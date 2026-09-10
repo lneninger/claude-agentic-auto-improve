@@ -1,0 +1,24 @@
+﻿# Python and env
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and temp
+*.log
+.sync-state/
+
+# Build output
+dist/
+build/
+obj/
+bin/
+
+# Node modules (if ever used)
+node_modules/
