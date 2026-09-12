@@ -1,0 +1,11 @@
+{
+  "_comment": "architecture-guard.py exception list. ignored_files = full bypass. file_rule_exemptions = per-rule bypass by file suffix. Valid rules: inline-style, gray-utility, hex-color, scroll-edge, inline-component-template, inline-component-styles, scss-raw-property. '*' exempts all rules.",
+  "ignored_files": [],
+  "file_rule_exemptions": {
+    "features/backtest/backtest-flow-list.component.scss": ["scss-raw-property"],
+    "features/earnings/earnings-calendar-page.component.scss": ["scss-raw-property"],
+    "features/trading/panels/screener-criteria-dialog.component.scss": ["scss-raw-property"],
+    "shared/components/screener-editor.component.scss": ["scss-raw-property"],
+    "features/chat/chat-panel.component.scss": ["scss-raw-property"]
+  }
+}

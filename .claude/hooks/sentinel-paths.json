@@ -1,0 +1,47 @@
+{
+  "_comment": "Single source of truth for auto-regeneration triggers. Consumed by .claude/hooks/mark-models-dirty.py, .claude/hooks/regenerate-models-on-stop.py, and .githooks/pre-commit. Patterns are glob-style relative to the repo root and matched against forward-slash-normalized paths. 'rest' -> NSwag REST generator. 'hub' -> TypedSignalR Hub generator. 'docs' -> wiki regen (tools/generate-docs.cmd). 'graphql' -> schema export (tools/generate-graphql-schema.cmd) then typed-client codegen (cd ClientApp && npm run graphql:codegen). A file can match multiple keys.",
+  "rest": [
+    "src/ScalpingMachine.API/**/*.cs",
+    "src/ScalpingMachine.Domain/**/*.cs",
+    "src/ScalpingMachine.Strategy/DataElements/**/*.cs",
+    "src/**/*Dto.cs",
+    "src/**/*Dtos.cs",
+    "src/**/*Request.cs",
+    "src/**/*Response.cs",
+    "tools/nswag/**",
+    "tools/nswag-apiresponse-post-processor.mjs"
+  ],
+  "hub": [
+    "src/ScalpingMachine.Services/SignalR/**/*.cs",
+    "src/ScalpingMachine.Domain/**/*.cs",
+    "src/ScalpingMachine.Strategy/Models/**/*.cs",
+    "src/ScalpingMachine.Strategy/Enums/**/*.cs",
+    "src/ScalpingMachine.Services/Strategy/Backtest/**/*.cs",
+    "src/ScalpingMachine.Services/Strategy/Evaluation/ConditionMatch.cs",
+    "src/ScalpingMachine.Services/Support/**/*.cs",
+    "src/ScalpingMachine.Services/ExternalData/Scheduling/IngestionDtos.cs",
+    "tools/tapper-enum-post-processor.mjs"
+  ],
+  "docs": [
+    "CLAUDE.md",
+    "ClientApp/projects/scalping-machine/DESIGN_PATTERNS.md",
+    "ClientApp/projects/scalping-machine/ANGULAR_MATERIAL_RULES.md",
+    "docs/handbook/scalping-machine/**/*.md",
+    "tools/aggregate-handbook.mjs",
+    "tools/generate-docs.cmd",
+    "tools/nswag/openapi.json"
+  ],
+  "graphql": [
+    "src/ScalpingMachine.GraphQL/**/*.cs",
+    "tools/graphql/**",
+    "ClientApp/codegen.ts",
+    "ClientApp/projects/scalping-mobile/src/**/*.graphql"
+  ],
+  "jsonl": [
+    "python/training-data/synthetic/*.jsonl",
+    "src/ScalpingMachine.Services/Chat/ChatToolExecutor.cs",
+    "src/ScalpingMachine.Services/Chat/ChatToolDefinitions.cs",
+    "src/ScalpingMachine.Services/Strategy/Force/ForceActionService.cs",
+    "tools/validate-jsonl-against-executor.py"
+  ]
+}
