@@ -48,6 +48,88 @@ DEFAULT_IMPLEMENTERS = (
 PROFILE_PATH = Path(".claude/project-profile.md")
 
 
+DEFAULT_REVIEW_GATES = (
+    "fullstack-code-reviewer",
+    "test-strategy-critic",
+    "api-contract-reviewer",
+    "security-auditor",
+    "migration-safety-reviewer",
+    "sql-performance-reviewer",
+    "contract-critic",
+    "data-architect",
+)
+
+
+def load_slot(profile_text: Optional[str], slot: str) -> Tuple[str, ...]:
+    """Read any named slot from the project profile.
+
+    One reader for every slot, so a new thing the flow needs is a slot in the
+    template and a line here, never a second configuration file competing with
+    the profile.
+
+    A slot holding backticked values yields exactly those. A slot holding one
+    plain word, such as the project name, yields that word. A slot still holding
+    the template's italic placeholder yields nothing, because that prose
+    describes the slot rather than filling it.
+    """
+    if not profile_text:
+        return ()
+    pattern = r"^\|\s*`?" + re.escape(slot) + r"`?\s*\|(.+?)\|\s*$"
+    m = re.search(pattern, profile_text, re.M | re.I)
+    if not m:
+        return ()
+    raw = m.group(1).strip()
+    if "`" in raw:
+        # A list slot: the values are backticked, so take exactly those.
+        return tuple(v for v in re.findall(r"`([^`]+)`", raw) if v.lower() != "none")
+    if raw.startswith("*(") or raw.lower() in ("none", ""):
+        # An unfilled template slot. Its italic prose is a description of the
+        # slot, never a value, and reading it as one is how a fresh project
+        # inherits a dozen nonsense entries.
+        return ()
+    return (raw,)
+
+
+def load_review_gates(profile_text: Optional[str]) -> Tuple[str, ...]:
+    """Agents that appear in a handoff block but produce nothing to merge.
+
+    A reviewer opens no pull request, so a block naming one is a gate in the
+    sequence rather than a merge-gated sub-task. Declaring them is what lets a
+    name that is neither an implementer nor a gate be reported as a mistake
+    instead of silently vanishing from the plan.
+    """
+    return load_slot(profile_text, "review-gates") or DEFAULT_REVIEW_GATES
+
+
+def agents_named_in(contract_text: str) -> List[str]:
+    """Every backticked agent-shaped name in the handoff headings, in order."""
+    section = re.search(r"^## Implementation Handoff(.*?)(?=^## |\Z)", contract_text, re.S | re.M)
+    if not section:
+        return []
+    out = []
+    for heading in re.findall(r"^### (.+)$", section.group(1), re.M):
+        out.extend(re.findall(r"`([a-z][a-z0-9-]{4,})`", heading))
+    return out
+
+
+def unknown_agents(contract_text: str, implementers: Tuple[str, ...],
+                   gates: Tuple[str, ...]) -> List[str]:
+    """Names that are neither an implementer nor a declared review gate.
+
+    These are almost always a typo or a shorthand. Left unreported, the block
+    quietly stops being a sub-task and the work disappears from the plan with
+    nothing to say it did.
+    """
+    known = set(implementers) | set(gates)
+    seen, out = set(), []
+    for name in agents_named_in(contract_text):
+        if name not in known and name not in seen:
+            seen.add(name); out.append(name)
+    return out
+
+
+
+
 def load_implementers(profile_text: Optional[str]) -> Tuple[str, ...]:
     """Which agents may own a sub-task, read from the project profile.
 
@@ -66,15 +148,7 @@ def load_implementers(profile_text: Optional[str]) -> Tuple[str, ...]:
     """
     if not profile_text:
         return DEFAULT_IMPLEMENTERS
-    m = re.search(r"^\|\s*`?implementers`?\s*\|(.+?)\|\s*$", profile_text, re.M | re.I)
-    if not m:
-        return DEFAULT_IMPLEMENTERS
-    # Only backticked values count. The template ships this slot as italic
-    # placeholder prose, and reading that as agent names would hand a fresh
-    # project a dozen nonsense implementers that match no handoff block.
-    names = tuple(n for n in re.findall(r"`([A-Za-z0-9][A-Za-z0-9_-]*)`", m.group(1))
-                  if n.lower() != "none")
-    return names or DEFAULT_IMPLEMENTERS
+    return load_slot(profile_text, "implementers") or DEFAULT_IMPLEMENTERS
 
 
 def read_profile() -> Optional[str]:
@@ -84,6 +158,7 @@ def read_profile() -> Optional[str]:
 
 #: Resolved once at import for the running project.
 IMPLEMENTER_AGENTS = load_implementers(read_profile())
+REVIEW_GATES = load_review_gates(read_profile())
 
 
 @dataclass
@@ -154,7 +229,8 @@ def parse_handoff(contract_text: str,
         heading, _, body = block.partition("\n")
         heading = heading.strip()
 
-        agent = next((a for a in (implementers or IMPLEMENTER_AGENTS) if a in heading), None)
+        named = set(re.findall(r"`([a-z][a-z0-9-]{4,})`", heading))
+        agent = next((a for a in (implementers or IMPLEMENTER_AGENTS) if a in named), None)
         files = re.findall(r"^-\s+`?([^\s`]+)`?", body.split("**Files to touch:**")[-1], re.M) \
             if "**Files to touch:**" in body else []
         if not agent or not files:

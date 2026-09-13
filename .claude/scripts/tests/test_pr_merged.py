@@ -15,6 +15,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pr_merged import (  # noqa: E402
+    load_slot,
+    load_review_gates,
+    unknown_agents,
+    DEFAULT_REVIEW_GATES,
     load_implementers,
     DEFAULT_IMPLEMENTERS,
     new_state,
@@ -463,6 +467,88 @@ class TestProfilePlaceholders(unittest.TestCase):
     def test_a_slot_with_prose_around_real_names_takes_only_the_names(self):
         mixed = "| `implementers` | `acme-dev` and nothing else for now |\n"
         self.assertEqual(load_implementers(mixed), ("acme-dev",))
+
+
+# --------------------------------------------------------------------------
+# A general way to name what the flow needs
+# --------------------------------------------------------------------------
+SLOTS = """| Slot | Value |
+|---|---|
+| `project.name` | AcmeApp |
+| `implementers` | `acme-dev` |
+| `review-gates` | `acme-reviewer`, `acme-auditor` |
+"""
+
+
+class TestSlotReader(unittest.TestCase):
+    def test_any_slot_can_be_read_by_name(self):
+        self.assertEqual(load_slot(SLOTS, "project.name"), ("AcmeApp",))
+        self.assertEqual(load_slot(SLOTS, "implementers"), ("acme-dev",))
+
+    def test_an_absent_slot_reads_as_empty_not_as_an_error(self):
+        self.assertEqual(load_slot(SLOTS, "nothing-declared-here"), ())
+
+    def test_review_gates_come_from_their_own_slot(self):
+        self.assertEqual(load_review_gates(SLOTS), ("acme-reviewer", "acme-auditor"))
+
+    def test_no_profile_falls_back_to_the_gates_the_plugin_ships(self):
+        self.assertEqual(load_review_gates(None), DEFAULT_REVIEW_GATES)
+
+
+class TestUnknownAgents(unittest.TestCase):
+    """A name that is neither an implementer nor a gate must be reported, never dropped."""
+
+    CONTRACT = """
+## Implementation Handoff
+
+### 1. Tests (`senior-test-engineer`)
+
+**Depends on:** none
+
+**Files to touch:**
+- tests/a.cs
+
+### 2. Review (`fullstack-code-reviewer`)
+
+**Depends on:** 1
+
+### 3. Safety (`trading-safety`)
+
+**Depends on:** 1
+"""
+
+    def test_a_declared_gate_is_not_reported_as_unknown(self):
+        out = unknown_agents(self.CONTRACT,
+                             implementers=("senior-test-engineer",),
+                             gates=("fullstack-code-reviewer", "trading-safety-reviewer"))
+        self.assertNotIn("fullstack-code-reviewer", out)
+
+    def test_a_malformed_name_is_reported(self):
+        out = unknown_agents(self.CONTRACT,
+                             implementers=("senior-test-engineer",),
+                             gates=("fullstack-code-reviewer", "trading-safety-reviewer"))
+        self.assertIn("trading-safety", out,
+                      "a block naming nothing recognised must surface, not vanish")
+
+    def test_an_implementer_is_not_reported(self):
+        out = unknown_agents(self.CONTRACT, implementers=("senior-test-engineer",), gates=())
+        self.assertNotIn("senior-test-engineer", out)
+
+
+class TestExactAgentMatching(unittest.TestCase):
+    def test_a_suffixed_name_does_not_match_the_real_agent(self):
+        contract = """
+## Implementation Handoff
+
+### 1. Backend (`dotnet-backend-architects`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/a.cs
+"""
+        self.assertEqual(parse_handoff(contract, implementers=("dotnet-backend-architect",)), [],
+                         "substring matching would silently accept a typo as the real agent")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
