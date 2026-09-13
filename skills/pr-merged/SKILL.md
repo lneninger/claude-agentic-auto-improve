@@ -35,8 +35,7 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — thirty-one
-cases over identity, parsing, verdicts, records, releases and conflict detection. They were
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — fifty cases over identity, parsing, verdicts, records, releases and conflict detection. They were
 mutation-probed: disabling the verification check, reading a missing dependency line as none,
 and counting scope notes as sub-tasks each turn the suite red.
 
@@ -152,8 +151,8 @@ continuous integration, it is the highest-risk content in the pull request. Find
 request, so the pull request's own merge commit is clean by construction. The resolution
 happened earlier, when somebody merged the default branch into their own to clear it.
 
-Measured in the project this was written for: one pull request's merge commit reported no
-resolved files, while a merge commit inside its branch reported fourteen.
+Verified on this repository: pull request #126's merge commit reports no resolved files, while
+a merge commit inside its branch reports fourteen.
 
 ```bash
 gh pr view <number> --json commits --jq '.commits[].oid'
@@ -170,7 +169,8 @@ they entered the codebase without ever being reviewed as a normal diff.
 Releasing dependents on top is the caller's decision, and it should be an informed one.
 
 **Where this does not work.** A squash or rebase merge produces no merge commit, so nothing is
-detectable. Say that plainly rather than reporting a clean result. Check which merge style the project uses.
+detectable. Say that plainly rather than reporting a clean result. This repository merges with
+merge commits, so the check applies here.
 
 **What conflicts here in practice.** The files that collide most are the append-heavy shared
 ones — the registries, the journal, and agent memories — not source code. A conflict in those
@@ -377,15 +377,14 @@ State what was skipped as plainly as what succeeded.
 
 ## What exists today, and what does not
 
-**The decomposition usually already exists.** Contracts written from the standard template
-carry an `## Implementation Handoff` section, with one block per implementer and a
-`**Files to touch:**` list inside each. Each block is a sub-task with a name and a scope.
-That is the plan this phase walks. In the project it was first written for, 132 of 146
-contracts carried that section and 117 carried the file list.
+**The decomposition exists.** Checked on 2026-09-13: of the 146 contracts under
+`.claude/concepts/`, 132 carry an `## Implementation Handoff` section, and 117 carry a
+`**Files to touch:**` list inside it. Each block is a sub-task with a name and a scope. That
+is the plan this skill walks, and it is already there in most contracts.
 
 What is missing is narrower than it first appears:
 
-- **No generated `task-map.yaml` is produced.** The orchestrator's planner never parses the
+- **No generated `task-map.yaml` anywhere.** The orchestrator's planner never parses the
   contract, so it always produces an empty graph. It looks for a `Task Decomposition`
   section, which no contract has. It does not read the handoff blocks, which nearly all
   contracts do have. That mismatch is the whole reason the plan store is empty.
@@ -398,9 +397,7 @@ What is missing is narrower than it first appears:
   completion store currently reads as a fully successful contract.
 
 **This skill is the missing producer.** It writes the first real completion records, and it
-takes its sub-tasks from the handoff blocks rather than waiting for a planner repair. The
-plugin ships those seven orchestrator scripts but not their design notes or tests, so this
-section and the gate in `/design-first` are the only record a fresh checkout has.
+takes its sub-tasks from the handoff blocks rather than waiting for a planner repair.
 
 Two follow-ups belong to the orchestrator, not to this skill. The two fallbacks above should
 be removed, or they will keep masking an empty store. The planner should read handoff blocks

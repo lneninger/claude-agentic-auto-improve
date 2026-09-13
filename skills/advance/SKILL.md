@@ -40,7 +40,7 @@ py -3 .claude/scripts/pr_merged.py --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
-by forty-one tests and has been mutation-probed. **Read its answer. Do not recompute it from
+by fifty tests and has been mutation-probed. **Read its answer. Do not recompute it from
 the contract**, or there are two implementations of the same rules and they will disagree.
 
 The answer carries `next_move.action`, plus `dispatch` packets when there is something to start.
@@ -51,6 +51,19 @@ The action set is closed. Each one has exactly one response.
 
 ### `dispatch` — there is work ready to start
 
+**Start it with the script, not by hand.** The branch, the state write and the readiness
+re-check all belong to one command:
+
+```bash
+py -3 .claude/scripts/pr_merged.py --contract <slug> --dispatch <sub-task-id> --json
+```
+
+It cuts the branch from a freshly fetched default branch, records the sub-task as
+`awaiting-merge` with that branch in the state store, and returns the packet. It refuses with
+`not-released` if the sub-task's dependencies have not landed, so a wrong identity cannot start
+work that has nothing to build on. Add `--dry-run` to see the packet without cutting anything.
+
+
 Each packet names the sub-task, its branch, its agent, its file scope, and the pre-written TASK
 block the architect wrote into the contract.
 
@@ -59,8 +72,7 @@ implementation run, and starting three at once spends a lot of work on the opera
 
 For the one being started:
 
-1. **Create the branch from a freshly fetched default branch.** The packet names it, in the
-   form `task/<contract-slug>/<sub-task-id>`. Never branch from whatever is checked out.
+1. **The branch already exists** — the dispatch command cut it and recorded it in state.
 2. **Run `/tdd-first`** with the packet's TASK block as the task, its file list as the scope,
    and the contract as the authority. Tests fail first; then the least code that turns them
    green.
@@ -90,6 +102,14 @@ Say so, then hand to `/verify-before-done` and afterwards `/ship` for the contra
 
 **Do not declare the contract finished here.** That the last sub-task closed is a fact this
 skill can report. Whether the contract is done is a verdict belonging to verification.
+
+### `awaiting-merge` — a sub-task is out for merge
+
+Say which sub-task, and which pull request it waits on. Do not start anything else and do
+not treat it as stuck. It is suspended, and `/pr-merged` is what resumes it.
+
+This state is the one the previous orchestrator never had. Without it, a sub-task waiting
+on an open pull request is indistinguishable from one that is genuinely blocked.
 
 ### `blocked` — sub-tasks remain and none is ready
 

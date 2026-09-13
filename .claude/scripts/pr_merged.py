@@ -26,6 +26,7 @@ import json
 import re
 import subprocess
 import sys
+import copy
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -262,6 +263,93 @@ def compute_released(tasks: List[SubTask],
 
 
 # ---------------------------------------------------------------------------
+# The state store — what makes suspend and resume real
+# ---------------------------------------------------------------------------
+STATE_DIR = Path(".claude/orchestrator/state")
+
+
+def new_state(contract_slug: str, tasks: List[SubTask]) -> Dict[str, Any]:
+    """A fresh position: every sub-task pending, nothing dispatched."""
+    return {
+        "contract": contract_slug,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "sub_tasks": {t.id: {"status": "pending", "branch": None, "pull_request": None}
+                      for t in tasks},
+    }
+
+
+def mark_dispatched(state: Dict[str, Any], subtask_id: str, branch: str) -> Dict[str, Any]:
+    """Record that a sub-task was started and is now waiting for a merge.
+
+    ``awaiting-merge`` is the state the old orchestrator never had. Without it,
+    a sub-task suspended on an open pull request is indistinguishable from one
+    that is genuinely stuck.
+    """
+    st = copy.deepcopy(state)
+    if subtask_id in st["sub_tasks"]:
+        st["sub_tasks"][subtask_id].update({"status": "awaiting-merge", "branch": branch})
+    return st
+
+
+def reconcile_state(state: Dict[str, Any], records: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Bring the position into line with the evidence.
+
+    Records are the durable truth; state is a working position. A record for a
+    sub-task the plan does not contain is ignored, never invented into state.
+    """
+    st = copy.deepcopy(state)
+    for tid, rec in records.items():
+        if tid not in st["sub_tasks"]:
+            continue
+        status = rec.get("status")
+        if status in ("completed", "failed"):
+            st["sub_tasks"][tid]["status"] = status
+    return st
+
+
+def awaiting_merge(state: Dict[str, Any]) -> List[str]:
+    return [tid for tid, v in state.get("sub_tasks", {}).items()
+            if v.get("status") == "awaiting-merge"]
+
+
+def state_path(contract_slug: str) -> Path:
+    return STATE_DIR / contract_slug / "state.yaml"
+
+
+def load_state(contract_slug: str) -> Optional[Dict[str, Any]]:
+    f = state_path(contract_slug)
+    if not f.is_file():
+        return None
+    try:
+        import yaml
+        return yaml.safe_load(f.read_text(encoding="utf-8")) or None
+    except Exception:
+        return None
+
+
+def write_state(contract_slug: str, state: Dict[str, Any]) -> Path:
+    import yaml
+    f = state_path(contract_slug)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(yaml.dump(state, default_flow_style=False, sort_keys=False), encoding="utf-8")
+    return f
+
+
+def create_branch(branch: str, base: str) -> Tuple[bool, str]:
+    """Cut a sub-task branch from a freshly fetched default branch.
+
+    Never from whatever happens to be checked out. A sub-task seeded from
+    another branch inherits its commits and its review surface.
+    """
+    if _run(["git", "rev-parse", "--verify", branch])[0] == 0:
+        return False, "branch already exists"
+    if _run(["git", "fetch", "origin", base])[0] != 0:
+        return False, "could not fetch origin/" + base
+    code, out = _run(["git", "switch", "-c", branch, "origin/" + base])
+    return code == 0, out or ("created " + branch)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch — extracted from the contract, never invented
 # ---------------------------------------------------------------------------
 def extract_task_block(block_body: str) -> Optional[str]:
@@ -297,7 +385,8 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
 # ---------------------------------------------------------------------------
 # advance — one move, then stop
 # ---------------------------------------------------------------------------
-def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
+            state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Decide the contract's next single move. This never iterates.
 
     A merge-gated loop does not spin. It makes one move, then suspends until a
@@ -316,6 +405,12 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]]) -> Dict[st
     if failed:
         return {"action": "escalate", "failed": failed,
                 "detail": "a sub-task could not be delivered; the contract needs amending"}
+
+    if state:
+        waiting = awaiting_merge(reconcile_state(state, records))
+        if waiting:
+            return {"action": "awaiting-merge", "awaiting": waiting,
+                    "detail": "a sub-task is out for merge; /pr-merged continues once it lands"}
 
     if all(t.id in records for t in tasks):
         return {"action": "complete",
@@ -425,6 +520,8 @@ def main() -> int:
     ap.add_argument("--status", action="store_true", help="report the plan without writing anything")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--dry-run", action="store_true", help="compute everything, write nothing")
+    ap.add_argument("--dispatch", metavar="SUBTASK", help="start this sub-task: cut its branch and record it")
+    ap.add_argument("--resume", action="store_true", help="report the stored position and what it waits for")
     args = ap.parse_args()
 
     contract = find_contract(args.contract)
@@ -471,11 +568,46 @@ def main() -> int:
         (report["failed"] if rec["status"] == "failed" else report["closed"]).append(
             {"pr": number, "sub_task": task.id, "record": rec})
 
-    move = advance(tasks, records)
+    state = load_state(slug) or new_state(slug, tasks)
+    state = reconcile_state(state, records)
+
+    if args.dispatch:
+        by_id = {t.id: t for t in tasks}
+        task = by_id.get(args.dispatch)
+        if not task:
+            print(json.dumps({"error": "unknown-sub-task", "sub_task": args.dispatch,
+                              "known": list(by_id)}))
+            return 2
+        move_now = advance(tasks, records, state)
+        ready = move_now.get("sub_tasks", []) if move_now["action"] == "dispatch" else []
+        if task.id not in ready:
+            print(json.dumps({"error": "not-released", "sub_task": task.id,
+                              "detail": "its dependencies have not landed; dispatching it would "
+                                        "build on work that does not exist"}))
+            return 3
+        branch = branch_for(slug, task.id)
+        ok, detail = (True, "dry run") if args.dry_run else create_branch(branch, base)
+        if not ok:
+            print(json.dumps({"error": "branch-failed", "branch": branch, "detail": detail}))
+            return 4
+        state = mark_dispatched(state, task.id, branch)
+        if not args.dry_run:
+            write_state(slug, state)
+        bodies = handoff_bodies(contract.read_text(encoding="utf-8", errors="replace"))
+        packet = build_dispatch(task, slug, str(contract), bodies.get(task.id, ""))
+        packet["branch_created"] = branch
+        print(json.dumps(packet, indent=2) if args.json else
+              f"dispatched {task.id} on {branch} -> {task.agent}")
+        return 0
+
+    move = advance(tasks, records, state)
     report["next_move"] = move
     report["released"] = move.get("sub_tasks", [])
     report["blocked"] = move.get("blocked", {})
     report["complete"] = move["action"] == "complete"
+    report["state"] = state
+    if not args.dry_run and not args.status:
+        write_state(slug, state)
 
     if move["action"] == "dispatch":
         bodies = handoff_bodies(contract.read_text(encoding="utf-8", errors="replace"))

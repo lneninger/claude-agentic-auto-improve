@@ -15,6 +15,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pr_merged import (  # noqa: E402
+    new_state,
+    mark_dispatched,
+    reconcile_state,
+    awaiting_merge,
     extract_task_block,
     build_dispatch,
     advance,
@@ -337,6 +341,59 @@ class TestAdvance(unittest.TestCase):
         out = advance(_tasks(), {})
         self.assertEqual(len(out["sub_tasks"]), 1,
                          "only the currently ready set; the caller decides what happens next")
+
+
+# --------------------------------------------------------------------------
+# The state store — what makes suspend and resume real
+# --------------------------------------------------------------------------
+class TestState(unittest.TestCase):
+    def test_a_new_state_lists_every_sub_task_as_pending(self):
+        st = new_state("c-slug", _tasks())
+        self.assertEqual(st["contract"], "c-slug")
+        self.assertEqual({k: v["status"] for k, v in st["sub_tasks"].items()},
+                         {"t1-a": "pending", "t2-b": "pending", "t3-c": "pending"})
+
+    def test_dispatching_records_the_branch_and_the_awaiting_merge_state(self):
+        st = mark_dispatched(new_state("c", _tasks()), "t1-a", "task/c/t1-a")
+        self.assertEqual(st["sub_tasks"]["t1-a"]["status"], "awaiting-merge")
+        self.assertEqual(st["sub_tasks"]["t1-a"]["branch"], "task/c/t1-a")
+
+    def test_awaiting_merge_is_distinct_from_blocked(self):
+        st = mark_dispatched(new_state("c", _tasks()), "t1-a", "task/c/t1-a")
+        self.assertEqual(awaiting_merge(st), ["t1-a"],
+                         "a dispatched sub-task is suspended, not stuck")
+
+    def test_a_completion_record_moves_the_sub_task_out_of_awaiting_merge(self):
+        st = mark_dispatched(new_state("c", _tasks()), "t1-a", "task/c/t1-a")
+        st = reconcile_state(st, {"t1-a": {"status": "completed", "verified": "github"}})
+        self.assertEqual(st["sub_tasks"]["t1-a"]["status"], "completed")
+        self.assertEqual(awaiting_merge(st), [])
+
+    def test_a_failure_record_is_reflected_in_state(self):
+        st = reconcile_state(new_state("c", _tasks()),
+                             {"t1-a": {"status": "failed", "verified": "github"}})
+        self.assertEqual(st["sub_tasks"]["t1-a"]["status"], "failed")
+
+    def test_reconcile_never_invents_a_status_for_an_unknown_sub_task(self):
+        st = reconcile_state(new_state("c", _tasks()), {"t99-ghost": {"status": "completed"}})
+        self.assertNotIn("t99-ghost", st["sub_tasks"])
+
+    def test_resuming_from_state_knows_what_it_is_waiting_for(self):
+        st = mark_dispatched(new_state("c", _tasks()), "t1-a", "task/c/t1-a")
+        st["sub_tasks"]["t1-a"]["pull_request"] = 42
+        self.assertEqual(st["sub_tasks"]["t1-a"]["pull_request"], 42)
+        self.assertEqual(awaiting_merge(st), ["t1-a"])
+
+
+class TestAdvanceWithState(unittest.TestCase):
+    def test_a_dispatched_sub_task_is_not_offered_for_dispatch_again(self):
+        st = mark_dispatched(new_state("c", _tasks()), "t1-a", "task/c/t1-a")
+        out = advance(_tasks(), {}, state=st)
+        self.assertEqual(out["action"], "awaiting-merge")
+        self.assertEqual(out["awaiting"], ["t1-a"])
+
+    def test_without_state_behaviour_is_unchanged(self):
+        self.assertEqual(advance(_tasks(), {})["action"], "dispatch")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
