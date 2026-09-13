@@ -157,7 +157,7 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          18 generic skills          (plugin root -- all three providers)
+skills/          21 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   hooks/         16 generic hooks, 3 shared helper modules, 4 generic data files
@@ -187,6 +187,11 @@ Codex. Every other tree stays under `.claude/`, and `hooks/` in particular **mus
 so a hook moved to the repository root would resolve every registry, area-map and contract
 lookup against the wrong directory and miss silently.
 
+At runtime the loop also writes two stores under `.claude/orchestrator/`: `results/`
+holds one completion record per finished sub-task and is the durable evidence, while
+`state/` holds the working position and can be rebuilt from the records. Commit the
+first; ignore the second.
+
 ### Agents
 
 data-architect, contract-critic, fullstack-code-reviewer, senior-test-engineer,
@@ -196,23 +201,38 @@ dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scou
 
 ### Skills
 
-design-first, tdd-first, debug, verify-before-done, north-star, north-star-review,
-list-contracts, task, contract-accuracy, critique-now, cross-impact, journal-add,
-plan-questions, validate-registries, promote-ui-rule, git-commit, ship,
-sql-server-patterns.
+flow, task, design-first, tdd-first, advance, pr-merged, verify-before-done,
+git-commit, ship, debug, north-star, north-star-review, list-contracts,
+contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
+validate-registries, promote-ui-rule, sql-server-patterns.
 
 They form one chain, and each stage hands the next a written artefact rather than a memory
 of the conversation:
 
 ```
-/task            Work Item Brief      .claude/work-items/
-  -> /design-first  concept contract   .claude/concepts/     (you approve it)
-  -> /tdd-first     failing tests first
-  -> reviewers      adversarial critique
-  -> /verify-before-done   build, tests, drift        (blocks the word "done")
-  -> /git-commit    the commits
-  -> /ship          pull request + a Closing Link GitHub actually resolved
+/flow   the front door. Runs everything below, pausing only where you must decide.
+  |
+  +-- /task               Work Item Brief    .claude/work-items/
+  +-- /design-first       concept contract   .claude/concepts/   (you approve it)
+  +-- /tdd-first          failing tests first
+  +-- reviewers           adversarial critique
+  +-- /verify-before-done build, tests, drift    (blocks the word "done")
+  +-- /git-commit         the commits
+  +-- /ship               pull request, and a closing link GitHub actually resolved
 ```
+
+When a contract declares more than one sub-task, the middle of that chain iterates
+instead of running straight through. Each sub-task ends in a pull request somebody
+has to merge, so it moves one step at a time:
+
+```
+/advance      start what is ready, open a pull request, stop
+(you merge)   the only step in the whole chain a machine cannot take
+/pr-merged    confirm with GitHub, record it, say what that released
+              -> /advance again
+```
+
+Neither half loops. A person merging is what joins them.
 
 ### Hooks
 
@@ -368,5 +388,7 @@ enforcement on, and that is your decision rather than a script's.
 
 Extracted from a first consuming project on 2026-09-10; inventory completed and the
 ownership and direction model corrected on 2026-09-12. Made installable under the Claude
-Code, Cursor and OpenAI Codex plugin mechanisms on 2026-09-13 — see
+Code, Cursor and OpenAI Codex plugin mechanisms on 2026-09-13. The contract sub-task
+loop — `/flow`, `/advance`, `/pr-merged` and `pr_merged.py` — landed the same day, with
+`plugin_doctor.py` to bootstrap a consuming project. See
 [Known limitations](#known-limitations) for what that release does not yet cover.
