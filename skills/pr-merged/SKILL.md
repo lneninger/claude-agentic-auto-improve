@@ -174,6 +174,40 @@ gh auth login
 Do not install it yourself. Do not reach the GitHub interface with a token taken from the
 environment.
 
+## Step 1.5: Flag hand-resolved files in the pull request's history
+
+A file resolved by hand during a merge was never tested in the form that landed. With no
+continuous integration, it is the highest-risk content in the pull request. Find it and say so.
+
+**Look at the history, not the merge commit.** GitHub refuses to merge a conflicted pull
+request, so the pull request's own merge commit is clean by construction. The resolution
+happened earlier, when somebody merged the default branch into their own to clear it.
+
+Measured in the project this was written for: one pull request's merge commit reported no
+resolved files, while a merge commit inside its branch reported fourteen.
+
+```bash
+gh pr view <number> --json commits --jq '.commits[].oid'
+# then, for each commit that has two parents:
+git show --cc --name-only --format="" <sha>
+```
+
+The combined diff lists only files whose content differs from **both** parents. A clean
+automatic merge lists nothing. Anything listed was either a hand-resolved conflict, or a
+change introduced during the merge that existed in neither side. Treat both the same way:
+they entered the codebase without ever being reviewed as a normal diff.
+
+**Report them, do not block on them.** Name the pull request, the merge commit and the files.
+Releasing dependents on top is the caller's decision, and it should be an informed one.
+
+**Where this does not work.** A squash or rebase merge produces no merge commit, so nothing is
+detectable. Say that plainly rather than reporting a clean result. Check which merge style the project uses.
+
+**What conflicts here in practice.** The files that collide most are the append-heavy shared
+ones — the registries, the journal, and agent memories — not source code. A conflict in those
+usually means a lost entry rather than broken behaviour, which is worth saying in the report so
+the reader calibrates.
+
 ## Step 2: Map each merged pull request to a sub-task
 
 **First, load the sub-tasks.** Take them from whichever source exists, in this order:
@@ -285,6 +319,7 @@ keeps the branch reserved.
 - Verified merged: <number -> sub-task, one line each>
 - Skipped: <number — verdict, one line each>
 - Unmapped: <numbers that matched no sub-task>
+- Hand-resolved files: <pr -> merge commit -> files, or none detected, or not detectable (squash/rebase)>
 - Completion records written: <paths>
 - Released: <sub-tasks now unblocked, and what released them>
 - Still blocked: <sub-task — waiting on X>
