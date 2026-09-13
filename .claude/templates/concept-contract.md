@@ -6,7 +6,7 @@
 **Status:** draft
 **Supersedes:** <optional — path to a prior contract this replaces>
 
-> **Protocol:** filled in by `data-architect`. Implementer agents (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`, `senior-test-engineer`, `ui-ux-designer`) refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
+> **Protocol:** filled in by `data-architect`. Implementer agents — the ones named in your profile's `implementers` slot — refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
 >
 > **Lifecycle:**
 > - `draft` — data-architect has drafted; user still has Open Questions to resolve. Hook BLOCKS.
@@ -224,7 +224,7 @@ A REST endpoint / SignalR event does NOT automatically get a chat-tool wrapper �
 
 2. **No — this endpoint/event is UI-only or admin-only.** One-line justification (e.g. "admin-only surface — chat would bypass row-level auth", "UI-only destructive mutation where a typed chat call would be unsafe").
 
-3. **Deferred to a follow-up mini-phase.** Name the follow-up contract or todo item. The current contract MUST NOT ship synthetic training examples that invoke a non-existent tool — the `llm-training-engineer` is instructed to refuse data generation when this section is absent or set to "Deferred".
+3. **Deferred to a follow-up mini-phase.** Name the follow-up contract or todo item. The current contract MUST NOT ship synthetic training examples that invoke a non-existent tool — a model-training agent, where a project has one, is instructed to refuse data generation when this section is absent or set to "Deferred".
 
 **Why this section exists:** Phase A2 Strategy Learner (2026-04-21) added `POST /api/strategy-runs/{strategyId}/start-pair` + `runPairUpdate` SignalR event but OMITTED this section. The subsequent `/retrain-llm` cycle filled the gap by inventing a tool shape, producing adapter `5d9acc15` that would confidently hallucinate a non-existent API contract (`create_strategy` with `action: "start_pair"`). The adapter was archived DO NOT DEPLOY after `llm-contract-reviewer` audit. A separate mini-phase (`2026-04-23-a2-chat-tools-start-run-pair`) had to be written to properly add the `start_run_pair` tool. This section makes that class of omission impossible for future contracts.
 
@@ -406,12 +406,12 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
-### 3. Data pipeline (`ingestion-data-architect`) — if applicable
+### 3. A third area (`<an agent from your profile's implementers slot>`) — if applicable
 
 **Depends on:** 1
 
 **Files to touch:**
-- `<a backend.roots entry>/Ingestion/...`
+- `<a backend.roots entry>/<the area this block covers>/...`
 
 **Pre-written TASK block:**
 ```

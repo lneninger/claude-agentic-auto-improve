@@ -334,6 +334,30 @@ it will not claim tests passed when nothing ran them.
 
 Each refusal exists because the mechanism it replaced did the opposite.
 
+### Let the doctor create what is missing
+
+Rather than working through the steps above by hand, run:
+
+```bash
+py -3 .claude/scripts/plugin_doctor.py                # report what is missing
+py -3 .claude/scripts/plugin_doctor.py --fix          # create what is safe
+```
+
+It creates the directories, copies the templates and registries out of the plugin, and
+scaffolds the configuration files. It is safe to re-run: a second pass finds nothing to do.
+
+Two things it will not do, both on purpose.
+
+**It never overwrites.** A file that exists is yours, whatever it contains.
+
+**It never invents a value that describes your repository.** `project-profile.md` arrives with
+the template's placeholders intact, so the machinery reads each slot as unfilled rather than as
+a wrong answer. A confidently wrong profile is worse than an obviously empty one. The report
+lists those files under `NEEDS YOU`.
+
+It also leaves `.claude/settings.json` alone and says so. Registering the hooks turns
+enforcement on, and that is your decision rather than a script's.
+
 ## Documentation
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — sync workflow, the project-name check, conflict resolution
