@@ -198,17 +198,49 @@ Once all Open Questions are answered AND all critique findings have explicit use
 
 ## Step 3.5: Offer orchestration for autonomous execution
 
+> ### GATE — do not offer Option A. The orchestrator does not work.
+>
+> Its two load-bearing pieces are unimplemented stubs, and it reports success anyway.
+> Skip the choice entirely and go straight to Step 4. Say in one line that an autonomous
+> path exists but is gated as unimplemented. Do not put a choice to the user when only one
+> option is available.
+> Verified 2026-09-13 by reading the code and running the suite.
+>
+> - `.claude/scripts/orchestrator_task_planner.py` — `_load_contract` returns a hardcoded
+>   dictionary holding an empty task list, instead of parsing the contract markdown.
+>   `plan_tasks` returns nothing. A contract therefore yields zero tasks.
+> - `.claude/scripts/task_executor_launcher.py` — `_spawn_claude_session` has its real call
+>   commented out. It touches a marker file and returns true. `_collect_result` then finds no
+>   result file, falls through to a fallback, and reports the task completed with tests
+>   passed. The commit it cites is whatever the worktree was already sitting on.
+>
+> Nothing is planned, nothing is executed, and the run still reports a passing final review.
+> This is silent success, which is worse than a crash: every gate reports green.
+>
+> The suite at `.claude/orchestrator/tests/test_orchestration_system.py` does not catch it.
+> It assigns `orchestrator.task_map` directly and never calls `plan_tasks`, so the planner
+> stub is never exercised. Thirteen tests pass in about a fifth of a second.
+>
+> **Lift this gate only when both stubs are real, and a test proves a task's work actually
+> landed** — a commit the orchestrator did not invent. A positive control is required here:
+> a task that fails must make the run fail. Until then, everything below is a design record,
+> not a runnable path.
+>
+> Note for a consuming project: the plugin ships these seven scripts but neither the
+> roadmap under `.claude/orchestrator/` nor the tests, so nothing in a fresh checkout
+> records that they are stubs. This gate is that record.
+
 With the contract now approved, offer the user an orchestration option for autonomous, loop-driven task execution:
 
 **Present this choice:**
 
 > **Contract approved.** Choose how to proceed:
 > 
-> **Option A:** Use the Contract Orchestrator — manages task planning, execution, Architect re-entry, and final review autonomously. Returns when complete.
+> **Option A — UNAVAILABLE, see the gate above. Do not present this option.** The Contract Orchestrator — manages task planning, execution, Architect re-entry, and final review autonomously. Returns when complete.
 > 
 > **Option B:** Traditional workflow — hand off to implementer agents (`/tdd-first` flow) and conduct reviews manually.
 
-**If the user chooses Option A (Orchestrator):**
+**If the user chooses Option A (Orchestrator) — unreachable while the gate above stands:**
 
 1. Extract the contract ID from the filename: `<YYYY-MM-DD>-<slug>.md` → slug becomes `CTR-<slug>` (e.g., `2026-09-09-add-trailing-stops.md` → `CTR-add-trailing-stops`)
 2. Run the orchestrator entry point:
