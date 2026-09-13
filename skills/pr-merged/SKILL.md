@@ -1,6 +1,6 @@
 ---
 name: pr-merged
-description: "Tell the session that one or more pull requests have merged, then release the sub-tasks that were waiting on them. Verifies each pull request really merged by asking GitHub rather than trusting the claim, writes a completion record for the finished sub-task, recomputes which dependent sub-tasks are now unblocked, and continues with them. Use when: user says /pr-merged, 'PR 40 is merged', 'these PRs merged, continue', 'pick up what was waiting on #41', or returns to a session after merging work elsewhere. Reads and writes the orchestrator's plan, result and state stores; does not run the Contract Orchestrator scripts, which are gated as unimplemented."
+description: "The closing phase of one sub-task: once its pull request has merged, record the completion and work out which pending sub-tasks that releases. Verifies the merge by asking GitHub rather than trusting the claim, writes a completion record stamped verified: github, recomputes the released set, and hands that set back to its caller. Iteration belongs to the orchestrator loop, not to this phase. Use when: the loop closes a sub-task, or a person says /pr-merged, 'PR 40 is merged', 'these PRs merged, continue', or returns after merging work outside a running loop. Reads and writes the orchestrator plan, result and state stores; runs no orchestrator script."
 user_invocable: true
 ---
 
@@ -18,6 +18,41 @@ happened, records the finished sub-task, works out what that unblocks, and conti
    verify merged (ask GitHub)  ->  map to sub-task  ->  write completion record
    ->  recompute released sub-tasks  ->  continue
 ```
+
+## Where this sits — a phase, not a loop
+
+**This skill does not iterate. It closes one sub-task and hands back.**
+
+Three levels run this project's work, and each owns exactly one thing:
+
+| Level | Owner | Owns |
+|---|---|---|
+| Outer chain | `/flow` | One work item, from intake through to shipped |
+| Inner loop | The orchestrator | Iterating the pending sub-tasks of one contract |
+| Sub-task phase | **this skill** | Closing out one sub-task once its work has merged |
+
+A sub-task's life runs: implement, test, review, verify, commit, open a pull request, merge.
+**This skill is what happens after that merge.** It records the completion, works out what the
+completion releases, and returns that set to whoever called it. Choosing what runs next, and
+starting it, belongs to the loop.
+
+That separation is the point. If this skill also decided what to run next, there would be two
+things competing to drive iteration, and they would disagree the moment either changed.
+
+### Two ways it is invoked
+
+**Called by the loop — the primary path.** The loop has a sub-task whose pull request merged.
+It calls this phase with the contract, the sub-task and the pull request. The phase verifies,
+records, recomputes, and returns the released set. The loop then iterates. It does not ask
+the user anything, because the loop is already running under whatever authority started it.
+
+**Called by a person — the recovery path.** Somebody merged work outside a running loop, or
+no loop is running at all. They invoke `/pr-merged` with pull request numbers. The phase does
+exactly the same four things. The only difference is at the end: with no loop to hand back to,
+it reports the released set and asks whether to start any of it.
+
+**The work in between is identical in both paths.** Verification, the record, and the release
+computation do not care who called them. Only the handoff at the end differs.
 
 ## The three stores, and why they stay separate
 
@@ -74,7 +109,10 @@ closing-link check in `/ship` uses, and for the same reason.
 
 ## Step 0: Parse the invocation
 
-Accept any mix of these, separated by spaces or commas:
+**Called by the loop,** the input is a contract identifier, a sub-task identifier and a pull
+request. Skip the discovery below; the caller already knows which sub-task this is.
+
+**Called by a person,** accept any mix of these, separated by spaces or commas:
 
 | Form | Meaning |
 |---|---|
@@ -183,18 +221,30 @@ orchestrator's own gate, and this skill must not repeat it.
 **Compute releases from completion records only.** Do not read the live state to decide a
 release. State can be stale; a record is evidence.
 
-## Step 5: Continue the released sub-tasks
+## Step 5: Hand the released set back — do not iterate
 
-Report the released set first, then act.
+This phase ends by returning three things: the sub-task it closed, the set that closing
+released, and the set still blocked with what each is waiting for.
 
-- **One sub-task released** → start it, using its scope and acceptance criteria from the plan.
-  Run it through `/tdd-first` with the contract as its authority.
+**What happens next depends on who called.**
+
+**The loop called.** Return the sets and stop. Do not start a sub-task, do not ask the user
+anything, and do not decide an order. The loop owns iteration, and it already holds the
+authority it was started under. A phase that starts work behind its caller's back produces two
+things driving the same queue.
+
+**A person called.** There is no loop to hand back to, so report and offer:
+
+- **One released** → name it, and offer to start it through `/tdd-first`, with the contract as
+  its authority.
 - **Several released** → list them and ask which to start. Each is a full implementation run.
-- **None released** → say so, and name what each blocked sub-task still waits for. This is a
-  normal and common outcome.
+- **None released** → say so, and name what each blocked sub-task is waiting for. This is a
+  normal and common outcome, not a failure.
 
-When every sub-task in the plan has a completion record, the contract's implementation is
-done. Hand off to `/verify-before-done`, then `/ship`, rather than declaring it finished here.
+**When every sub-task has a completion record,** say that the contract's implementation is
+complete and hand to `/verify-before-done`, then `/ship`. Do not declare the contract finished
+from here. Completion of the last sub-task is a fact this phase can report. Whether the
+contract is done is a verdict that belongs to verification.
 
 ## Step 6: Offer to clean up
 
@@ -231,9 +281,8 @@ State what was skipped as plainly as what succeeded.
 **The decomposition usually already exists.** Contracts written from the standard template
 carry an `## Implementation Handoff` section, with one block per implementer and a
 `**Files to touch:**` list inside each. Each block is a sub-task with a name and a scope.
-That is the plan this skill walks. In the project this skill was first written for, 132 of
-146 contracts carried that section and 117 carried the file list, so expect most contracts to
-be usable without any extra authoring.
+That is the plan this phase walks. In the project it was first written for, 132 of 146
+contracts carried that section and 117 carried the file list.
 
 What is missing is narrower than it first appears:
 
@@ -276,7 +325,12 @@ which have no naming dependency at all.
   person.
 - **Inventing a sub-task graph** when the contract has no decomposition. Report it instead.
 - **Guessing which sub-task a pull request belongs to.** Report the unmapped number.
-- **Starting several released sub-tasks without asking.** Each is a full run.
+- **Starting several released sub-tasks without asking,** on the person-called path. Each is
+  a full run.
+- **Starting anything at all when the loop called you.** Return the sets and stop. Two
+  things driving one queue will disagree the moment either changes.
+- **Declaring the contract finished** because the last sub-task closed. That verdict belongs
+  to `/verify-before-done`.
 
 ## When NOT to use this skill
 
@@ -287,7 +341,11 @@ which have no naming dependency at all.
 ## Skill integrations
 
 - **Reads** the plan store, and **writes** the completion and state stores.
-- **Hands released sub-tasks to** `/tdd-first`, with the contract as the authority.
+- **Is a phase of** the orchestrator's loop, which owns iteration over a contract's
+  sub-tasks. This skill closes one sub-task and returns; it never iterates.
+- **Sits inside** `/flow`, which owns the outer chain for one whole work item.
+- **Offers released sub-tasks to** `/tdd-first` on the person-called path only, with the
+  contract as the authority.
 - **Hands a finished contract to** `/verify-before-done`, then `/ship`.
 - **Complements** `/ship`, which opens pull requests. This skill handles what happens after
   one merges.

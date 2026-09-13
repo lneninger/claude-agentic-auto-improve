@@ -242,6 +242,24 @@ predict where the chain pauses will either sit watching it or walk away at the w
 what failed into the brief under a `## Run log` heading, and hand back. A chain that
 retries forever burns an afternoon and reports nothing.
 
+## The three layers, and which one owns iteration
+
+`/flow` is the outer layer. It is worth knowing what sits beneath it, because the middle layer
+is real in the design and gated in practice.
+
+| Layer | Owner | Owns |
+|---|---|---|
+| Outer chain | **`/flow`** | One work item, from intake through to shipped |
+| Inner loop | The Contract Orchestrator | Iterating the pending sub-tasks of one contract |
+| Sub-task phase | `/pr-merged` | Closing one sub-task once its pull request merges |
+
+**Today `/flow` covers the outer layer and drives implementation through agents,** because the
+inner loop cannot execute a sub-task. When the loop is repaired, `/flow` hands the inner
+iteration to it and keeps the outer chain. Nothing about the outer chain changes.
+
+`/pr-merged` works under either arrangement. It closes a sub-task and returns the released set
+to its caller. The loop calls it when a loop is running, and a person calls it when one is not.
+
 ## Resuming a run
 
 `/flow` is resumable because the Work Item Brief records where the run got to. Invoke
@@ -265,7 +283,7 @@ finished sub-task, works out which sub-tasks that releases, and continues them.
 usually a new session, and the tree has moved since. Check the branch, check the worktree
 path, and confirm the file list the brief names still exists before acting on it.
 
-## The Contract Orchestrator is NOT wired
+## The inner loop is gated — do not run the orchestrator
 
 This plugin ships seven scripts that read as a working orchestrator:
 `execute_contract.py`, `orchestrator_loop.py`, `orchestrator_task_planner.py`,
@@ -274,7 +292,7 @@ This plugin ships seven scripts that read as a working orchestrator:
 that go with them, so a fresh checkout carries no record that they are stubs. The gate in
 `/design-first` Step 3.5 and this section are that record.
 
-**Do not run them, and do not offer them as a working choice.** Verified by reading the
+**The loop is a real layer of this design, and it cannot run today.** Do not invoke it, and do not offer it as a working choice. Verified by reading the
 source on 2026-09-13:
 
 1. **The planner always yields zero tasks.** `TaskPlanner._load_contract` returns a
