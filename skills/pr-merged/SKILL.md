@@ -53,7 +53,7 @@ Three levels run this project's work, and each owns exactly one thing:
 | Level | Owner | Owns |
 |---|---|---|
 | Outer chain | `/flow` | One work item, from intake through to shipped |
-| Inner loop | The orchestrator | Iterating the pending sub-tasks of one contract |
+| Inner loop | `/advance` | Iterating the pending sub-tasks, one step per merge |
 | Sub-task phase | **this skill** | Closing out one sub-task once its work has merged |
 
 A sub-task's life runs: implement, test, review, verify, commit, open a pull request, merge.
@@ -66,78 +66,22 @@ things competing to drive iteration, and they would disagree the moment either c
 
 ### Two ways it is invoked
 
-**Called by the loop — the primary path.** The loop has a sub-task whose pull request merged.
-It calls this phase with the contract, the sub-task and the pull request. The phase verifies,
-records, recomputes, and returns the released set. The loop then iterates. It does not ask
-the user anything, because the loop is already running under whatever authority started it.
+Both are triggered by a session, not by a background process. Nothing calls this phase on its
+own, because nothing watches for a merge. The difference is who is driving.
 
-**Called by a person — the recovery path.** Somebody merged work outside a running loop, or
-no loop is running at all. They invoke `/pr-merged` with pull request numbers. The phase does
-exactly the same four things. The only difference is at the end: with no loop to hand back to,
-it reports the released set and asks whether to start any of it.
+**`/flow` is driving.** It is carrying a work item and a merge just landed. The phase verifies,
+records, recomputes and returns the released set. It asks nothing, because `/flow` already
+holds the authority the operator gave it, and it continues with `/advance`.
 
-**The work in between is identical in both paths.** Verification, the record, and the release
-computation do not care who called them. Only the handoff at the end differs.
+**A person is driving.** They merged something, possibly after resolving a conflict, and came
+back to say so. The phase does exactly the same four things. The only difference is the ending:
+it reports the released set and points at `/advance` rather than continuing by itself.
 
-## The three stores, and why they stay separate
+**The work in between is identical.** Verification, the record and the release computation do
+not care who called them. Only the handoff differs.
 
-This skill reads and writes the same stores the orchestrator design defines. They are kept
-apart on purpose, and merging them would lose something each one carries.
-
-| Store | Path | Holds |
-|---|---|---|
-| **Plan** | The contract's `## Implementation Handoff` blocks, or `.claude/orchestrator/plans/<contract-id>/task-map.yaml` when one has been generated | The sub-tasks: identity, scope, acceptance criteria |
-| **Completion** | `.claude/orchestrator/results/<contract-id>/<task-id>.yaml` | One record per **finished** sub-task |
-| **State** | `.claude/orchestrator/state/<contract-id>/state.yaml` | The live machine: which sub-task is pending, running, blocked or failed |
-
-**The completion store is the durable one.** State is a working position and can be rebuilt.
-A completion record is evidence that a specific sub-task finished, with the commit that
-carries it. Releases are computed from completion records, never from the live state, because
-state can be lost or stale and a record cannot.
-
-### The completion record
-
-One file per finished sub-task, in the shape the orchestrator design already defines:
-
-```yaml
-status: completed
-commit: <full hash of the merge commit>
-tests_passed: <true | false | unknown — see below; never assume true>
-tests_verified_by: <ci | local-run | none>
-contract_impact:
-  severity: none
-  requires_architect: false
-  description: null
-```
-
-This skill adds provenance, so a reader can tell a real merge from a hand-written record:
-
-```yaml
-completed_by: pr-merged
-pull_request: <url>
-merged_at: <timestamp GitHub reported>
-verified: github
-```
-
-**`tests_passed` must never be asserted, only observed.** This phase watches a merge. It does
-not watch a test run. Fill the field from evidence and name the evidence:
-
-- `ci` — a status check on the merge commit reported success. Read it from the pull request.
-- `local-run` — somebody ran the suite against the merge commit and said so.
-- `none` — neither happened. Then `tests_passed` is `unknown`, not `true`.
-
-**This repository has no continuous integration.** There is no workflows directory, so `ci` is
-not available here today and `none` is the honest default.
-
-**A resolved conflict invalidates any earlier result.** When a developer fixes a conflict, the
-merged code differs from what the sub-task's tests ran against. Any pre-merge green is stale.
-Say so in the record rather than carrying the old verdict forward.
-
-**Releasing on `unknown` is a decision, not a default.** Report it plainly when handing back
-the released set, so whoever acts on it knows the dependents are building on untested code.
-
-`verified: github` is the important field. It means the merge was confirmed by asking GitHub,
-not asserted by a person. A record without it must not release anything.
+**Neither path iterates.** This phase closes one sub-task. `/advance` starts the next. A person
+merging is what joins them, which is why a merge-gated contract cannot run unattended.
 
 ## The rule that governs the whole skill
 
@@ -325,11 +269,8 @@ things driving the same queue.
 
 **A person called.** There is no loop to hand back to, so report and offer:
 
-- **One released** → name it, and offer to start it through `/tdd-first`, with the contract as
-  its authority.
-- **Several released** → list them and ask which to start. Each is a full implementation run.
-- **None released** → say so, and name what each blocked sub-task is waiting for. This is a
-  normal and common outcome, not a failure.
+- **One or more released** → name them, and offer `/advance`, which takes the next step.
+  Do not start a sub-task from here; `/advance` owns dispatch.
 
 **When every sub-task has a completion record,** say that the contract's implementation is
 complete and hand to `/verify-before-done`, then `/ship`. Do not declare the contract finished

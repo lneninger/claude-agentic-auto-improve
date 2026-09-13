@@ -113,6 +113,15 @@ Step 4. The closing section of this file records why.
 
 ## Step 3: Implement, test first
 
+**If the contract carries sub-tasks, hand the inner loop to `/advance`.** A contract whose
+`## Implementation Handoff` section holds more than one numbered sub-task is iterated a step at
+a time, because each sub-task ends in a pull request somebody must merge. `/advance` takes one
+step and stops; `/pr-merged` records the merge and wakes it. `/flow` keeps the outer chain and
+resumes at verification once every sub-task has a completion record.
+
+For a contract with a single implementation block there is nothing to iterate, so run it
+directly as below.
+
 Invoke `/tdd-first` through the Skill tool with the contract path.
 
 It runs the cycle the protocol mandates. `senior-test-engineer` writes failing tests and no
@@ -250,7 +259,7 @@ is real in the design and gated in practice.
 | Layer | Owner | Owns |
 |---|---|---|
 | Outer chain | **`/flow`** | One work item, from intake through to shipped |
-| Inner loop | The Contract Orchestrator | Iterating the pending sub-tasks of one contract |
+| Inner loop | **`/advance`**, with `/pr-merged` | Iterating the pending sub-tasks of one contract, one step per merge |
 | Sub-task phase | `/pr-merged` | Closing one sub-task once its pull request merges |
 
 **Today `/flow` covers the outer layer and drives implementation through agents,** because the
@@ -360,5 +369,6 @@ exists.
   domain reviewers the diff calls for.
 - **Reads and writes** the Work Item Brief at `.claude/work-items/`, which is what makes a
   run resumable across sessions.
-- **Pairs with** `/pr-merged`, which resumes a run when a sub-task's dependency merges.
+- **Hands the inner loop to** `/advance`, which moves a contract one sub-task at a time.
+- **Pairs with** `/pr-merged`, which closes a sub-task and wakes `/advance`.
 - **Deliberately does not drive** `.claude/scripts/execute_contract.py`.
