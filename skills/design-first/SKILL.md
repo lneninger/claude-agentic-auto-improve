@@ -226,6 +226,26 @@ Once all Open Questions are answered AND all critique findings have explicit use
 > a task that fails must make the run fail. Until then, everything below is a design record,
 > not a runnable path.
 >
+> Five further defects, found 2026-09-13 in the consuming project and recorded here so the
+> gate carries the whole picture. Any one of them would break a run on its own:
+>
+> - `task_executor_launcher.py` passes three arguments, in a different order, to the
+>   `TaskExecutionPacketGenerator` constructor, which declares four. Every task would raise
+>   a type error before doing anything.
+> - `_wait_for_architect` in `orchestrator_loop.py` blocks on Python's `input`, and the
+>   agent dispatch beside it is commented out. An unattended run cannot answer it.
+> - `_merge_to_master` checks out the default branch and merges with no working directory
+>   set, so it acts on whichever tree the orchestrator was started from — including a
+>   developer's primary checkout.
+> - `_start_execution` shells out to the GitHub client to create one issue for the contract
+>   and one per task, **before** any work happens. A curious run leaves real issues behind.
+> - `OrchestratorLoop._find_contract` returns the first markdown file containing the text
+>   `Status: approved`, which need not be the contract that was asked for.
+>
+> The working alternative is `/flow`, which composes `/task`, `/design-first`, `/tdd-first`,
+> the reviewer agents, `/verify-before-done`, `/git-commit` and `/ship`, and pauses only
+> where a person has to decide. Route there instead of offering a choice.
+>
 > Note for a consuming project: the plugin ships these seven scripts but neither the
 > roadmap under `.claude/orchestrator/` nor the tests, so nothing in a fresh checkout
 > records that they are stubs. This gate is that record.
