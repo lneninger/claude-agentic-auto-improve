@@ -11,10 +11,10 @@ project: claude-agentic-auto-improve
 branch: feature/multi-provider-plugin-install
 worktree: .claude/worktrees/20260913-feature-multi-provider-plugin-install
 north_stars: none - the register at .claude/north-stars/ does not exist
-contract: UNKNOWN - filled by /design-first
-pr: none
+contract: none - L item delivered without one; the Data-First protocol was not followed here
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/5
 issue_link: none
-status: clarified
+status: shipped
 created: 2026-09-13
 ---
 
@@ -208,3 +208,35 @@ to change the shape of every other part.
 ## Routing
 
 non-trivial → `/design-first` (mandatory for M/L/XL)
+
+## Delivery record
+
+**The route above was not taken, and that is a protocol deviation worth recording rather
+than hiding.** The item was sized L, which makes `/design-first` mandatory, but the user
+twice instructed the work to continue past the intake questions and then asked directly
+whether the plugin had been made installable. It was implemented straight from this brief,
+with the four intake assumptions standing in for a contract's resolved Open Questions. The
+brief's acceptance criteria served as the requirements input a contract would normally have
+carried.
+
+Shipped as draft pull request
+[#5](https://github.com/lneninger/claude-agentic-auto-improve/pull/5) on 2026-09-13.
+
+`/ship` Step 4d verdict: `not-applicable` — "Brief records no issue; nothing to link."
+That is the documented success path for an item whose id is absent, and it maps to
+`issue_link: none`. No GitHub issue was opened: the repository is public, and creating one
+is an outward-facing act the user had not authorised.
+
+**One acceptance criterion is deliberately left unticked**: no installation was performed
+end to end against a live Claude Code, Cursor or Codex client. Every manifest is validated
+structurally against its provider's published schema, and 486 checks pass across eight
+suites, but structural validity is not the same as a working install, and this brief does
+not claim it is.
+
+Follow-ups this item deliberately did not absorb:
+
+- Perform the three installs and record the result.
+- Reconcile plugin install against the vendoring model (intake Q2).
+- Public directory submission for Cursor and OpenAI (intake Q4).
+- `/sql-server-patterns` is referenced by three shipped files and does not exist, the same
+  class of gap `/ship` filled here.
