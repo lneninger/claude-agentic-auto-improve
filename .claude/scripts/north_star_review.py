@@ -81,7 +81,7 @@ def mechanisms_path() -> Path:
 def default_repo_root(project: str) -> Path:
     """Repo root to scan for a project's anti-patterns.
 
-    Was a hardcoded ``d:/Dev/HIPALANET/StockToolScalpingMachine``, which
+    Was a hardcoded absolute path to one checkout, which
     resolves to the PARENT repo even when this script runs inside a worktree --
     so a gap analysis silently scanned the wrong tree. Resolved from the
     project root instead, falling back to cwd (#35).
@@ -182,7 +182,7 @@ def discover(project: str | None) -> list[NorthStar]:
     proj_name = root.parent.parent.name
     # Alias-based (see list_contracts): the checkout name is the branch slug
     # in a worktree, so an exact match against the documented
-    # `--project StockToolScalpingMachine` silently returned zero (#35).
+    # `--project <the repository name>` silently returned zero (#35).
     if not project_matches(root, project):
         return []
     out: list[NorthStar] = []

@@ -1,0 +1,27 @@
+{
+  "_comment": "TEMPLATE. Per-project settings for db-destructive-guard.py. The hook is generic; every name of a consuming project's own databases and source folders lives here. Copy this file into the consuming repository at .claude/hooks/db-destructive-guard.rules.json and replace the placeholder values. Same shape as architecture-guard.rules.json.",
+
+  "_fail_closed": "If this file is missing, unreadable, or has an empty protected_databases array, the hook does NOT fall back to permitting anything. It treats EVERY database as protected and allows only the disposable-suffix escape, and it narrows the production path allow-list to the entries that name no project. A guard that fails open when its configuration disappears is worse than one that never moved.",
+
+  "_template_note": "The placeholder values below are deliberately fictional. They are NOT a safe default: a consuming project that ships this file unedited protects two databases it does not have, which means the guard treats its real databases as unprotected only if they are named in the allow-list. Fill this in before relying on the guard.",
+
+  "_extension_seam": "Add a database name to protected_databases, or a path prefix to production_path_allowlist. Never widen the allow-list to a whole tree.",
+
+  "protected_databases": [
+    "AcmeApp",
+    "AcmeApp_Testing"
+  ],
+
+  "production_path_allowlist": [
+    "src/acmeapp.api/",
+    "src/acmeapp.persistence/",
+    "tools/db-protection/",
+    ".claude/",
+    "/.claude/",
+    "docs/"
+  ],
+
+  "_production_path_allowlist_comment": "Path prefixes where protected-database connection strings legitimately appear in source: production application configuration, the persistence layer, the guard's own helper tooling, the Claude configuration tree and the documentation tree. Normalised to forward slashes and matched case-insensitively. The '.claude/' entry is deliberately broad: concept contracts, plans, templates, journal entries and hook code all need to name the protected databases verbatim.",
+
+  "_disposable_suffix_comment": "The disposable-database suffixes are NOT here. They are generic by construction and name no project, so they stay in the hook."
+}

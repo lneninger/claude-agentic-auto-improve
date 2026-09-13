@@ -2060,7 +2060,7 @@ def case10_project_alias_matching(env) -> None:
     """Flattening the layout (INV-8) removed the ``concepts/<project>/``
     directory level that used to carry project identity. The obvious
     substitute -- the directory above ``.claude`` -- is the BRANCH SLUG inside
-    a worktree, so the ``--project StockToolScalpingMachine`` invocation both
+    a worktree, so the ``--project <the repository name>`` invocation both
     SKILL.md files document matched nothing and exited 0. ``project_aliases``
     widens matching to the main working tree's name as well, case-folded.
 
@@ -2182,13 +2182,21 @@ def case11_same_answer_from_any_directory() -> None:
 
     repo = _SCRIPTS_DIR.parent.parent
     second = None
-    for candidate in ("src", "ClientApp", "tools", "docs"):
+    for candidate in ("src", "tools", "docs", "lib", "app"):
         if (repo / candidate).is_dir():
             second = repo / candidate
             break
     if second is None:
+        # Any real subdirectory that is not part of the tooling itself. Named
+        # candidates come first only so the chosen directory is stable run to
+        # run; the case needs a second real CWD, not a particular one.
+        for child in sorted(repo.iterdir()):
+            if child.is_dir() and not child.name.startswith("."):
+                second = child
+                break
+    if second is None:
         check("case11: a second real directory exists to run from", False,
-              "no src/ClientApp/tools/docs directory under the checkout")
+              "no non-dot subdirectory under the checkout to run from")
         return
     check("case11: a second real directory exists to run from", True, "")
 

@@ -43,6 +43,54 @@ _DROP_TR     = f"{_D} {_TR}"          # e.g. "DROP TRIGGER"
 _DISABLE_TR  = f"{_DI} {_TR}"         # e.g. "DISABLE TRIGGER"
 _INSERT      = "INS" + "ERT INTO"     # e.g. "INSERT INTO"
 
+# ---------------------------------------------------------------------------
+# Project-shaped fixture values, read from the SAME rules file the hook reads.
+#
+# The Layer-3c cases need a name the guard considers protected and a path the
+# guard considers production. Both are project facts, so writing them here
+# would (a) pin a generic suite to one repository and (b) let the suite and the
+# hook drift apart silently -- a case could keep passing against a database
+# name the hook no longer protects, which is the shape of a test that is green
+# for the wrong reason.
+#
+# THIS LOADER FAILS LOUD, deliberately. The hook's own loader fails CLOSED, but
+# a test harness that quietly substitutes a placeholder when its configuration
+# is missing runs a suite that proves nothing. Same lesson as the HOOK path
+# above: a vacuous pass is worse than an error.
+# ---------------------------------------------------------------------------
+_RULES_PATH = Path(HOOK).parent / "db-destructive-guard.rules.json"
+try:
+    _RULES = json.loads(_RULES_PATH.read_text(encoding="utf-8"))
+except Exception as _e:  # pragma: no cover - configuration error, not a test failure
+    raise SystemExit(f"cannot read {_RULES_PATH}: {_e}")
+
+_PROTECTED_DBS = [str(n) for n in (_RULES.get("protected_databases") or []) if str(n).strip()]
+if not _PROTECTED_DBS:
+    raise SystemExit(
+        f"{_RULES_PATH} declares no protected_databases; the Layer-3c cases "
+        "would test nothing. Refusing to run a vacuous suite."
+    )
+
+# The first declared protected database. Every 3c case that must BLOCK aims at
+# this name; every disposable ALLOW case aims at the same name plus a suffix
+# from the guard's generic escape list, so the two differ in exactly the one
+# way the guard is supposed to notice.
+_DB_PROT = _PROTECTED_DBS[0]
+_DB_DISP = f"{_DB_PROT}_Test_abc123def456"
+
+# A source path the rules file marks as production. Used by the one 3c case
+# that must ALLOW a protected connection string because of WHERE it is written.
+_SRC_ALLOWED = next(
+    (str(p) for p in (_RULES.get("production_path_allowlist") or [])
+     if str(p).startswith("src/")),
+    None,
+)
+if _SRC_ALLOWED is None:
+    raise SystemExit(
+        f"{_RULES_PATH} declares no production_path_allowlist entry under src/; "
+        "case 3c.2 would test nothing. Refusing to run a vacuous suite."
+    )
+
 
 @dataclass
 class Case:
@@ -149,7 +197,7 @@ CASES: list[Case] = [
             "tool_input": {
                 "file_path": "d:/Dev/Foo/tests/SomeTest.cs",
                 "content": (
-                    'const string cs = "Server=(localdb)\\m;Database=ScalpingMachine;Trusted_Connection=True;";\n'
+                    f'const string cs = "Server=(localdb)\\m;Database={_DB_PROT};Trusted_Connection=True;";\n'
                     f'await conn.ExecuteAsync("{_INSERT} Users (Id, Name) VALUES (1, \'x\')");'
                 ),
             },
@@ -158,14 +206,14 @@ CASES: list[Case] = [
         expect_stderr_contains="PROTECTED",
     ),
     Case(
-        name="3c.2 Write to src/ScalpingMachine.API/ with protected-DB CS -> ALLOW (in allow-list)",
+        name=f"3c.2 Write to {_SRC_ALLOWED} with protected-DB CS -> ALLOW (in allow-list)",
         payload={
             "tool_name": "Write",
             "tool_input": {
-                "file_path": "d:/Dev/Foo/src/ScalpingMachine.API/appsettings.json",
+                "file_path": f"d:/Dev/Foo/{_SRC_ALLOWED}appsettings.json",
                 "content": (
-                    '"ConnectionStrings": { "ScalpingDb": '
-                    '"Server=(localdb)\\m;Database=ScalpingMachine;Trusted_Connection=True;" }'
+                    '"ConnectionStrings": { "AppDb": '
+                    f'"Server=(localdb)\\m;Database={_DB_PROT};Trusted_Connection=True;" }}'
                 ),
             },
         },
@@ -178,7 +226,7 @@ CASES: list[Case] = [
             "tool_input": {
                 "file_path": "d:/Dev/Foo/tests/SomeTest.cs",
                 "content": (
-                    'const string cs = "Server=(localdb)\\m;Database=ScalpingMachine_Test_abc123def456;Trusted_Connection=True;";\n'
+                    f'const string cs = "Server=(localdb)\\m;Database={_DB_DISP};Trusted_Connection=True;";\n'
                     f'await conn.ExecuteAsync("{_INSERT} Users (Id, Name) VALUES (1, \'x\')");'
                 ),
             },
@@ -192,7 +240,7 @@ CASES: list[Case] = [
             "tool_input": {
                 "command": (
                     'sqlcmd -S "(localdb)\\m" -E '
-                    f'-Q "Database=ScalpingMachine; {_INSERT} Users VALUES (1, \'x\')"'
+                    f'-Q "Database={_DB_PROT}; {_INSERT} Users VALUES (1, \'x\')"'
                 )
             },
         },
@@ -206,7 +254,7 @@ CASES: list[Case] = [
                 "file_path": "d:/Dev/Foo/scripts/diagnose.cs",
                 "old_string": "const string cs = \"OLD\";",
                 "new_string": (
-                    'const string cs = "Server=(localdb)\\m;Database=ScalpingMachine;Trusted_Connection=True;";\n'
+                    f'const string cs = "Server=(localdb)\\m;Database={_DB_PROT};Trusted_Connection=True;";\n'
                     '// read-only diagnostic'
                 ),
             },
@@ -218,12 +266,12 @@ CASES: list[Case] = [
     # Layer 3c extended -- alternative protected-DB connection forms
     # ---------------------------------------------------------------
     Case(
-        name="3c.6 Bash 'sqlcmd -d ScalpingMachine -Q UPDATE' -> BLOCK",
+        name="3c.6 Bash 'sqlcmd -d <protected> -Q UPDATE' -> BLOCK",
         payload={
             "tool_name": "Bash",
             "tool_input": {
                 "command": (
-                    'sqlcmd -S "(localdb)\\m" -E -d ScalpingMachine '
+                    f'sqlcmd -S "(localdb)\\m" -E -d {_DB_PROT} '
                     f'-Q "UPDATE Users SET Name = \'x\' WHERE Id = 1"'
                 )
             },
@@ -231,12 +279,12 @@ CASES: list[Case] = [
         expect_rc=2,
     ),
     Case(
-        name="3c.7 Bash 'sqlcmd -d ScalpingMachine_Test_<guid> -Q UPDATE' -> ALLOW (disposable)",
+        name="3c.7 Bash 'sqlcmd -d <protected>_Test_<guid> -Q UPDATE' -> ALLOW (disposable)",
         payload={
             "tool_name": "Bash",
             "tool_input": {
                 "command": (
-                    'sqlcmd -S "(localdb)\\m" -E -d ScalpingMachine_Test_abc123def456 '
+                    f'sqlcmd -S "(localdb)\\m" -E -d {_DB_DISP} '
                     f'-Q "UPDATE Users SET Name = \'x\' WHERE Id = 1"'
                 )
             },
@@ -244,25 +292,25 @@ CASES: list[Case] = [
         expect_rc=0,
     ),
     Case(
-        name="3c.8 T-SQL 'USE ScalpingMachine; DELETE FROM Users' -> BLOCK",
+        name="3c.8 T-SQL 'USE <protected>; DELETE FROM Users' -> BLOCK",
         payload={
             "tool_name": "Bash",
             "tool_input": {
                 "command": (
-                    f'sqlcmd -S "(localdb)\\m" -E -Q "USE ScalpingMachine; DELETE FROM Users WHERE Id = 1"'
+                    f'sqlcmd -S "(localdb)\\m" -E -Q "USE {_DB_PROT}; DELETE FROM Users WHERE Id = 1"'
                 )
             },
         },
         expect_rc=2,
     ),
     Case(
-        name="3c.9 'Initial Catalog=ScalpingMachine' + DELETE in non-allowlist file -> BLOCK",
+        name="3c.9 'Initial Catalog=<protected>' + DELETE in non-allowlist file -> BLOCK",
         payload={
             "tool_name": "Write",
             "tool_input": {
                 "file_path": "d:/Dev/Foo/scripts/maintenance.cs",
                 "content": (
-                    'var cs = "Server=(localdb)\\m;Initial Catalog=ScalpingMachine;Trusted_Connection=True;";\n'
+                    f'var cs = "Server=(localdb)\\m;Initial Catalog={_DB_PROT};Trusted_Connection=True;";\n'
                     f'await conn.ExecuteAsync("DELETE FROM Users WHERE Id = 1");'
                 ),
             },
@@ -270,12 +318,12 @@ CASES: list[Case] = [
         expect_rc=2,
     ),
     Case(
-        name="3c.10 PowerShell '-Database ScalpingMachine' + INSERT -> BLOCK",
+        name="3c.10 PowerShell '-Database <protected>' + INSERT -> BLOCK",
         payload={
             "tool_name": "PowerShell",
             "tool_input": {
                 "command": (
-                    'Invoke-Sqlcmd -ServerInstance "(localdb)\\m" -Database ScalpingMachine '
+                    f'Invoke-Sqlcmd -ServerInstance "(localdb)\\m" -Database {_DB_PROT} '
                     f'-Query "{_INSERT} Users (Id, Name) VALUES (1, \'x\')"'
                 )
             },
@@ -283,12 +331,12 @@ CASES: list[Case] = [
         expect_rc=2,
     ),
     Case(
-        name="3c.11 'USE ScalpingMachine_Test_abc' + DELETE -> ALLOW (disposable USE target)",
+        name="3c.11 'USE <protected>_Test_abc' + DELETE -> ALLOW (disposable USE target)",
         payload={
             "tool_name": "Bash",
             "tool_input": {
                 "command": (
-                    f'sqlcmd -E -Q "USE ScalpingMachine_Test_abc123def456; DELETE FROM Users WHERE Id = 1"'
+                    f'sqlcmd -E -Q "USE {_DB_DISP}; DELETE FROM Users WHERE Id = 1"'
                 )
             },
         },
@@ -299,10 +347,10 @@ CASES: list[Case] = [
         payload={
             "tool_name": "Write",
             "tool_input": {
-                "file_path": "c:/users/lneni/.claude/concepts/StockToolScalpingMachine/example.md",
+                "file_path": "c:/users/dev/.claude/concepts/example.md",
                 "content": (
                     'Documentation example: a connection string like '
-                    '`Database=ScalpingMachine` paired with `INSERT INTO Users` '
+                    f'`Database={_DB_PROT}` paired with `INSERT INTO Users` '
                     'should be allowed in concept contracts.'
                 ),
             },

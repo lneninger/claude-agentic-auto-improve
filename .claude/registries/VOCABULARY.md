@@ -20,7 +20,7 @@
 - **Domain Event** — an immutable record of something that happened in the domain. Past tense. Carries payload needed by downstream consumers.
 - **Command** — an imperative request to change state. Present tense. May be rejected.
 - **Port** — an interface declared by the domain that describes a dependency (e.g. `IMarketDataProvider`).
-- **Adapter** — an implementation of a port that bridges to a specific technology (IBKR, backtest data, etc).
+- **Adapter** — an implementation of a port that bridges to a specific technology (a third-party service client, a backtest data file, etc).
 - **Invariant** — a rule that must always be true for an entity or aggregate to be in a valid state.
 - **Projection** — a read-optimized shape derived from entities, used for queries and UI.
 - **Saga / Process Manager** — a long-running coordination of multiple domain events toward a business outcome.
@@ -33,6 +33,3 @@
 - **Ownership tier** — the label that says whether a given setup file is owned by the plugin, and therefore replaceable on sync, or owned by the consuming project, and therefore never touched. Every setup file carries exactly one tier. The tier is recorded in `.claude/.sync-config.json` and nowhere else; a file that no tree's file list names is a local asset by default.
 - **Sync direction** — which way changes may travel for one synced tree. Three values: `bidirectional`, `plugin-to-repo`, `repo-to-plugin`. It is a property of the tree, recorded once in the sync configuration, and never a property of an individual file. Every tree holds `bidirectional` today; the other two remain defined so a future tree can use one.
 - **Vendored-asset drift** — the condition where a vendored asset and its plugin original no longer match. Detected by comparing content hashes of the two files **after normalising encoding** — folding line endings and stripping a leading byte order mark — never by comparing timestamps, because a checkout rewrites timestamps and an encoding convention rewrites bytes without changing meaning. A file present on one side and absent from the other is drift of its own kind and is reported as such; before 2026-09-12 it produced no signal at all. The qualifier is part of the term: the bare word *drift* already means generated output no longer matching its source in this project, and the two conditions are unrelated.
-
----
-

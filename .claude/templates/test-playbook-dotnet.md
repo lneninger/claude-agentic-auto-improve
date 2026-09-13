@@ -1,6 +1,6 @@
 # .NET 9 Test Playbook
 
-Reusable xUnit + Moq examples for the StockToolScalpingMachine backend. Referenced by `.claude/agents/senior-test-engineer.md`.
+Reusable xUnit + Moq examples for this project's backend - the projects named by the `backend.roots` slot of `.claude/project-profile.md`. Referenced by `.claude/agents/senior-test-engineer.md`.
 
 ---
 
@@ -87,15 +87,15 @@ public class ConditionEvaluationServiceTests
 ```csharp
 public class StrategyRepositoryTests : IDisposable
 {
-    private readonly ScalpingMachineDbContext _context;
+    private readonly AppDbContext _context;
     private readonly StrategyRepository _sut;
 
     public StrategyRepositoryTests()
     {
-        var options = new DbContextOptionsBuilder<ScalpingMachineDbContext>()
+        var options = new DbContextOptionsBuilder<AppDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString()) // unique DB per test
             .Options;
-        _context = new ScalpingMachineDbContext(options);
+        _context = new AppDbContext(options);
         _sut = new StrategyRepository(_context);
     }
 
@@ -157,9 +157,9 @@ public class StrategiesControllerTests : IClassFixture<WebApplicationFactory<Pro
         {
             builder.ConfigureServices(services =>
             {
-                var descriptor = services.Single(d => d.ServiceType == typeof(DbContextOptions<ScalpingMachineDbContext>));
+                var descriptor = services.Single(d => d.ServiceType == typeof(DbContextOptions<AppDbContext>));
                 services.Remove(descriptor);
-                services.AddDbContext<ScalpingMachineDbContext>(o =>
+                services.AddDbContext<AppDbContext>(o =>
                     o.UseInMemoryDatabase("IntegrationTest"));
             });
         }).CreateClient();

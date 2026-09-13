@@ -38,7 +38,7 @@ For the eligible pattern, derive a draft rule definition:
   "id": "<kebab-case-id>",
   "regex": "<python-regex>",
   "applies_to": "html|ts|scss|any",
-  "scope": "all|admin-panel|scalping-machine",
+  "scope": "all|<one application name from the frontend.roots slot>",
   "suggestion": "<replacement-guidance-with-token-name>",
   "exception_seeds": []
 }
@@ -49,7 +49,7 @@ Present the draft to the user via `AskUserQuestion` with these fields editable:
 1. **Rule id** — kebab-case, globally unique (suggest `<offending-class>-banned-<scope>`).
 2. **Regex** — the actual pattern the guard will match. Default: `\b<bad-class>\b`. Let the user refine.
 3. **Applies to** — html / ts / scss / any. Default: infer from the journal entries' source contracts.
-4. **Scope** — all / admin-panel / scalping-machine. Default: `all` unless one of the app sub-tags (`app:admin-panel` / `app:scalping-machine`) dominates the matching entries.
+4. **Scope** — `all`, or one application name from the `frontend.roots` slot of `.claude/project-profile.md`. Default: `all` unless a single `app:<name>` sub-tag dominates the matching entries.
 5. **Suggestion** — replacement guidance. Default: pull from the most recent journal entry's `Lesson:` field.
 6. **Exception seeds** — optional comma-separated file-path substrings to exempt. Default: empty.
 

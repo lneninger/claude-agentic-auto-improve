@@ -20,7 +20,7 @@ Optional flags the user may pass:
 
 Example with an explicit repo root:
 ```bash
-py -3 ".claude/scripts/validate_registries.py" --root "d:/Dev/HIPALANET/StockToolScalpingMachine"
+py -3 ".claude/scripts/validate_registries.py" --root "<absolute path to the repository root>"
 ```
 
 ## Step 2: Present the report

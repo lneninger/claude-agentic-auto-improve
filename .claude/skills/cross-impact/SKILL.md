@@ -22,7 +22,7 @@ Surface the top-3 adjacent areas for a contract or a synthetic file list.
   Run against an existing contract. Uses the contract's `## Files to touch` list
   as input.
 
-- `/cross-impact src/ScalpingMachine.Services/Ingestion/EarningsJob.cs,src/ScalpingMachine.Services/Ingestion/FundamentalsJob.cs`
+- `/cross-impact <a backend.roots entry>/Ingestion/EarningsJob.cs,<the same entry>/Ingestion/FundamentalsJob.cs`
   Run against a synthetic file list. Useful before drafting a contract — lets
   you see which areas the work would span.
 

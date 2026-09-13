@@ -48,9 +48,9 @@ Invoke `/verify-before-done` via the Skill tool.
 - Any failure reported by the verification skill → stop, surface the failure, do NOT stage or commit.
 - The skill is unavailable in the current project → fall back to baseline checks based on the diff:
   - `.cs` files changed → `dotnet build --nologo --verbosity minimal`
-  - `.ts`/`.html`/`.scss` under `ClientApp/` → `npm run build` in the relevant project
+  - `.ts`/`.html`/`.scss` under the `frontend.root-container` slot of `.claude/project-profile.md` → `npm run build` in the relevant project
   - `.py` files changed → `python -m py_compile <changed files>` or the project's lint command
-  - Migration files changed → confirm `ScalpingDbContextModelSnapshot.cs` (or equivalent) is also staged
+  - Migration files changed → confirm the `*ModelSnapshot.cs` file under `migration.root` is also staged
 - Only run baseline checks that are obviously required by the diff. Don't re-run the full suite if `/verify-before-done` ran cleanly.
 
 ## Step 2: Inventory changes
@@ -80,10 +80,10 @@ Show the modified + untracked files in a single list. Use AskUserQuestion (or a 
 - Files matching `*credentials*`, `*secret*`, `*password*`, `*token*` (case-insensitive) — but not files where the literal string is a normal identifier (e.g., `PasswordResetTokenEntity.cs` is fine, `tokens.json` is suspicious).
 
 **Hard refuse to stage manually** (the pre-commit hook will regen and stage these):
-- `ClientApp/**/generated/**`
-- `tools/nswag/openapi.json`
-- `docs/handbook/admin-panel/{architecture,contracts}/**`
-- `docs/generated/openapi.json`
+- `**/generated/**` under the `frontend.root-container` slot
+- The generated OpenAPI document the client generator writes
+- The generated handbook trees the project's docs generator writes
+- `docs/generated/**`
 - Any file with the marker header `THIS FILE IS GENERATED`
 
 For each file the user confirms, run:

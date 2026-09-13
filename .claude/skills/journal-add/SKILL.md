@@ -52,7 +52,7 @@ After gathering the basics, ask one focused yes/no question via `AskUserQuestion
 If yes:
 
 - **Enforce `ui-evolution` in the Tags line.** If the user's Step-1 Tags list does not include it, prepend `ui-evolution` automatically.
-- **Ask the optional app scope** via a second `AskUserQuestion`: "Which app does this apply to?" with options `both apps (no sub-tag)` / `app:admin-panel only` / `app:scalping-machine only`. If `app:*` is picked, append the chosen sub-tag to the Tags line.
+- **Ask the optional app scope** via a second `AskUserQuestion`: "Which app does this apply to?" — one option per application named by the `frontend.roots` slot of `.claude/project-profile.md`, spelled `app:<name> only`, plus an `all apps (no sub-tag)` option. If an `app:*` option is picked, append the chosen sub-tag to the Tags line.
 - **Recurring-mistake check.** If the user described this as a repeat occurrence (e.g. "the third time we hit this"), also append `recurring-mistake` to the Tags line. This is the signal `/promote-ui-rule` reads when gating automated guard-rule promotion.
 
 If no, skip this step. (The architecture-advisor hook and ui-ux-designer agent's Step 0 grep would still pick up the entry on a tag match, but you avoid the noise of marking generic lessons as UI-tagged.)
@@ -63,8 +63,8 @@ If no, skip this step. (The architecture-advisor hook and ui-ux-designer agent's
 
 Determine the project from CWD:
 
-- If CWD starts with `d:\Dev\HIPALANET\StockToolScalpingMachine` (or any variant of that path) → `## Project: StockToolScalpingMachine`.
-- For any other project, derive the section name from the last path component of the repo root.
+- If CWD is inside the repository, the section is `## Project: <project.name>`, taking `project.name` from the `.claude/project-profile.md` slot of that repository.
+- If the profile is absent, fall back to the last path component of the repo root.
 - If CWD is `~/.claude` or unrelated → use the `## Universal lessons` section instead.
 
 If the matching `## Project: <name>` section does not exist in JOURNAL.md, create it immediately above the closing of the file with this exact heading and a single-line placeholder comment matching the existing project sections.

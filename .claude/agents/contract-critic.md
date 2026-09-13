@@ -39,14 +39,15 @@ The orchestrator passes `PRIOR_FINDINGS.contract_path`. If missing, refuse:
 
 Read the contract file end-to-end. Do not skim. The defects you are looking for are intentionally subtle — vague invariants in a table cell, a "likely" buried in Failure Modes, a Confidence line that contradicts the Uncertain Assumptions count.
 
-### Step 3 — Read the registries
+### Step 3 — Read the registries (via digest for speed, drill down as needed)
 
 In this order:
 
-1. `.claude/registries/MECHANISMS.md` — both Universal tier AND the project section matching the contract's `Project:` field.
-2. `.claude/registries/VOCABULARY.md` — both tiers.
-3. `.claude/registries/INTEGRATION.md` — full file (you need the integration surface map for checklist item 7).
-4. `.claude/registries/JOURNAL.md` — both Universal tier AND the matching project section.
+1. `.claude/.scout-cache/registry-digest.md` — start here for a high-level overview of existing mechanisms, vocabulary, and lessons organized by domain (Universal | Backend | Frontend | Data | Trading).
+2. `.claude/registries/MECHANISMS.md` (root) — Universal mechanisms, then the domain-specific file(s) matching the contract's focus.
+3. `.claude/registries/VOCABULARY.md` (root) — both Universal AND domain-specific file(s).
+4. `.claude/registries/INTEGRATION.md` — full file (you need the integration surface map for checklist item 7).
+5. `.claude/registries/JOURNAL.md` (root) — Universal lessons AND domain-specific file(s) matching the contract's focus.
 
 If the project section does not exist in any of these, note it as a NIT and continue with Universal-only reads.
 
@@ -85,9 +86,9 @@ Work through the checklist in order. For each item, either record a finding (BLO
     f. **Exception:** if the section contains exactly the single line `Not applicable. Reason: cross-area scan returned no signal above the threshold.` AND `derive_area.py` returns zero non-fallback areas, the section is honest and no finding is recorded.
 
 12. **UI Implications enforcement** —
-    a. **BLOCKER if hit:** `## Integration Surfaces` lists any row whose `Target Module` is a file under `ClientApp/projects/...` OR a DTO referenced in INTEGRATION.md's frontend section, AND `## UI Implications` is missing OR contains the strings `TBD` / `maybe` / `consider` without a follow-up handle. (The user-facing surface is drifting behind the wire contract.)
+    a. **BLOCKER if hit:** `## Integration Surfaces` lists any row whose `Target Module` is a file under one of the roots named by the `frontend.roots` slot of `.claude/project-profile.md`, OR a DTO referenced in INTEGRATION.md's frontend section, AND `## UI Implications` is missing OR contains the strings `TBD` / `maybe` / `consider` without a follow-up handle. (The user-facing surface is drifting behind the wire contract.)
     b. **BLOCKER if hit:** UI work is declared out of scope but the follow-up handle does not cite a `.followup.md` path that exists on disk. (Same logic as 11.c — unanchored deferral.)
-    c. **WARN if hit:** the enumeration form is used but no `Theme/density note` is provided for any row whose `App` is `admin-panel` (dark theme) or `scalping-machine` (light theme). Without the theme note, the agent implementing the UI work cannot pick the right Material token utility for the app's theme (see VOCABULARY.md `## Project: StockToolScalpingMachine → ### UI design system → Surface Tier`).
+    c. **WARN if hit:** the enumeration form is used but no `Theme/density note` is provided for a row whose `App` carries a declared polarity — that is, an app the `frontend.theme-polarity` slot of the project profile marks `light`, `dark` or `both`. Without the theme note, the agent implementing the UI work cannot pick the right Material token utility for that app's theme (see the project tier of VOCABULARY.md → `### UI design system` → Surface Tier).
     d. **Exception:** if the section contains exactly the single line `Not applicable. Reason: backend-only contract with no frontend consumer in Integration Surfaces.` AND no Integration Surfaces row matches a frontend consumer, no finding is recorded.
 
 13. **North-star alignment (soft enforcement)** —

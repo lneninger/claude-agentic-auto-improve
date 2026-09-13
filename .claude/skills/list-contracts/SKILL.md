@@ -15,7 +15,7 @@ py -3 ".claude/scripts/list_contracts.py"
 ```
 
 Accepts these optional flags the user may pass after `/list-contracts`:
-- `--project <name>` — filter to one project (e.g. `--project StockToolScalpingMachine`)
+- `--project <name>` — filter to one project. The name for this repository is the `project.name` slot of `.claude/project-profile.md`.
 - `--status <name>` — filter to one status (`draft`, `approved`, `stub`, `implemented`, `archived`, `superseded`, `rejected`)
 - `--json` — emit structured JSON instead of the human report
 
@@ -27,8 +27,8 @@ py -3 ".claude/scripts/list_contracts.py"
 # Drafts that need user input
 py -3 ".claude/scripts/list_contracts.py" --status draft
 
-# Everything in one project
-py -3 ".claude/scripts/list_contracts.py" --project StockToolScalpingMachine
+# Everything in one project (the name comes from the project.name slot)
+py -3 ".claude/scripts/list_contracts.py" --project <project.name>
 ```
 
 ## Step 2: Show the report to the user

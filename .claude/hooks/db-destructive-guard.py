@@ -275,7 +275,7 @@ PROTECTED_DESTRUCTIVE_TARGET_RE = re.compile(
 # the destructive-pattern bank when the file is edited by an agent.
 #
 # Negative lookahead `(?!_)` on the DB name ensures we don't false-positive on
-# disposable names like ScalpingMachine_Test_<guid> / ScalpingMachine_Testing_x.
+# disposable names like <ProtectedName>_Test_<guid> / <ProtectedName>_Testing_x.
 # ---------------------------------------------------------------------------
 def _protected_db_patterns() -> list[tuple[str, str]]:
     """
@@ -440,8 +440,8 @@ def _file_in_production_allowlist(file_path: str) -> bool:
     """True iff the (normalized, lowercased) file_path starts with one of the
     PRODUCTION_PATH_ALLOWLIST entries OR contains one of them as a substring.
     Substring matching is intentional -- file_path on Windows often starts
-    with a drive letter, so an entry like "src/scalpingmachine.api/" must
-    match "d:/dev/.../src/scalpingmachine.api/program.cs"."""
+    with a drive letter, so an entry like "src/<backend-project>/" must
+    match "d:/dev/.../src/<backend-project>/program.cs"."""
     if not file_path:
         return False
     for prefix in PRODUCTION_PATH_ALLOWLIST:
@@ -614,7 +614,7 @@ def main() -> int:
             lines.append(f"    {p}")
         lines.append("")
         lines.append("If this is a test, use a disposable connection string built from a guid,")
-        lines.append("not the dev DB name. Pattern: Database=ScalpingMachine_Test_<guid>")
+        lines.append("not the dev DB name. Pattern: Database=<AnyName>_Test_<guid>")
     else:
         lines.append("this tool call would run a destructive DB operation against")
         lines.append("what appears to be a working/dev/prod database.")

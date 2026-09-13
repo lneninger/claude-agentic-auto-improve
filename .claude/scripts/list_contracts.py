@@ -202,7 +202,7 @@ def collect(project_filter: str | None, status_filter: str | None) -> list[dict[
         # Alias-based: --project accepts the checkout name OR the main-repo
         # name, case-folded. In a worktree the checkout name is the branch
         # slug, so an exact match against the documented
-        # `--project StockToolScalpingMachine` silently returned zero (#35).
+        # `--project <the repository name>` silently returned zero (#35).
         if not project_matches(root, project_filter):
             continue
         if status_filter and info.get("status") != status_filter:

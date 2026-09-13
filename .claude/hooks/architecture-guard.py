@@ -203,7 +203,7 @@ def detect_app(file_path: Path) -> str | None:
 
     The root that holds the applications is a project fact, so it is read from
     architecture-guard.rules.json (`frontend_projects_root`) rather than
-    hard-coded here. This project sets it to `ClientApp/projects`.
+    hard-coded here. A consuming project sets it to its own workspace root.
     """
     norm = str(file_path).replace("\\", "/").lower()
     root = load_project_settings()["frontend_projects_root"]
@@ -226,7 +226,7 @@ def load_app_rules(file_path: Path) -> dict | None:
         return _APP_RULES_CACHE.get(app)
     _APP_RULES_LOADED.add(app)
 
-    # Walk up to find ClientApp/projects/<app>/.app-rules.json.
+    # Walk up to find <frontend_projects_root>/<app>/.app-rules.json.
     parts = list(file_path.resolve().parts) if file_path.is_absolute() else list(Path.cwd().joinpath(file_path).resolve().parts)
     for i in range(len(parts) - 1, 0, -1):
         if parts[i].lower() == app and i >= 2 and parts[i - 1].lower() == "projects":
@@ -360,7 +360,7 @@ RX_INLINE_STICKY = re.compile(r"\bsticky\s+top-0\b")
 # Height-chain invariant for scroll-edge templates.
 # scroll-edge + flex-1 min-h-0 inside a file whose first <div class="..."> lacks
 # any of {h-full, flex-1, max-h-, min-h-screen} silently collapses to 0 px and
-# renders empty content (recurring regression — obs 865, 1292 in StockToolScalpingMachine).
+# renders empty content (recurring regression — observations 865 and 1292 in this project).
 RX_HEIGHT_CHAIN_ANCHOR = re.compile(r"\bscroll-edge\b.*\bflex-1\b.*\bmin-h-0\b|\bflex-1\b.*\bmin-h-0\b.*\bscroll-edge\b")
 RX_FIRST_DIV_CLASS = re.compile(r'<div\s+class="([^"]+)"')
 RX_ROOT_HAS_HEIGHT = re.compile(r"\b(?:h-full|flex-1|max-h-|min-h-screen)\b")
@@ -456,7 +456,8 @@ def scan_template_html(content: str, path: Path, exemptions: dict) -> list[Viola
                     line_text=line.strip(),
                     suggestion=(
                         "Replace static style=\"...\" with Tailwind utilities from "
-                        "DESIGN_PATTERNS.md (e.g. text-primary, bg-surface-container, "
+                        "the design-pattern document under Reference below "
+                        "(e.g. text-primary, bg-surface-container, "
                         "border-outline-variant, w-[200px], p-4, gap-2). "
                         "Dynamic [style.prop]=\"expr\" bindings are allowed."
                     ),
@@ -749,7 +750,7 @@ def emit_warnings(file_path: str, warnings: list[Violation]) -> None:
     if len(warnings) > 10:
         out.append(f"  ... and {len(warnings) - 10} more")
     out.append(
-        "  -> Move these to the template as Tailwind utilities. See DESIGN_PATTERNS.md."
+        "  -> Move these to the template as Tailwind utilities. See the design-pattern document."
     )
     out.append(bar)
     out.append("")

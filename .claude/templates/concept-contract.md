@@ -189,7 +189,7 @@ If the contract does NOT conflict with any active north-star, OMIT this section 
 
 ## UI Implications
 
-> **REQUIRED whenever `## Integration Surfaces` lists ANY entry with a frontend consumer (file under `ClientApp/projects/...` OR a DTO referenced in INTEGRATION.md's frontend section). Verified by `contract-critic` checklist item 12.**
+> **REQUIRED whenever `## Integration Surfaces` lists ANY entry with a frontend consumer — a file under a root named by the `frontend.roots` slot of `.claude/project-profile.md`, OR a DTO referenced in INTEGRATION.md's frontend section. Verified by `contract-critic` checklist item 12.**
 >
 > Either enumerate the UI changes OR explicitly mark UI work out of scope with a follow-up handle. Empty "no changes needed" prose is not acceptable.
 
@@ -197,8 +197,8 @@ If the contract does NOT conflict with any active north-star, OMIT this section 
 
 | App | Surface affected | Change | Theme/density note |
 |-----|------------------|--------|--------------------|
-| (e.g. admin-panel) | RemediationStepButton | New `target` enum value rendered as a button | Dark theme — use `text-on-surface` not `text-neutral-700` |
-| (e.g. scalping-machine) | StrategyCenterBlade | New status badge color | Light theme — use `text-primary` on `bg-primary/8` |
+| (an app whose `frontend.theme-polarity` is `dark`) | RemediationStepButton | New `target` enum value rendered as a button | Dark theme — use `text-on-surface` not `text-neutral-700` |
+| (an app whose `frontend.theme-polarity` is `light`) | SettingsBlade | New status badge color | Light theme — use `text-primary` on `bg-primary/8` |
 
 **Out-of-scope form** (fill when UI work is deferred):
 
@@ -220,7 +220,7 @@ A REST endpoint / SignalR event does NOT automatically get a chat-tool wrapper �
    - **Tool-result JSON shape** (narrow — matching `create_strategy`/`update_strategy` precedent; NOT the full domain object):
    - **Executor dispatch target** (`IXxxService.YyyAsync` — prefer a service seam so controller + executor share one orchestration path; see `feedback_service_layer_cannot_leak_exception_message_to_chat.md` for error-handling rules):
    - **System-prompt announcement prose** (draft the paragraph that will land in `SystemPromptBuilder.cs`; include Live/Shadow defaults and any Phase-constrained semantics).
-   - **Sentinel files to touch** (always these three for a new chat tool): `src/ScalpingMachine.Services/Chat/ChatToolDefinitions.cs`, `ChatToolExecutor.cs`, `SystemPromptBuilder.cs`. These trigger `/retrain-llm`.
+   - **Sentinel files to touch** (always the whole chat-tool trio for a new chat tool): the tool-definition file, the tool-executor file and the system-prompt builder, all under the chat area of `backend.roots`. Their exact paths are the `rest`/`docs` sentinel lists in `.claude/hooks/sentinel-paths.json`. These trigger the project's model-retraining skill.
 
 2. **No — this endpoint/event is UI-only or admin-only.** One-line justification (e.g. "admin-only surface — chat would bypass row-level auth", "UI-only destructive mutation where a typed chat call would be unsafe").
 
@@ -376,7 +376,7 @@ PRIOR_FINDINGS:
 ### Frontend (`angular-senior-dev`)
 
 **Files to touch:**
-- `ClientApp/projects/<app>/src/app/...`
+- `<a frontend.roots entry>/src/app/...`
 
 **Pre-written TASK block:**
 ```
@@ -395,7 +395,7 @@ PRIOR_FINDINGS:
 ### Data pipeline (`ingestion-data-architect`) — if applicable
 
 **Files to touch:**
-- `src/ScalpingMachine.Services/Ingestion/...`
+- `<a backend.roots entry>/Ingestion/...`
 
 **Pre-written TASK block:**
 ```

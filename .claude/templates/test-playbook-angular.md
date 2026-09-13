@@ -1,6 +1,6 @@
 # Angular 21 Test Playbook
 
-Reusable Jasmine + Karma examples for the StockToolScalpingMachine frontend. Referenced by `.claude/agents/senior-test-engineer.md`.
+Reusable Jasmine + Karma examples for this project's frontend — the applications named by the `frontend.roots` slot of `.claude/project-profile.md`. Referenced by `.claude/agents/senior-test-engineer.md`.
 
 ---
 

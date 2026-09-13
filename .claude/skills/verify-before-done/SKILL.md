@@ -16,12 +16,14 @@ Implementer agents (and Claude sessions in general) sometimes close a task with 
 
 Classify the change by files touched (read `git status` + `git diff --stat`):
 
-- **Backend only** (`src/ScalpingMachine.*/*.cs`) → Steps 1, 2, 4, 5.5, 6, 7
-- **Frontend only** (`ClientApp/**/*.ts|.html|.scss`) → Steps 3, 4, 5.5, 6, 7
+Roots come from `.claude/project-profile.md`. Read it first; do not infer a path from a project name.
+
+- **Backend only** — every changed file sits under `backend.roots` → Steps 1, 2, 4, 5.5, 6, 7
+- **Frontend only** — every changed file sits under `frontend.roots` → Steps 3, 4, 5.5, 6, 7
 - **Full-stack** (both) → all steps
-- **Migration** (`Persistence/Migrations/*`) → Steps 1, 2, 5, 5.5, 6, 7
-- **Python sidecar** (`python/scalping_llm/**`) → Steps 8, 5.5, 6, 7
-- **Docs only** (`.md`, `.claude/`, `CLAUDE.md`) → Step 6, 7 only
+- **Migration** — anything under `migration.root` → Steps 1, 2, 5, 5.5, 6, 7
+- **Sidecar or auxiliary runtime** — a language runtime outside `backend.roots` and `frontend.roots` → Steps 8, 5.5, 6, 7
+- **Docs only** (`.md`, `.claude/`) → Step 6, 7 only
 
 **Step 5.5 (safety-critical review gate) fires on every non-docs-only scope** — it short-circuits to PASS when no safety-critical path is touched, so it is cheap. See Step 5.5 for the path-to-reviewer mapping.
 
@@ -50,7 +52,7 @@ dotnet test <affected-test-project> --nologo --verbosity minimal --no-build
 ## Step 3: Frontend build + tests
 
 ```bash
-# From ClientApp/:
+# From the frontend workspace root (frontend.root-container in the project profile):
 npm run build -- --configuration=production
 npm run test -- --watch=false --browsers=ChromeHeadless
 ```
@@ -66,10 +68,10 @@ If any `.cs` file in a sentinel path (see `.claude/hooks/sentinel-paths.json`) w
 
 ```bash
 # Check drift without running the regenerator
-git diff --stat ClientApp/**/generated/
+git diff --stat <frontend.roots>/**/generated/
 # If there are uncommitted changes here but no regen in flight, run it manually:
 tools/regenerate-angular-models.cmd
-git diff --stat ClientApp/**/generated/  # should now be clean if auto-regen already ran
+git diff --stat <frontend.roots>/**/generated/  # should now be clean if auto-regen already ran
 ```
 
 **Halt conditions:**
@@ -86,7 +88,7 @@ If any `Persistence/Migrations/*.cs` file was created or modified:
    - Are there any `DROP COLUMN` / `ALTER COLUMN` / `DROP INDEX` operations that need a data backfill first?
 2. Run the migration against a local dev DB:
    ```bash
-   dotnet ef database update --project src/ScalpingMachine.Persistence --startup-project src/ScalpingMachine.API
+   dotnet ef database update --project <the project owning migration.root> --startup-project <the startup project>
    ```
 3. Step 5.5 will enforce that `migration-safety-reviewer` was invoked on the current diff — do not bypass it for schema modifications.
 
@@ -103,21 +105,28 @@ This step encodes the **session-context-isolation principle**: code review done 
 
 Read `git diff --name-only` (uncommitted + staged) and classify each file:
 
-| Path pattern (in the diff) | Required reviewer agent | Rationale |
-|---|---|---|
-| `src/ScalpingMachine.Strategy/Execution/**` | `trading-safety-reviewer` | Live order flow |
-| `src/ScalpingMachine.Services/Ibkr/**` | `trading-safety-reviewer` | Broker integration |
-| `src/ScalpingMachine.Services/Alpaca/**` | `trading-safety-reviewer` | Broker integration |
-| `src/ScalpingMachine.Domain/Auth/**` | `security-auditor` | Credentials, JWT, encryption |
-| `src/ScalpingMachine.Services/Auth/**` | `security-auditor` | Credentials, JWT, encryption |
-| `src/ScalpingMachine.API/Controllers/AuthController.cs` | `security-auditor` | Auth surface |
-| `src/ScalpingMachine.Persistence/Migrations/**` | `migration-safety-reviewer` | Online schema change risk |
-| Any `*Repository.cs` or LINQ query change | `sql-performance-reviewer` | Plan / index / N+1 risk |
-| Any `Controllers/*Controller.cs` or DTO change | `api-contract-reviewer` | Frontend deserialization drift |
-| Any `core/api/generated/**.ts` (manual edit) | `api-contract-reviewer` + halt | Generated files must not be hand-edited; investigate before allowing |
-| Any LLM pipeline file (see CLAUDE.md "LLM Key Files") | `llm-contract-reviewer` | Tool / schema / training-data alignment |
+**Resolve every row against `.claude/project-profile.md` before matching.** The rows name profile
+slots, not literal paths. Open the profile, read the slot, and match the diff against the roots it
+names. If the profile is missing, say so and halt — do not guess a path from a project name.
 
-A single diff can require multiple reviewers — list them all.
+> **Why this indirection exists, in one incident.** Until 2026-09-12 the first row read
+> `src/ScalpingMachine.Strategy/Execution/**`. That path has never existed in this repository's
+> history; the execution engine is under `Services/`. The row had been wrong since the day it was
+> written on 2026-08-22, and no run ever failed because of it — a prose rule whose pattern matches
+> nothing simply stays quiet, and quiet is indistinguishable from "nothing to review". A hardcoded
+> path in a shared skill is a fact nobody owns. A slot has one owner and one place to be wrong.
+
+| Diff touches the roots named by | Required reviewer agent | Rationale |
+|---|---|---|
+| `safety-critical.roots` — the live-order-flow and broker entries | `trading-safety-reviewer` | Live order flow, broker integration |
+| `auth.roots` | `security-auditor` | Credentials, tokens, encryption |
+| `migration.root` | `migration-safety-reviewer` | Online schema change risk |
+| Any repository class or database query change under `backend.roots` | `sql-performance-reviewer` | Plan / index / N+1 risk |
+| Any controller or data-transfer-object change under `backend.roots` | `api-contract-reviewer` | Frontend deserialization drift |
+| Any hand edit to generated client code under `frontend.roots` | `api-contract-reviewer` + halt | Generated files must not be hand-edited; investigate before allowing |
+| Any file the profile's `review.documents` flags as pipeline-critical | `llm-contract-reviewer` | Tool / schema / training-data alignment |
+
+A slot may name several roots, and a single diff can require multiple reviewers — list them all.
 
 ### Gate procedure
 
@@ -179,7 +188,7 @@ git diff --stat --cached
 Check for:
 
 - [ ] No unintended files staged (`.env`, credentials, `*.key`, `*.pem`, connection strings).
-- [ ] No `ClientApp/**/generated/` drift (either committed cleanly or regenerated in Step 4).
+- [ ] No generated-client drift under `frontend.roots` (either committed cleanly or regenerated in Step 4).
 - [ ] No `.claude/.models-dirty-*` or `.claude/.regen-lock` files accidentally staged.
 - [ ] No `bin/`, `obj/`, or build output staged.
 - [ ] No `debug-notes*.md` or `.claude/tdd-scratch-*.md` staged (those are local scratch files).
@@ -244,7 +253,7 @@ Run this step IFF all of the following are true:
    - Sensitive: `.env`, `.env.*`, `*.key`, `*.pem`, `*.pfx`, `appsettings*.json` (with credentials), `secrets*.json`, `credentials.json`
    - Build output: `bin/`, `obj/`, `dist/`, `node_modules/`
    - Local scratch: `.claude/.models-dirty-*`, `.claude/.regen-lock`, `.claude/hooks/*.log*`, `debug-notes-*.md`, `.claude/tdd-scratch-*.md`
-   - Generated drift: `ClientApp/**/generated/**` only if Step 4 reported drift that was NOT yet regenerated (a CLEAN regen is committable)
+   - Generated drift: generated client code under `frontend.roots` only if Step 4 reported drift that was NOT yet regenerated (a CLEAN regen is committable)
    If any excluded file is in the working copy, list it explicitly to the user and ask whether to include it before staging anything else.
 
 2. **Scope-creep check.** If the staged file list exceeds **30 files** OR touches more than **3 top-level project directories**, escalate to the user with the full list before drafting the message. Large commits hide intent; ask the user to confirm or split.

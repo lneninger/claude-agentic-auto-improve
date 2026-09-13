@@ -47,7 +47,7 @@ def looks_like_path(entry: str) -> bool:
     """Reject prose bullets that sit under a Files-to-touch heading.
 
     The first whitespace token of "- No new entity, DbSet, migration or
-    ScalpingDbContext change." is "No", which matches_path then matched
+    AppDbContext change." is "No", which matches_path then matched
     almost everywhere -- so a contract silently covered files it never
     named. An entry qualifies only if it could actually name a file.
     """

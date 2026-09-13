@@ -307,12 +307,14 @@ def normalize_resolved_link(raw):
     """Flatten ONE element of ``closingIssuesReferences`` into a comparison key.
 
     GitHub's real shape is NESTED and was captured verbatim from
-    ``gh pr view 36 --json closingIssuesReferences`` on 2026-08-27::
+    ``gh pr view <n> --json closingIssuesReferences`` on 2026-08-27. Only the
+    owner and repository names below are placeholders; every key and every
+    nesting level is exactly what GitHub returned::
 
         {"id": "I_kwDO...", "number": 35,
-         "repository": {"id": "R_kgDO...", "name": "StockToolScalpingMachine",
-                        "owner": {"id": "MDQ6...", "login": "lneninger"}},
-         "url": "https://github.com/lneninger/StockToolScalpingMachine/issues/35"}
+         "repository": {"id": "R_kgDO...", "name": "canonical-repo-name",
+                        "owner": {"id": "MDQ6...", "login": "some-owner"}},
+         "url": "https://github.com/some-owner/canonical-repo-name/issues/35"}
 
     There is no flat ``owner``/``repo`` pair. An earlier revision of this file
     compared against a hand-invented flat shape; every fixture agreed with it
@@ -331,19 +333,19 @@ def same_issue(a, b):
     """Compare two issue coordinates, case-insensitively on owner and repo.
 
     Case-insensitivity handles only CASING -- GitHub treats owner and repo names
-    that way. It does **not** resolve an alias: ``strategies`` never equals
-    ``scalpingmachine`` in any casing.
+    that way. It does **not** resolve an alias: ``legacyname`` never equals
+    ``canonicalname`` in any casing.
 
     What actually makes the rename safe is that :func:`verify` resolves identity
     from ``gh repo view --json nameWithOwner`` and re-reads a bare ``id:``
     against that canonical name. This repo needs it: the git remote and all 14
-    briefs say ``lneninger/StockToolStrategies`` while GitHub reports
-    ``lneninger/StockToolScalpingMachine`` and answers the old name only by
+    briefs say ``lneninger/legacy-repo-name`` while GitHub reports
+    ``lneninger/canonical-repo-name`` and answers the old name only by
     redirect.
 
     **Known limitation.** That canonical re-read helps bare ids only. An
     explicitly cross-repo ``id:`` spelled with the OLD name -- e.g.
-    ``lneninger/StockToolStrategies#39`` -- keeps its literal owner/repo through
+    ``lneninger/legacy-repo-name#39`` -- keeps its literal owner/repo through
     ``_CROSS``, fails ``sameRepo``, and reports ``foreign-closing-ref`` on a
     genuinely linked PR. No brief spells an id that way today (all 14 use a bare
     number, measured 2026-08-27), but every brief's ``repo:`` field carries the
@@ -619,7 +621,7 @@ def verify(brief_path, pr_number, repo, conventions_path=None,
 
     # Repo IDENTITY comes from gh, never from the brief's repo: string. This
     # repo was renamed: the git remote and every brief still say
-    # "StockToolStrategies" while GitHub reports "StockToolScalpingMachine"
+    # "legacy-repo-name" while GitHub reports "canonical-repo-name"
     # and answers the old name only by redirect. Comparing the brief's string
     # against a resolved link would call every genuine link foreign.
     repo_json, rc, stderr = _gh_json(
@@ -680,13 +682,50 @@ def verify(brief_path, pr_number, repo, conventions_path=None,
     return result
 
 
+def _default_repo_seed():
+    """Best-effort ``owner/repo`` from the origin remote, for the --repo seed.
+
+    Never authoritative: :func:`verify` overrides it with the canonical name
+    from ``gh repo view``. Returns the literal ``"owner/repo"`` when no remote
+    can be read, which keeps :func:`read_brief_id`'s ``partition("/")`` well
+    formed and matches nothing, so a bare id still resolves through the
+    canonical re-read and a cross-repo id still reports as foreign.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return "owner/repo"
+    url = (out.stdout or "").strip()
+    if out.returncode != 0 or not url:
+        return "owner/repo"
+    if url.endswith(".git"):
+        url = url[:-4]
+    url = url.rstrip("/")
+    parts = url.replace(":", "/").split("/")
+    if len(parts) >= 2 and parts[-1] and parts[-2]:
+        return "%s/%s" % (parts[-2], parts[-1])
+    return "owner/repo"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Verify that GitHub reports a Closing Link for a PR and its work item.")
     parser.add_argument("--brief", required=True,
                         help="Work Item Brief path; resolved via work_items_dir() when relative.")
     parser.add_argument("--pr", required=True, type=int, help="Pull request number.")
-    parser.add_argument("--repo", default="lneninger/StockToolStrategies")
+    # SEED ONLY, never identity. verify() re-reads the canonical owner/repo from
+    # `gh repo view --json nameWithOwner` and overrides whatever arrives here
+    # (see the block above the _gh_json call), so a stale or wrong seed
+    # self-corrects on every path where gh answers -- and where gh does not
+    # answer, the run is `unverifiable` regardless. Hardcoding one project's
+    # slug here would therefore buy nothing and would pin a generic script to
+    # one repository, so the default is read from the git remote instead.
+    parser.add_argument(
+        "--repo", default=_default_repo_seed(),
+        help="owner/repo seed used to read a bare id: before gh reports the "
+             "canonical name. Defaults to the origin remote.")
     parser.add_argument("--repair-attempted", action="store_true",
                         help="Set on the re-query after /ship's single repair (INV-2).")
     parser.add_argument("--json", action="store_true", help="Emit the full verdict as JSON.")

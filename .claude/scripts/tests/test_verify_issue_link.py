@@ -82,13 +82,18 @@ def need_subject(name):
 # --------------------------------------------------------------------------
 # Fixtures
 # --------------------------------------------------------------------------
-# The brief's repo: string is the OLD name -- the repo was renamed and the git
-# remote still says StockToolStrategies. GitHub answers that name by redirect
-# but REPORTS the canonical one. Every fixture below therefore exercises the
+# The brief's repo: string is the OLD name -- the repository was renamed and the
+# git remote still says the old one. GitHub answers that name by redirect but
+# REPORTS the canonical one. Every fixture below therefore exercises the
 # rename: the brief carries the alias, gh reports CANONICAL, and a genuine link
 # must still resolve. Verified 2026-08-27 with `gh repo view --json nameWithOwner`.
-REPO = "lneninger/StockToolStrategies"          # alias, as every brief spells it
-CANONICAL = "lneninger/StockToolScalpingMachine"  # what gh actually reports
+#
+# The two names below are PLACEHOLDERS, not this project's own repository names.
+# What the fixtures test is the RELATIONSHIP -- alias differs from canonical,
+# same owner, matching is case-folded -- and that relationship is unchanged by
+# the substitution. Nothing here compares against a real repository.
+REPO = "lneninger/legacy-repo-name"          # alias, as every brief spells it
+CANONICAL = "lneninger/canonical-repo-name"  # what gh actually reports
 OWNER, REPO_NAME = CANONICAL.split("/")
 
 ISSUE_LINK_BLOCK = {
@@ -123,13 +128,16 @@ ISSUE_LINK_BLOCK = {
 def resolved_link(number, owner=OWNER, repo=REPO_NAME):
     """GitHub's REAL closingIssuesReferences element shape.
 
-    CAPTURED VERBATIM from `gh pr view 36 --repo lneninger/StockToolScalpingMachine
-    --json closingIssuesReferences` on 2026-08-27, which returned:
+    The SHAPE below was CAPTURED VERBATIM from a real
+    `gh pr view <n> --json closingIssuesReferences` run on 2026-08-27. Only the
+    owner and repository names are placeholders; every key, every nesting level
+    and every id format is exactly what GitHub returned. The shape is the part
+    that was load-bearing, and it is untouched. The capture returned:
 
         [{"id": "I_kwDORb7AlM8AAAABOY8AkQ", "number": 35,
-          "repository": {"id": "R_kgDORb7AlA", "name": "StockToolScalpingMachine",
+          "repository": {"id": "R_kgDORb7AlA", "name": "canonical-repo-name",
                          "owner": {"id": "MDQ6VXNlcjY2MjMyNzk=", "login": "lneninger"}},
-          "url": "https://github.com/lneninger/StockToolScalpingMachine/issues/35"}]
+          "url": "https://github.com/lneninger/canonical-repo-name/issues/35"}]
 
     It is NESTED under `repository`. There is no flat owner/repo pair. An
     earlier revision of this suite invented a flat shape and the subject was
@@ -207,7 +215,7 @@ def gh_stub(
 
     Fixture shape captured verbatim from a real
     `gh pr view <n> --json closingIssuesReferences,baseRefName,state,body`
-    run against lneninger/StockToolStrategies PR #40 and PR #36 on
+    run against lneninger/legacy-repo-name PR #40 and PR #36 on
     2026-08-27 (see the suite's provenance note in case 1).
     """
 
@@ -593,8 +601,8 @@ def case_11_brief_corpus():
     # read_brief_id is deliberate: an unresolved *issue id* must halt, because it
     # decides a verdict; an unfilled *pr:* decides nothing (/ship passes --pr).
     pr_specs = [
-        ("https://github.com/lneninger/StockToolStrategies/pull/23", "url", False),
-        ("https://github.com/lneninger/StockToolStrategies/pull/23 (draft)", "url", True),
+        ("https://github.com/lneninger/legacy-repo-name/pull/23", "url", False),
+        ("https://github.com/lneninger/legacy-repo-name/pull/23 (draft)", "url", True),
         ("pending", "placeholder", False),
         ("UNKNOWN", "placeholder", False),
         ("<filled by /ship>", "placeholder", False),
@@ -939,7 +947,7 @@ def case_18_brief_pr_note_reaches_the_verdict():
     name = "18 briefPrNote reaches the verdict when pr: already holds a URL"
     with tmp() as d:
         root = Path(d)
-        r = verify(write_brief(root, pr="https://github.com/lneninger/StockToolStrategies/pull/23"),
+        r = verify(write_brief(root, pr="https://github.com/lneninger/legacy-repo-name/pull/23"),
                    write_conventions(root), gh_stub(closing=MATCHING))
         check(name, bool(r.get("briefPrNote")),
               "the overwrite warning is unimplemented; got %r" % r.get("briefPrNote"))

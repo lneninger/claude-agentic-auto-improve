@@ -4,9 +4,16 @@ architecture-advisor.py -- UserPromptSubmit hook injecting CSS rules.
 
 When the user prompt mentions UI/frontend keywords (component, template, style,
 design, ui, layout, theme, scss, css, html), inject a short reminder block
-pointing at DESIGN_PATTERNS.md and listing banned CSS patterns. This gives the
-agent a just-in-time nudge BEFORE it starts writing, complementing the
+pointing at the project's design documents and listing banned CSS patterns. This
+gives the agent a just-in-time nudge BEFORE it starts writing, complementing the
 architecture-guard.py PreToolUse blocker that runs AFTER.
+
+Project-shaped facts -- where the front-end applications live, and which
+documents the reminder cites -- are NOT hard-coded here. They come from
+architecture-guard.rules.json (`frontend_projects_root`, `reference_documents`),
+the same file the guard reads, so the two never disagree. With both absent the
+hook still emits every rule it emits today; it simply detects no application
+name and prints no reference section.
 
 Hook contract (Claude Code):
     stdin:  JSON with { prompt: <user text>, ... }
@@ -27,32 +34,89 @@ import re
 import sys
 from pathlib import Path
 
-# Per-app rules: when the user prompt mentions a path under
-# ClientApp/projects/<app>/, the matching .app-rules.json is loaded and its
-# `advisorRemindersAppendix` is appended to the reminder block.
-APP_PATH_RX = re.compile(r"clientapp/projects/([a-z0-9-]+)/", re.IGNORECASE)
+HOME = Path.home()
+sys.path.insert(0, str(Path(__file__).parent))
+try:  # project-local .claude first, global second
+    import _project_paths as _pp
+except Exception:  # pragma: no cover -- hooks must never crash a prompt
+    _pp = None
+
+RULES_FILE = (
+    _pp.hook_file("architecture-guard.rules.json") if _pp
+    else HOME / ".claude" / "hooks" / "architecture-guard.rules.json"
+)
+
+_DEFAULT_FRONTEND_PROJECTS_ROOT = "projects"
+_DEFAULT_REFERENCE_DOCUMENTS: list[str] = []
+_PROJECT_SETTINGS: dict | None = None
+
+
+def load_project_settings() -> dict:
+    """
+    Read the two project-shaped facts from architecture-guard.rules.json.
+
+    Shared with architecture-guard.py on purpose: the advisor names the same
+    application root and the same reference documents the guard names, so one
+    file owns both. Neither key changes which rules are emitted.
+    """
+    global _PROJECT_SETTINGS
+    if _PROJECT_SETTINGS is not None:
+        return _PROJECT_SETTINGS
+    data: dict = {}
+    try:
+        if RULES_FILE.exists():
+            loaded = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"failed to read project settings: {e}")
+    root = data.get("frontend_projects_root")
+    docs = data.get("reference_documents")
+    _PROJECT_SETTINGS = {
+        "frontend_projects_root": (
+            str(root).strip("/") if isinstance(root, str) and root.strip()
+            else _DEFAULT_FRONTEND_PROJECTS_ROOT
+        ),
+        "reference_documents": (
+            [str(d) for d in docs] if isinstance(docs, list)
+            else list(_DEFAULT_REFERENCE_DOCUMENTS)
+        ),
+    }
+    return _PROJECT_SETTINGS
+
+
+def app_path_rx() -> re.Pattern[str]:
+    """
+    Per-app rules: when the user prompt mentions a path under
+    <frontend_projects_root>/<app>/, the matching .app-rules.json is loaded and
+    its `advisorRemindersAppendix` is appended to the reminder block.
+    """
+    root = load_project_settings()["frontend_projects_root"]
+    return re.compile(re.escape(root) + r"/([a-z0-9-]+)/", re.IGNORECASE)
 
 
 def find_app_rules(app_name: str, prompt_text: str) -> dict | None:
     """
     Resolve <app>/.app-rules.json by walking up from any path token in the
-    prompt that references the project's clientapp tree. Falls back to None
+    prompt that references the project's front-end tree. Falls back to None
     when the file is missing or unparseable -- the hook stays advisory.
     """
     # Try to locate the project root via any drive-letter path token in the prompt.
     candidates: list[Path] = []
     for token in re.findall(r"[a-zA-Z]:[\\/][^\s'\"<>]+", prompt_text):
-        # Walk up to find ClientApp/projects/<app_name>/
+        # Walk up to find <frontend_projects_root>/<app_name>/
         token_norm = Path(token.replace("\\", "/"))
         # Try every ancestor that ends in "<app_name>".
         for ancestor in [token_norm, *token_norm.parents]:
             if ancestor.name.lower() == app_name.lower():
                 candidates.append(ancestor)
                 break
-    # Also try the conventional default at d:/Dev/HIPALANET/StockToolScalpingMachine/.
-    candidates.append(
-        Path(f"d:/Dev/HIPALANET/StockToolScalpingMachine/ClientApp/projects/{app_name}")
-    )
+    # Also try the current project root, which the editor exports, then the CWD.
+    root = load_project_settings()["frontend_projects_root"]
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir:
+        candidates.append(Path(project_dir) / root / app_name)
+    candidates.append(Path.cwd() / root / app_name)
     for c in candidates:
         rules_file = c / ".app-rules.json"
         if rules_file.exists():
@@ -89,7 +153,7 @@ PRO_MAX_NUDGE = """\
 Before writing, glance at:
   ~/.claude/references/ui-ux-pro-max/product-patterns.md (Blade + dense-metrics-grid + 6 product patterns)
   ~/.claude/references/ui-ux-pro-max/ux-guidelines.md   (~60 severity-flagged UX rules)
-The reference catalog is advisory, NOT authoritative -- when it disagrees with DESIGN_PATTERNS.md, the project file wins. Palette hexes there are chart-config-only colors, NEVER theme-token replacements.
+The reference catalog is advisory, NOT authoritative -- when it disagrees with a document in the "Reference files" list above, the project file wins. Palette hexes there are chart-config-only colors, NEVER theme-token replacements.
 """
 
 REMINDER = """\
@@ -115,15 +179,24 @@ REMINDER = """\
 * Banned: inline overflow-y-auto / sticky top-0 for scroll containers -> use
   the global scroll-edge / scroll-edge-content / scroll-edge-header classes.
 
-Reference files (read before writing any UI code):
-  ClientApp/projects/scalping-machine/DESIGN_PATTERNS.md (conversion table)
-  ClientApp/projects/scalping-machine/ANGULAR_MATERIAL_RULES.md
-  ClientApp/projects/scalping-machine/src/styles.scss (@theme bridge)
-
 The PreToolUse architecture-guard.py hook WILL reject writes that violate
 these rules. Get it right the first time -- don't trial-and-error against
 the guard.
 """
+
+
+def reference_section() -> str:
+    """
+    Render the "Reference files" block from `reference_documents` in
+    architecture-guard.rules.json. An empty list omits the block entirely --
+    the reminder above stands on its own, and no rule depends on it.
+    """
+    docs = load_project_settings()["reference_documents"]
+    if not docs:
+        return ""
+    lines = ["Reference files (read before writing any UI code):"]
+    lines.extend(f"  {d}" for d in docs)
+    return "\n".join(lines) + "\n"
 
 
 def log(msg: str) -> None:
@@ -152,7 +225,7 @@ def main() -> None:
     # Per-app appendix: detect referenced apps and append each app's reminders.
     extra_blocks: list[str] = []
     seen_apps: set[str] = set()
-    for match in APP_PATH_RX.finditer(prompt_text):
+    for match in app_path_rx().finditer(prompt_text):
         app = match.group(1).lower()
         if app in seen_apps:
             continue
@@ -165,6 +238,9 @@ def main() -> None:
             extra_blocks.append(appendix)
 
     additional_context = REMINDER
+    refs = reference_section()
+    if refs:
+        additional_context += "\n" + refs
     if extra_blocks:
         additional_context += "\n\n" + "\n\n".join(extra_blocks)
 
