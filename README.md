@@ -72,7 +72,7 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 16 skills | yes | yes | yes |
+| 17 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
 | 16 hooks | yes | no | no |
 | scripts, templates, references, registries | vendoring only | vendoring only | vendoring only |
@@ -142,7 +142,7 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          16 generic skills          (plugin root -- all three providers)
+skills/          17 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   hooks/         16 generic hooks, 3 shared helper modules, 4 generic data files
@@ -183,7 +183,20 @@ dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scou
 
 design-first, tdd-first, debug, verify-before-done, north-star, north-star-review,
 list-contracts, task, contract-accuracy, critique-now, cross-impact, journal-add,
-plan-questions, validate-registries, promote-ui-rule, git-commit.
+plan-questions, validate-registries, promote-ui-rule, git-commit, ship.
+
+They form one chain, and each stage hands the next a written artefact rather than a memory
+of the conversation:
+
+```
+/task            Work Item Brief      .claude/work-items/
+  -> /design-first  concept contract   .claude/concepts/     (you approve it)
+  -> /tdd-first     failing tests first
+  -> reviewers      adversarial critique
+  -> /verify-before-done   build, tests, drift        (blocks the word "done")
+  -> /git-commit    the commits
+  -> /ship          pull request + a Closing Link GitHub actually resolved
+```
 
 ### Hooks
 
