@@ -21,14 +21,29 @@ happened, records the finished sub-task, works out what that unblocks, and conti
 
 ## The logic lives in a script — this file is the human front door
 
+### Finding the script, under either install mode
+
+The script ships with the plugin **and** with a vendored copy, but it sits at a different
+place in each. Resolve it once, then use the result:
+
+```bash
+PRM=$(ls .claude/scripts/pr_merged.py          "$CLAUDE_PLUGIN_ROOT/.claude/scripts/pr_merged.py"          ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/pr_merged.py          2>/dev/null | head -1)
+```
+
+A vendored project finds the first. A plugin install finds one of the others. **If `PRM` comes
+back empty, stop and say so** — the loop's every rule lives in that file, and a skill that
+cannot find it can only guess at what it says.
+
+
+
 **One implementation, two front doors.** A skill is instructions for a model, and the
 orchestrator loop is a Python program, so a loop cannot invoke a skill. Both call the same
 script instead, and both therefore behave identically. Two implementations of these rules
 would drift the moment either changed.
 
 ```bash
-py -3 .claude/scripts/pr_merged.py --contract <slug|path> --pr <n> [--pr <n> ...] --json
-py -3 .claude/scripts/pr_merged.py --contract <slug|path> --status --json   # read-only
+py -3 "$PRM" --contract <slug|path> --pr <n> [--pr <n> ...] --json
+py -3 "$PRM" --contract <slug|path> --status --json   # read-only
 ```
 
 This follows the pattern already used here: `/ship` shells out to `verify_issue_link.py`, and

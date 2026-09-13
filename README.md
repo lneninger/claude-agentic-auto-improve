@@ -75,13 +75,22 @@ this repository has already been bitten by once, so the gaps are stated rather t
 | 21 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
 | 16 hooks | yes | no | no |
-| scripts, templates, references, registries | vendoring only | vendoring only | vendoring only |
+| scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
 
-**The scripts row is the one to read twice.** No provider's install delivers
-`.claude/scripts/`, and every skill cites its script by a path inside *your* repository.
-So an install alone gives you `/advance` and `/pr-merged` as text, and `pr_merged.py` —
-which holds every rule they describe — will not be there. Copy `.claude/scripts/` and
-`.claude/templates/` by hand even when the rest arrives as a plugin.
+**Corrected 2026-09-13.** This row used to read `vendoring only`, and that was wrong. An
+install copies the whole repository into the provider's cache, script files included — the
+`superpowers` plugin ships Python the same way and its files sit in that cache today.
+
+What was actually missing was a way for a skill to *find* them. A skill citing
+`.claude/scripts/<name>.py` is naming a path inside **your** repository, which exists when you
+vendor and does not when you install.
+
+Skills that call a script now resolve it first, trying the vendored path, then
+`$CLAUDE_PLUGIN_ROOT`, then the provider's cache. `/advance` and `/pr-merged` do this, and any
+skill added later should copy the pattern rather than assume a vendored layout.
+
+The templates still need copying by hand under an install, because a concept contract is a
+file **in** your repository rather than one read from the plugin.
 
 Cursor and OpenAI both read the **Agent Plugins** open standard
 (`https://agent-plugins.org`), which is why one root `plugin.json` serves both. Claude Code

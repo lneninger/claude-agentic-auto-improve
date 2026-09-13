@@ -35,8 +35,23 @@ Between the two, that is the loop. Neither half iterates.
 
 ## Step 1: Ask the script, do not re-derive
 
+### Finding the script, under either install mode
+
+The script ships with the plugin **and** with a vendored copy, but it sits at a different
+place in each. Resolve it once, then use the result:
+
 ```bash
-py -3 .claude/scripts/pr_merged.py --contract <slug|path> --status --json
+PRM=$(ls .claude/scripts/pr_merged.py          "$CLAUDE_PLUGIN_ROOT/.claude/scripts/pr_merged.py"          ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/pr_merged.py          2>/dev/null | head -1)
+```
+
+A vendored project finds the first. A plugin install finds one of the others. **If `PRM` comes
+back empty, stop and say so** — the loop's every rule lives in that file, and a skill that
+cannot find it can only guess at what it says.
+
+
+
+```bash
+py -3 "$PRM" --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
@@ -55,7 +70,7 @@ The action set is closed. Each one has exactly one response.
 re-check all belong to one command:
 
 ```bash
-py -3 .claude/scripts/pr_merged.py --contract <slug> --dispatch <sub-task-id> --json
+py -3 "$PRM" --contract <slug> --dispatch <sub-task-id> --json
 ```
 
 It cuts the branch from a freshly fetched default branch, records the sub-task as
