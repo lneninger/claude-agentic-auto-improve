@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "agentic-auto-improve",
+  "displayName": "Agentic Auto-Improve",
+  "version": "0.1.0",
+  "description": "The Data-First Engineering Protocol as an installable asset set: 16 skills, 14 agents and 16 enforcement hooks that put design before implementation and tests before code.",
+  "author": {
+    "name": "lneninger",
+    "url": "https://github.com/lneninger"
+  },
+  "homepage": "https://github.com/lneninger/claude-agentic-auto-improve",
+  "repository": "https://github.com/lneninger/claude-agentic-auto-improve",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "code-review",
+    "test-driven-development",
+    "design",
+    "architecture",
+    "hooks",
+    "agents",
+    "skills"
+  ],
+  "hooks": "./.claude/hooks/hooks.json"
+}

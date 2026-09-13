@@ -23,9 +23,19 @@ The tree list, each tree's file list and the registry list all come from the con
 project's `.claude/.sync-config.json`. That file is the single source of truth and the
 sync script reads it; nothing about the synced set is hard-coded in the script.
 
-- `.claude/agents/`, `skills/`, `hooks/`, `scripts/`, `templates/`, `references/`
+- `skills/` and `agents/` — **at this repository's root**, mapping to the consuming
+  project's `.claude/skills/` and `.claude/agents/`
+- `.claude/hooks/`, `scripts/`, `templates/`, `references/`
 - `.claude/registries/` — the Universal section only, above the first `## Project:`
   heading, except `INTEGRATION.md` which is whole-file
+
+> **The two root trees are a path mapping, not a path match.** They live at the root here
+> because a plugin's components must be discoverable there — the portable Agent Plugins
+> manifest that Cursor and OpenAI Codex read has no component-path fields, so a skill
+> outside the plugin root is invisible to them. A consuming project still keeps its copies
+> under `.claude/`. A `.sync-config.json` tree entry therefore needs both sides of the
+> mapping, and a configuration written before 2026-09-13 that assumes `.claude/skills`
+> on both sides will report every skill as `ONLY_IN_MAIN`.
 
 A file that no `files` array names is a local asset by default: it stays in the consuming
 project and is never compared.
@@ -107,6 +117,13 @@ Two layers, in order:
 1. the `CLAUDE_PLUGIN_ROOT` environment variable
 2. the conventional sibling directory beside the consuming repository
 
+> **`CLAUDE_PLUGIN_ROOT` now has two meanings, and they agree.** The sync tool reads it as
+> "where this repository is checked out." Claude Code independently substitutes it in a
+> plugin's hook commands as "where this plugin is installed" — which is
+> `.claude/hooks/hooks.json`'s only way to path its own scripts. Under a plugin install both
+> resolve to the same directory, so nothing breaks. Do not repurpose the name for anything
+> a third reader would resolve differently.
+
 A git worktree is not beside this checkout, so **from a worktree set `CLAUDE_PLUGIN_ROOT`
 first**. There is deliberately no git-submodule layer: submodules behave badly in a
 worktree workflow.
@@ -127,6 +144,13 @@ worktree workflow.
 3. Add its path to the matching tree's `files` array in `.claude/.sync-config.json`.
 4. Run the sync. If the project-name check refuses it, the asset is not generic yet.
 5. Add it to the list in [README.md](README.md).
+6. **If it is a hook, register it in `.claude/hooks/hooks.json`.** That file is the single
+   registration point for the plugin install, so a hook added to the tree but not to it
+   ships as a file nothing ever runs — the silent-success failure this repository has
+   already been bitten by once.
+7. **If it is a skill or an agent, put it at the repository root** (`skills/<name>/SKILL.md`
+   or `agents/<name>.md`), not under `.claude/`. Anywhere else and the three plugin
+   mechanisms will not find it.
 
 ## Troubleshooting
 

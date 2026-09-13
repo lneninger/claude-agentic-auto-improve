@@ -1,0 +1,20 @@
+{
+  "name": "agentic-auto-improve",
+  "version": "0.1.0",
+  "description": "The Data-First Engineering Protocol as an installable asset set: 16 skills and 14 subagents that put design before implementation and tests before code.",
+  "author": {
+    "name": "lneninger"
+  },
+  "homepage": "https://github.com/lneninger/claude-agentic-auto-improve",
+  "repository": "https://github.com/lneninger/claude-agentic-auto-improve",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "code-review",
+    "test-driven-development",
+    "design",
+    "architecture"
+  ],
+  "skills": "./skills/",
+  "agents": "./agents/"
+}

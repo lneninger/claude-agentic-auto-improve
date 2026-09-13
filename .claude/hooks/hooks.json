@@ -1,0 +1,137 @@
+{
+  "$comment": [
+    "Claude Code hook configuration for the agentic-auto-improve plugin.",
+    "",
+    "Referenced from .claude-plugin/plugin.json as \"hooks\". It deliberately lives",
+    "beside the hooks rather than at the plugin root, because _project_paths.py",
+    "resolves its search root as Path(__file__).parent.parent -- that is, the",
+    "'.claude' directory two levels up from a hook file. Moving the hooks to a",
+    "root-level hooks/ directory would resolve SELF_ROOT to the repository root",
+    "and every registry, area-map and contract lookup would silently miss.",
+    "",
+    "INTERPRETER: 'py -3' is the Windows Python launcher, which is the invocation",
+    "every hook docstring in this repository already specifies. On macOS and Linux",
+    "replace 'py -3' with 'python3' throughout this file. There is no per-platform",
+    "branch available in this format, so the choice is documented rather than solved.",
+    "",
+    "BLAST RADIUS: these are enforcement gates, not suggestions. Installing this",
+    "plugin turns them on. concept-gate blocks Edit/Write on non-trivial files until",
+    "an approved concept contract exists, and the database guards fail CLOSED, which",
+    "means an unconfigured install treats every database as protected. That is the",
+    "intended posture of the Data-First Engineering Protocol, but it is a real change",
+    "to how the session behaves. README.md lists the per-hook environment-variable",
+    "kill switches."
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/architecture-guard.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/bash-gate.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-destructive-guard.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-research-readonly-guard.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/codegraph-first-guard.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/contract-status-watcher.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/critic-verdict-tracker.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/journal-post-approval-tracker.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/integration-check.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__codegraph__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/codegraph-turn-tracker.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/codegraph-turn-reset.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/architecture-advisor.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plan-question-advisor.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/memory-pager.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

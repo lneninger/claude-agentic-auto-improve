@@ -14,6 +14,11 @@ venv/
 *.log
 .sync-state/
 
+# Parallel worktrees. A worktree nested under the repository is not ignored
+# automatically, so without this every later status and diff carries a second
+# full checkout as untracked noise.
+.claude/worktrees/
+
 # Build output
 dist/
 build/
