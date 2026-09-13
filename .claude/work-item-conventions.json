@@ -1,0 +1,52 @@
+{
+  "$comment": "TEMPLATE with empty content sets. Single source of truth for work-item title conventions. Read by the task skill (issue effort-type prefix) and the ship skill (pull-request module prefix). Edit here, never inline in a skill -- duplicating these lists is how the two skills drift apart.",
+  "issueTitle": {
+    "$comment": "Issue titles are prefixed with ONE effort type: '[FEATURE] Add trailing-stop to close evaluator'. The nine effort types below are generic and need no per-project change.",
+    "format": "[<EFFORT>] <Title>",
+    "pattern": "^\\[(FEATURE|BUG|IMPROVEMENT|REFACTOR|PERF|SECURITY|DOCS|CHORE|SPIKE)\\] .+",
+    "exactlyOne": true,
+    "effortTypes": [
+      { "tag": "FEATURE", "means": "New capability that did not exist before", "canonical": true },
+      { "tag": "BUG", "means": "Existing behavior is wrong; there is a reproduction", "canonical": true },
+      { "tag": "IMPROVEMENT", "means": "Existing behavior works but is inadequate -- experience, ergonomics, coverage", "canonical": true },
+      { "tag": "REFACTOR", "means": "Internal structure changes, external behavior identical" },
+      { "tag": "PERF", "means": "Same behavior, measurably faster or lighter" },
+      { "tag": "SECURITY", "means": "Auth, credentials, encryption, ownership enforcement, disclosure" },
+      { "tag": "DOCS", "means": "Documentation, handbook, or contract text only" },
+      { "tag": "CHORE", "means": "Dependency bumps, config, build plumbing, cleanup" },
+      { "tag": "SPIKE", "means": "Timeboxed research; the deliverable is a finding, not code" }
+    ]
+  },
+  "issueLink": {
+    "$comment": "Generic. The pull-request-to-issue Closing Link. A 'Closes #N' line in a body is a REQUEST for a link, never proof of one: only the forge's resolved closing references count.",
+    "closingKeyword": "Closes",
+    "referenceKeyword": "Refs",
+    "oneKeywordPerLine": true,
+    "sameRepoFormat": "Closes #<n>",
+    "crossRepoFormat": "Closes <owner>/<repo>#<n>",
+    "resolvesToClosingLink": false,
+    "absentIdTokens": ["none", "None", ""],
+    "unresolvedIdTokens": ["UNKNOWN", "unknown"],
+    "$tokenComment": "TWO lists, because the tokens mean opposite things. An absent id is a deliberate 'this work has no issue' and is a SUCCESS path. An unresolved id is a placeholder nobody filled in and must HALT. Folding them together is how an unresolved field ships unlinked and is reported as success.",
+    "partialField": "partial",
+    "linkStateField": "issue_link",
+    "linkStates": ["closes", "refs", "none", "unresolved", "manual", "unknown"],
+    "maxRepairAttempts": 1
+  },
+  "prTitle": {
+    "$comment": "Pull-request titles are prefixed with EVERY touched module, in the fixed 'order' below. Derived from the diff, never guessed. POPULATE 'order' and 'map' per project: they name this project's own source layout and nothing else here does.",
+    "globSemantics": "'**' crosses directory separators; a single '*' does NOT. So 'src/*' means direct children of src only, never a nested file. If your matcher uses Python fnmatch (where '*' DOES cross '/'), you will over-match -- verified failure mode, do not skip this note.",
+    "ignore": {
+      "$comment": "Never contribute a tag and never trigger the unmapped prompt -- not shippable source.",
+      "globs": [".tmp/**", ".codegraph/**", "*.jpg", "*.png", "*.pyc"]
+    },
+    "format": "[<MODULE>]...[<MODULE>] <Title>",
+    "atLeastOne": true,
+    "_schema": {
+      "order": ["<MODULE-TAG>", "..."],
+      "map": [{ "tag": "<MODULE-TAG>", "globs": ["<path/**>"], "means": "<what this module is>" }]
+    },
+    "order": [],
+    "map": []
+  }
+}

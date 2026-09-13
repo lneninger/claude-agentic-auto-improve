@@ -1,192 +1,136 @@
-﻿# claude-agentic-auto-improve
+# claude-agentic-auto-improve
 
-A reusable plugin repository containing generic agents, skills, hooks, and registries for any Claude Code project following the Data-First Engineering Protocol.
+A reusable repository holding the project-independent half of a Claude Code setup:
+generic agents, skills, hooks, workflow scripts, templates, references and the Universal
+tier of the registries, for any project following the Data-First Engineering Protocol.
 
-## What's Included
+## What this is, and what it is not
 
-### Agents (`.claude/agents/`)
+It is a **vendoring source**: a place to copy files from, so a new project can adopt the
+same workflow without assembling it by hand. The copies are committed in the consuming
+repository, so that repository works when this checkout is absent.
 
-Generic, project-agnostic agents that can be used in any Claude Code project:
+It is **not** a plugin the editor can load. Claude Code's plugin mechanism is the
+`enabledPlugins` and `extraKnownMarketplaces` pair in the workstation settings file, and
+this repository carries no manifest and belongs to no marketplace. Converting it is
+tracked as separate work.
 
-- **data-architect.md** — Designs data shapes and reusable mechanisms before implementation
-- **fullstack-code-reviewer.md** — Adversarial code review for correctness, security, performance
-- **senior-test-engineer.md** — Writes RED tests first (TDD)
-- **test-strategy-critic.md** — Reviews test suites for value vs over-mocking
-- **migration-safety-reviewer.md** — Validates database migrations for production safety
-- **security-auditor.md** — Focuses on auth, encryption, and user-data boundaries
-- **sql-performance-reviewer.md** — Analyzes query plans and index coverage
-- **ui-ux-designer.md** — Visual design, theming, and user experience
+## Ownership and direction
 
-### Skills (`.claude/skills/`)
+**Every synced tree is bidirectional.** No tree is one-way and neither repository is
+authoritative by position. Divergence is settled by reading both versions and merging,
+never by a rule about which side wins.
 
-Skill implementations that orchestrate multi-step workflows:
+Ownership is a field in the consuming project's `.claude/.sync-config.json`, not a
+directory on disk. Each tree entry carries a `path`, an `ownership_tier`, a `direction`
+and a `files` array naming exactly which paths are shared. A file that no `files` array
+names is a local asset and is never synced.
 
-- **design-first/** — Data-First Engineering Protocol entry point
-- **tdd-first/** — Test-driven development cycle
-- **debug/** — 4-phase systematic debugging (REPRODUCE → ISOLATE → HYPOTHESIZE → VERIFY)
-- **verify-before-done/** — Pre-completion verification gauntlet
-- **north-star/** — North-star problem statement and discovery
-- **north-star-review/** — Review north-star against implementation
-- **list-contracts/** — Inventory of concept contracts
-- **task/** — Task assignment and worktree setup
+Protection against project-specific content reaching this repository is the
+**project-name check** in the sync tool, described under "Contributing" below. It is not a
+direction rule. The one-way rule that used to guard agents protected the wrong direction:
+this repository's own copies carry a consuming project's names, so a one-way pull pushed
+that contamination downstream into every other consuming project.
 
-### Hooks (`.claude/hooks/`)
-
-Python validation and state-management hooks that enforce protocols:
-
-- **concept-gate.py** — Blocks Edit/Write on non-trivial files without an approved contract
-- **architecture-guard.py** — Prevents anti-patterns in templates and CSS
-- **codegraph-first-guard.py** — Gates file-system investigation behind CodeGraph queries
-- **plain-language-guard.py** — Enforces clear writing standards
-- **db-destructive-guard.py** — Prevents accidental database destruction
-- **db-research-readonly-guard.py** — Enforces read-only connections for forensic queries
-- **codegraph-turn-tracker.py** / **codegraph-turn-reset.py** — Manages CodeGraph investigation gate state
-- **integration-check.py** — Warns on backend/frontend contract drift
-- **mark-models-dirty.py** — Triggers auto-regeneration of generated code
-- Utilities: `_error_log.py`, `_memory_common.py`, `_project_paths.py`
-
-### Registries (`.claude/registries/`)
-
-Two-tier registries (Universal + per-project) that document reusable patterns:
-
-- **MECHANISMS.md** — Reusable architectural patterns (Universal section only in plugin)
-- **VOCABULARY.md** — Business domain terminology and entity definitions (Universal only)
-- **JOURNAL.md** — Lessons learned from design contracts (Universal only)
-- **INTEGRATION.md** — Cross-system integration patterns (entire file, project-independent)
-
-### References (`.claude/references/`)
-
-Decision tables and design guidance:
-
-- **codegraph-decision-table.md** — When to use which CodeGraph tool
-- **end-user-view-standard.md** — User-facing documentation patterns
-
-## File Structure
+## What is included
 
 ```
 .claude/
-  agents/              → 8 generic agents (project-agnostic)
-  skills/              → 8 generic skills
-  hooks/               → 10 generic hooks + 3 utilities
-    tests/             → Hook test suites (pytest)
-  registries/
-    MECHANISMS.md      → Universal Patterns section only
-    VOCABULARY.md      → Universal section only
-    JOURNAL.md         → Universal section only
-    INTEGRATION.md     → Entire file
-  references/          → Decision tables, design guidance
-.gitignore
+  agents/        13 generic agents
+  skills/        16 generic skills
+  hooks/         19 generic hooks, 3 shared helper modules, 3 generic data files
+    tests/       3 hook test suites
+  scripts/       19 workflow scripts
+    tests/       2 suites, including the path-resolution suite
+  templates/     6 document templates
+  references/    2 reference documents
+  registries/    MECHANISMS.md, VOCABULARY.md, JOURNAL.md (Universal tier only)
+                 INTEGRATION.md (whole file)
+  area-mapping.json          TEMPLATE - schema intact, empty content set
+  work-item-conventions.json TEMPLATE - schema intact, empty content set
+  project-profile.md         TEMPLATE - blank slot table
+  .project-tokens.json       TEMPLATE - empty token array
 README.md
 CONTRIBUTING.md
 ```
 
-## Quick Start: Using This Plugin in a New Project
+### Agents
 
-### 1. Clone the plugin
+data-architect, contract-critic, fullstack-code-reviewer, senior-test-engineer,
+test-strategy-critic, migration-safety-reviewer, security-auditor,
+sql-performance-reviewer, api-contract-reviewer, ui-ux-designer,
+dotnet-backend-architect, angular-senior-dev, python-ai-developer.
 
-```bash
-cd <your-new-project-dir>
-git clone https://github.com/your-org/claude-agentic-auto-improve .claude-plugin
-```
+### Skills
 
-### 2. Copy the .claude structure
+design-first, tdd-first, debug, verify-before-done, north-star, north-star-review,
+list-contracts, task, contract-accuracy, critique-now, cross-impact, journal-add,
+plan-questions, validate-registries, promote-ui-rule, git-commit.
 
-```bash
-# Create .claude directory if needed
-mkdir -p .claude
+### Hooks
 
-# Copy plugin assets to your project
-cp -r .claude-plugin/.claude/* .claude/
+concept-gate, architecture-guard, bash-gate, architecture-advisor, codegraph-first-guard,
+codegraph-turn-tracker, codegraph-turn-reset, plain-language-guard, db-destructive-guard,
+db-research-readonly-guard, integration-check, plan-question-advisor,
+critic-verdict-tracker, contract-status-watcher, journal-post-approval-tracker,
+memory-pager, plus the shared helpers `_error_log.py`, `_memory_common.py` and
+`_project_paths.py`, and the generic data files `architecture-guard.rules.json`,
+`architecture-guard.exceptions.json` and `plain-language-guard.rules.json`.
 
-# Keep plugin-specific items in .claude/plugin-managed/ (optional)
-# or commit copied files directly
-```
+**A guard hook keeps its per-project settings in a `<hook-name>.rules.json` file beside
+it**, so the hook body names no project. A rules file holding one project's own constants
+stays in that project and is not shipped here — `db-destructive-guard.rules.json` and
+`integration-check.rules.json` are the two examples.
 
-### 3. Extend with project-specific additions
+**The fail direction is per hook and is stated in each rules file.** A hook that BLOCKS
+fails **closed** when its rules file is missing: `db-destructive-guard.py` with no
+configuration treats every database as protected. A hook that only WARNS may fail soft.
+Never copy the soft choice to a guard that blocks.
 
-Create project-local sections in your registries:
+### Scripts and templates are not optional
 
-```bash
-# Edit .claude/registries/MECHANISMS.md
-# Add a new "## Project: MyProject" section after the Universal section
+The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, five skills
+cite scripts in `.claude/scripts/`, and every concept contract is a copy of
+`templates/concept-contract.md`. `scripts/tests/test_script_path_resolution.py` is the
+74-case suite for the two-layer path resolver. Shipping the resolver without its suite
+would ship the part that can be wrong and leave behind the part that would say so.
 
-# Edit .claude/registries/VOCABULARY.md  
-# Add project-specific terms
+## Quick start in a new project
 
-# Create project-specific agents in .claude/agents/
-# (prefix trading-only agents, domain-specific agents, etc.)
-```
+1. **Copy the trees.** Copy `.claude/agents`, `skills`, `hooks`, `scripts`, `templates`
+   and `references` into your project's `.claude/`, at their ordinary paths. Do not create
+   a subdirectory named after this repository; one copy, in the normal place.
 
-### 4. Configure hooks in .claude/settings.json
+2. **Copy the registries** and add your own `## Project: <name>` section below the
+   Universal tier in each. Everything below the first `## Project:` line stays yours and
+   is never synced.
 
-Register hooks that apply to your project:
+3. **Fill in the four templates.** `area-mapping.json`, `work-item-conventions.json`,
+   `project-profile.md` and `.project-tokens.json` ship with their schema and an empty
+   content set, because their shape is generic and their content is not.
+   `.project-tokens.json` is the one to fill in first: an unguarded outbound sync is how
+   contamination spreads.
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "run": "python",
-        "with": [".claude/hooks/concept-gate.py"],
-        "on": ["Edit", "Write"],
-        "description": "Enforce Data-First protocol"
-      },
-      {
-        "run": "python",
-        "with": [".claude/hooks/architecture-guard.py"],
-        "on": ["Edit", "Write"],
-        "description": "Prevent CSS/template anti-patterns"
-      }
-    ]
-  }
-}
-```
+4. **Write `.claude/project-profile.md`.** It is the only file you must author to make the
+   thirteen vendored agents correct. A generic agent cites a slot by name rather than a
+   literal path, so every slot must be present, and an empty slot reads `none`.
 
-Full `.claude/settings.json` template: See the hook registration docs below.
+5. **Register the hooks** in your `.claude/settings.json`, pathing every command through
+   `$CLAUDE_PROJECT_DIR/.claude/hooks/`. Do not point a hook command at this checkout:
+   `_project_paths.py` resolves a hook's `.claude` root from the hook file's own location,
+   so a hook run from here would add this repository's registries as a second search root
+   and could answer a lookup your project meant to answer itself.
 
-### 5. Initialize CodeGraph
-
-```bash
-codegraph init -i
-```
-
-## Integration with Consuming Projects
-
-Once your project has adopted this plugin, keep it synced:
-
-### Syncing Changes
-
-The main StockToolScalpingMachine repository uses `tools/sync-plugin.cmd` to keep the plugin updated:
-
-```bash
-# From the main repo
-tools\sync-plugin.cmd
-```
-
-This bidirectional sync:
-- Pushes generic agents/skills/hooks from main → plugin
-- Pulls updates from plugin → main
-- Preserves project-specific sections in registries
-- Detects conflicts and requires manual resolution
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for conflict resolution workflow.
-
-### Adopting Updates in Your Project
-
-When the plugin is updated:
-
-1. Pull plugin updates into your project
-2. Merge plugin-managed sections with your local customizations
-3. Test that hooks, agents, and skills still work in your project
+6. **Add your sync configuration** at `.claude/.sync-config.json` and the tool that reads
+   it. See CONTRIBUTING.md.
 
 ## Documentation
 
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — Sync workflow, conflict resolution, and how to propose changes
-- **Hook test suites** — `.claude/hooks/tests/test_*.py` — pytest-based validation
-- **Each agent/skill** — see the `## When to Use` section in each `.md` file
+- [CONTRIBUTING.md](CONTRIBUTING.md) — sync workflow, the project-name check, conflict resolution
+- `.claude/hooks/tests/` and `.claude/scripts/tests/` — the suites
+- Each agent and skill — its own `## When to Use` section
 
 ## Status
 
-First release extracted from StockToolScalpingMachine project (2026-09-10).
-
-Cross-project adoption: This plugin is designed to be vendored into new Claude Code projects. See **Quick Start** above.
+Extracted from a first consuming project on 2026-09-10; inventory completed and the
+ownership and direction model corrected on 2026-09-12.

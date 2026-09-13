@@ -1,0 +1,8 @@
+{
+  "_comment": "External rules loaded by architecture-guard.py at scan time, resolved beside the hook. Populated by the /promote-ui-rule skill after a UI mistake has recurred 3+ times in JOURNAL.md (Tags: ui-evolution, recurring-mistake). Hand-editing is allowed but each rule must satisfy: id is kebab-case and globally unique; regex is a valid Python regex; applies_to is one of 'html'|'ts'|'scss'|'any'; scope is 'all' or one of this project's front-end application names; exception_seeds is a (possibly empty) list of file-path substrings that should be exempt from this rule. Rules added here behave identically to the built-in regex rules in architecture-guard.py -- exit 2 + block message + path in error output.",
+  "_project_settings_comment": "The two keys below are the project-shaped facts the hook used to carry inline. They affect WHICH PATHS ARE SCANNED and WHAT THE BLOCK MESSAGE CITES. No verdict depends on either: with both absent, the guard still blocks every violation it blocks today, it simply detects no application name and prints no reference section.",
+  "frontend_projects_root": "",
+  "reference_documents": [],
+  "rules": [],
+  "_template_comment": "Template shipped by the plugin. The two project keys below are intentionally empty: a consuming project fills them in its own checkout and they never travel back. With both empty the guard still blocks every violation it blocks today; it simply detects no application name and prints no reference section."
+}

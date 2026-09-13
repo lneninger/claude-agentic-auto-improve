@@ -61,6 +61,45 @@ EXTERNAL_RULES_FILE = (
 # External rules loaded once per process; populated by /promote-ui-rule skill.
 _EXTERNAL_RULES: list[dict] | None = None
 
+# Project-shaped settings, read from the same rules file.
+#
+# Two facts in this hook name a project rather than a pattern: where the
+# front-end applications live, and which documents the block message points a
+# reader at. Both now come from architecture-guard.rules.json so the hook body
+# is generic. The defaults below are generic too, and they only ever affect
+# WHICH PATHS ARE SCANNED and WHAT THE MESSAGE CITES -- never whether a
+# violation blocks. No verdict depends on them.
+_PROJECT_SETTINGS: dict | None = None
+
+_DEFAULT_FRONTEND_PROJECTS_ROOT = "projects"
+_DEFAULT_REFERENCE_DOCUMENTS: list[str] = []
+
+
+def load_project_settings() -> dict:
+    global _PROJECT_SETTINGS
+    if _PROJECT_SETTINGS is not None:
+        return _PROJECT_SETTINGS
+    data: dict = {}
+    if EXTERNAL_RULES_FILE.exists():
+        try:
+            loaded = json.loads(EXTERNAL_RULES_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError) as e:
+            log(f"failed to read project settings: {e}")
+    root = data.get("frontend_projects_root")
+    docs = data.get("reference_documents")
+    _PROJECT_SETTINGS = {
+        "frontend_projects_root": (
+            str(root).strip("/").lower() if isinstance(root, str) and root.strip()
+            else _DEFAULT_FRONTEND_PROJECTS_ROOT
+        ),
+        "reference_documents": (
+            [str(d) for d in docs] if isinstance(docs, list) else list(_DEFAULT_REFERENCE_DOCUMENTS)
+        ),
+    }
+    return _PROJECT_SETTINGS
+
 
 def load_external_rules() -> list[dict]:
     global _EXTERNAL_RULES
@@ -159,11 +198,16 @@ _APP_RULES_LOADED: set[str] = set()
 
 def detect_app(file_path: Path) -> str | None:
     """
-    Detect the Angular project from a file path. Returns 'admin-panel' /
-    'scalping-machine' / None when the path does not live under any project.
+    Detect the front-end application from a file path, or None when the path
+    does not live under any application.
+
+    The root that holds the applications is a project fact, so it is read from
+    architecture-guard.rules.json (`frontend_projects_root`) rather than
+    hard-coded here. This project sets it to `ClientApp/projects`.
     """
     norm = str(file_path).replace("\\", "/").lower()
-    m = re.search(r"clientapp/projects/([a-z0-9-]+)/", norm)
+    root = load_project_settings()["frontend_projects_root"]
+    m = re.search(re.escape(root) + r"/([a-z0-9-]+)/", norm)
     if m:
         return m.group(1)
     return None
@@ -676,12 +720,15 @@ def format_block_message(file_path: str, blocking: list[Violation]) -> str:
     if len(blocking) > 15:
         lines.append(f"  ... and {len(blocking) - 15} more violation(s)")
         lines.append("")
+    # The documents a reader is pointed at are a project fact, so they come from
+    # architecture-guard.rules.json (`reference_documents`). An empty list simply
+    # omits the section; no verdict depends on it.
+    reference_docs = load_project_settings()["reference_documents"]
+    if reference_docs:
+        lines.append("Reference:")
+        lines.extend(f"  {doc}" for doc in reference_docs)
+        lines.append("")
     lines.extend([
-        "Reference:",
-        "  ClientApp/projects/scalping-machine/DESIGN_PATTERNS.md (conversion table)",
-        "  ClientApp/projects/scalping-machine/ANGULAR_MATERIAL_RULES.md",
-        "  ClientApp/projects/scalping-machine/src/styles.scss (@theme bridge)",
-        "",
         "Escape hatch: CLAUDE_ARCH_GUARD=off (use sparingly)",
         bar,
         "",
