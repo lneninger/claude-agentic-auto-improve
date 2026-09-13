@@ -158,7 +158,7 @@ Judge each against this table. The set is closed, and the first match wins.
 |---|---|---|
 | Merged, with a timestamp and a merge commit | `merged` | Continue with this one |
 | State open | `not-merged` | Skip it, and say so. Write nothing |
-| Closed, no merge timestamp | `closed-unmerged` | Skip it. Closed is not delivered |
+| Closed, no merge timestamp | `closed-unmerged` | **Not a skip.** The sub-task could not be delivered — see the failure section below |
 | Merged, base is not the default branch | `merged-elsewhere` | **Halt this one and ask.** It landed on a branch, so dependents may still have nothing to build on |
 | No such pull request | `not-found` | Skip it, and report the number |
 | GitHub client missing or unauthenticated | `unverifiable` | **Halt the whole skill** |
@@ -311,6 +311,72 @@ complete and hand to `/verify-before-done`, then `/ship`. Do not declare the con
 from here. Completion of the last sub-task is a fact this phase can report. Whether the
 contract is done is a verdict that belongs to verification.
 
+## When a sub-task cannot be delivered
+
+A pull request closed without merging is not a skip. It means the sub-task could not be
+delivered as the contract specified it. So does an implementer that halts because the tests
+cannot be made to pass.
+
+**That is evidence about the design, not only about the code.** A sub-task nobody can build
+means the decomposition was wrong. It goes to the architect, not to a failure report.
+
+### Write a failure record, in the channel that already exists
+
+The orchestrator already carries an escalation channel and reads it: `contract_impact` with
+`requires_architect`. Use it rather than inventing a second path.
+
+```yaml
+status: failed
+commit: null
+tests_passed: unknown
+tests_verified_by: none
+contract_impact:
+  requires_architect: true
+  severity: <high | medium | low>
+  description: <why this sub-task could not be delivered, in one or two sentences>
+completed_by: pr-merged
+pull_request: <url of the closed pull request>
+verified: github
+```
+
+**Severity is about the blast radius on the contract, not on the sub-task.** High means other
+sub-tasks are built on an assumption this failure disproves. Medium means this sub-task needs
+respecifying and the rest stand. Low means the approach was wrong but the specification holds.
+
+### Release nothing
+
+**A failed sub-task releases none of its dependents.** They were going to build on work that
+does not exist. Leave them blocked, and name the failed sub-task as what blocks them.
+
+This is the one case where the blocked state is correct and must not be cleared by a person
+calling this phase again. It clears when the contract is amended.
+
+### Hand back an escalation, not a released set
+
+The return is different in shape. Say that the sub-task failed, give the severity and the
+description, and name every sub-task now blocked behind it.
+
+The loop routes that to architect re-entry and pauses. A person is told the contract needs
+amending, and that `/design-first` is where that happens.
+
+### The three things the architect can decide
+
+**The decomposition was wrong.** The contract is amended, the sub-tasks are respecified, and
+the failure record stays as history explaining why.
+
+**The sub-task was unnecessary.** It becomes a `no-work-required` completion, which releases
+its dependents normally. The failure record is superseded, never deleted.
+
+**The specification was right and the approach was wrong.** The same sub-task is retried. The
+failure record stays, so a second failure on the same sub-task is visible as a pattern rather
+than read as a first attempt.
+
+### Tests that cannot pass never reach this phase
+
+No pull request merges, so nothing calls it. That failure surfaces from the implementer
+halting during `/tdd-first`. The record shape above is the same, and whoever is driving writes
+it. This phase owns the closed-pull-request path only.
+
 ## Step 6: Offer to clean up
 
 A merged pull request leaves its branch and often a worktree behind. Offer once, and only for
@@ -336,7 +402,8 @@ keeps the branch reserved.
 - Completion records written: <paths>
 - Released: <sub-tasks now unblocked, and what released them>
 - Still blocked: <sub-task — waiting on X>
-- Contract complete: <yes, hand to /verify-before-done | no, N sub-tasks remain>
+- Failed: <sub-task — severity, one-line reason, and what it now blocks | none>
+- Contract complete: <yes, hand to /verify-before-done | no, N sub-tasks remain | blocked on architect re-entry>
 - Cleanup: <removed, or offered and declined>
 ```
 
@@ -387,6 +454,10 @@ which have no naming dependency at all.
 - **Writing `tests_passed: true` because a merge happened.** A merge is not a test run.
   Record what was observed, and `unknown` when nothing was.
 - **Treating a closed pull request as delivered.** Closed without merging is the opposite.
+- **Treating a closed pull request as a skip.** It is a failed sub-task and it escalates.
+- **Releasing dependents of a failed sub-task.** They would build on work that does not exist.
+- **Deleting a failure record when the architect supersedes it.** A second failure on the same
+  sub-task should be visible as a pattern.
 - **Treating an unresolvable dependency as satisfied.** That is the orchestrator's own defect.
 - **Computing a release from the live state instead of completion records.** State goes stale.
 - **Overwriting an existing completion record silently.** Two commits for one sub-task needs a
