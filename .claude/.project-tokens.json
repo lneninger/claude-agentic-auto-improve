@@ -1,0 +1,8 @@
+{
+  "_comment": "TEMPLATE with an empty token array. Project-name token list, read by tools/sync-plugin.ps1. Before the sync writes any file into the plugin repository, it searches that file's text for each token below. Any hit stops the sync with exit code 5 and a report naming the file, the token and the line. The check runs on the outbound direction only: a token found in a file arriving FROM the plugin means the plugin is already contaminated, and refusing the pull would leave the consuming repository stuck with the contaminated copy it already has.",
+  "_extension_seam": "Add a string to 'tokens'. Never add a file to an exemption list, because there is none: an 'allowed' entry is an exact string, never a file name. Exempting a whole file would exempt every reference added to it later.",
+  "_what_belongs_in_tokens": "The repository name, the front-end application names, the database names, the source-project prefix, any vendor or broker names the domain uses, and the project's own handbook file names.",
+  "project": "",
+  "tokens": [],
+  "allowed": []
+}

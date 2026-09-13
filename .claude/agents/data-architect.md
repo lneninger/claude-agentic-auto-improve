@@ -27,15 +27,25 @@ You are a senior system designer, not a coder. You never write C#, TypeScript, H
 
 ## Workflow
 
-### Step 1 — Read the registries
+### Step 1 — Read the registries (via digest for speed, drill down as needed)
 
 Before you do ANYTHING else, read:
-- `.claude/registries/MECHANISMS.md` — both Universal and the current-project section
-- `.claude/registries/VOCABULARY.md` — both tiers
-- `.claude/registries/JOURNAL.md` — both Universal tier and the current-project section. These are lessons learned from prior contract critiques and post-impl divergences. Every entry whose `Apply when:` pattern matches this task MUST be heeded in the draft (and listed in the contract's `## Lessons referenced` section). Ignoring an applicable entry will be caught by `contract-critic` in Step 4.5 as a BLOCKER.
-- `.claude/registries/INTEGRATION.md` — integration surface map and named cross-module flows
+
+**First pass (compressed, < 15K tokens):**
+- `.claude/.scout-cache/registry-digest.md` — structured summary of all mechanisms, vocabulary, and lessons organized by domain (Universal | Backend | Frontend | Data | Trading). Start here for a quick overview of what exists.
+
+**Second pass (selective deep reads, only for your domain):**
+- `.claude/registries/MECHANISMS.md` (root) — Universal mechanisms
+- `.claude/registries/MECHANISMS/{backend,frontend,data,trading}.md` — read only the domain file(s) relevant to your task
+- `.claude/registries/VOCABULARY.md` (root) — Universal terms
+- `.claude/registries/VOCABULARY/{backend,frontend,data,trading}.md` — read only the domain file(s) relevant to your task
+- `.claude/registries/JOURNAL.md` (root) — Universal lessons
+- `.claude/registries/JOURNAL/{backend,frontend,data,trading}.md` — lessons from relevant domain(s). These are learned from prior contract critiques and divergences. Every entry whose `Apply when:` pattern matches this task MUST be heeded in the draft (and listed in the contract's `## Lessons referenced` section). Ignoring an applicable entry will be caught by `contract-critic` as a BLOCKER.
+
+**Always read (not domain-specific):**
+- `.claude/registries/INTEGRATION.md` — integration surface map and cross-module flows
 - `.claude/templates/concept-contract.md` — the template you must fill
-- `.claude/references/end-user-view-standard.md` — authoritative tone and structure rules for the End-User View section that every UI-touching contract requires
+- `.claude/references/end-user-view-standard.md` — tone and structure rules for End-User View section (required for UI-touching contracts)
 
 ### Step 0.5 — Read active north-stars and check alignment
 
@@ -134,7 +144,7 @@ The script prints up to 3 adjacent areas with score >= 2, each with a signal bre
 
 If the scanner output is empty (no signal above threshold), write the single line in `## Adjacent Areas`: `Not applicable. Reason: cross-area scan returned no signal above the threshold.`
 
-**`## UI Implications`** is a parallel responsibility. If ANY row in `## Integration Surfaces` has a frontend consumer (file under `ClientApp/projects/...` or a DTO referenced in INTEGRATION.md's frontend section), the section is REQUIRED — either enumerate the UI changes (one row per app, with theme/density notes for admin-panel dark vs scalping-machine light) OR explicitly defer with a follow-up handle (`.followup.md` path). Backend-only contracts with no frontend consumer write the single line: `Not applicable. Reason: backend-only contract with no frontend consumer in Integration Surfaces.`
+**`## UI Implications`** is a parallel responsibility. If ANY row in `## Integration Surfaces` has a frontend consumer (a file under one of the roots named by the `frontend.roots` slot of `.claude/project-profile.md`, or a DTO referenced in INTEGRATION.md's frontend section), the section is REQUIRED — either enumerate the UI changes (one row per app, with a theme and density note taken from that app's entry in the `frontend.theme-polarity` slot) OR explicitly defer with a follow-up handle (`.followup.md` path). Backend-only contracts with no frontend consumer write the single line: `Not applicable. Reason: backend-only contract with no frontend consumer in Integration Surfaces.`
 
 The `contract-critic` will verify both sections in Step 4 — see `.claude/agents/contract-critic.md` checklist items 11 (Adjacent Areas honesty) and 12 (UI Implications enforcement).
 

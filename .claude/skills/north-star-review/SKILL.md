@@ -23,7 +23,7 @@ When invoked, run `.claude/scripts/north_star_review.py` and present the ranked 
 py -3 ".claude/scripts/north_star_review.py" --project <project-name>
 ```
 
-Defaults: if no `--project` argument is provided, the script discovers every project under `.claude/north-stars/` and reviews them all. Use `--project StockToolScalpingMachine` in this repo.
+Defaults: if no `--project` argument is provided, the script discovers every project under `.claude/north-stars/` and reviews them all. To review one project, pass the `project.name` slot of `.claude/project-profile.md` as the argument.
 
 Optional flags the user may pass after `/north-star-review`:
 

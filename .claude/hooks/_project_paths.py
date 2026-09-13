@@ -286,7 +286,7 @@ def project_aliases(root: Path) -> set[str]:
     carry the project identity, and the obvious substitute -- the directory
     above ``.claude`` -- is the **branch slug** inside a worktree
     (``20260826-bug-35-...``). That silently broke
-    ``--project StockToolScalpingMachine``, an invocation both
+    ``--project <the repository name>``, an invocation both
     ``list-contracts`` and ``north-star-review`` document in their SKILL.md:
     it matched nothing and exited 0.
 

@@ -25,7 +25,7 @@ Read `.claude/templates/north-star.md` to confirm the exact section structure. T
 
 ## Step 1: Detect the project
 
-From CWD, derive the project name (last path component of repo root). Default to `StockToolScalpingMachine` when in that working tree. Stop and ask the user via `AskUserQuestion` if the project is ambiguous.
+Take the project name from the `project.name` slot of `.claude/project-profile.md`. If the profile is absent, fall back to the last path component of the repo root. Stop and ask the user via `AskUserQuestion` if the project is ambiguous.
 
 Create the project subfolder under `.claude/north-stars/` if it doesn't exist.
 
@@ -52,7 +52,7 @@ This is the load-bearing section — `contract-critic` checklist item 13 reads i
 Propose 3–6 anti-patterns based on the aspiration. Each anti-pattern MUST contain at least one **backticked snippet** (a code identifier, file path fragment, class name, or class-attribute string) that `north_star_review.py` can grep against the codebase. Examples:
 
 - `New code that calls \`System.IO.File.WriteAllText\` against a path under the project repo`
-- `A new feature that requires the operator user to author conditions in \`ClientApp/projects/scalping-machine/\``
+- `A new feature that requires the operator user to author conditions in a frontend application root`
 - `Hardcoding \`var(--mat-sys-primary)\` inside a \`style="..."\` attribute (already caught by architecture-guard, listed here for completeness)`
 
 Anti-patterns without backticked snippets degrade to manual review only — they are still valid but don't surface gap signals.

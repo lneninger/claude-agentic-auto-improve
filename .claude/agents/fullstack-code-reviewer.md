@@ -32,7 +32,7 @@ You are an adversarial senior code reviewer with 15+ years across Angular 21 (Ty
 - No AutoMapper — manual mapping only
 - XML doc comments on all public members
 - `AsNoTracking()` on all read-only EF queries
-- Singletons for stateful IBKR services; Scoped for repositories
+- Singletons for stateful external-connection services; Scoped for repositories
 - Structured logging (templates) — never string interpolation in log calls
 - `CancellationToken` parameter on all async methods
 - `Async` suffix on all async method names

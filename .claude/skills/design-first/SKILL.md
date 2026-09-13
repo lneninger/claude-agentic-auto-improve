@@ -56,12 +56,13 @@ CWD: <current working directory — used to detect project>
 FILES: <files the user mentioned, if any>
 PRIOR_AGENT: none
 PRIOR_FINDINGS:
+  registry_digest: .claude/.scout-cache/registry-digest.md
   mechanisms_registry: .claude/registries/MECHANISMS.md
   vocabulary_registry: .claude/registries/VOCABULARY.md
   contract_template: .claude/templates/concept-contract.md
 ```
 
-The data-architect will read both registries plus `.claude/registries/JOURNAL.md`, read relevant code (read-only), and produce a concept contract file at `.claude/concepts/<YYYY-MM-DD>-<slug>.md` with `Status: draft`. The `## Critique` section is left empty for Step 2.5; the `## Lessons referenced` section is filled by the architect if any JOURNAL.md entries applied.
+The data-architect will read the registry-scout digest first (< 15K tokens) for a high-level overview, then selectively drill down into domain-specific registry files as needed. The architect will read relevant code (read-only) and produce a concept contract file at `.claude/concepts/<YYYY-MM-DD>-<slug>.md` with `Status: draft`. The `## Critique` section is left empty for Step 2.5; the `## Lessons referenced` section is filled by the architect if any JOURNAL.md entries applied.
 
 ## Step 2.5: Critique the draft
 
@@ -259,7 +260,7 @@ A clean re-review requires a clean context. The cost of one extra agent spawn is
 
 ### Mapping to the safety-critical review gate
 
-This Step 5 invocation produces the HANDOFF that `/verify-before-done` Step 5.5 looks for when the diff includes safety-critical paths. If the diff additionally touches `Strategy/Execution/**`, `Services/Ibkr/**`, `Services/Alpaca/**`, `Domain/Auth/**`, `Services/Auth/**`, or `Persistence/Migrations/**`, also spawn the matching domain reviewer (`trading-safety-reviewer`, `security-auditor`, `migration-safety-reviewer`) — each is an independent agent invocation, not a replacement for `fullstack-code-reviewer`.
+This Step 5 invocation produces the HANDOFF that `/verify-before-done` Step 5.5 looks for when the diff includes safety-critical paths. If the diff additionally touches a root named by the `safety-critical.roots`, `auth.roots` or `migration.root` slots of `.claude/project-profile.md`, also spawn the matching domain reviewer (the project's live-action safety reviewer, `security-auditor`, `migration-safety-reviewer`) — each is an independent agent invocation, not a replacement for `fullstack-code-reviewer`.
 
 ## Step 6: Flip contract status to implemented
 

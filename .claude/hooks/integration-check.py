@@ -46,9 +46,28 @@ STATE_FILE = Path(tempfile.gettempdir()) / "claude-integration-check.json"
 BACKEND_EXTENSIONS = {".cs"}
 FRONTEND_EXTENSIONS = {".ts"}
 
-# Directories that indicate backend vs frontend
-BACKEND_MARKERS = ["src/ScalpingMachine."]
-FRONTEND_MARKERS = ["ClientApp/projects/"]
+# Directories that indicate backend vs frontend.
+#
+# These are the only project-shaped facts this hook needs, so they live in
+# integration-check.rules.json beside it rather than inline here, and the hook
+# itself is generic. See that file for the fail-soft note: this hook only ever
+# emits a WARNING, so an absent rules file costs a reminder rather than a
+# safety layer. A guard that BLOCKS must fail closed instead.
+_IC_RULES_PATH = Path(__file__).resolve().parent / "integration-check.rules.json"
+
+
+def _load_integration_rules() -> dict:
+    try:
+        with _IC_RULES_PATH.open(encoding="utf-8") as _f:
+            data = json.load(_f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+_IC_RULES = _load_integration_rules()
+BACKEND_MARKERS = [str(m) for m in (_IC_RULES.get("backend_markers") or [])]
+FRONTEND_MARKERS = [str(m) for m in (_IC_RULES.get("frontend_markers") or [])]
 
 # Specific directories that are integration-sensitive
 BACKEND_INTEGRATION_DIRS = [

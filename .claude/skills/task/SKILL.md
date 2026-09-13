@@ -68,9 +68,10 @@ Pull from the result:
 - **Comments** — GitHub discussions frequently amend or override the original body. Read them; the newest constraint wins. If a comment contradicts the body, surface it in Step 3 rather than silently picking one.
 - **Linked issues / PRs** — scan the body and comments for `#N` references and record them as related items.
 
-> **`gh` is mandatory here — there is no fallback.** This repo
-> (`lneninger/StockToolStrategies`) is **private**, so `WebFetch` on an issue URL
-> returns 404 to an unauthenticated client. If `gh` is missing or unauthenticated,
+> **`gh` is mandatory here — there is no fallback.** Whenever the tracker repository
+> is **private** — as this one is — `WebFetch` on an issue URL
+> returns 404 to an unauthenticated client. Get the repository from `gh repo view`
+> or the `origin` remote; never hardcode a slug in a skill. If `gh` is missing or unauthenticated,
 > say so plainly and go to Step 1d (free text), telling the user:
 >
 > ```
@@ -244,7 +245,7 @@ This is the step that earns the skill its place. Read the brief you just wrote a
 1. **Is every acceptance criterion verifiable?** "Works well" and "is fast" are not. Push each one to a form a test could assert. If the tracker's criteria are vague, that is a finding, not something to smooth over.
 2. **Is there a criterion for the failure path?** Most tickets specify only the happy path.
 3. **Does anything conflict with a project rule?** Check `CLAUDE.md` for the areas the item touches — an issue asking for something the architecture rules forbid must surface now, not at review.
-4. **Does this touch a safety-critical path?** (`Strategy/Execution/**`, `Services/Ibkr/**`, `Services/Alpaca/**`, `Domain/Auth/**`, `Persistence/Migrations/**`, live order flow.) If yes, note in the brief that `/tdd-first` is **mandatory with no opt-out** and that a domain reviewer will be required.
+4. **Does this touch a safety-critical path?** Match the item against the `safety-critical.roots`, `auth.roots` and `migration.root` slots of `.claude/project-profile.md`, plus any live external-action path those roots protect. If yes, note in the brief that `/tdd-first` is **mandatory with no opt-out** and that a domain reviewer will be required.
 5. **Are there `UNKNOWN`s left?**
 
 Use `AskUserQuestion` to resolve every gap. Batch related questions into one call rather than interrogating one at a time. Append each answer under `## Open questions from intake` and update the affected sections in place.
@@ -400,25 +401,25 @@ If the two SHAs differ, the worktree was seeded from the wrong ref. Remove it an
 
 **Enter it only if this session continues the work.** Use the `EnterWorktree` tool with `path: .claude/worktrees/<wt>` — the path form enters the tree you just built rather than creating another one, and `ExitWorktree` will not delete a path-entered worktree, which is what keeps it available to parallel sessions. If instead this tree is being prepared for a *different* session or a background job, stay where you are and hand the path over.
 
-**Open the worktree in its own VS Code window.** `StockToolScalpingMachine.code-workspace` is git-tracked, so `git worktree add` already placed a correct copy at the worktree root — open **that** copy, never the parent tree's:
+**Open the worktree in its own VS Code window.** The repository's `<project.name>.code-workspace` file — `project.name` is a slot in `.claude/project-profile.md` — is git-tracked, so `git worktree add` already placed a correct copy at the worktree root. Open **that** copy, never the parent tree's:
 
 ```bash
-code -n ".claude/worktrees/<wt>/StockToolScalpingMachine.code-workspace"
+code -n ".claude/worktrees/<wt>/<project.name>.code-workspace"
 ```
 
 `-n` forces a **new** window instead of reusing the current one, so the parent tree's window stays open beside it — which is the entire point of a parallel worktree.
 
 **The copy works untouched, and there is an invariant that keeps it that way.** VS Code resolves each `folders[].path` against the directory holding the workspace file, so:
 
-- **`.` and `ClientApp` are relative on purpose.** They follow whichever tree the file sits in — in a worktree they resolve to *that* worktree's root and `ClientApp`. Never make these absolute; that is what would pin every copy back to the parent tree.
-- **Every folder OUTSIDE the repo must be absolute.** A relative `../sibling` resolves from `<repo>/.claude/worktrees/<wt>/`, where `..` is `.claude/worktrees/` — not the repo's parent. It silently renders as a missing folder. This is a real bug that was fixed on 2026-08-22: `../StockToolScalpingMachine-VSC HTTP Tests` became `D:/Dev/HIPALANET/StockToolScalpingMachine-VSC HTTP Tests`.
+- **Every folder INSIDE the repo is relative on purpose** — the repository root `.` and the `frontend.root-container` slot's directory among them. They follow whichever tree the file sits in, so in a worktree they resolve to *that* worktree. Never make these absolute; that is what would pin every copy back to the parent tree.
+- **Every folder OUTSIDE the repo must be absolute.** A relative `../sibling` resolves from `<repo>/.claude/worktrees/<wt>/`, where `..` is `.claude/worktrees/` — not the repo's parent. It silently renders as a missing folder. This is a real bug that was fixed on 2026-08-22: a sibling folder written as `../<sibling>` had to become its full absolute path.
 
 VS Code does **not** do variable substitution in `folders[].path`, so absolute is the only mechanism available for the outside-the-repo case. **Never hand-edit the workspace file inside a worktree** — it is tracked, so the edit rides along in every commit and pollutes the PR diff with machine-local paths. If a copy is wrong, fix the root file and let the correction reach worktrees through master.
 
 Verify a new tree's copy resolves before handing it off:
 
 ```bash
-py -3 -c "import json,pathlib,sys; h=pathlib.Path(sys.argv[1]); ws=json.load(open(h/'StockToolScalpingMachine.code-workspace',encoding='utf-8')); [print(('OK   ' if (p if (p:=pathlib.Path(f['path'])).is_absolute() else h/p).exists() else 'BROKEN '), f['path']) for f in ws['folders']]" ".claude/worktrees/<wt>"
+py -3 -c "import json,pathlib,sys; h=pathlib.Path(sys.argv[1]); ws=json.load(open(next(h.glob('*.code-workspace')),encoding='utf-8')); [print(('OK   ' if (p if (p:=pathlib.Path(f['path'])).is_absolute() else h/p).exists() else 'BROKEN '), f['path']) for f in ws['folders']]" ".claude/worktrees/<wt>"
 ```
 
 **Lifecycle.** After `/ship` merges the PR:

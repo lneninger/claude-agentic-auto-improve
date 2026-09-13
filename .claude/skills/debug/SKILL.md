@@ -1,6 +1,6 @@
 ---
 name: debug
-description: "Systematic 4-phase debugging protocol — REPRODUCE → ISOLATE → HYPOTHESIZE → VERIFY before any fix is written. Forces root-cause analysis instead of symptom patching. Writes findings to .claude/debug-notes-<slug>.md. Use when: user says /debug, 'debug this', 'why is X failing', 'fix this bug', or when a symptom is reported. Mandatory for bugs in IBKR/Alpaca integration, strategy execution, auth, or migrations. Produces a HANDOFF suitable for dotnet-backend-architect or angular-senior-dev to implement the fix."
+description: "Systematic 4-phase debugging protocol — REPRODUCE → ISOLATE → HYPOTHESIZE → VERIFY before any fix is written. Forces root-cause analysis instead of symptom patching. Writes findings to .claude/debug-notes-<slug>.md. Use when: user says /debug, 'debug this', 'why is X failing', 'fix this bug', or when a symptom is reported. Mandatory for bugs under any root named by the safety-critical.roots, auth.roots or migration.root slots of .claude/project-profile.md. Produces a HANDOFF suitable for dotnet-backend-architect or angular-senior-dev to implement the fix."
 user_invocable: true
 ---
 
@@ -78,7 +78,7 @@ Narrow the failure to the smallest possible code region. The goal of this phase 
 | SignalR message loss | Tail both hub and client with correlation IDs |
 | Async / timing | Add stopwatch logs around the suspect `await`s — look for >N ms waits |
 | SQL perf / wrong result | Capture the actual SQL + parameters via EF logging, run manually |
-| External API (IBKR/Alpaca) | Capture the exact request and response — don't infer, observe |
+| External API (any third-party service client) | Capture the exact request and response — don't infer, observe |
 | Memory / GC / leak | `dotnet-counters` + `dotnet-gcdump` |
 
 ### 2b. Drill until the breakpoint is a single scope
@@ -113,7 +113,7 @@ In the scratch file:
 ```
 ## Phase 3: HYPOTHESIZE
 - Root cause (one sentence): <specific invariant violated>
-  Good example: "Order IDs from IBKR are 64-bit but the DB column is int32, so orders with IDs > 2^31-1 fail to persist and the retry logic silently drops them."
+  Good example: "Record IDs from the upstream service are 64-bit but the DB column is int32, so records with IDs > 2^31-1 fail to persist and the retry logic silently drops them."
   Bad example: "The order persistence is broken."
 - Why this explains the symptom: <causal chain>
 - Predictions this hypothesis makes:
@@ -192,15 +192,15 @@ Choose the agent by area:
 
 - Backend C# → `dotnet-backend-architect`
 - Angular frontend → `angular-senior-dev`
-- IBKR / Alpaca integration → `ibkr-api-architect` / `alpaca-api-architect`
+- Third-party service integration → the project's own integration agent for that service, if it declares one
 - Ingestion jobs → `ingestion-data-architect`
 - SQL / index / migration perf → `dotnet-backend-architect` with `/sql-server-patterns` skill (+ `sql-performance-reviewer` to audit)
 - Docker / container lifecycle → `docker-master-goat`
 - LLM pipeline / Python sidecar → `python-ai-developer` or `llm-training-engineer`
 
-### Trading-safety path bugs require escalation
+### Safety-critical path bugs require escalation
 
-If the root cause is in `src/ScalpingMachine.Strategy/Execution/*`, `Services/Ibkr/*`, or `Services/Alpaca/*` — the implementer's HANDOFF must recommend `trading-safety-reviewer` next. Do NOT let a fix in these paths ship without that review.
+If the root cause sits under a root named by the `safety-critical.roots` slot of `.claude/project-profile.md`, the implementer's HANDOFF must recommend the project's live-action safety reviewer next. Do NOT let a fix in these paths ship without that review.
 
 ## After the fix: close the loop
 

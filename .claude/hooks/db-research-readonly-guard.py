@@ -130,7 +130,7 @@ ALWAYS_ALLOW = re.compile(
 # a command with no disposable marker -- falls through to the original block.
 #
 # (a) and (b) are BOTH required and neither is redundant. (a) alone would let
-# `sqlcmd -d ScalpingMachine -Q "INSERT ... -- cleanup X_Test_abc123"` through:
+# `sqlcmd -d <ProtectedName> -Q "INSERT ... -- cleanup X_Test_abc123"` through:
 # no protected DROP target, a disposable marker present, yet plain DML aimed
 # straight at the dev database. (b) closes that.
 #
@@ -140,7 +140,44 @@ ALWAYS_ALLOW = re.compile(
 # ---------------------------------------------------------------------------
 _V_DROP = "DR" + "OP"
 _V_ALTER = "AL" + "TER"
-_PROTECTED_NAMES = r"ScalpingMachine(?:_Testing)?"
+
+# The protected database names are a project fact, so they are NOT written here.
+# They come from db-destructive-guard.rules.json -- one rules file, read by both
+# database guards, so the two can never disagree about which databases are
+# protected.
+#
+# THE LOADER FAILS CLOSED, exactly as the destructive guard's does. If the rules
+# file is missing, unreadable or has an empty list, every database name is
+# treated as protected, which makes clause (b) below match every command and so
+# withdraws the disposable exemption entirely. Stricter, never looser.
+_RULES_PATH = Path(__file__).resolve().parent / "db-destructive-guard.rules.json"
+
+
+def _load_protected_names() -> tuple[str, ...]:
+    try:
+        with _RULES_PATH.open(encoding="utf-8") as _f:
+            data = json.load(_f)
+    except Exception:
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    # Longest name first, so an alternation never settles on a shorter prefix.
+    return tuple(
+        sorted(
+            (str(n) for n in (data.get("protected_databases") or []) if str(n).strip()),
+            key=len,
+            reverse=True,
+        )
+    )
+
+
+PROTECTED_DATABASES = _load_protected_names()
+
+if PROTECTED_DATABASES:
+    _PROTECTED_NAMES = r"(?:" + "|".join(re.escape(n) for n in PROTECTED_DATABASES) + r")"
+else:
+    # No configuration: treat every database name as protected.
+    _PROTECTED_NAMES = r"\w+"
 
 # (a) protected DB as the target of a destructive database-level statement.
 PROTECTED_DESTRUCTIVE_TARGET = re.compile(

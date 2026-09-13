@@ -1,175 +1,141 @@
 # Contributing to claude-agentic-auto-improve
 
-This document describes the sync workflow, conflict resolution procedure, and how to propose changes to the plugin.
+How changes travel between this repository and a consuming project, how conflicts are
+resolved, and what will refuse a change.
 
-## Sync Workflow
+## Direction: one rule, both ways
 
-The plugin repository is kept in sync with the main StockToolScalpingMachine repository via the `sync-plugin.cmd` script. Synced assets include:
+**Every synced tree is bidirectional. Neither repository is authoritative.**
 
-- **Agents** (`.claude/agents/`): Generic agents only; trading-specific agents stay in the main repo
-- **Skills** (`.claude/skills/`): Generic skills only; trading/domain-specific skills stay in the main repo  
-- **Hooks** (`.claude/hooks/`): Generic validation and state-management hooks
-- **Registries** (`.claude/registries/`):
-  - `MECHANISMS.md`: Universal patterns section only
-  - `VOCABULARY.md`: Universal section only
-  - `JOURNAL.md`: Universal section only
-  - `INTEGRATION.md`: Entire file (project-independent)
+> **Corrected 2026-09-12.** The previous version of this document said, two lines apart,
+> that this repository was authoritative for agents and that the main repository was the
+> canonical source for everything else. Both cannot be true and neither was enforced. The
+> one-way rule is withdrawn. It also protected the wrong direction: this repository's
+> copies carry a consuming project's names, so a one-way pull pushed that contamination
+> downstream into every other consuming project, and a project that repaired a file
+> locally lost the repair at the next sync.
 
-## Making Changes
+What replaces it is a check a tool can run, described below.
 
-### From the main repo (StockToolScalpingMachine)
+## Synced assets
 
-1. Edit the file in the main repo under `.claude/`
-2. Run the sync script (from the main repo root):
-   ```bash
-   tools\sync-plugin.cmd
-   ```
-3. The script will automatically push changes to the plugin repository
+The tree list, each tree's file list and the registry list all come from the consuming
+project's `.claude/.sync-config.json`. That file is the single source of truth and the
+sync script reads it; nothing about the synced set is hard-coded in the script.
 
-### From the plugin repo (claude-agentic-auto-improve)
+- `.claude/agents/`, `skills/`, `hooks/`, `scripts/`, `templates/`, `references/`
+- `.claude/registries/` — the Universal section only, above the first `## Project:`
+  heading, except `INTEGRATION.md` which is whole-file
 
-1. Edit the file in the plugin repo
-2. Changes flow back to the main repo on the next sync
-3. **For agents**: flow is **one-way plugin → main only** (plugin is authoritative for generic agents)
-4. **For other assets**: bidirectional, with conflict detection
+A file that no `files` array names is a local asset by default: it stays in the consuming
+project and is never compared.
 
-## Conflict Resolution
+## The project-name check
 
-Conflicts occur when both repositories have modified the same file since the last sync.
+**Before the sync writes anything into this repository, it searches every outbound file
+for each literal string in the consuming project's `.claude/.project-tokens.json`** — the
+repository name, the front-end application names, the database names, the source prefix,
+the vendor names the domain uses and the project's own handbook file names.
 
-### Detecting Conflicts
+Any hit halts the run with **exit code 5** and a report naming the file, the token and the
+line. Nothing is copied.
 
-Run the sync script:
+It runs **outbound only**. A token found in a file arriving from here means this
+repository is already contaminated, and refusing the pull would leave the consumer stuck
+with the contaminated copy it already has.
 
-```bash
-tools\sync-plugin.cmd
-```
+A deliberate false positive is declared as an **exact string** in the `allowed` array with
+a one-line reason. **It is never a file name.** Exempting a whole file exempts every
+reference added to it later, which is how a file becomes permanently unguarded.
 
-On conflict, the script exits with code 2 and creates:
-```
-.claude\.sync-state\conflicts.json
-```
+## Making a change
 
-The marker file contains:
-- Timestamp of conflict detection
-- List of conflicting files
-- Hash and modification time for each version
-- Resolution status
+Edit the file wherever you are working, at its ordinary path, then sync. There is one copy
+per repository and no subdirectory owns anything.
 
-### Resolving Conflicts
+Two obligations come with editing a generic file:
 
-1. **Read the conflict marker:**
-   ```bash
-   type .claude\.sync-state\conflicts.json
-   ```
+1. **Do not write a project reference into it.** If it needs a project-shaped fact, cite a
+   slot in `project-profile.md` by name, or move the constant into a
+   `<hook-name>.rules.json` file beside the hook.
+2. **If an agent needs a fact no profile slot covers, add the slot to
+   `.claude/project-profile.md` here, in the same change**, so every consuming project
+   gains it at once. Never invent a slot that exists in only one project.
 
-2. **Decide which version wins:**
-   - Check modification times
-   - Review changes on both sides
-   - Manually merge if needed (prefer combining changes)
+## Conflict resolution
 
-3. **Apply resolution:**
-   - Edit the conflict file in whichever repo should be authoritative
-   - For agents: resolve in the plugin repo (one-way semantics)
-   - For other assets: edit in main repo (it's the canonical source)
+A conflict is reported when the configuration names a file and the two sides disagree
+about it. Three kinds:
 
-4. **Re-run sync to clear the marker:**
-   ```bash
-   tools\sync-plugin.cmd
-   ```
+- `CONFLICT` — both sides hold it and the content differs
+- `ONLY_IN_MAIN` / `ONLY_IN_PLUGIN` — the configuration names it but one side lacks it
+- `REGISTRY_CONFLICT` — the Universal sections of a registry file differ
 
-On success, the marker is deleted and the working copy is updated.
+**One rule for every tree: read both versions and merge by hand.** No side wins by being
+newer. A timestamp says which checkout was touched last, not which change is right, and a
+checkout rewrites timestamps anyway.
 
-### Force Override (caution!)
+For a one-sided file, decide whether it should exist on the other side. If it should, copy
+it there. If it should not, remove it from that tree's `files` array — a file that is not
+declared is not compared.
 
-To force-sync without conflict detection:
-```bash
-tools\sync-plugin.cmd --force
-```
+Then re-run the sync with `--resolve`.
 
-**Use this only when you are certain of the resolution.** It skips conflict detection entirely.
+### How content is compared
 
-## Exit Codes
+Line endings are folded and a leading UTF-8 byte order mark is stripped before hashing.
+This repository stores line-feed endings and marks its registry files; a consuming project
+on Windows typically stores carriage-return plus line-feed and no mark. Neither difference
+changes meaning, and comparing raw bytes once reported eighteen conflicts that no edit
+could ever clear — which trains an operator to reach for `--force`, the one path that
+silently overwrites real divergence.
+
+## Exit codes
 
 | Code | Meaning | Action |
-|------|---------|--------|
-| 0 | Success | No action needed |
-| 2 | Conflict | Resolve conflicts and re-run |
-| 3 | Marker exists | Run with `--resolve` or delete the marker |
-| 4 | Script error | Check error message and fix environment |
+|---|---|---|
+| 0 | Success | None |
+| 2 | Conflict | Resolve and re-run |
+| 3 | Marker exists | Re-run with `--resolve`, or delete the marker |
+| 4 | Bad environment | Including: this repository was not found. The message names both locations tried. |
+| 5 | Project-name check failed | Remove the reference, or declare the exact string in `allowed` with a reason. Nothing was copied. |
 
-## Updating Registries (MECHANISMS.md, VOCABULARY.md)
+## Finding this repository
 
-The sync script handles registry files specially:
+Two layers, in order:
 
-- **Universal section** (before `## Project:`) is synced bidirectionally
-- **Project sections** (after `## Project:`) stay local to each repo
+1. the `CLAUDE_PLUGIN_ROOT` environment variable
+2. the conventional sibling directory beside the consuming repository
 
-When editing MECHANISMS.md or VOCABULARY.md:
+A git worktree is not beside this checkout, so **from a worktree set `CLAUDE_PLUGIN_ROOT`
+first**. There is deliberately no git-submodule layer: submodules behave badly in a
+worktree workflow.
 
-1. Edit only the Universal section in the plugin (lines before `## Project:`)
-2. Or edit in the main repo and sync back to plugin
-3. The sync script automatically preserves project-specific sections
+## Registries
 
-## Testing Before Sync
+- Edit only the Universal section, above the first `## Project:` heading.
+- Everything from that heading to the end of the file belongs to the consuming project and
+  is never compared or copied.
+- **A cross-project mechanism entry must live in the Universal tier.** An entry below the
+  project heading can never reach this repository, so filing one there silently guarantees
+  no other project sees it. Three entries were misfiled that way until 2026-09-12.
 
-Before syncing changes that affect agents or skills:
+## Proposing a new generic asset
 
-1. Test the change locally in the main repo
-2. Verify `/design-first`, `/tdd-first`, or other skills still work
-3. Verify agents still launch and behave correctly
-4. Then run `sync-plugin.cmd` to push to plugin
-
-## Proposing New Generic Assets
-
-If you've created a new agent, skill, or hook that should be part of the plugin:
-
-1. **Get approval** from the team that this is truly generic (not domain-specific)
-2. **Place it in the main repo** (e.g., `.claude/agents/my-new-agent.md`)
-3. **Run sync** to push it to the plugin:
-   ```bash
-   tools\sync-plugin.cmd
-   ```
-4. **Update this doc** to list the new asset in the Synced section above
+1. Satisfy yourself it is genuinely generic, not domain-specific wearing a general name.
+2. Place it in the consuming project at its ordinary path.
+3. Add its path to the matching tree's `files` array in `.claude/.sync-config.json`.
+4. Run the sync. If the project-name check refuses it, the asset is not generic yet.
+5. Add it to the list in [README.md](README.md).
 
 ## Troubleshooting
 
-### Marker file won't clear
+**The marker will not clear.** Delete `.claude\.sync-state\conflicts.json` in the
+consuming project and re-run.
 
-If `conflicts.json` persists:
+**"Plugin repository not found."** That is exit code 4, and the message names both
+locations it tried. Set `CLAUDE_PLUGIN_ROOT`.
 
-```bash
-REM Delete the marker file
-del .claude\.sync-state\conflicts.json
-
-REM Re-run sync
-tools\sync-plugin.cmd
-```
-
-### Script gives "path not found" errors
-
-Verify plugin repo exists one level up:
-```bash
-dir ..\claude-agentic-auto-improve\.claude\agents
-```
-
-If missing, clone it:
-```bash
-cd ..
-git clone <plugin-repo-url>
-cd <main-repo>
-```
-
-### Changes aren't syncing
-
-Run the sync script with verbose output:
-```bash
-powershell -NoProfile -Command ". .\tools\sync-plugin.ps1 -MainRepoPath (Get-Location) -PluginRepoPath '..\claude-agentic-auto-improve' -SyncStateDir '.\.claude\.sync-state' -ConflictMarkerPath '.\.claude\.sync-state\conflicts.json' -Verbose"
-```
-
-## Questions?
-
-Refer to:
-- Plugin structure: [`README.md`](README.md)
-- Main repo sync docs: `<main-repo>/tools/README.md`
-- Plugin contract: `.claude/concepts/2026-09-10-plugin-sync-extraction.md`
+**The sync reports nothing and exits 0.** Check that it ran at all. A wrapper script that
+returns 0 having done nothing looks exactly like a clean sync — that was the real state of
+this tooling from its first commit until 2026-09-12.

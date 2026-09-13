@@ -1,0 +1,15 @@
+{
+  "_comment": "TEMPLATE with an empty content set. Sentinel-path -> area mapping for the contract-critic skip system. A contract belongs to the UNION of every matching area (not first-match-wins). Skip is offered only when ALL areas the contract touches are skip-eligible. Patterns use the same '...' (multi-segment) and '*' (single-segment) wildcard syntax as concept-gate.py 'Files to touch' entries -- see .claude/scripts/_contract_files.matches_path. To populate: add one key per area with a stable lowercase slug; patterns should be lowercase forward-slash paths that match what data-architect typically writes in 'Files to touch'.",
+  "_seed_adjacency_comment": "Each area MAY carry an optional `seed_adjacency: [<slug>, ...]` array listing adjacent areas the cross-area scanner cannot derive from CodeGraph / journal / mechanism signals. DO NOT enumerate every adjacency -- that re-creates the hand-curated graph the cross-area system is designed to avoid. The seed list weight is +1 so it cannot dominate the codegraph signal; seeds still respect the top-3 cap and the threshold. Read by .claude/scripts/cross_area_scan.py.",
+  "_schema": {
+    "areas": {
+      "<area-slug>": {
+        "description": "<one sentence: what belongs in this area, and whether it is safety-critical>",
+        "patterns": ["<lowercase/forward-slash/path/...>"],
+        "seed_adjacency": ["<other-area-slug>"]
+      }
+    }
+  },
+  "fallback": "uncategorized",
+  "areas": {}
+}

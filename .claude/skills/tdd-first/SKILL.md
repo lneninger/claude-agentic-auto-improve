@@ -1,6 +1,6 @@
 ---
 name: tdd-first
-description: "Enforce a RED→GREEN→REFACTOR cycle for a feature. Writes failing tests BEFORE implementation, runs the test suite to confirm the red state, then invokes the implementer agent with the failing tests as authoritative input, then re-runs to confirm green. Use when: user says /tdd-first, 'do this test-first', 'TDD this feature', or before any trading-safety-critical / migration / auth path change. Default for changes under Strategy/Execution/*, Services/Ibkr/*, Services/Alpaca/*, Domain/Auth/*, Persistence/Migrations/*, and anything touching live order flow."
+description: "Enforce a RED→GREEN→REFACTOR cycle for a feature. Writes failing tests BEFORE implementation, runs the test suite to confirm the red state, then invokes the implementer agent with the failing tests as authoritative input, then re-runs to confirm green. Use when: user says /tdd-first, 'do this test-first', 'TDD this feature', or before any safety-critical / migration / auth path change. Default for changes under any root named by the safety-critical.roots slot of .claude/project-profile.md, and anything touching a live external-action path."
 user_invocable: true
 ---
 
@@ -13,11 +13,10 @@ When invoked, enforce the RED→GREEN→REFACTOR cycle. **No implementation code
 1. **Concept contract must exist** for non-trivial features. If the `concept-gate.py` hook is active and no contract path is supplied, halt and tell the user to run `/design-first` first.
 2. **Scope must be testable** — if the change is purely visual (CSS tweak, template restructure) skip this skill and use `ui-ux-designer` directly.
 3. **This skill is strongly recommended** (but not mandatory) for:
-   - Any change under `src/ScalpingMachine.Strategy/Execution/*`
-   - Any change under `src/ScalpingMachine.Services/Ibkr/*` or `Services/Alpaca/*`
-   - Any change to `Domain/Auth/*` or `Services/Auth/*`
+   - Any change under a root named by the `safety-critical.roots` slot of `.claude/project-profile.md` — read the slot, do not guess a path from a project name
+   - Any change under a root named by the `auth.roots` slot
    - Any new EF Core migration or repository query
-   - Any change to condition evaluators, field resolvers, or the FlowManager
+   - Any change to the domain's rule-evaluation pipeline — its evaluators, its field resolvers, or the component that sequences them
 
 ## Step 1: Identify the test surface
 
@@ -25,7 +24,7 @@ Ask the user (or infer from the contract):
 
 - **What behavior is changing?** Name it as a single sentence.
 - **What would a correct implementation produce that a broken one does not?** This is the test assertion.
-- **What test project houses this?** Match the layer: `tests/ScalpingMachine.Strategy.Tests`, `tests/ScalpingMachine.Services.Tests`, `tests/ScalpingMachine.Persistence.Tests`, or for Angular: `ClientApp/projects/scalping-machine/src/app/**/*.spec.ts`.
+- **What test project houses this?** Match the layer against the `test.roots` slot of `.claude/project-profile.md` — one backend suite per layer — or, for a frontend change, `src/app/**/*.spec.ts` under the owning `frontend.roots` entry.
 
 Write the answers to a scratch file at `.claude/tdd-scratch-<timestamp>.md` so the subsequent agents can read it without losing context.
 
@@ -42,7 +41,7 @@ CONSTRAINTS:
   - Follow project test conventions (xUnit + Moq for .NET, Jasmine + signals testing for Angular)
   - Test must FAIL with a clear assertion message, not a null-ref or compile error
   - Cover: happy path + at least one edge case + one error path
-  - If the behavior depends on time/random/IBKR, mock those dependencies properly
+  - If the behavior depends on the clock, on randomness, or on an external service client, mock those dependencies properly
 PRIOR_FINDINGS:
   contract_path: <path>
   contract_status: approved
@@ -117,14 +116,14 @@ If a second review pass is needed after refactors land, spawn a **new** `fullsta
 
 ### Safety-critical paths: also spawn the domain reviewer
 
-For changes under `Strategy/Execution/**`, `Services/Ibkr/**`, `Services/Alpaca/**`, `Domain/Auth/**`, `Services/Auth/**`, or `Persistence/Migrations/**`, spawn the matching domain reviewer (`trading-safety-reviewer`, `security-auditor`, `migration-safety-reviewer`) as an **additional** Agent-tool invocation — not a replacement for `fullstack-code-reviewer`. Each reviewer is an independent isolated instance. Step 7's `/verify-before-done` Step 5.5 will refuse to PASS without these HANDOFFs in scope.
+For changes under any root named by the `safety-critical.roots`, `auth.roots` or `migration.root` slots of `.claude/project-profile.md`, spawn the matching domain reviewer (the project's live-action safety reviewer, `security-auditor`, `migration-safety-reviewer`) as an **additional** Agent-tool invocation — not a replacement for `fullstack-code-reviewer`. Each reviewer is an independent isolated instance. Step 7's `/verify-before-done` Step 5.5 will refuse to PASS without these HANDOFFs in scope.
 
 ## Step 7: Final verification + cleanup
 
 1. Run `/verify-before-done` (if available) or manually:
    - Build passes for all affected projects
    - Full test suite passes (not just the target tests)
-   - No uncommitted auto-generated files (check `ClientApp/**/generated/` and `Migrations/`)
+   - No uncommitted auto-generated files (check `**/generated/` under `frontend.root-container`, and `migration.root`)
 2. Delete the `.claude/tdd-scratch-<timestamp>.md` file or move it to `.claude/tdd-history/` if you want to keep the audit trail.
 3. Report the HANDOFF for the calling context, including:
    - Final test count (red → green delta)

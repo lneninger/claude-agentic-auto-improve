@@ -63,7 +63,8 @@ Right:
 2. `codegraph_impact` on it → the blast radius across backend and generated clients.
 3. Cross-check the Angular side by hand: **generated TypeScript is not reliably indexed.** The
    `.ts` client is regenerated from C#, so `codegraph_impact` may not show the frontend consumers
-   at all. Confirm with `git grep` on `ClientApp/**/generated/`.
+   at all. Confirm with `git grep` on `**/generated/` under the `frontend.root-container` slot of
+   `.claude/project-profile.md`.
 
 ### "Map the recording capture feature"
 

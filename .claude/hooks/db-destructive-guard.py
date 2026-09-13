@@ -198,9 +198,58 @@ DISPOSABLE_PATTERNS: list[tuple[str, str]] = [
 # ---------------------------------------------------------------------------
 _TGT_DROP = "DR" + "OP"
 _TGT_ALTER = "AL" + "TER"
+
+
+# ---------------------------------------------------------------------------
+# Per-project settings, loaded from the rules file beside this hook.
+#
+# The hook is generic. Every name of this project's own databases and source
+# folders lives in db-destructive-guard.rules.json, the same shape as
+# architecture-guard.rules.json and plain-language-guard.rules.json.
+#
+# THE LOADER FAILS CLOSED. If the rules file is missing, unreadable or empty,
+# the guard does not fall back to permitting anything: it treats EVERY database
+# as protected and narrows the production path allow-list to the two entries
+# that name no project. A guard that fails open when its configuration
+# disappears is worse than one that never moved -- and this guard is the last
+# layer between an agent and a database that has already been destroyed twice.
+# ---------------------------------------------------------------------------
+_RULES_PATH = Path(__file__).resolve().parent / "db-destructive-guard.rules.json"
+
+
+def _load_guard_rules() -> dict:
+    try:
+        with _RULES_PATH.open(encoding="utf-8") as _f:
+            data = json.load(_f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+_RULES = _load_guard_rules()
+
+# Longest name first, so an alternation never settles on a shorter prefix.
+PROTECTED_DATABASES: tuple[str, ...] = tuple(
+    sorted(
+        (str(n) for n in (_RULES.get("protected_databases") or []) if str(n).strip()),
+        key=len,
+        reverse=True,
+    )
+)
+RULES_LOADED = bool(PROTECTED_DATABASES)
+
+if RULES_LOADED:
+    _PROTECTED_NAME_ALT = (
+        r"\[?(?:" + "|".join(re.escape(n) for n in PROTECTED_DATABASES) + r")\]?\b(?!_)"
+    )
+else:
+    # No configuration: every database name is protected. Only the generic
+    # disposable-suffix escape below can still allow an operation through.
+    _PROTECTED_NAME_ALT = r"\[?\w+\]?\b(?!_)"
+
 PROTECTED_DESTRUCTIVE_TARGET_RE = re.compile(
     r"\b(?:" + _TGT_DROP + r"|" + _TGT_ALTER + r")\s+DATABASE\s+"
-    r"\[?ScalpingMachine(?:_Testing)?\]?\b(?!_)",
+    + _PROTECTED_NAME_ALT,
     re.IGNORECASE,
 )
 
@@ -226,26 +275,42 @@ PROTECTED_DESTRUCTIVE_TARGET_RE = re.compile(
 # the destructive-pattern bank when the file is edited by an agent.
 #
 # Negative lookahead `(?!_)` on the DB name ensures we don't false-positive on
-# disposable names like ScalpingMachine_Test_<guid> / ScalpingMachine_Testing_x.
+# disposable names like <ProtectedName>_Test_<guid> / <ProtectedName>_Testing_x.
 # ---------------------------------------------------------------------------
-PROTECTED_DB_PATTERNS: list[tuple[str, str]] = [
-    # Connection-string fragment: ADO.NET / SqlClient canonical form.
-    ("protected-dev-db",                r"Database\s*=\s*ScalpingMachine\b(?!_)"),
-    ("protected-testing-db",            r"Database\s*=\s*ScalpingMachine_Testing\b(?!_)"),
-    # Connection-string fragment: alternative ADO.NET keyword "Initial Catalog".
-    ("protected-dev-db-initcat",        r"Initial\s+Catalog\s*=\s*ScalpingMachine\b(?!_)"),
-    ("protected-testing-db-initcat",    r"Initial\s+Catalog\s*=\s*ScalpingMachine_Testing\b(?!_)"),
-    # T-SQL USE statement.
-    ("protected-dev-db-use",            r"\bUSE\s+\[?ScalpingMachine\]?\b(?!_)"),
-    ("protected-testing-db-use",        r"\bUSE\s+\[?ScalpingMachine_Testing\]?\b(?!_)"),
-    # sqlcmd -d flag (preceded by start-of-string or whitespace so we don't
-    # match unrelated "-d" substrings inside a longer flag/value).
-    ("protected-dev-db-sqlcmd-d",       r"(?:^|\s)-d\s+\[?ScalpingMachine\]?\b(?!_)"),
-    ("protected-testing-db-sqlcmd-d",   r"(?:^|\s)-d\s+\[?ScalpingMachine_Testing\]?\b(?!_)"),
-    # PowerShell SqlServer / dbatools modules -Database parameter.
-    ("protected-dev-db-pwsh-database",  r"(?:^|\s)-Database\s+\[?ScalpingMachine\]?\b(?!_)"),
-    ("protected-testing-db-pwsh-database", r"(?:^|\s)-Database\s+\[?ScalpingMachine_Testing\]?\b(?!_)"),
-]
+def _protected_db_patterns() -> list[tuple[str, str]]:
+    """
+    One set of five surface patterns per protected database name, built from the
+    rules file rather than written out per name. Adding a database to the rules
+    file therefore covers every surface at once, instead of needing five more
+    hand-written lines that a later reader can silently leave incomplete.
+
+    With no rules file, the name part becomes a bare word match, so every
+    database is treated as protected -- see the fail-closed note above.
+    """
+    if RULES_LOADED:
+        named = [(re.sub(r"\W+", "-", n).strip("-").lower(), re.escape(n)) for n in PROTECTED_DATABASES]
+    else:
+        named = [("unconfigured-any-db", r"\w+")]
+
+    patterns: list[tuple[str, str]] = []
+    for label, name in named:
+        patterns.extend([
+            # Connection-string fragment: ADO.NET / SqlClient canonical form.
+            (f"protected-{label}",                 rf"Database\s*=\s*{name}\b(?!_)"),
+            # Connection-string fragment: alternative ADO.NET keyword "Initial Catalog".
+            (f"protected-{label}-initcat",         rf"Initial\s+Catalog\s*=\s*{name}\b(?!_)"),
+            # T-SQL USE statement.
+            (f"protected-{label}-use",             rf"\bUSE\s+\[?{name}\]?\b(?!_)"),
+            # sqlcmd -d flag (preceded by start-of-string or whitespace so we
+            # don't match unrelated "-d" substrings inside a longer flag/value).
+            (f"protected-{label}-sqlcmd-d",        rf"(?:^|\s)-d\s+\[?{name}\]?\b(?!_)"),
+            # PowerShell SqlServer / dbatools modules -Database parameter.
+            (f"protected-{label}-pwsh-database",   rf"(?:^|\s)-Database\s+\[?{name}\]?\b(?!_)"),
+        ])
+    return patterns
+
+
+PROTECTED_DB_PATTERNS: list[tuple[str, str]] = _protected_db_patterns()
 
 # Composed from parts so the source of this file does not contain the heavy
 # verb substrings as literals. Avoids self-triggering the destructive bank
@@ -273,13 +338,13 @@ WRITE_KEYWORD_PATTERN = r"\b(?:" + "|".join(_DML_WRITES) + "|" + _DDL_ALTS + r")
 #
 # Normalized to forward slashes; matched case-insensitively against the same
 # normalization of file_path.
-PRODUCTION_PATH_ALLOWLIST: tuple[str, ...] = (
-    "src/scalpingmachine.api/",
-    "src/scalpingmachine.persistence/",
-    "tools/db-protection/",
-    ".claude/",
-    "/.claude/",
-    "docs/",
+# Read from the rules file. With no rules file the list narrows to the two
+# entries that name no project, which is the strict direction: fewer paths are
+# allowed to carry a protected-database connection string, never more.
+PRODUCTION_PATH_ALLOWLIST: tuple[str, ...] = tuple(
+    str(p).strip().lower()
+    for p in (_RULES.get("production_path_allowlist") or [".claude/", "/.claude/"])
+    if str(p).strip()
 )
 
 # Pre-compile.
@@ -375,8 +440,8 @@ def _file_in_production_allowlist(file_path: str) -> bool:
     """True iff the (normalized, lowercased) file_path starts with one of the
     PRODUCTION_PATH_ALLOWLIST entries OR contains one of them as a substring.
     Substring matching is intentional -- file_path on Windows often starts
-    with a drive letter, so an entry like "src/scalpingmachine.api/" must
-    match "d:/dev/.../src/scalpingmachine.api/program.cs"."""
+    with a drive letter, so an entry like "src/<backend-project>/" must
+    match "d:/dev/.../src/<backend-project>/program.cs"."""
     if not file_path:
         return False
     for prefix in PRODUCTION_PATH_ALLOWLIST:
@@ -549,7 +614,7 @@ def main() -> int:
             lines.append(f"    {p}")
         lines.append("")
         lines.append("If this is a test, use a disposable connection string built from a guid,")
-        lines.append("not the dev DB name. Pattern: Database=ScalpingMachine_Test_<guid>")
+        lines.append("not the dev DB name. Pattern: Database=<AnyName>_Test_<guid>")
     else:
         lines.append("this tool call would run a destructive DB operation against")
         lines.append("what appears to be a working/dev/prod database.")
