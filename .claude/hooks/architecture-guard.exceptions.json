@@ -1,11 +1,13 @@
 {
-  "_comment": "architecture-guard.py exception list. ignored_files = full bypass. file_rule_exemptions = per-rule bypass by file suffix. Valid rules: inline-style, gray-utility, hex-color, scroll-edge, inline-component-template, inline-component-styles, scss-raw-property. '*' exempts all rules.",
+  "_comment": "TEMPLATE. architecture-guard.py exception list. ignored_files = full bypass. file_rule_exemptions = per-rule bypass by file suffix. Valid rules: inline-style, gray-utility, hex-color, scroll-edge, inline-component-template, inline-component-styles, scss-raw-property. '*' exempts all rules.",
+
+  "_template_note": "Both collections ship EMPTY, and empty is the correct starting state. An empty exception list exempts nothing, so a fresh project gets the strictest guard rather than inheriting another project's bypasses. Add an entry only after you have looked at the file and decided the guard is wrong about it.",
+
+  "_fail_closed": "If this file is missing or unreadable, the guard exempts nothing. Losing it makes the guard stricter, never weaker.",
+
   "ignored_files": [],
-  "file_rule_exemptions": {
-    "features/backtest/backtest-flow-list.component.scss": ["scss-raw-property"],
-    "features/earnings/earnings-calendar-page.component.scss": ["scss-raw-property"],
-    "features/trading/panels/screener-criteria-dialog.component.scss": ["scss-raw-property"],
-    "shared/components/screener-editor.component.scss": ["scss-raw-property"],
-    "features/chat/chat-panel.component.scss": ["scss-raw-property"]
-  }
+
+  "file_rule_exemptions": {},
+
+  "_file_rule_exemptions_shape": "Keys are path suffixes matched against the file being written; values are arrays of rule names. Example: {\"features/report/report-page.component.scss\": [\"scss-raw-property\"]}."
 }
