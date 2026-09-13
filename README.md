@@ -72,10 +72,16 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 18 skills | yes | yes | yes |
+| 21 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
 | 16 hooks | yes | no | no |
 | scripts, templates, references, registries | vendoring only | vendoring only | vendoring only |
+
+**The scripts row is the one to read twice.** No provider's install delivers
+`.claude/scripts/`, and every skill cites its script by a path inside *your* repository.
+So an install alone gives you `/advance` and `/pr-merged` as text, and `pr_merged.py` —
+which holds every rule they describe — will not be there. Copy `.claude/scripts/` and
+`.claude/templates/` by hand even when the rest arrives as a plugin.
 
 Cursor and OpenAI both read the **Agent Plugins** open standard
 (`https://agent-plugins.org`), which is why one root `plugin.json` serves both. Claude Code
