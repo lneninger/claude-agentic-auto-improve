@@ -15,6 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pr_merged import (  # noqa: E402
+    load_implementers,
+    DEFAULT_IMPLEMENTERS,
     new_state,
     mark_dispatched,
     reconcile_state,
@@ -394,6 +396,73 @@ class TestAdvanceWithState(unittest.TestCase):
 
     def test_without_state_behaviour_is_unchanged(self):
         self.assertEqual(advance(_tasks(), {})["action"], "dispatch")
+
+
+# --------------------------------------------------------------------------
+# Portability - the implementer list comes from the project profile
+# --------------------------------------------------------------------------
+PROFILE = """# Project Profile\n\n## Slots\n\n| Slot | Value |\n|---|---|\n| `project.name` | AcmeApp |\n| `backend.roots` | src/AcmeApp.Api/ |\n| `implementers` | `acme-backend-dev`, `acme-frontend-dev` |\n"""
+
+
+class TestPortability(unittest.TestCase):
+    def test_the_implementer_list_is_read_from_the_profile(self):
+        self.assertEqual(load_implementers(PROFILE), ("acme-backend-dev", "acme-frontend-dev"))
+
+    def test_no_profile_falls_back_to_the_agents_the_plugin_ships(self):
+        self.assertEqual(load_implementers(None), DEFAULT_IMPLEMENTERS)
+
+    def test_a_profile_without_the_slot_falls_back_too(self):
+        self.assertEqual(load_implementers("# Project Profile\n\n| `project.name` | X |\n"),
+                         DEFAULT_IMPLEMENTERS)
+
+    def test_a_slot_reading_none_falls_back_rather_than_matching_nothing(self):
+        prof = PROFILE.replace("`acme-backend-dev`, `acme-frontend-dev`", "none")
+        self.assertEqual(load_implementers(prof), DEFAULT_IMPLEMENTERS,
+                         "an empty implementer list would make every block a non-sub-task")
+
+    def test_the_default_only_names_agents_the_plugin_actually_ships(self):
+        for a in DEFAULT_IMPLEMENTERS:
+            self.assertNotIn(a, ("ingestion-data-architect", "llm-training-engineer",
+                                 "pinescript-developer"),
+                             "project-specific agents belong in a profile, not the default")
+
+    def test_a_contract_parses_against_a_projects_own_implementers(self):
+        contract = """
+## Implementation Handoff
+
+### 1. Service (`acme-backend-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/AcmeApp.Api/Thing.cs
+"""
+        tasks = parse_handoff(contract, implementers=("acme-backend-dev",))
+        self.assertEqual([t.id for t in tasks], ["t1-service"])
+
+    def test_the_same_contract_yields_nothing_under_the_default_list(self):
+        contract = "## Implementation Handoff\n\n### 1. Service (`acme-backend-dev`)\n\n**Depends on:** none\n\n**Files to touch:**\n- a.cs\n"
+        self.assertEqual(parse_handoff(contract), [],
+                         "an unknown agent name is not silently treated as a sub-task")
+
+
+class TestProfilePlaceholders(unittest.TestCase):
+    """The template ships with placeholder prose. It must never parse as agent names."""
+
+    def test_placeholder_prose_is_not_read_as_agents(self):
+        tmpl = ("| Slot | Value |\n"
+                "| `implementers` | *(the agents that may own a contract sub-task, "
+                "or `none` to accept the plugin's own)* |\n")
+        self.assertEqual(load_implementers(tmpl), DEFAULT_IMPLEMENTERS,
+                         "an unfilled template slot must fall back, not invent names")
+
+    def test_only_backticked_values_count_as_names(self):
+        filled = "| `implementers` | `acme-dev`, `acme-web` |\n"
+        self.assertEqual(load_implementers(filled), ("acme-dev", "acme-web"))
+
+    def test_a_slot_with_prose_around_real_names_takes_only_the_names(self):
+        mixed = "| `implementers` | `acme-dev` and nothing else for now |\n"
+        self.assertEqual(load_implementers(mixed), ("acme-dev",))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

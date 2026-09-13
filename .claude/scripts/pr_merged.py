@@ -35,17 +35,55 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 CONCEPTS_DIR = Path(".claude/concepts")
 RESULTS_DIR = Path(".claude/orchestrator/results")
 
-# Agents that can own a sub-task. A block naming none of these is not a sub-task.
-IMPLEMENTER_AGENTS = (
+# Agents that can own a sub-task, for a project that declares none of its own.
+# Only names the plugin actually ships: a project adds its own through the profile.
+DEFAULT_IMPLEMENTERS = (
     "dotnet-backend-architect",
     "angular-senior-dev",
-    "ingestion-data-architect",
     "senior-test-engineer",
     "ui-ux-designer",
-    "llm-training-engineer",
     "python-ai-developer",
-    "pinescript-developer",
 )
+
+PROFILE_PATH = Path(".claude/project-profile.md")
+
+
+def load_implementers(profile_text: Optional[str]) -> Tuple[str, ...]:
+    """Which agents may own a sub-task, read from the project profile.
+
+    Pure: it reads the text it is given and never touches disk. ``None`` or an
+    empty string means the project authored no profile. ``read_profile`` is the
+    separate thing that goes to disk, so "no profile" and "read the file" are
+    never the same argument.
+
+    A generic mechanism must not carry one project's agent names into another.
+    The profile declares them in an ``implementers`` slot; absence falls back to
+    the agents the plugin ships.
+
+    A slot reading ``none`` also falls back. An empty implementer list would
+    make every handoff block fail the sub-task test, so a contract would parse
+    to nothing and the loop would report nothing-planned for work that exists.
+    """
+    if not profile_text:
+        return DEFAULT_IMPLEMENTERS
+    m = re.search(r"^\|\s*`?implementers`?\s*\|(.+?)\|\s*$", profile_text, re.M | re.I)
+    if not m:
+        return DEFAULT_IMPLEMENTERS
+    # Only backticked values count. The template ships this slot as italic
+    # placeholder prose, and reading that as agent names would hand a fresh
+    # project a dozen nonsense implementers that match no handoff block.
+    names = tuple(n for n in re.findall(r"`([A-Za-z0-9][A-Za-z0-9_-]*)`", m.group(1))
+                  if n.lower() != "none")
+    return names or DEFAULT_IMPLEMENTERS
+
+
+def read_profile() -> Optional[str]:
+    """The project profile's text, or None when the project has not authored one."""
+    return PROFILE_PATH.read_text(encoding="utf-8", errors="replace")         if PROFILE_PATH.is_file() else None
+
+
+#: Resolved once at import for the running project.
+IMPLEMENTER_AGENTS = load_implementers(read_profile())
 
 
 @dataclass
@@ -97,7 +135,8 @@ def _parse_depends_on(body: str) -> Optional[List[int]]:
     return [int(n) for n in re.findall(r"\d+", raw.split("—")[0].split("–")[0])]
 
 
-def parse_handoff(contract_text: str) -> List[SubTask]:
+def parse_handoff(contract_text: str,
+                  implementers: Optional[Tuple[str, ...]] = None) -> List[SubTask]:
     """Read the ``## Implementation Handoff`` section into sub-tasks.
 
     A sub-task is a block that names an implementer agent AND carries a
@@ -115,7 +154,7 @@ def parse_handoff(contract_text: str) -> List[SubTask]:
         heading, _, body = block.partition("\n")
         heading = heading.strip()
 
-        agent = next((a for a in IMPLEMENTER_AGENTS if a in heading), None)
+        agent = next((a for a in (implementers or IMPLEMENTER_AGENTS) if a in heading), None)
         files = re.findall(r"^-\s+`?([^\s`]+)`?", body.split("**Files to touch:**")[-1], re.M) \
             if "**Files to touch:**" in body else []
         if not agent or not files:

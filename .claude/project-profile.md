@@ -32,6 +32,16 @@ project profile", and this file is where that root is named.
 | `auth.roots` | *(the authentication and credential code roots, or `none`)* |
 | `safety-critical.roots` | *(roots where a defect causes irreversible harm, or `none`)* |
 | `review.documents` | *(the primary documents a reviewer must read, or `none`)* |
+| `implementers` | *(the agents that may own a contract sub-task, or `none` to accept the plugin's own)* |
+
+### A note on `implementers`
+
+The contract sub-task loop reads this slot to decide which handoff blocks are sub-tasks. A block
+naming an agent outside the list is treated as a review gate or a note, so nothing waits on it to
+merge.
+
+Leaving it `none` accepts the agents the plugin ships. Naming a wrong agent is worse than naming
+none: the block silently stops being a sub-task and the loop reports work as unplanned.
 
 ## Worked shape
 
@@ -39,4 +49,5 @@ project profile", and this file is where that root is named.
 | `migration.root` | `src/AcmeApp.Persistence/Migrations/` |
 | `safety-critical.roots` | `src/AcmeApp.Payments/`, `src/AcmeApp.Auth/` |
 | `review.documents` | `CLAUDE.md`, `TESTING.md` |
+| `implementers` | `acme-backend-dev`, `acme-frontend-dev` |
 ```

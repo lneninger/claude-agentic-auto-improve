@@ -227,9 +227,13 @@ Never copy the soft choice to a guard that blocks.
 
 ### Scripts and templates are not optional
 
-The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, five skills
+The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, six skills
 cite scripts in `.claude/scripts/`, and every concept contract is a copy of
-`templates/concept-contract.md`. `scripts/tests/test_script_path_resolution.py` is the
+`templates/concept-contract.md`. The contract sub-task loop is the newest of these:
+`pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
+both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
+`scripts/tests/test_pr_merged.py`, sixty cases including the placeholder trap that an
+unfilled `implementers` slot would otherwise walk into. `scripts/tests/test_script_path_resolution.py` is the
 74-case suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
@@ -275,6 +279,45 @@ would ship the part that can be wrong and leave behind the part that would say s
 
 6. **Add your sync configuration** at `.claude/.sync-config.json` and the tool that reads
    it. See CONTRIBUTING.md.
+
+## Where to start once it is installed
+
+**Type `/flow`.** That is the front door, and everything else is reached through it.
+
+```
+/flow <an issue number, a link, or a sentence describing the work>
+```
+
+It runs the chain in order: intake, a concept contract you approve, test-first implementation,
+adversarial review, verification, a commit, and a draft pull request. It pauses only where a
+person has to decide, and the contract gate is the one stop that can never be automated away.
+
+### When a contract has several sub-tasks
+
+A contract's `## Implementation Handoff` section may declare more than one sub-task, each with
+its own `Depends on:` line. Then the work is iterated one step per merge, because every
+sub-task ends in a pull request somebody has to merge.
+
+Three things drive that, and none of them loops on its own:
+
+| You type | What happens |
+|---|---|
+| `/advance <contract>` | Starts whatever is ready, opens a pull request, and stops |
+| *(you merge the pull request)* | The only step a machine cannot take |
+| `/pr-merged <number>` | Confirms the merge with GitHub, records it, and says what it released |
+
+Then `/advance` again. Between those, that is the loop.
+
+The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
+neither can drift from the other. It carries fifty-seven tests.
+
+### What it will refuse to do
+
+It will not release a sub-task whose dependency has not landed. It will not treat a contract
+with no sub-tasks as finished. It will not record a merge it did not confirm with GitHub, and
+it will not claim tests passed when nothing ran them.
+
+Each refusal exists because the mechanism it replaced did the opposite.
 
 ## Documentation
 
