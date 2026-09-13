@@ -353,7 +353,19 @@ If no journal entries applied, write: `No applicable lessons in JOURNAL.md at dr
 
 Once `Status: approved`, the main session dispatches the following handoffs. The `Files to touch` list is authoritative — the `concept-gate.py` hook uses it to allow/block Edit and Write calls.
 
-### Backend (`dotnet-backend-architect`)
+**Each numbered block is one sub-task.** A sub-task is a block that names an implementer agent AND carries a `Files to touch` list. A block with neither — a scope note such as "no frontend, no migration", or a review gate — is not a sub-task and is never waited on for a merge.
+
+**Sub-task identity is derived, never written twice.** The identity is `t<ordinal>-<slug of the name>`, so `### 2. Backend (…)` is `t2-backend`. That one identity names three things: the branch `task/<contract-slug>/<id>`, the completion record `.claude/orchestrator/results/<contract-slug>/<id>.yaml`, and the sub-task named in its pull request title.
+
+**One branch and one pull request per sub-task.** That is what lets a merge release the sub-tasks waiting on it. A pull request spanning two sub-tasks means the decomposition or the execution was wrong, and it is reported rather than guessed at.
+
+**`Depends on:` is required on every sub-task.** Write `none`, or the ordinals it waits for. State it, never leave it to be inferred — file lists do not carry it. Backend and frontend touch entirely different files and the frontend still needs the endpoint first. A sub-task is released only when every ordinal it names has a completion record.
+
+**Review gates belong in the sequence, and complete differently.** A reviewer opens no pull request. Give the gate a `Depends on:` so its position is clear, and no `Files to touch`, so nothing waits on a merge that will never come.
+
+### 1. Backend (`dotnet-backend-architect`)
+
+**Depends on:** none
 
 **Files to touch:**
 - `path/to/file1.cs`
@@ -373,7 +385,9 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
-### Frontend (`angular-senior-dev`)
+### 2. Frontend (`angular-senior-dev`)
+
+**Depends on:** 1 — the generated TypeScript models must exist first
 
 **Files to touch:**
 - `<a frontend.roots entry>/src/app/...`
@@ -392,7 +406,9 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
-### Data pipeline (`ingestion-data-architect`) — if applicable
+### 3. Data pipeline (`ingestion-data-architect`) — if applicable
+
+**Depends on:** 1
 
 **Files to touch:**
 - `<a backend.roots entry>/Ingestion/...`

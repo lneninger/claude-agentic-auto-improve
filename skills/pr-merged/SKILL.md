@@ -217,14 +217,19 @@ the reader calibrates.
    Its heading names it, such as Backend, Frontend or Data pipeline. Its
    `**Files to touch:**` list is its scope. This is the normal source today.
 
+**Sub-task identity is derived from the block, never stored twice.** It is
+`t<ordinal>-<slug of the name>`, so `### 2. Backend (…)` is `t2-backend`. One identity names
+three things: the branch `task/<contract-slug>/<id>`, the completion record
+`<id>.yaml`, and the sub-task named in the pull request title.
+
 Then match each merged pull request to a sub-task, stopping at the first hit:
 
-1. The head branch matches a sub-task's branch in the state store.
-2. The head branch or the pull request title names the sub-task, such as `backend` or
-   `frontend`.
-3. **The files the pull request changed fall inside exactly one sub-task's
-   `Files to touch` list.** This is the most reliable signal, because that list is the same
-   one the concept gate enforces during implementation.
+1. The head branch is `task/<contract-slug>/<id>`. This is the normal case and it is exact.
+2. The pull request title names the identity.
+3. The state store records that branch against a sub-task.
+
+All three are string matches against a derived identity. **There is no heuristic over file
+lists,** because there no longer needs to be one — the branch carries the answer.
 
 **A pull request that matches no sub-task is reported, never guessed at.** Say which number
 could not be placed and carry on with the rest.
@@ -253,11 +258,19 @@ the evidence.
 
 For every sub-task with no completion record, work out what it depends on.
 
-**Where dependencies come from.** A generated plan states them outright. Handoff blocks do
-not, so derive them the same way `/design-first` already does when it dispatches: two
-sub-tasks whose `Files to touch` lists **overlap** must run in order, and two whose lists are
-disjoint are independent. Where the order is genuinely ambiguous, say so and ask rather than
-picking one.
+**Dependencies are read, never derived.** Every sub-task block carries a `Depends on:` line
+holding either `none` or the ordinals it waits for. Read it. Do not infer ordering from
+anything else.
+
+**Never derive dependencies from overlapping file lists.** That was an earlier rule here and it
+was wrong. Overlapping files mean two writers could clobber each other. They say nothing about
+one thing needing another to exist first. Backend and frontend touch entirely different files,
+and the frontend still needs the endpoint before it can call it, so the rule gets the most
+common case in this project exactly backwards.
+
+**A sub-task with no `Depends on:` line is a defect in the contract, not a sub-task with no
+dependencies.** Report it and leave the sub-task blocked. Guessing `none` releases work that
+may have nothing to build on.
 
 Then, for each dependency, look for a completion record carrying `verified: github`.
 
@@ -379,6 +392,9 @@ which have no naming dependency at all.
 - **Overwriting an existing completion record silently.** Two commits for one sub-task needs a
   person.
 - **Inventing a sub-task graph** when the contract has no decomposition. Report it instead.
+- **Deriving a dependency from overlapping file lists.** Overlap means two writers could
+  clash. It does not mean one needs the other first.
+- **Reading a missing `Depends on:` line as `none`.** It is a contract defect. Report it.
 - **Guessing which sub-task a pull request belongs to.** Report the unmapped number.
 - **Starting several released sub-tasks without asking,** on the person-called path. Each is
   a full run.
