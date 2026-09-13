@@ -19,6 +19,31 @@ happened, records the finished sub-task, works out what that unblocks, and conti
    ->  recompute released sub-tasks  ->  continue
 ```
 
+## The logic lives in a script — this file is the human front door
+
+**One implementation, two front doors.** A skill is instructions for a model, and the
+orchestrator loop is a Python program, so a loop cannot invoke a skill. Both call the same
+script instead, and both therefore behave identically. Two implementations of these rules
+would drift the moment either changed.
+
+```bash
+py -3 .claude/scripts/pr_merged.py --contract <slug|path> --pr <n> [--pr <n> ...] --json
+py -3 .claude/scripts/pr_merged.py --contract <slug|path> --status --json   # read-only
+```
+
+This follows the pattern already used here: `/ship` shells out to `verify_issue_link.py`, and
+`/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
+to a person and offers what to do next.
+
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — thirty-one
+cases over identity, parsing, verdicts, records, releases and conflict detection. They were
+mutation-probed: disabling the verification check, reading a missing dependency line as none,
+and counting scope notes as sub-tasks each turn the suite red.
+
+**Read the script's output rather than re-deriving it.** Everything below describes what the
+script does and how to act on what it returns. Where this file and the script disagree, the
+script is what runs, and the disagreement is a defect in this file.
+
 ## Where this sits — a phase, not a loop
 
 **This skill does not iterate. It closes one sub-task and hands back.**
@@ -491,4 +516,5 @@ which have no naming dependency at all.
 - **Hands a finished contract to** `/verify-before-done`, then `/ship`.
 - **Complements** `/ship`, which opens pull requests. This skill handles what happens after
   one merges.
+- **Implemented by** `.claude/scripts/pr_merged.py`, which the loop calls directly.
 - **Does not run** `.claude/scripts/execute_contract.py`.
