@@ -2194,12 +2194,35 @@ def case11_same_answer_from_any_directory() -> None:
             if child.is_dir() and not child.name.startswith("."):
                 second = child
                 break
+    created_second = None
     if second is None:
-        check("case11: a second real directory exists to run from", False,
-              "no non-dot subdirectory under the checkout to run from")
-        return
+        # A checkout that is nothing but its own .claude tree has no non-dot
+        # subdirectory to run from. That is exactly how the plugin repository
+        # looks, and this case used to FAIL there -- reporting a defect in the
+        # scripts when the only thing missing was somewhere to stand.
+        #
+        # The docstring above says it: the case needs a second real working
+        # directory, not a particular one. So make one and remove it again.
+        # Somewhere outside the checkout would not do. Project-first resolution
+        # is supposed to find no project out there, so a difference in output
+        # would be correct behaviour rather than the defect under test.
+        second = Path(tempfile.mkdtemp(prefix="pathres_second_cwd_", dir=str(repo)))
+        created_second = second
     check("case11: a second real directory exists to run from", True, "")
 
+    try:
+        _case11_compare_from_both(repo, second)
+    finally:
+        if created_second is not None:
+            shutil.rmtree(created_second, ignore_errors=True)
+
+
+def _case11_compare_from_both(repo: Path, second: Path) -> None:
+    """Run every script from both working directories, comparing byte for byte.
+
+    Split out of the case above only so the created directory can be removed in
+    a ``finally``; the body is unchanged.
+    """
     contract = None
     for md in sorted((repo / ".claude" / "concepts").glob("*.md")):
         contract = md
