@@ -135,6 +135,25 @@ def parse_handoff(contract_text: str) -> List[SubTask]:
     return tasks
 
 
+def handoff_bodies(contract_text: str) -> Dict[str, str]:
+    """Sub-task identity -> the raw text of its handoff block.
+
+    Kept separate from ``parse_handoff`` so the parsed plan stays small enough
+    to hand around as JSON.
+    """
+    out: Dict[str, str] = {}
+    section = re.search(r"^## Implementation Handoff(.*?)(?=^## |\Z)", contract_text, re.S | re.M)
+    if not section:
+        return out
+    for index, block in enumerate(re.split(r"^### ", section.group(1), flags=re.M)[1:], start=1):
+        heading, _, body = block.partition("\n")
+        heading = heading.strip()
+        om = re.match(r"(\d+)\.", heading)
+        ordinal = int(om.group(1)) if om else index
+        out[derive_subtask_id(ordinal, re.sub(r"^\d+\.\s*", "", heading))] = body
+    return out
+
+
 # ---------------------------------------------------------------------------
 # What GitHub says
 # ---------------------------------------------------------------------------
@@ -240,6 +259,74 @@ def compute_released(tasks: List[SubTask],
             released.append(task)
 
     return released, blocked
+
+
+# ---------------------------------------------------------------------------
+# Dispatch — extracted from the contract, never invented
+# ---------------------------------------------------------------------------
+def extract_task_block(block_body: str) -> Optional[str]:
+    """Pull the architect's pre-written TASK block out of a handoff block.
+
+    The contract already carries one per sub-task in most cases, so dispatch
+    reads it rather than composing instructions of its own. Returns ``None``
+    when the block has none — a gap to report, never to fill by guessing.
+    """
+    m = re.search(r"\*\*Pre-written TASK block:\*\*\s*```[a-z]*\n(.*?)```", block_body, re.S)
+    return m.group(1).rstrip() if m else None
+
+
+def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
+                   block_body: str) -> Dict[str, Any]:
+    """Everything needed to start one sub-task, and nothing more.
+
+    This produces the packet. It does not run anything: implementation needs a
+    model, and a script cannot be one. The caller executes it.
+    """
+    block = extract_task_block(block_body)
+    return {
+        "sub_task": task.id,
+        "branch": branch_for(contract_slug, task.id),
+        "agent": task.agent,
+        "files": task.files,
+        "contract": contract_path,
+        "task_block": block,
+        "needs_authoring": block is None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# advance — one move, then stop
+# ---------------------------------------------------------------------------
+def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Decide the contract's next single move. This never iterates.
+
+    A merge-gated loop does not spin. It makes one move, then suspends until a
+    person merges something and the closing phase wakes it.
+
+    The order of these questions matters. An empty plan is reported as having
+    nothing planned, never as complete — ``all()`` over an empty collection
+    answers yes, and reading that as success is the defect that made the old
+    orchestrator report a finished contract having written no code.
+    """
+    if not tasks:
+        return {"action": "nothing-planned",
+                "detail": "the contract declares no sub-tasks; nothing can be complete"}
+
+    failed = [tid for tid, rec in records.items() if rec.get("status") == "failed"]
+    if failed:
+        return {"action": "escalate", "failed": failed,
+                "detail": "a sub-task could not be delivered; the contract needs amending"}
+
+    if all(t.id in records for t in tasks):
+        return {"action": "complete",
+                "detail": "every sub-task has a completion record"}
+
+    released, blocked = compute_released(tasks, records)
+    if released:
+        return {"action": "dispatch", "sub_tasks": [t.id for t in released], "blocked": blocked}
+
+    return {"action": "blocked", "blocked": blocked,
+            "detail": "sub-tasks remain and none is ready"}
 
 
 # ---------------------------------------------------------------------------
@@ -384,10 +471,19 @@ def main() -> int:
         (report["failed"] if rec["status"] == "failed" else report["closed"]).append(
             {"pr": number, "sub_task": task.id, "record": rec})
 
-    released, blocked = compute_released(tasks, records)
-    report["released"] = [t.id for t in released]
-    report["blocked"] = blocked
-    report["complete"] = bool(tasks) and all(t.id in records for t in tasks) and not report["failed"]
+    move = advance(tasks, records)
+    report["next_move"] = move
+    report["released"] = move.get("sub_tasks", [])
+    report["blocked"] = move.get("blocked", {})
+    report["complete"] = move["action"] == "complete"
+
+    if move["action"] == "dispatch":
+        bodies = handoff_bodies(contract.read_text(encoding="utf-8", errors="replace"))
+        by_id = {t.id: t for t in tasks}
+        report["dispatch"] = [
+            build_dispatch(by_id[tid], slug, str(contract), bodies.get(tid, ""))
+            for tid in move["sub_tasks"]
+        ]
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -396,12 +492,15 @@ def main() -> int:
         print(f"  closed:   {[c['sub_task'] for c in report['closed']] or 'none'}")
         print(f"  failed:   {[c['sub_task'] for c in report['failed']] or 'none'}")
         print(f"  released: {report['released'] or 'none'}")
-        for tid, why in blocked.items():
+        for tid, why in report["blocked"].items():
             print(f"  blocked:  {tid} <- {', '.join(why)}")
         if report["hand_resolved"]:
             for h in report["hand_resolved"]:
                 print(f"  hand-resolved in #{h['pr']}: {', '.join(h['files'])}")
-        print(f"  contract complete: {report['complete']}")
+        print(f"  next move: {move['action']}" + (f" - {move.get('detail')}" if move.get("detail") else ""))
+        for d in report.get("dispatch", []):
+            flag = "  [TASK BLOCK MISSING — author it in the contract]" if d["needs_authoring"] else ""
+            print(f"    dispatch {d['sub_task']} -> {d['agent']} on {d['branch']}{flag}")
     return 0
 
 

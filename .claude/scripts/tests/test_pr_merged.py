@@ -15,6 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pr_merged import (  # noqa: E402
+    extract_task_block,
+    build_dispatch,
+    advance,
     derive_subtask_id,
     parse_handoff,
     branch_for,
@@ -254,6 +257,86 @@ class TestResolvedFiles(unittest.TestCase):
         self.assertEqual(detect_resolved_files(["c1"], fake_git), [],
                          "a non-merge commit has no combined diff to read")
 
+
+
+# --------------------------------------------------------------------------
+# Dispatch — extracted from the contract, never invented
+# --------------------------------------------------------------------------
+BLOCK_WITH_TASK = """
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo/Bar.cs
+
+**Pre-written TASK block:**
+```
+TASK: Do the backend thing.
+CONTEXT: concept contract at .claude/concepts/x.md
+```
+"""
+
+
+class TestDispatch(unittest.TestCase):
+    def test_the_task_block_is_extracted_from_the_contract(self):
+        got = extract_task_block(BLOCK_WITH_TASK)
+        self.assertIn("TASK: Do the backend thing.", got)
+
+    def test_a_block_without_one_returns_none_rather_than_a_guess(self):
+        self.assertIsNone(extract_task_block("**Files to touch:**\n- a.cs\n"))
+
+    def test_a_dispatch_packet_names_branch_agent_scope_and_task(self):
+        task = SubTask(id="t2-backend", ordinal=2, name="Backend",
+                       agent="dotnet-backend-architect", depends_on=[1], files=["src/Foo/Bar.cs"])
+        d = build_dispatch(task, "c-slug", ".claude/concepts/c-slug.md", BLOCK_WITH_TASK)
+        self.assertEqual(d["branch"], "task/c-slug/t2-backend")
+        self.assertEqual(d["agent"], "dotnet-backend-architect")
+        self.assertEqual(d["files"], ["src/Foo/Bar.cs"])
+        self.assertIn("TASK: Do the backend thing.", d["task_block"])
+        self.assertEqual(d["contract"], ".claude/concepts/c-slug.md")
+
+    def test_a_dispatch_without_a_task_block_is_flagged_not_fabricated(self):
+        task = SubTask(id="t1-a", ordinal=1, name="A", agent="x", depends_on=[], files=["a"])
+        d = build_dispatch(task, "c", ".claude/concepts/c.md", "**Files to touch:**\n- a\n")
+        self.assertIsNone(d["task_block"])
+        self.assertTrue(d["needs_authoring"])
+
+
+# --------------------------------------------------------------------------
+# advance — one move, then stop. It never iterates.
+# --------------------------------------------------------------------------
+class TestAdvance(unittest.TestCase):
+    def test_an_empty_plan_is_never_reported_as_complete(self):
+        out = advance([], {})
+        self.assertEqual(out["action"], "nothing-planned")
+        self.assertNotEqual(out["action"], "complete")
+
+    def test_ready_sub_tasks_are_returned_for_dispatch(self):
+        out = advance(_tasks(), {})
+        self.assertEqual(out["action"], "dispatch")
+        self.assertEqual(out["sub_tasks"], ["t1-a"])
+
+    def test_completion_is_positive_every_sub_task_has_a_record(self):
+        recs = {t.id: {"status": "completed", "verified": "github"} for t in _tasks()}
+        self.assertEqual(advance(_tasks(), recs)["action"], "complete")
+
+    def test_a_failure_escalates_rather_than_dispatching(self):
+        recs = {"t1-a": {"status": "failed", "verified": "github",
+                         "contract_impact": {"requires_architect": True}}}
+        out = advance(_tasks(), recs)
+        self.assertEqual(out["action"], "escalate")
+        self.assertIn("t1-a", out["failed"])
+
+    def test_nothing_ready_and_nothing_failed_is_blocked_not_complete(self):
+        tasks = _tasks()
+        tasks[0].depends_on = [99]
+        out = advance(tasks, {})
+        self.assertEqual(out["action"], "blocked")
+        self.assertNotEqual(out["action"], "complete")
+
+    def test_advance_returns_one_move_and_does_not_iterate(self):
+        out = advance(_tasks(), {})
+        self.assertEqual(len(out["sub_tasks"]), 1,
+                         "only the currently ready set; the caller decides what happens next")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
