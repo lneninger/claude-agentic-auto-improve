@@ -1,0 +1,19 @@
+{
+  "name": "auto-improve",
+  "interface": {
+    "displayName": "Agentic Auto-Improve"
+  },
+  "plugins": [
+    {
+      "name": "agentic-auto-improve",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

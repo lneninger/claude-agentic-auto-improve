@@ -1,0 +1,33 @@
+{
+  "name": "auto-improve",
+  "owner": {
+    "name": "lneninger",
+    "url": "https://github.com/lneninger"
+  },
+  "description": "Single-plugin marketplace hosting the Agentic Auto-Improve asset set.",
+  "version": "0.1.0",
+  "plugins": [
+    {
+      "name": "agentic-auto-improve",
+      "source": "./",
+      "displayName": "Agentic Auto-Improve",
+      "description": "The Data-First Engineering Protocol as an installable asset set: 16 skills, 14 agents and 16 enforcement hooks that put design before implementation and tests before code.",
+      "version": "0.1.0",
+      "author": {
+        "name": "lneninger",
+        "url": "https://github.com/lneninger"
+      },
+      "homepage": "https://github.com/lneninger/claude-agentic-auto-improve",
+      "repository": "https://github.com/lneninger/claude-agentic-auto-improve",
+      "license": "MIT",
+      "category": "workflow",
+      "keywords": [
+        "workflow",
+        "code-review",
+        "test-driven-development",
+        "design",
+        "architecture"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "agentic-auto-improve",
+  "version": "0.1.0",
+  "description": "The Data-First Engineering Protocol as an installable asset set: 16 skills that put design before implementation and tests before code.",
+  "author": {
+    "name": "lneninger",
+    "url": "https://github.com/lneninger"
+  },
+  "homepage": "https://github.com/lneninger/claude-agentic-auto-improve",
+  "repository": "https://github.com/lneninger/claude-agentic-auto-improve",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "code-review",
+    "test-driven-development",
+    "design",
+    "architecture"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Agentic Auto-Improve",
+        "category": "Productivity"
+      }
+    },
+    "com.cursor": {
+      "$comment": "Cursor reads this portable manifest directly. Agents and rules, which the portable schema does not define, are declared in .cursor-plugin/plugin.json alongside it."
+    }
+  }
+}
