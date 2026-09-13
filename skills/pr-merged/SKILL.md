@@ -77,7 +77,8 @@ One file per finished sub-task, in the shape the orchestrator design already def
 ```yaml
 status: completed
 commit: <full hash of the merge commit>
-tests_passed: true
+tests_passed: <true | false | unknown — see below; never assume true>
+tests_verified_by: <ci | local-run | none>
 contract_impact:
   severity: none
   requires_architect: false
@@ -92,6 +93,23 @@ pull_request: <url>
 merged_at: <timestamp GitHub reported>
 verified: github
 ```
+
+**`tests_passed` must never be asserted, only observed.** This phase watches a merge. It does
+not watch a test run. Fill the field from evidence and name the evidence:
+
+- `ci` — a status check on the merge commit reported success. Read it from the pull request.
+- `local-run` — somebody ran the suite against the merge commit and said so.
+- `none` — neither happened. Then `tests_passed` is `unknown`, not `true`.
+
+**This repository has no continuous integration.** There is no workflows directory, so `ci` is
+not available here today and `none` is the honest default.
+
+**A resolved conflict invalidates any earlier result.** When a developer fixes a conflict, the
+merged code differs from what the sub-task's tests ran against. Any pre-merge green is stale.
+Say so in the record rather than carrying the old verdict forward.
+
+**Releasing on `unknown` is a decision, not a default.** Report it plainly when handing back
+the released set, so whoever acts on it knows the dependents are building on untested code.
 
 `verified: github` is the important field. It means the merge was confirmed by asking GitHub,
 not asserted by a person. A record without it must not release anything.
@@ -318,6 +336,8 @@ which have no naming dependency at all.
 
 - **Writing a completion record on the user's word alone.** Ask GitHub. Everything rests on
   this.
+- **Writing `tests_passed: true` because a merge happened.** A merge is not a test run.
+  Record what was observed, and `unknown` when nothing was.
 - **Treating a closed pull request as delivered.** Closed without merging is the opposite.
 - **Treating an unresolvable dependency as satisfied.** That is the orchestrator's own defect.
 - **Computing a release from the live state instead of completion records.** State goes stale.
