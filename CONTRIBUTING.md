@@ -27,7 +27,19 @@ sync script reads it; nothing about the synced set is hard-coded in the script.
   project's `.claude/skills/` and `.claude/agents/`
 - `.claude/hooks/`, `scripts/`, `templates/`, `references/`
 - `.claude/registries/` — the Universal section only, above the first `## Project:`
-  heading, except `INTEGRATION.md` which is whole-file
+  heading. `MECHANISMS.md`, `VOCABULARY.md` and `JOURNAL.md` are the three that
+  travel that way.
+
+> **`INTEGRATION.md` is the exception, and it does not travel at all.** It is the one
+> registry with no Universal tier, so there is no section of it that is generic:
+> every line names one project's endpoints, DTO↔model pairings and events. The
+> configuration compares it whole-file when it names it, which is why this is worth
+> stating rather than leaving to inference — a whole-file compare of a file with no
+> shareable half is a push of project content into shared space, and the
+> project-name check below would refuse it with exit code 5 on the first token it
+> matched. This repository ships none, so a configuration that names it reports
+> `ONLY_IN_MAIN` on every run. Leave it out of the `files` array and it stays what it
+> already is: a local asset.
 
 > **The two root trees are a path mapping, not a path match.** They live at the root here
 > because a plugin's components must be discoverable there — the portable Agent Plugins
