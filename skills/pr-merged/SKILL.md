@@ -1,6 +1,6 @@
 ---
 name: pr-merged
-description: "The closing phase of one sub-task: once its pull request has merged, record the completion and work out which pending sub-tasks that releases. Verifies the merge by asking GitHub rather than trusting the claim, writes a completion record stamped verified: github, recomputes the released set, and hands that set back to its caller. Iteration belongs to the orchestrator loop, not to this phase. Use when: the loop closes a sub-task, or a person says /pr-merged, 'PR 40 is merged', 'these PRs merged, continue', or returns after merging work outside a running loop. Reads and writes the orchestrator plan, result and state stores; runs no orchestrator script."
+description: "The closing phase of one sub-task: once its pull request has merged, record the completion and work out which pending sub-tasks that releases. Verifies the merge by asking GitHub rather than trusting the claim, writes a completion record stamped verified: github, recomputes the released set, and hands that set back to its caller. Iteration belongs to /advance, not to this phase. Use when: the loop closes a sub-task, or a person says /pr-merged, 'PR 40 is merged', 'these PRs merged, continue', or returns after merging work outside a running loop. Reads a contract handoff plan and writes the result and state stores."
 user_invocable: true
 ---
 
@@ -37,7 +37,7 @@ cannot find it can only guess at what it says.
 
 
 **One implementation, two front doors.** A skill is instructions for a model, and the
-orchestrator loop is a Python program, so a loop cannot invoke a skill. Both call the same
+caller may be a program rather than a session, and a program cannot invoke a skill. Both call the same
 script instead, and both therefore behave identically. Two implementations of these rules
 would drift the moment either changed.
 
@@ -303,8 +303,8 @@ means the decomposition was wrong. It goes to the architect, not to a failure re
 
 ### Write a failure record, in the channel that already exists
 
-The orchestrator already carries an escalation channel and reads it: `contract_impact` with
-`requires_architect`. Use it rather than inventing a second path.
+The escalation channel is `contract_impact` with `requires_architect`, inherited from the
+removed design because the shape was right. Use it rather than inventing a second path.
 
 ```yaml
 status: failed
@@ -390,40 +390,35 @@ keeps the branch reserved.
 
 State what was skipped as plainly as what succeeded.
 
-## What exists today, and what does not
+## The stores, and the design that defined them
 
-**The decomposition exists.** Checked on 2026-09-13: of the 146 contracts under
-`.claude/concepts/`, 132 carry an `## Implementation Handoff` section, and 117 carry a
-`**Files to touch:**` list inside it. Each block is a sub-task with a name and a scope. That
-is the plan this skill walks, and it is already there in most contracts.
+This phase writes to `.claude/orchestrator/results/` and `state/`, and reads a plan. Those
+paths come from an earlier subsystem that specified three stores and never filled any of them.
 
-What is missing is narrower than it first appears:
+**That subsystem's scripts were removed on 2026-09-14.** Its planner never parsed a contract
+and no session was ever launched, so the completion store was created, read in two places, and
+never written to once. Both readers invented success when they found nothing.
 
-- **No generated `task-map.yaml` anywhere.** The orchestrator's planner never parses the
-  contract, so it always produces an empty graph. It looks for a `Task Decomposition`
-  section, which no contract has. It does not read the handoff blocks, which nearly all
-  contracts do have. That mismatch is the whole reason the plan store is empty.
-- **No completion record has ever been written.** The store is created, its path is recorded
-  in state, and two consumers read it. Nothing produces one. The intended producer was the
-  task-executor session, which is never launched.
-- **Both readers invent success when a record is absent.** The launcher's fallback returns a
-  completed status with tests passed, citing whatever commit the worktree already sat on. The
-  final reviewer treats a missing record as simulation mode and skips its check. So an empty
-  completion store currently reads as a fully successful contract.
+The store names are kept because the design behind them was right: a plan of sub-tasks, one
+durable record per finished sub-task, and a working position rebuilt from those records. This
+phase is the producer that store never had.
 
-**This skill is the missing producer.** It writes the first real completion records, and it
-takes its sub-tasks from the handoff blocks rather than waiting for a planner repair.
+Its design record stays under `.claude/orchestrator/`, with a README saying plainly that it is
+a record rather than running code.
 
-Two follow-ups belong to the orchestrator, not to this skill. The two fallbacks above should
-be removed, or they will keep masking an empty store. The planner should read handoff blocks
-rather than a section no contract writes.
+**Do not model this phase's dependency check on the removed one.** That gate failed open: the
+executor named a branch with a date appended, the lookup omitted the date, and on the miss it
+released the child anyway. This phase computes releases from completion records, which carry
+no naming convention to get wrong.
 
-**A separate note on the orchestrator's own gate.** Do not reuse its dependency check as a
-model. Verified by testing it in a throwaway repository: the executor names task branches with
-a date appended, the gate looks them up without one, and on that miss the loop's copy fails
-open and releases the child anyway. A second copy of the same check in the launcher answers
-the opposite on identical input. This skill computes releases from completion records instead,
-which have no naming dependency at all.
+### Where the sub-tasks come from
+
+Contracts written from the standard template carry an `## Implementation Handoff` section, with
+one block per implementer and a `**Files to touch:**` list inside each. Each block is a
+sub-task. That is the plan this phase walks, and it needs no planner to produce it.
+
+The removed planner looked for a `## Task Decomposition` heading instead, which no contract
+ever wrote. That mismatch is the whole reason its plan store stayed empty.
 
 ## Anti-patterns (halt immediately)
 
@@ -470,4 +465,5 @@ which have no naming dependency at all.
 - **Complements** `/ship`, which opens pull requests. This skill handles what happens after
   one merges.
 - **Implemented by** `.claude/scripts/pr_merged.py`, which the loop calls directly.
-- **Does not run** `.claude/scripts/execute_contract.py`.
+- **Does not depend on** the removed orchestrator scripts; its design record is at
+  `.claude/orchestrator/`.

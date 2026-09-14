@@ -196,86 +196,33 @@ Once all Open Questions are answered AND all critique findings have explicit use
 - Append `→ Addressed by: <one line>` / `→ Deferred: <reason>` / `→ Rejected: <reason>` directly under each `[BLOCKER]` and `[WARN]` finding in the `## Critique` section
 - Flip `Status: draft` → `Status: approved`
 
-## Step 3.5: Offer orchestration for autonomous execution
+## Step 3.5: Route the approved contract
 
-> ### GATE — do not offer Option A. The orchestrator does not work.
->
-> Its two load-bearing pieces are unimplemented stubs, and it reports success anyway.
-> Skip the choice entirely and go straight to Step 4. Say in one line that an autonomous
-> path exists but is gated as unimplemented. Do not put a choice to the user when only one
-> option is available.
-> Verified 2026-09-13 by reading the code and running the suite.
->
-> - `.claude/scripts/orchestrator_task_planner.py` — `_load_contract` returns a hardcoded
->   dictionary holding an empty task list, instead of parsing the contract markdown.
->   `plan_tasks` returns nothing. A contract therefore yields zero tasks.
-> - `.claude/scripts/task_executor_launcher.py` — `_spawn_claude_session` has its real call
->   commented out. It touches a marker file and returns true. `_collect_result` then finds no
->   result file, falls through to a fallback, and reports the task completed with tests
->   passed. The commit it cites is whatever the worktree was already sitting on.
->
-> Nothing is planned, nothing is executed, and the run still reports a passing final review.
-> This is silent success, which is worse than a crash: every gate reports green.
->
-> The suite at `.claude/orchestrator/tests/test_orchestration_system.py` does not catch it.
-> It assigns `orchestrator.task_map` directly and never calls `plan_tasks`, so the planner
-> stub is never exercised. Thirteen tests pass in about a fifth of a second.
->
-> **Lift this gate only when both stubs are real, and a test proves a task's work actually
-> landed** — a commit the orchestrator did not invent. A positive control is required here:
-> a task that fails must make the run fail. Until then, everything below is a design record,
-> not a runnable path.
->
-> Five further defects, found 2026-09-13 in the consuming project and recorded here so the
-> gate carries the whole picture. Any one of them would break a run on its own:
->
-> - `task_executor_launcher.py` passes three arguments, in a different order, to the
->   `TaskExecutionPacketGenerator` constructor, which declares four. Every task would raise
->   a type error before doing anything.
-> - `_wait_for_architect` in `orchestrator_loop.py` blocks on Python's `input`, and the
->   agent dispatch beside it is commented out. An unattended run cannot answer it.
-> - `_merge_to_master` checks out the default branch and merges with no working directory
->   set, so it acts on whichever tree the orchestrator was started from — including a
->   developer's primary checkout.
-> - `_start_execution` shells out to the GitHub client to create one issue for the contract
->   and one per task, **before** any work happens. A curious run leaves real issues behind.
-> - `OrchestratorLoop._find_contract` returns the first markdown file containing the text
->   `Status: approved`, which need not be the contract that was asked for.
->
-> The working alternative is `/flow`, which composes `/task`, `/design-first`, `/tdd-first`,
-> the reviewer agents, `/verify-before-done`, `/git-commit` and `/ship`, and pauses only
-> where a person has to decide. Route there instead of offering a choice.
->
-> Note for a consuming project: the plugin ships these seven scripts but neither the
-> roadmap under `.claude/orchestrator/` nor the tests, so nothing in a fresh checkout
-> records that they are stubs. This gate is that record.
+With the contract approved, decide how the implementation runs.
 
-With the contract now approved, offer the user an orchestration option for autonomous, loop-driven task execution:
+**Route one — the agent chain (use this).** Continue to Step 4 and hand off to the implementer
+agents. When the operator wants the rest of the chain carried automatically, through tests,
+review, verification and a pull request, invoke `/flow`. It composes `/tdd-first`, the reviewer
+agents, `/verify-before-done`, `/git-commit` and `/ship`, and pauses only where a person has to
+decide.
 
-**Present this choice:**
+**When the contract declares several sub-tasks,** the middle of that chain iterates one step
+per merge. `/advance` starts what is ready and stops, a person merges, and `/pr-merged`
+confirms the merge with GitHub and says what it released. Neither half loops.
 
-> **Contract approved.** Choose how to proceed:
-> 
-> **Option A — UNAVAILABLE, see the gate above. Do not present this option.** The Contract Orchestrator — manages task planning, execution, Architect re-entry, and final review autonomously. Returns when complete.
-> 
-> **Option B:** Traditional workflow — hand off to implementer agents (`/tdd-first` flow) and conduct reviews manually.
+**Route two — the Contract Orchestrator (removed).**
+An earlier subsystem claimed this job and never did it. Its eight scripts were removed from
+this plugin on 2026-09-14, after a review found the two load-bearing pieces were stubs: the
+planner never parsed a contract, and no session was ever launched. Zero sub-tasks satisfied
+the loop's completion test, so a run printed that the contract was complete having written no
+code, and its own suite passed without ever calling the planner.
 
-**If the user chooses Option A (Orchestrator) — unreachable while the gate above stands:**
+It also carried three hazards for anyone who did run it. It opened real tracker issues before
+doing any work. Its merge step acted on whichever tree it was started from. Its dependency
+gate failed open, releasing a sub-task whose parent had not merged.
 
-1. Extract the contract ID from the filename: `<YYYY-MM-DD>-<slug>.md` → slug becomes `CTR-<slug>` (e.g., `2026-09-09-add-trailing-stops.md` → `CTR-add-trailing-stops`)
-2. Run the orchestrator entry point:
-   ```bash
-   python3 .claude/scripts/execute_contract.py <CONTRACT-ID>
-   ```
-3. Wait for orchestrator completion (will handle task planning, execution, architect re-entry, and final review autonomously)
-4. Orchestrator will report completion status and any failures
-5. **STOP here.** Do NOT proceed to Steps 4, 5, or 6. The orchestrator subsumes all post-approval workflow steps.
-
-**If the user chooses Option B (Traditional workflow):**
-
-Proceed to Step 4 (implementer handoff) as normal. The orchestrator is not invoked.
-
-**Rationale:** The orchestrator is designed for contracts with clear, decomposable work — explicit task lists and minimal discovery. Traditional workflow suits contracts where extensive review, feedback loops, or deep user involvement is expected. The user chooses which tool fits their contract's risk profile and complexity.
+Do not reintroduce it to solve a scheduling problem. `/flow` and `/advance` do the same job
+through pull requests, which gives the review surface the removed design never had.
 
 ## Step 4: Hand off to implementer agents
 
