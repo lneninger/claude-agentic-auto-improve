@@ -163,12 +163,11 @@ agents/          14 generic agents          (plugin root -- Claude and Cursor)
   hooks/         16 generic hooks, 3 shared helper modules, 4 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
     tests/       3 hook test suites
-  scripts/       19 workflow scripts
-    tests/       2 suites, including the path-resolution suite
+  scripts/       12 workflow scripts, 2 shared helper modules
+    tests/       7 suites, including the path-resolution suite
   templates/     6 document templates
   references/    2 reference documents
   registries/    MECHANISMS.md, VOCABULARY.md, JOURNAL.md (Universal tier only)
-                 INTEGRATION.md (whole file)
   area-mapping.json          TEMPLATE - schema intact, empty content set
   work-item-conventions.json TEMPLATE - schema intact, empty content set
   project-profile.md         TEMPLATE - blank slot table
@@ -262,14 +261,14 @@ Never copy the soft choice to a guard that blocks.
 
 ### Scripts and templates are not optional
 
-The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, six skills
+The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, eleven skills
 cite scripts in `.claude/scripts/`, and every concept contract is a copy of
 `templates/concept-contract.md`. The contract sub-task loop is the newest of these:
 `pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
 both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
-`scripts/tests/test_pr_merged.py`, sixty cases including the placeholder trap that an
+`scripts/tests/test_pr_merged.py`, sixty-eight cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. `scripts/tests/test_script_path_resolution.py` is the
-74-case suite for the two-layer path resolver. Shipping the resolver without its suite
+177-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
 ## Quick start in a new project
@@ -344,7 +343,7 @@ Three things drive that, and none of them loops on its own:
 Then `/advance` again. Between those, that is the loop.
 
 The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
-neither can drift from the other. It carries fifty-seven tests.
+neither can drift from the other. It carries sixty-eight tests.
 
 ### What it will refuse to do
 
@@ -392,5 +391,7 @@ Extracted from a first consuming project on 2026-09-10; inventory completed and 
 ownership and direction model corrected on 2026-09-12. Made installable under the Claude
 Code, Cursor and OpenAI Codex plugin mechanisms on 2026-09-13. The contract sub-task
 loop — `/flow`, `/advance`, `/pr-merged` and `pr_merged.py` — landed the same day, with
-`plugin_doctor.py` to bootstrap a consuming project. See
+`plugin_doctor.py` to bootstrap a consuming project. The stated inventory was
+reconciled against the tree again on 2026-09-14, after the orchestrator scripts were
+withdrawn and five test suites were added without the counts following either move. See
 [Known limitations](#known-limitations) for what that release does not yet cover.
