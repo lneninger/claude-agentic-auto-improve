@@ -72,10 +72,25 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 18 skills | yes | yes | yes |
+| 21 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
 | 16 hooks | yes | no | no |
-| scripts, templates, references, registries | vendoring only | vendoring only | vendoring only |
+| scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
+
+**Corrected 2026-09-13.** This row used to read `vendoring only`, and that was wrong. An
+install copies the whole repository into the provider's cache, script files included — the
+`superpowers` plugin ships Python the same way and its files sit in that cache today.
+
+What was actually missing was a way for a skill to *find* them. A skill citing
+`.claude/scripts/<name>.py` is naming a path inside **your** repository, which exists when you
+vendor and does not when you install.
+
+Skills that call a script now resolve it first, trying the vendored path, then
+`$CLAUDE_PLUGIN_ROOT`, then the provider's cache. `/advance` and `/pr-merged` do this, and any
+skill added later should copy the pattern rather than assume a vendored layout.
+
+The templates still need copying by hand under an install, because a concept contract is a
+file **in** your repository rather than one read from the plugin.
 
 Cursor and OpenAI both read the **Agent Plugins** open standard
 (`https://agent-plugins.org`), which is why one root `plugin.json` serves both. Claude Code
@@ -142,7 +157,7 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          18 generic skills          (plugin root -- all three providers)
+skills/          21 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   hooks/         16 generic hooks, 3 shared helper modules, 4 generic data files
@@ -172,6 +187,11 @@ Codex. Every other tree stays under `.claude/`, and `hooks/` in particular **mus
 so a hook moved to the repository root would resolve every registry, area-map and contract
 lookup against the wrong directory and miss silently.
 
+At runtime the loop also writes two stores under `.claude/orchestrator/`: `results/`
+holds one completion record per finished sub-task and is the durable evidence, while
+`state/` holds the working position and can be rebuilt from the records. Commit the
+first; ignore the second.
+
 ### Agents
 
 data-architect, contract-critic, fullstack-code-reviewer, senior-test-engineer,
@@ -181,23 +201,38 @@ dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scou
 
 ### Skills
 
-design-first, tdd-first, debug, verify-before-done, north-star, north-star-review,
-list-contracts, task, contract-accuracy, critique-now, cross-impact, journal-add,
-plan-questions, validate-registries, promote-ui-rule, git-commit, ship,
-sql-server-patterns.
+flow, task, design-first, tdd-first, advance, pr-merged, verify-before-done,
+git-commit, ship, debug, north-star, north-star-review, list-contracts,
+contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
+validate-registries, promote-ui-rule, sql-server-patterns.
 
 They form one chain, and each stage hands the next a written artefact rather than a memory
 of the conversation:
 
 ```
-/task            Work Item Brief      .claude/work-items/
-  -> /design-first  concept contract   .claude/concepts/     (you approve it)
-  -> /tdd-first     failing tests first
-  -> reviewers      adversarial critique
-  -> /verify-before-done   build, tests, drift        (blocks the word "done")
-  -> /git-commit    the commits
-  -> /ship          pull request + a Closing Link GitHub actually resolved
+/flow   the front door. Runs everything below, pausing only where you must decide.
+  |
+  +-- /task               Work Item Brief    .claude/work-items/
+  +-- /design-first       concept contract   .claude/concepts/   (you approve it)
+  +-- /tdd-first          failing tests first
+  +-- reviewers           adversarial critique
+  +-- /verify-before-done build, tests, drift    (blocks the word "done")
+  +-- /git-commit         the commits
+  +-- /ship               pull request, and a closing link GitHub actually resolved
 ```
+
+When a contract declares more than one sub-task, the middle of that chain iterates
+instead of running straight through. Each sub-task ends in a pull request somebody
+has to merge, so it moves one step at a time:
+
+```
+/advance      start what is ready, open a pull request, stop
+(you merge)   the only step in the whole chain a machine cannot take
+/pr-merged    confirm with GitHub, record it, say what that released
+              -> /advance again
+```
+
+Neither half loops. A person merging is what joins them.
 
 ### Hooks
 
@@ -227,9 +262,13 @@ Never copy the soft choice to a guard that blocks.
 
 ### Scripts and templates are not optional
 
-The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, five skills
+The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, six skills
 cite scripts in `.claude/scripts/`, and every concept contract is a copy of
-`templates/concept-contract.md`. `scripts/tests/test_script_path_resolution.py` is the
+`templates/concept-contract.md`. The contract sub-task loop is the newest of these:
+`pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
+both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
+`scripts/tests/test_pr_merged.py`, sixty cases including the placeholder trap that an
+unfilled `implementers` slot would otherwise walk into. `scripts/tests/test_script_path_resolution.py` is the
 74-case suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
@@ -276,6 +315,69 @@ would ship the part that can be wrong and leave behind the part that would say s
 6. **Add your sync configuration** at `.claude/.sync-config.json` and the tool that reads
    it. See CONTRIBUTING.md.
 
+## Where to start once it is installed
+
+**Type `/flow`.** That is the front door, and everything else is reached through it.
+
+```
+/flow <an issue number, a link, or a sentence describing the work>
+```
+
+It runs the chain in order: intake, a concept contract you approve, test-first implementation,
+adversarial review, verification, a commit, and a draft pull request. It pauses only where a
+person has to decide, and the contract gate is the one stop that can never be automated away.
+
+### When a contract has several sub-tasks
+
+A contract's `## Implementation Handoff` section may declare more than one sub-task, each with
+its own `Depends on:` line. Then the work is iterated one step per merge, because every
+sub-task ends in a pull request somebody has to merge.
+
+Three things drive that, and none of them loops on its own:
+
+| You type | What happens |
+|---|---|
+| `/advance <contract>` | Starts whatever is ready, opens a pull request, and stops |
+| *(you merge the pull request)* | The only step a machine cannot take |
+| `/pr-merged <number>` | Confirms the merge with GitHub, records it, and says what it released |
+
+Then `/advance` again. Between those, that is the loop.
+
+The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
+neither can drift from the other. It carries fifty-seven tests.
+
+### What it will refuse to do
+
+It will not release a sub-task whose dependency has not landed. It will not treat a contract
+with no sub-tasks as finished. It will not record a merge it did not confirm with GitHub, and
+it will not claim tests passed when nothing ran them.
+
+Each refusal exists because the mechanism it replaced did the opposite.
+
+### Let the doctor create what is missing
+
+Rather than working through the steps above by hand, run:
+
+```bash
+py -3 .claude/scripts/plugin_doctor.py                # report what is missing
+py -3 .claude/scripts/plugin_doctor.py --fix          # create what is safe
+```
+
+It creates the directories, copies the templates and registries out of the plugin, and
+scaffolds the configuration files. It is safe to re-run: a second pass finds nothing to do.
+
+Two things it will not do, both on purpose.
+
+**It never overwrites.** A file that exists is yours, whatever it contains.
+
+**It never invents a value that describes your repository.** `project-profile.md` arrives with
+the template's placeholders intact, so the machinery reads each slot as unfilled rather than as
+a wrong answer. A confidently wrong profile is worse than an obviously empty one. The report
+lists those files under `NEEDS YOU`.
+
+It also leaves `.claude/settings.json` alone and says so. Registering the hooks turns
+enforcement on, and that is your decision rather than a script's.
+
 ## Documentation
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — sync workflow, the project-name check, conflict resolution
@@ -286,5 +388,7 @@ would ship the part that can be wrong and leave behind the part that would say s
 
 Extracted from a first consuming project on 2026-09-10; inventory completed and the
 ownership and direction model corrected on 2026-09-12. Made installable under the Claude
-Code, Cursor and OpenAI Codex plugin mechanisms on 2026-09-13 — see
+Code, Cursor and OpenAI Codex plugin mechanisms on 2026-09-13. The contract sub-task
+loop — `/flow`, `/advance`, `/pr-merged` and `pr_merged.py` — landed the same day, with
+`plugin_doctor.py` to bootstrap a consuming project. See
 [Known limitations](#known-limitations) for what that release does not yet cover.

@@ -32,6 +32,22 @@ project profile", and this file is where that root is named.
 | `auth.roots` | *(the authentication and credential code roots, or `none`)* |
 | `safety-critical.roots` | *(roots where a defect causes irreversible harm, or `none`)* |
 | `review.documents` | *(the primary documents a reviewer must read, or `none`)* |
+| `implementers` | *(the agents that may own a contract sub-task, or `none` to accept the plugin's own)* |
+| `review-gates` | *(the agents that appear in a handoff block but open no pull request, or `none` to accept the plugin's own)* |
+
+### A note on `implementers`
+
+The contract sub-task loop reads this slot to decide which handoff blocks are sub-tasks. A block
+naming an agent outside the list is treated as a review gate or a note, so nothing waits on it to
+merge.
+
+Leaving it `none` accepts the agents the plugin ships. Naming a wrong agent is worse than naming
+none: the block silently stops being a sub-task and the loop reports work as unplanned.
+
+`review-gates` is the companion slot. A reviewer opens no pull request, so a block naming one is a
+step in the sequence rather than something to wait on for a merge. Declaring both lists is what
+lets the loop report a name that is neither — almost always a typo or a shorthand — instead of
+letting that block vanish from the plan with nothing to say it did.
 
 ## Worked shape
 
@@ -39,4 +55,6 @@ project profile", and this file is where that root is named.
 | `migration.root` | `src/AcmeApp.Persistence/Migrations/` |
 | `safety-critical.roots` | `src/AcmeApp.Payments/`, `src/AcmeApp.Auth/` |
 | `review.documents` | `CLAUDE.md`, `TESTING.md` |
+| `implementers` | `acme-backend-dev`, `acme-frontend-dev` |
+| `review-gates` | `acme-security-auditor` |
 ```
