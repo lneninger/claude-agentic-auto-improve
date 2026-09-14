@@ -60,8 +60,8 @@ is wrong in the safe direction still teaches the reader that the counts are deco
 
 - Rewriting the README's structure, headings, or argument. The user chose the accuracy
   pass explicitly over a full rewrite.
-- CONTRIBUTING.md, which carries its own copy of the `INTEGRATION.md` claim. Fixing it
-  is correct but is a separate change against a separate file.
+- ~~CONTRIBUTING.md, which carries its own copy of the `INTEGRATION.md` claim.~~
+  **Brought into scope on request, 2026-09-14.** See `## CONTRIBUTING.md addendum`.
 - The four failing cases in `.claude/scripts/tests/test_verify_issue_link.py`. They are
   pre-existing, they fail because this repository is a template rather than a consuming
   project, and a README pass must not quietly change test code.
@@ -127,3 +127,34 @@ Suites: 9 of 10 fully green. `test_verify_issue_link.py` reports 158/162 with 4 
 that are pre-existing -- the identical four appear with this brief removed, so they are
 unrelated to this change. They assert against "the REAL conventions file" and "the real
 corpus", both of which are empty template content in this repository by design.
+
+
+## CONTRIBUTING.md addendum
+
+Added after the README pass, when the user asked for the same claim to be fixed in
+CONTRIBUTING.md.
+
+**It was not the same defect.** The README listed `INTEGRATION.md` in its
+`## What is included` block, which enumerates shipped files, so the claim was simply
+false and deletion was the fix. CONTRIBUTING.md's line is a *sync rule* -- "the Universal
+section only, except `INTEGRATION.md` which is whole-file" -- and a rule is not falsified
+by the file being absent.
+
+What is wrong with it is subtler. `MECHANISMS.md` line 48 records that `INTEGRATION.md`
+"is the one registry with no Universal tier at all". The two-tier split exists precisely so
+the Universal half can be shared and the project half cannot. A registry with no Universal
+half therefore has nothing shareable in it: every line names one project's endpoints,
+DTO-to-model pairings and events. Listing it among the synced assets presents it as an
+ordinary member of a set it can never legitimately join -- CONTRIBUTING.md's own
+project-name check would halt the first outbound push with exit code 5, and this
+repository's not shipping one is the observable evidence that it never travelled.
+
+The replacement states that it does not travel, gives the reason, and routes the reader to
+the remedy the document already defines for a one-sided file: leave it out of the `files`
+array, where an undeclared file is never compared. Every term it uses -- `ONLY_IN_MAIN`,
+exit code 5, the `files` array, "local asset" -- is defined elsewhere in the same document.
+
+`MECHANISMS.md` was deliberately NOT edited. Its sentence describes how the configuration
+compares the file, which remains true, and a registry is shared source of truth that a
+documentation pass should not quietly rewrite. The new text is phrased to sit alongside it
+rather than contradict it.
