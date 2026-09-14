@@ -1,6 +1,6 @@
 ---
 name: flow
-description: "Run the whole contract-driven delivery chain end to end in one invocation: intake, design contract, test-first implementation, adversarial review, verification, commit and pull request. Drives the working agent chain (/task, /design-first, /tdd-first, the reviewer agents, /verify-before-done, /git-commit, /ship) and pauses only at the gates a human must answer. Use when: user says /flow, 'run the whole flow', 'take this all the way to a PR', 'do the full autonomous flow', 'end to end', or hands over a request and expects a pull request back rather than a plan. Does NOT drive the Contract Orchestrator scripts under .claude/scripts/ — that scaffold is gated as unimplemented; see the section at the end."
+description: "Run the whole contract-driven delivery chain end to end in one invocation: intake, design contract, test-first implementation, adversarial review, verification, commit and pull request. Drives the working agent chain (/task, /design-first, /tdd-first, the reviewer agents, /verify-before-done, /git-commit, /ship) and pauses only at the gates a human must answer. Use when: user says /flow, 'run the whole flow', 'take this all the way to a PR', 'do the full autonomous flow', 'end to end', or hands over a request and expects a pull request back rather than a plan. Replaces the Contract Orchestrator scripts, which were removed; see the section at the end."
 user_invocable: true
 ---
 
@@ -292,48 +292,29 @@ finished sub-task, works out which sub-tasks that releases, and continues them.
 usually a new session, and the tree has moved since. Check the branch, check the worktree
 path, and confirm the file list the brief names still exists before acting on it.
 
-## The inner loop is gated — do not run the orchestrator
+## The inner loop, and the design that was removed
 
-This plugin ships seven scripts that read as a working orchestrator:
-`execute_contract.py`, `orchestrator_loop.py`, `orchestrator_task_planner.py`,
-`task_executor_launcher.py`, `generate_task_execution_packet.py`, `final_reviewer.py` and
-`orchestrator_github_integration.py`. It does **not** ship the design notes or the tests
-that go with them, so a fresh checkout carries no record that they are stubs. The gate in
-`/design-first` Step 3.5 and this section are that record.
+`/advance` and `/pr-merged` are the inner loop. Nothing else is.
 
-**The loop is a real layer of this design, and it cannot run today.** Do not invoke it, and do not offer it as a working choice. Verified by reading the
-source on 2026-09-13:
+An earlier subsystem claimed that job — eight scripts under `.claude/scripts/`, with names
+beginning `orchestrator_` plus `execute_contract.py`. **They were removed on 2026-09-14.**
 
-1. **The planner always yields zero tasks.** `TaskPlanner._load_contract` returns a
-   hardcoded dictionary and never reads the contract markdown. `plan_tasks` hands back the
-   empty dictionary it started with.
-2. **Zero tasks makes the run claim success.** `_execute_next_tasks` asks whether all tasks
-   completed, and Python's `all` over an empty collection answers yes. The loop moves to
-   verifying, the final reviewer walks the same empty collection, and the program prints
-   that execution is complete. Nothing was written.
-3. **No Claude session is ever launched.** `_spawn_claude_session` touches a marker file
-   and returns success; the launch line beside it is commented out. `_collect_result` then
-   finds no result file, falls through to a fallback, and reports the task completed with
-   tests passed, citing whatever commit the worktree already sat on.
-4. **The packet generator call raises a type error.** The launcher passes three arguments
-   to a constructor that declares four, in a different order.
-5. **Architect re-entry blocks on console input,** with the agent dispatch commented out.
-   An unattended run cannot answer it.
-6. **A merge acts on the primary working tree.** `_merge_to_master` checks out the default
-   branch and merges with no working directory set, so it acts on whichever tree the
-   orchestrator was started from.
-7. **A run opens real tracker issues first.** `_start_execution` shells out to the GitHub
-   client to create an issue for the contract and one per task, before any work happens.
-8. **Contract lookup can pick the wrong file** — the first contract found containing the
-   text `Status: approved`, which need not be the one requested.
-9. **The test suite that exists in the origin project is green and proves nothing.** It
-   runs thirteen tests in about a fifth of a second and never calls `plan_tasks`, so the
-   planner stub is never exercised.
+They never worked. The planner never parsed a contract, so every run produced zero sub-tasks,
+and an empty set satisfied the completion test. A run therefore printed that the contract was
+complete having written no code. No session was ever launched; that call sat commented out.
+Its own thirteen-test suite passed without once calling the planner.
 
-**Lift this gate only when the stubs are real and a test proves a task's work actually
-landed** — a commit the orchestrator did not invent. A positive control is required: a task
-that fails must make the run fail. Until then, the agent chain above is the autonomy that
-exists.
+Three hazards came with it. It opened real tracker issues before doing any work. Its merge
+step acted on whichever tree it was started from. Its dependency gate failed open, releasing a
+sub-task whose parent had not merged.
+
+**It was a different loop, not a broken version of this one.** It merged locally and never
+pushed, so it had no review surface and no person in the loop. This design integrates by pull
+request, which is why a person merges every sub-task.
+
+The design record is kept, with a README stating plainly that it is a record rather than code.
+Read it before rebuilding anything: the one capability it had and this design does not is an
+isolated session per sub-task.
 
 ## Anti-patterns (halt immediately)
 
@@ -371,4 +352,5 @@ exists.
   run resumable across sessions.
 - **Hands the inner loop to** `/advance`, which moves a contract one sub-task at a time.
 - **Pairs with** `/pr-merged`, which closes a sub-task and wakes `/advance`.
-- **Deliberately does not drive** `.claude/scripts/execute_contract.py`.
+- **Replaces** the removed orchestrator scripts; their design record is at
+  `.claude/orchestrator/`.
