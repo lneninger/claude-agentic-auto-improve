@@ -151,6 +151,56 @@ worktree workflow.
 7. **If it is a skill or an agent, put it at the repository root** (`skills/<name>/SKILL.md`
    or `agents/<name>.md`), not under `.claude/`. Anywhere else and the three plugin
    mechanisms will not find it.
+8. **If it is code, it must be true about itself.** See the rule below. An asset that is only
+   safe because something elsewhere warns about it does not ship.
+
+## What may not ship
+
+**Anything this plugin ships must carry enough truth to be used safely by someone with none
+of the originating project's context.** They have your code and not your notes, your history
+or your conversation.
+
+Two obligations follow, and they are not the same one twice.
+
+**A file must state its state, not only its intent.** A docstring saying what a function is
+for is not a record of whether it does it. Where something is unfinished, say so at the top of
+the file, before a reader gets far enough to find the stub.
+
+**Nothing ships that needs an external warning to be safe.** If an asset is only safe because
+a separate document explains what is wrong with it, remove the asset. A warning only works
+when the reader opens it before running the thing, and nothing enforces that order.
+
+### The incident that produced this rule
+
+Eight orchestration scripts shipped here from 2026-09-09 to 2026-09-14. Every one carried a
+docstring. The task planner's opened: *"generates task DAG from Contract specification. Reads a
+Contract file and produces task-map.yaml with task dependencies, scope, acceptance criteria."*
+
+Eleven lines below that sat the function it described:
+
+```python
+# Return empty for now; real implementation fills this
+return self.tasks
+```
+
+So the code was documented. Its documentation described a program that was never written.
+
+The consequence was not a crash. Zero sub-tasks satisfied the loop's completion test, so a run
+reported that a contract had completed having written no code. Its own thirteen-test suite
+passed without once calling the planner.
+
+**The originating project held ten documents recording all of this. None of them shipped
+here.** A fresh checkout got the code and nothing else, so the warning had to be written into
+three skills instead — the only assets that travelled.
+
+That warning was the wrong fix, and shipping the ten documents alongside would have been
+little better: the implementation summary opens "Status: Foundation and Core Components
+Implemented", and the user guide walks you through running it. More documentation of that kind
+is more surface for the same error.
+
+The scripts were removed from both repositories on 2026-09-14. Their design record stays in
+the originating project, under a README that says plainly it is a record rather than running
+code.
 
 ## Troubleshooting
 

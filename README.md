@@ -380,7 +380,9 @@ enforcement on, and that is your decision rather than a script's.
 
 ## Documentation
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — sync workflow, the project-name check, conflict resolution
+- [CONTRIBUTING.md](CONTRIBUTING.md) — sync workflow, the project-name check, conflict
+  resolution, and **what may not ship**: the rule that an asset must state its own state,
+  and that nothing ships which is only safe because a separate document warns about it
 - `.claude/hooks/tests/` and `.claude/scripts/tests/` — the suites
 - Each agent and skill — its own `## When to Use` section
 
