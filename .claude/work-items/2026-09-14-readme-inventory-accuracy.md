@@ -12,9 +12,9 @@ branch: docs/readme-inventory-accuracy
 worktree: .claude/worktrees/20260914-docs-readme-inventory-accuracy
 north_stars: none - the register holds no active thought
 contract: none - XS/S route, no contract required
-pr: none
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/8
+issue_link: none
+status: shipped
 created: 2026-09-14
 ---
 
