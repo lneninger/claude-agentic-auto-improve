@@ -9,6 +9,17 @@
   "max_em_dashes_per_sentence": 3,
   "max_findings_reported": 12,
 
+  "_scoring_comment": "How much each kind of fault weighs, and the score at or above which the turn is stopped instead of merely noted. A stopped turn costs the reader a second copy of the message, because this hook runs after the message is printed and cannot retract it. So only a fault worth that cost should reach the threshold. Retune here; no Python change is needed.",
+  "fault_weights": {
+    "short_form": 4,
+    "bare_number": 4,
+    "stacked_dashes": 4,
+    "sentence_length": 1
+  },
+  "_sentence_overrun_comment": "A sentence-length fault weighs its base plus one more for every whole step of words past the limit, so a sentence at double the limit weighs far more than one four words over.",
+  "sentence_overrun_step": 10,
+  "stop_threshold": 4,
+
   "_short_forms_comment": "Each of these must be written out in full words at least once per message, with the short form in brackets right after it, like 'test-driven development (TDD)'. Code, file paths, links and inline code spans are stripped out before the check, so a short form that only appears inside a path or a command is never flagged.",
   "short_forms": [
     "TDD",
