@@ -115,6 +115,10 @@
           {
             "type": "command",
             "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plan-question-advisor.py\""
+          },
+          {
+            "type": "command",
+            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py\" --carry-forward"
           }
         ]
       }
