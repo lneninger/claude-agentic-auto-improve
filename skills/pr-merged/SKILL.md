@@ -50,7 +50,7 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — fifty cases over identity, parsing, verdicts, records, releases and conflict detection. They were
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — ninety-three cases over identity, parsing, block classification, verdicts, records, releases and conflict detection. They were
 mutation-probed: disabling the verification check, reading a missing dependency line as none,
 and counting scope notes as sub-tasks each turn the suite red.
 
@@ -379,8 +379,10 @@ keeps the branch reserved.
 - Verified merged: <number -> sub-task, one line each>
 - Skipped: <number — verdict, one line each>
 - Unmapped: <numbers that matched no sub-task>
+- Contract defects: <block id — reason (files-but-no-recognised-agent | no-files-but-names-an-agent), one line each | none>
 - Hand-resolved files: <pr -> merge commit -> files, or none detected, or not detectable (squash/rebase)>
 - Completion records written: <paths>
+- Review verdicts: <sub-task — pass | pass-with-findings | blocked | unreadable, one line each | none read this run>
 - Released: <sub-tasks now unblocked, and what released them>
 - Still blocked: <sub-task — waiting on X>
 - Failed: <sub-task — severity, one-line reason, and what it now blocks | none>
@@ -414,8 +416,11 @@ no naming convention to get wrong.
 ### Where the sub-tasks come from
 
 Contracts written from the standard template carry an `## Implementation Handoff` section, with
-one block per implementer and a `**Files to touch:**` list inside each. Each block is a
-sub-task. That is the plan this phase walks, and it needs no planner to produce it.
+one block per agent — implementer and review gate alike — and a `**Files to touch:**` list inside
+each. **That list is what makes a block a sub-task, not who is assigned to it.** A review gate
+declares its artefact and is waited on for a merge exactly as an implementer is. A block naming
+an agent with no file list is a contract defect that halts the plan. That is the plan this phase
+walks, and it needs no planner to produce it.
 
 The removed planner looked for a `## Task Decomposition` heading instead, which no contract
 ever wrote. That mismatch is the whole reason its plan store stayed empty.

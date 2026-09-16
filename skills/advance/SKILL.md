@@ -55,7 +55,7 @@ py -3 "$PRM" --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
-by fifty tests and has been mutation-probed. **Read its answer. Do not recompute it from
+by ninety-three tests and has been mutation-probed. **Read its answer. Do not recompute it from
 the contract**, or there are two implementations of the same rules and they will disagree.
 
 The answer carries `next_move.action`, plus `dispatch` packets when there is something to start.
@@ -63,6 +63,24 @@ The answer carries `next_move.action`, plus `dispatch` packets when there is som
 ## Step 2: Take the move the script names
 
 The action set is closed. Each one has exactly one response.
+
+### `contract-defect` — a block cannot be delivered as written
+
+**Checked before every other action, including `dispatch` and `nothing-planned`.** Report each
+entry in `defects` with its block and its reason, then stop. Start nothing.
+
+Two reasons exist. `no-files-but-names-an-agent` is a block that names somebody to do work and
+declares no files, so it produces neither a diff nor a record and nothing could ever prove it
+ran. `files-but-no-recognised-agent` is a block carrying real files whose agent matches no
+entry in the project profile's `implementers` or `review-gates` slots — usually a typo, which
+is why the block is still tracked rather than quietly dropped.
+
+**The remedy is editing one line of the contract, not working around it here.** Do not invent
+an agent, do not infer a file list, and do not skip the block and carry on with the rest.
+
+This is checked first on purpose. A contract whose blocks are *all* malformed has no sub-tasks
+at all, so asking "is anything planned?" first would answer `nothing-planned` about a contract
+that declares nine defective blocks — which is the silent discard this action exists to end.
 
 ### `dispatch` — there is work ready to start
 
@@ -94,6 +112,18 @@ For the one being started:
 3. **Run `/ship`** to open a draft pull request for that sub-task, and only that sub-task.
 4. **Stop.** Report the pull request and say plainly that the contract now waits for a merge,
    and that `/pr-merged` is what continues it.
+
+**A packet flagged `needs_agent` names no recognised agent.** Refuse it the same way. Say which
+sub-task is missing one, and that its heading must name an agent from the project profile's
+`implementers` or `review-gates` slots. Do not pick an agent that looks right — the packet is
+JSON another model reads, and a guessed name sends real work to the wrong specialist.
+
+**This refusal cannot arise from the loop's own dispatch, and that is deliberate.** A block whose
+agent is unrecognised is already a defect, and defects are asked about before anything is
+dispatched, so the earlier question always catches it first. The refusal is kept as a guard for a
+packet built by hand — `build_dispatch` is public and a caller may construct one directly. Kept
+rather than deleted on the operator's decision of 2026-09-16, recorded so nobody removes it as
+dead code or re-derives the contradiction.
 
 **A packet flagged `needs_authoring` has no TASK block in the contract.** Do not write one and
 carry on. Say which sub-task is missing it, and that the contract needs amending. Inventing the
@@ -150,6 +180,7 @@ blocks. `/design-first` is where that happens.
 ### ADVANCE REPORT
 - Contract: <slug>  (<n> sub-tasks)
 - Next move: <action>
+- Contract defects: <block — reason, one line each | none>
 - Started: <sub-task -> branch -> pull request url, or none>
 - Failed: <sub-task — severity, reason | none>
 - Blocked: <sub-task <- what holds it, one line each | none>

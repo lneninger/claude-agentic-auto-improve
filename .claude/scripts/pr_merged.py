@@ -91,12 +91,14 @@ def load_slot(profile_text: Optional[str], slot: str) -> Tuple[str, ...]:
 
 
 def load_review_gates(profile_text: Optional[str]) -> Tuple[str, ...]:
-    """Agents that appear in a handoff block but produce nothing to merge.
+    """Agents that review rather than implement.
 
-    A reviewer opens no pull request, so a block naming one is a gate in the
-    sequence rather than a merge-gated sub-task. Declaring them is what lets a
-    name that is neither an implementer nor a gate be reported as a mistake
-    instead of silently vanishing from the plan.
+    A review gate that declares a ``Files to touch`` entry (its review
+    artefact) is an ordinary mergeable block, resolved through this list
+    exactly as an implementer is resolved through ``IMPLEMENTER_AGENTS`` --
+    see ``classify_handoff``. Declaring them is what lets a name that is
+    neither an implementer nor a gate be reported as a mistake instead of
+    silently vanishing from the plan.
     """
     return load_slot(profile_text, "review-gates") or DEFAULT_REVIEW_GATES
 
@@ -168,11 +170,75 @@ class SubTask:
     id: str
     ordinal: int
     name: str
-    agent: str
+    #: ``None`` when the block names no recognised agent -- never an empty
+    #: string. The dispatch packet is JSON a model reads, and "" reads as a
+    #: name.
+    agent: Optional[str]
     #: Declared ordinals this waits for. ``None`` means the contract never said,
     #: which is a defect and must never be read as "no dependencies".
     depends_on: Optional[List[int]]
     files: List[str] = field(default_factory=list)
+    #: Which list resolved ``agent``: implementer | review-gate | unrecognised
+    #: | none. Defaults to ``None`` ("unset") so a hand-built SubTask in a
+    #: test is not forced to invent a role -- ``classify_handoff`` always
+    #: sets this explicitly.
+    agent_role: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Block classification -- what a block declares, never who is assigned
+# ---------------------------------------------------------------------------
+@dataclass
+class HandoffBlock:
+    """One ``###`` block in the handoff section, whatever kind it is.
+
+    The accounting listing: its length equals the number of ``###`` headings
+    in the section. Every block gets one of these, including scope notes and
+    malformed blocks -- nothing is discarded.
+    """
+
+    ordinal: int
+    id: str
+    heading: str
+    #: Closed set: mergeable | scope-note | malformed. Decided by what the
+    #: block declares -- files, an agent, both, or neither.
+    kind: str
+    agent: Optional[str]
+    #: Closed set: implementer | review-gate | unrecognised | none.
+    agent_role: str
+    files: List[str]
+    depends_on: Optional[List[int]]
+
+
+@dataclass
+class BlockDefect:
+    """A block that cannot be delivered as written, whatever its kind.
+
+    Separate from ``kind`` deliberately: kind describes the declaration,
+    defect describes the deliverability. A block may be ``mergeable`` and
+    defective at once -- files present, agent name a typo.
+    """
+
+    ordinal: int
+    id: str
+    heading: str
+    #: Closed set: no-files-but-names-an-agent | files-but-no-recognised-agent.
+    reason: str
+    agent: Optional[str]
+
+
+@dataclass
+class HandoffClassification:
+    """The single return of ``classify_handoff``.
+
+    ``sub_tasks`` keeps ``parse_handoff``'s exact position, ordering and
+    fields -- it is the mergeable subset whose agent actually resolved to a
+    recognised name, so it can be dispatched.
+    """
+
+    blocks: List[HandoffBlock]
+    sub_tasks: List[SubTask]
+    defects: List[BlockDefect]
 
 
 # ---------------------------------------------------------------------------
@@ -210,45 +276,116 @@ def _parse_depends_on(body: str) -> Optional[List[int]]:
     return [int(n) for n in re.findall(r"\d+", raw.split("—")[0].split("–")[0])]
 
 
-def parse_handoff(contract_text: str,
-                  implementers: Optional[Tuple[str, ...]] = None) -> List[SubTask]:
-    """Read the ``## Implementation Handoff`` section into sub-tasks.
+def classify_handoff(contract_text: str,
+                     implementers: Optional[Tuple[str, ...]] = None,
+                     gates: Optional[Tuple[str, ...]] = None) -> HandoffClassification:
+    """Classify every ``###`` block in the ``## Implementation Handoff`` section.
 
-    A sub-task is a block that names an implementer agent AND carries a
-    ``Files to touch`` list. A scope note has neither. A review gate has an
-    agent but nothing to merge. Neither is waited on.
+    A block is judged by what it DECLARES, never by who is assigned:
+
+      declares files? | agent in heading        | kind        | in defects?
+      -----------------|--------------------------|-------------|-------------
+      yes              | implementer              | mergeable   | no
+      yes              | review-gate               | mergeable   | no
+      yes              | agent-shaped, unrecognised | mergeable  | yes
+      yes              | none present              | mergeable   | yes
+      no                | implementer or review-gate | malformed | yes
+      no                | agent-shaped, unrecognised | malformed  | yes
+      no                | none present              | scope-note  | no
+
+    ``sub_tasks`` is the mergeable subset whose agent actually resolved --
+    the two "mergeable but defective" rows above are tracked in ``defects``
+    and excluded from ``sub_tasks``, because there is no one to dispatch them
+    to. Nothing that appears in the handoff section is silently dropped:
+    ``len(blocks)`` equals the number of ``###`` headings.
 
     Headings after the section end are never read.
     """
     section = re.search(r"^## Implementation Handoff(.*?)(?=^## |\Z)", contract_text, re.S | re.M)
     if not section:
-        return []
+        return HandoffClassification(blocks=[], sub_tasks=[], defects=[])
 
-    tasks: List[SubTask] = []
+    impls = implementers if implementers is not None else IMPLEMENTER_AGENTS
+    gts = gates if gates is not None else REVIEW_GATES
+
+    blocks: List[HandoffBlock] = []
+    sub_tasks: List[SubTask] = []
+    defects: List[BlockDefect] = []
+
     for index, block in enumerate(re.split(r"^### ", section.group(1), flags=re.M)[1:], start=1):
         heading, _, body = block.partition("\n")
         heading = heading.strip()
 
-        named = set(re.findall(r"`([a-z][a-z0-9-]{4,})`", heading))
-        agent = next((a for a in (implementers or IMPLEMENTER_AGENTS) if a in named), None)
+        named_order = re.findall(r"`([a-z][a-z0-9-]{4,})`", heading)
+        named = set(named_order)
         files = re.findall(r"^-\s+`?([^\s`]+)`?", body.split("**Files to touch:**")[-1], re.M) \
             if "**Files to touch:**" in body else []
-        if not agent or not files:
-            continue  # scope note, review gate, or anything else that never merges
+
+        agent = next((a for a in impls if a in named), None)
+        if agent:
+            role = "implementer"
+        else:
+            agent = next((a for a in gts if a in named), None)
+            if agent:
+                role = "review-gate"
+            elif named_order:
+                agent = named_order[0]
+                role = "unrecognised"
+            else:
+                role = "none"
 
         ordinal_match = re.match(r"(\d+)\.", heading)
         ordinal = int(ordinal_match.group(1)) if ordinal_match else index
         clean = re.sub(r"^\d+\.\s*", "", heading)
+        block_id = derive_subtask_id(ordinal, clean)
+        name = re.split(r"\s+[—–-]\s+", clean.split("(")[0])[0].strip()
+        depends_on = _parse_depends_on(body)
 
-        tasks.append(SubTask(
-            id=derive_subtask_id(ordinal, clean),
-            ordinal=ordinal,
-            name=re.split(r"\s+[—–-]\s+", clean.split("(")[0])[0].strip(),
-            agent=agent,
-            depends_on=_parse_depends_on(body),
-            files=files,
+        if files:
+            kind = "mergeable"
+        elif role != "none":
+            kind = "malformed"
+        else:
+            kind = "scope-note"
+
+        blocks.append(HandoffBlock(
+            ordinal=ordinal, id=block_id, heading=heading, kind=kind,
+            agent=agent, agent_role=role, files=files, depends_on=depends_on,
         ))
-    return tasks
+
+        if kind == "mergeable" and role in ("implementer", "review-gate"):
+            sub_tasks.append(SubTask(
+                id=block_id, ordinal=ordinal, name=name, agent=agent,
+                depends_on=depends_on, files=files, agent_role=role,
+            ))
+        elif kind == "mergeable":
+            defects.append(BlockDefect(
+                ordinal=ordinal, id=block_id, heading=heading,
+                reason="files-but-no-recognised-agent", agent=agent,
+            ))
+        elif kind == "malformed":
+            defects.append(BlockDefect(
+                ordinal=ordinal, id=block_id, heading=heading,
+                reason="no-files-but-names-an-agent", agent=agent,
+            ))
+
+    return HandoffClassification(blocks=blocks, sub_tasks=sub_tasks, defects=defects)
+
+
+def parse_handoff(contract_text: str,
+                  implementers: Optional[Tuple[str, ...]] = None) -> List[SubTask]:
+    """Read the ``## Implementation Handoff`` section into sub-tasks.
+
+    A projection of ``classify_handoff``: a sub-task is a mergeable block
+    whose agent actually resolved, whether to an implementer or to a review
+    gate that declares its own review artefact as a file to touch. A scope
+    note declares neither an agent nor files. A block naming an agent with no
+    files -- review gate or otherwise -- is a contract defect, reported
+    through ``classify_handoff(...).defects`` rather than silently dropped.
+
+    Headings after the section end are never read.
+    """
+    return classify_handoff(contract_text, implementers=implementers, gates=None).sub_tasks
 
 
 def handoff_bodies(contract_text: str) -> Dict[str, str]:
@@ -303,11 +440,19 @@ def map_pr_to_subtask(head_branch: str, title: str, tasks: List[SubTask],
 # The record
 # ---------------------------------------------------------------------------
 def build_record(verdict: str, commit: Optional[str], pr_url: str,
-                 merged_at: Optional[str], checks: Optional[str]) -> Dict[str, Any]:
+                 merged_at: Optional[str], checks: Optional[str],
+                 review_verdict: Optional[str] = None) -> Dict[str, Any]:
     """A record states what was observed. It never asserts what was not.
 
     A merge is not a test run, so ``tests_passed`` is ``unknown`` unless a
     status check on the merge commit said otherwise.
+
+    ``review_verdict`` is the ``**Verdict:**`` reading a review-gate sub-task's
+    own artefact carried, if one was read. ``None`` means no reading was
+    taken -- either the sub-task declares no review artefact, or nothing
+    could be read -- and the key is OMITTED entirely rather than stamped as
+    null, so every record written before this parameter existed keeps its
+    exact meaning.
     """
     if checks == "SUCCESS":
         tests_passed, verified_by = True, "ci"
@@ -317,7 +462,7 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
         tests_passed, verified_by = "unknown", "none"
 
     failed = verdict == "closed-unmerged"
-    return {
+    record = {
         "status": "failed" if failed else "completed",
         "commit": commit,
         "tests_passed": tests_passed,
@@ -333,6 +478,9 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
         "merged_at": merged_at,
         "verified": "github",
     }
+    if review_verdict is not None:
+        record["review_verdict"] = review_verdict
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +493,12 @@ def compute_released(tasks: List[SubTask],
 
     Computed from completion records only. Live state can go stale; a record
     is evidence. A record releases nothing unless it is completed AND carries
-    ``verified: github``.
+    ``verified: github``. A dependency's record may also carry a
+    ``review_verdict`` (stamped for a verdict-bearing sub-task); a reading
+    outside ``pass`` / ``pass-with-findings`` is treated as unmet, naming the
+    reading in the blocked reason. A record with no ``review_verdict`` key is
+    judged exactly as before this field existed -- that is what protects
+    every record written before this change.
     """
     by_ordinal = {t.ordinal: t for t in tasks}
     released: List[SubTask] = []
@@ -368,6 +521,10 @@ def compute_released(tasks: List[SubTask],
             rec = records.get(dep.id)
             if not rec or rec.get("status") != "completed" or rec.get("verified") != "github":
                 unmet.append(dep.id)
+                continue
+            verdict = rec.get("review_verdict")
+            if verdict is not None and verdict not in ("pass", "pass-with-findings"):
+                unmet.append(f"{dep.id} (review verdict: {verdict})")
 
         if unmet:
             blocked[task.id] = unmet
@@ -494,6 +651,9 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
         "contract": contract_path,
         "task_block": block,
         "needs_authoring": block is None,
+        #: Mirrors needs_authoring. A None agent has no one to dispatch to --
+        #: the caller must refuse rather than send an empty name to a model.
+        "needs_agent": task.agent is None,
     }
 
 
@@ -501,17 +661,28 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
 # advance — one move, then stop
 # ---------------------------------------------------------------------------
 def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
-            state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            state: Optional[Dict[str, Any]] = None,
+            defects: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Decide the contract's next single move. This never iterates.
 
     A merge-gated loop does not spin. It makes one move, then suspends until a
     person merges something and the closing phase wakes it.
 
-    The order of these questions matters. An empty plan is reported as having
-    nothing planned, never as complete — ``all()`` over an empty collection
-    answers yes, and reading that as success is the defect that made the old
-    orchestrator report a finished contract having written no code.
+    The order of these questions matters, and a contract's own defects are
+    asked about FIRST — ahead of even an empty plan. A contract whose blocks
+    are all malformed parses to an empty task list, and asking
+    "nothing-planned" first would describe a contract declaring nine
+    defective blocks as one declaring none. Only once there are no defects to
+    report does an empty plan get read as having nothing planned, never as
+    complete — ``all()`` over an empty collection answers yes, and reading
+    that as success is the defect that made the old orchestrator report a
+    finished contract having written no code.
     """
+    if defects:
+        return {"action": "contract-defect", "defects": defects,
+                "detail": "one or more handoff blocks cannot be delivered as written; "
+                          "amend the contract before anything is dispatched"}
+
     if not tasks:
         return {"action": "nothing-planned",
                 "detail": "the contract declares no sub-tasks; nothing can be complete"}
@@ -561,6 +732,29 @@ def detect_resolved_files(commit_shas: List[str],
 
 
 # ---------------------------------------------------------------------------
+# The one machine-read line in a review artefact
+# ---------------------------------------------------------------------------
+_REVIEW_VERDICT_VALUES = ("pass", "pass-with-findings", "blocked")
+
+
+def parse_review_verdict(artefact_text: str) -> Optional[str]:
+    """Read a review artefact's ``**Verdict:**`` header line.
+
+    Fixed shape, alone on its own line: ``**Verdict:** pass``,
+    ``**Verdict:** pass-with-findings`` or ``**Verdict:** blocked``. Prose
+    elsewhere in the file is for the reader and is never read here. A missing
+    line, free prose that is not the fixed header, or a value outside the
+    closed set all return ``None`` -- a guess here is worse than admitting
+    the artefact could not be read.
+    """
+    m = re.search(r"^\*\*Verdict:\*\*\s*(\S+)\s*$", artefact_text, re.M)
+    if not m:
+        return None
+    value = m.group(1).strip()
+    return value if value in _REVIEW_VERDICT_VALUES else None
+
+
+# ---------------------------------------------------------------------------
 # Edges: the only places that touch git or GitHub
 # ---------------------------------------------------------------------------
 def _run(cmd: List[str]) -> Tuple[int, str]:
@@ -573,7 +767,7 @@ def _run(cmd: List[str]) -> Tuple[int, str]:
 
 def gh_pr(number: int) -> Optional[Dict[str, Any]]:
     code, out = _run(["gh", "pr", "view", str(number), "--json",
-                      "number,state,mergedAt,mergeCommit,headRefName,baseRefName,url,commits,statusCheckRollup"])
+                      "number,title,state,mergedAt,mergeCommit,headRefName,baseRefName,url,commits,statusCheckRollup"])
     if code != 0 or not out:
         return None
     try:
@@ -589,6 +783,18 @@ def git_combined_diff(sha: str) -> Tuple[List[str], int]:
         return [], parent_count
     _, out = _run(["git", "show", "--cc", "--name-only", "--format=", sha])
     return [l for l in out.splitlines() if l.strip()], parent_count
+
+
+def file_at_commit(sha: str, path: str) -> Optional[str]:
+    """The text of ``path`` as it existed at ``sha``, or ``None`` if it can't
+    be read -- the file didn't exist at that commit, or the commit is unknown.
+
+    Injectable the same way ``git_combined_diff`` is: called by its module-
+    level name, so a caller patches ``pr_merged.file_at_commit`` directly
+    without threading it through as a parameter.
+    """
+    code, out = _run(["git", "show", f"{sha}:{path}"])
+    return out if code == 0 else None
 
 
 def default_branch() -> str:
@@ -645,7 +851,10 @@ def main() -> int:
         return 2
 
     slug = contract.stem
-    tasks = parse_handoff(contract.read_text(encoding="utf-8", errors="replace"))
+    classification = classify_handoff(contract.read_text(encoding="utf-8", errors="replace"))
+    tasks = classification.sub_tasks
+    blocks = classification.blocks
+    defects = classification.defects
     records = load_records(slug)
     base = default_branch()
 
@@ -653,6 +862,8 @@ def main() -> int:
         "contract": slug,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sub_tasks": [asdict(t) for t in tasks],
+        "blocks": [asdict(b) for b in blocks],
+        "defects": [asdict(d) for d in defects],
         "closed": [], "skipped": [], "unmapped": [], "hand_resolved": [], "failed": [],
     }
 
@@ -675,13 +886,38 @@ def main() -> int:
 
         rollup = pr.get("statusCheckRollup")
         checks = rollup[0].get("conclusion") if isinstance(rollup, list) and rollup else None
-        rec = build_record(verdict, (pr.get("mergeCommit") or {}).get("oid"),
-                           pr.get("url", ""), pr.get("mergedAt"), checks)
+        merge_sha = (pr.get("mergeCommit") or {}).get("oid")
+
+        review_verdict = None
+        verdict_file = next((f for f in task.files if f.startswith(".claude/reviews/")), None)
+        # A pull request that closed WITHOUT merging has no merge commit, so
+        # nothing was read and no reading is stamped -- the key stays absent.
+        # Stamping "unreadable" here would claim an attempt that never
+        # happened. The dependent is already withheld by an older, stronger
+        # mechanism: build_record marks this record "failed" for a
+        # closed-unmerged pull request, and advance() short-circuits on any
+        # failed record before the release check is ever reached.
+        if verdict_file and merge_sha:
+            artefact_text = file_at_commit(merge_sha, verdict_file)
+            # parse_review_verdict stays pure: it reports what the artefact
+            # says, or nothing. "unreadable" is the loop's own judgement
+            # about an artefact -- absent, unparseable, or out of the closed
+            # set -- and is never something a gate writes, so it is named
+            # here rather than by the parser.
+            reading = parse_review_verdict(artefact_text) if artefact_text is not None else None
+            review_verdict = reading or "unreadable"
+
+        rec = build_record(verdict, merge_sha, pr.get("url", ""), pr.get("mergedAt"), checks,
+                           review_verdict=review_verdict)
         if not args.dry_run and not args.status:
             write_record(slug, task.id, rec)
         records[task.id] = rec
         (report["failed"] if rec["status"] == "failed" else report["closed"]).append(
             {"pr": number, "sub_task": task.id, "record": rec})
+
+    report["review_verdicts"] = {
+        tid: rec["review_verdict"] for tid, rec in records.items() if "review_verdict" in rec
+    }
 
     state = load_state(slug) or new_state(slug, tasks)
     state = reconcile_state(state, records)
@@ -693,12 +929,19 @@ def main() -> int:
             print(json.dumps({"error": "unknown-sub-task", "sub_task": args.dispatch,
                               "known": list(by_id)}))
             return 2
-        move_now = advance(tasks, records, state)
+        move_now = advance(tasks, records, state, defects=defects)
         ready = move_now.get("sub_tasks", []) if move_now["action"] == "dispatch" else []
         if task.id not in ready:
-            print(json.dumps({"error": "not-released", "sub_task": task.id,
-                              "detail": "its dependencies have not landed; dispatching it would "
-                                        "build on work that does not exist"}))
+            if move_now["action"] == "contract-defect":
+                print(json.dumps({"error": "contract-defect", "sub_task": task.id,
+                                  "defects": move_now.get("defects", []),
+                                  "detail": "one or more handoff blocks cannot be delivered as "
+                                            "written; amend the contract before anything is "
+                                            "dispatched"}))
+            else:
+                print(json.dumps({"error": "not-released", "sub_task": task.id,
+                                  "detail": "its dependencies have not landed; dispatching it "
+                                            "would build on work that does not exist"}))
             return 3
         branch = branch_for(slug, task.id)
         ok, detail = (True, "dry run") if args.dry_run else create_branch(branch, base)
@@ -715,7 +958,7 @@ def main() -> int:
               f"dispatched {task.id} on {branch} -> {task.agent}")
         return 0
 
-    move = advance(tasks, records, state)
+    move = advance(tasks, records, state, defects=defects)
     report["next_move"] = move
     report["released"] = move.get("sub_tasks", [])
     report["blocked"] = move.get("blocked", {})

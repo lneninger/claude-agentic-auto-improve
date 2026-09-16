@@ -6,7 +6,7 @@
 **Status:** draft
 **Supersedes:** <optional — path to a prior contract this replaces>
 
-> **Protocol:** filled in by `data-architect`. Implementer agents — the ones named in your profile's `implementers` slot — refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
+> **Protocol:** filled in by `data-architect`. Implementer agents (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`, `senior-test-engineer`, `ui-ux-designer`) refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
 >
 > **Lifecycle:**
 > - `draft` — data-architect has drafted; user still has Open Questions to resolve. Hook BLOCKS.
@@ -224,7 +224,7 @@ A REST endpoint / SignalR event does NOT automatically get a chat-tool wrapper �
 
 2. **No — this endpoint/event is UI-only or admin-only.** One-line justification (e.g. "admin-only surface — chat would bypass row-level auth", "UI-only destructive mutation where a typed chat call would be unsafe").
 
-3. **Deferred to a follow-up mini-phase.** Name the follow-up contract or todo item. The current contract MUST NOT ship synthetic training examples that invoke a non-existent tool — a model-training agent, where a project has one, is instructed to refuse data generation when this section is absent or set to "Deferred".
+3. **Deferred to a follow-up mini-phase.** Name the follow-up contract or todo item. The current contract MUST NOT ship synthetic training examples that invoke a non-existent tool — the `llm-training-engineer` is instructed to refuse data generation when this section is absent or set to "Deferred".
 
 **Why this section exists:** Phase A2 Strategy Learner (2026-04-21) added `POST /api/strategy-runs/{strategyId}/start-pair` + `runPairUpdate` SignalR event but OMITTED this section. The subsequent `/retrain-llm` cycle filled the gap by inventing a tool shape, producing adapter `5d9acc15` that would confidently hallucinate a non-existent API contract (`create_strategy` with `action: "start_pair"`). The adapter was archived DO NOT DEPLOY after `llm-contract-reviewer` audit. A separate mini-phase (`2026-04-23-a2-chat-tools-start-run-pair`) had to be written to properly add the `start_run_pair` tool. This section makes that class of omission impossible for future contracts.
 
@@ -353,7 +353,15 @@ If no journal entries applied, write: `No applicable lessons in JOURNAL.md at dr
 
 Once `Status: approved`, the main session dispatches the following handoffs. The `Files to touch` list is authoritative — the `concept-gate.py` hook uses it to allow/block Edit and Write calls.
 
-**Each numbered block is one sub-task.** A sub-task is a block that names an implementer agent AND carries a `Files to touch` list. A block with neither — a scope note such as "no frontend, no migration", or a review gate — is not a sub-task and is never waited on for a merge.
+**Each numbered block is judged by what it DECLARES, never by who is assigned.** There are exactly three kinds, and the loop decides which from the block itself:
+
+- **Mergeable** — the block carries a `Files to touch` list. It is a sub-task, it gets a branch and a pull request, and the blocks that name its ordinal wait on that merge. This holds whoever owns it: an implementer and a review gate are the same kind of block here, and the agent is metadata resolved from the project profile's `implementers` and `review-gates` slots together.
+- **Scope note** — the block carries no `Files to touch` list and names no agent. This is the place for "no frontend, no migration". Nothing waits on it. **If a block is informational, do not backtick an agent name in its heading** — naming one turns it into the third kind.
+- **Malformed** — the block carries no `Files to touch` list but names an agent. **This is a contract defect.** The loop reports it and halts the whole plan until this contract is amended; it dispatches nothing, not even the blocks that were fine. A block that names someone and gives them no files describes work nobody can deliver as written.
+
+Two further rows are defects even though the block is mergeable: files present with an agent-shaped name in neither profile slot (a typo), and files present with no agent named at all (nobody to dispatch to). Both halt the plan the same way.
+
+**Backtick nothing but the agent name in a `###` heading.** The loop reads any backticked lowercase word of five or more characters in a heading as an agent name. A heading such as ``### 2. Document the `advance` action`` therefore resolves `advance` as an unrecognised agent, and the block becomes a defect that halts the contract even though its file list is perfect. Put the method name, the flag, the field — anything that is not the agent — in plain text.
 
 **Sub-task identity is derived, never written twice.** The identity is `t<ordinal>-<slug of the name>`, so `### 2. Backend (…)` is `t2-backend`. That one identity names three things: the branch `task/<contract-slug>/<id>`, the completion record `.claude/orchestrator/results/<contract-slug>/<id>.yaml`, and the sub-task named in its pull request title.
 
@@ -361,7 +369,32 @@ Once `Status: approved`, the main session dispatches the following handoffs. The
 
 **`Depends on:` is required on every sub-task.** Write `none`, or the ordinals it waits for. State it, never leave it to be inferred — file lists do not carry it. Backend and frontend touch entirely different files and the frontend still needs the endpoint first. A sub-task is released only when every ordinal it names has a completion record.
 
-**Review gates belong in the sequence, and complete differently.** A reviewer opens no pull request. Give the gate a `Depends on:` so its position is clear, and no `Files to touch`, so nothing waits on a merge that will never come.
+**A review gate writes a file, so it is an ordinary mergeable sub-task.** The file is its review artefact. Give the gate a `Depends on:` like any other block, and a `Files to touch` list naming exactly one path:
+
+```
+.claude/reviews/<contract-slug>/<sub-task-id>-<gate-agent>.md
+```
+
+**The architect declares that path and NEVER creates the file.** Creation is the gate's own diff, produced by the pull request that closes the gate. A pre-created stub — even an empty one — makes *reviewed* and *never ran* indistinguishable under a file-exists check, which is the whole reason the artefact exists. So: the file does not exist means the review has not run; the file exists means a gate wrote it.
+
+**The artefact's six sections are fixed, in this order:**
+
+1. A header block — gate agent, sub-task id, contract path, reviewed-on date, **commit range reviewed** (`base..head`), **verdict**.
+2. `## What was checked` — one line per item the gate's TASK block named, each with its own outcome. Every named item appears. Empty is invalid, because it makes the verdict meaningless.
+3. `## Findings` — one entry per finding, with a severity (`blocker` / `warning` / `nit`) and a location. `None.` is valid, and is meaningful only because sections 2 and 5 are non-empty.
+4. `## What was NOT checked` — named explicitly. A gate that could not reach something says so, rather than leaving the omission to be inferred from silence.
+5. `## Evidence` — the commands run with their exit codes, or the files read with what was read from them. A verdict is a claim; this section is what backs it. Empty is invalid.
+6. `## Disposition` — what must happen before the contract continues, or `Nothing. This gate releases its dependents.`
+
+**The verdict line's shape is fixed because the loop PARSES it.** Alone on its line in the header, written exactly one of:
+
+```
+**Verdict:** pass
+**Verdict:** pass-with-findings
+**Verdict:** blocked
+```
+
+Anything else — prose such as `Verdict: everything looks good`, a missing line, or a value outside that set — reads as **unreadable**, and an unreadable verdict releases nothing: every block depending on the gate stays blocked until the artefact is fixed and the loop is re-run. `unreadable` is the loop's own reading, never a value a gate writes, so it never appears in an artefact. A `blocked` verdict also releases nothing; that is deliberate, and it clears by amending and re-running the gate on a new pull request.
 
 ### 1. Backend (`dotnet-backend-architect`)
 
@@ -406,12 +439,12 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
-### 3. A third area (`<an agent from your profile's implementers slot>`) — if applicable
+### 3. Data pipeline (`ingestion-data-architect`) — if applicable
 
 **Depends on:** 1
 
 **Files to touch:**
-- `<a backend.roots entry>/<the area this block covers>/...`
+- `<a backend.roots entry>/Ingestion/...`
 
 **Pre-written TASK block:**
 ```
@@ -421,6 +454,35 @@ FILES: <list>
 CONSTRAINTS:
   - all external calls MUST route through IExternalDataDispatcher
   - add DataCapability enum value if the data type is new
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/<this-file>.md
+  contract_status: approved
+```
+
+### 4. Review (`fullstack-code-reviewer`) — the shape every review gate takes
+
+**Depends on:** 1, 2 — there is nothing to review until both have merged
+
+**Files to touch:**
+- `.claude/reviews/<this-contract-slug>/t4-review.md`
+
+**Pre-written TASK block:**
+```
+TASK: Review <what>, and write the review artefact.
+CONTEXT: concept contract at .claude/concepts/<this-file>.md
+FILES: .claude/reviews/<this-contract-slug>/t4-review.md
+CONSTRAINTS:
+  - Write the artefact in the six-section shape the template fixes. The file does NOT
+    exist yet — you create it. Nobody pre-created a stub, and you must not treat its
+    absence as anything but "this review has not run".
+  - Name the commit range you reviewed, base..head. A verdict that cannot say which
+    state it passed is itself blocked.
+  - Every item this block named appears under "## What was checked" with its own outcome.
+  - "## Evidence" carries the commands you ran with their exit codes, or the files you
+    read with what you read from them. It is never empty.
+  - End the header with the verdict line, alone on its line, exactly one of:
+    "**Verdict:** pass", "**Verdict:** pass-with-findings", "**Verdict:** blocked".
+    The loop parses that line. Prose reads as unreadable and releases nothing.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/<this-file>.md
   contract_status: approved
