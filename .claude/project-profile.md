@@ -33,21 +33,27 @@ project profile", and this file is where that root is named.
 | `safety-critical.roots` | *(roots where a defect causes irreversible harm, or `none`)* |
 | `review.documents` | *(the primary documents a reviewer must read, or `none`)* |
 | `implementers` | *(the agents that may own a contract sub-task, or `none` to accept the plugin's own)* |
-| `review-gates` | *(the agents that appear in a handoff block but open no pull request, or `none` to accept the plugin's own)* |
+| `review-gates` | *(the agents that review rather than implement, or `none` to accept the plugin's own)* |
 
 ### A note on `implementers`
 
-The contract sub-task loop reads this slot to decide which handoff blocks are sub-tasks. A block
-naming an agent outside the list is treated as a review gate or a note, so nothing waits on it to
-merge.
+The contract sub-task loop reads this slot **together with** `review-gates` to resolve the agent a
+handoff block names. What makes a block a sub-task is its `Files to touch` list, never which of the
+two slots its agent came from.
 
 Leaving it `none` accepts the agents the plugin ships. Naming a wrong agent is worse than naming
-none: the block silently stops being a sub-task and the loop reports work as unplanned.
+none: the name resolves in neither slot, so the block becomes a contract defect that halts the whole
+plan until the contract is amended.
 
-`review-gates` is the companion slot. A reviewer opens no pull request, so a block naming one is a
-step in the sequence rather than something to wait on for a merge. Declaring both lists is what
-lets the loop report a name that is neither — almost always a typo or a shorthand — instead of
-letting that block vanish from the plan with nothing to say it did.
+`review-gates` is the companion slot. **A review gate writes a review artefact, so it opens a pull
+request exactly as an implementer does**, and a block naming a gate is waited on for its merge like
+any other. That artefact lives at `.claude/reviews/<contract-slug>/<sub-task-id>-<gate-agent>.md`
+and carries a fixed `**Verdict:**` header, which the loop parses to decide whether to release what
+depends on it. The architect declares that path and never creates the file, because a pre-created
+stub makes *reviewed* and *never ran* indistinguishable under a file-exists check.
+
+Declaring both lists is what lets the loop report a name that is neither — almost always a typo or
+a shorthand — instead of letting that block vanish from the plan with nothing to say it did.
 
 ## Worked shape
 
