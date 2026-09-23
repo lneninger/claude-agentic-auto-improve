@@ -410,13 +410,23 @@ def handoff_bodies(contract_text: str) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 # What GitHub says
 # ---------------------------------------------------------------------------
-def classify_pr(pr: Optional[Dict[str, Any]], default_branch: str = "master") -> str:
-    """One verdict from a closed set. First match wins."""
+def classify_pr(pr: Optional[Dict[str, Any]], default_branch: str = "master",
+                accepted_bases: Optional[set] = None) -> str:
+    """One verdict from a closed set. First match wins.
+
+    ``accepted_bases`` is the Declared base set -- ``{default branch} union
+    {every state entry's base}`` for one contract. ``None`` reproduces
+    today's behaviour exactly (I-9): only the repository default branch
+    counts as ``merged``. Given a set, ``merged`` holds for any base inside
+    it -- a sub-task's own declared parent branch included -- and
+    ``merged-elsewhere`` stays reachable for every base outside it.
+    """
     if not pr:
         return "not-found"
     state = (pr.get("state") or "").upper()
     if state == "MERGED" and pr.get("mergedAt") and pr.get("mergeCommit"):
-        return "merged" if pr.get("baseRefName") == default_branch else "merged-elsewhere"
+        accepted = accepted_bases if accepted_bases is not None else {default_branch}
+        return "merged" if pr.get("baseRefName") in accepted else "merged-elsewhere"
     if state == "OPEN":
         return "not-merged"
     if state == "CLOSED" and not pr.get("mergedAt"):
@@ -441,7 +451,9 @@ def map_pr_to_subtask(head_branch: str, title: str, tasks: List[SubTask],
 # ---------------------------------------------------------------------------
 def build_record(verdict: str, commit: Optional[str], pr_url: str,
                  merged_at: Optional[str], checks: Optional[str],
-                 review_verdict: Optional[str] = None) -> Dict[str, Any]:
+                 review_verdict: Optional[str] = None,
+                 sub_issue_closed: Optional[str] = None,
+                 hand_resolved: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """A record states what was observed. It never asserts what was not.
 
     A merge is not a test run, so ``tests_passed`` is ``unknown`` unless a
@@ -453,6 +465,21 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
     could be read -- and the key is OMITTED entirely rather than stamped as
     null, so every record written before this parameter existed keeps its
     exact meaning.
+
+    ``sub_issue_closed`` is ``close_sub_issue``'s outcome, stamped the same
+    way for the same reason (I-8): ``None`` means no closure was attempted --
+    either the sub-task carries no sub-issue, or the merge did not land on
+    an accepted base -- and the key is OMITTED rather than stamped null, so
+    every record written before sub-issues existed keeps its exact meaning.
+
+    ``hand_resolved`` is the Hand-Resolved Summary ``summarise_hand_resolved``
+    returned for this pull request. Stamped the same way and for the same
+    reason (I-3): ``None`` means no summary was supplied and the key is
+    OMITTED so a record written before this parameter existed keeps its exact
+    meaning (I-2 reads that absence as not-recorded, never as clean). Unlike
+    ``review_verdict`` and ``sub_issue_closed``, a caller mapping a pull
+    request to a sub-task always has a summary to supply -- even an empty
+    file list is a measurement -- so every new record carries this key (I-1).
     """
     if checks == "SUCCESS":
         tests_passed, verified_by = True, "ci"
@@ -480,6 +507,10 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
     }
     if review_verdict is not None:
         record["review_verdict"] = review_verdict
+    if sub_issue_closed is not None:
+        record["sub_issue_closed"] = sub_issue_closed
+    if hand_resolved is not None:
+        record["hand_resolved"] = hand_resolved
     return record
 
 
@@ -540,14 +571,72 @@ def compute_released(tasks: List[SubTask],
 STATE_DIR = Path(".claude/orchestrator/state")
 
 
-def new_state(contract_slug: str, tasks: List[SubTask]) -> Dict[str, Any]:
-    """A fresh position: every sub-task pending, nothing dispatched."""
+def new_state(contract_slug: str, tasks: List[SubTask],
+             base: Optional[str] = None) -> Dict[str, Any]:
+    """A fresh position: every sub-task pending, nothing dispatched.
+
+    ``base`` is the parent branch every sub-task's own branch will be cut
+    from once it is released. ``None`` means "the repository default
+    branch" and is resolved here, inside this one function, rather than at
+    every call site -- the same "resolved in one place" shape
+    ``verify_issue_link.py``'s analogous ``declared_base`` parameter uses.
+    Each fresh entry also carries ``issue: None`` and ``brief: None`` --
+    neither exists yet for a sub-task that has not been opened.
+    """
+    resolved_base = base if base is not None else default_branch()
     return {
         "contract": contract_slug,
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "sub_tasks": {t.id: {"status": "pending", "branch": None, "pull_request": None}
+        "sub_tasks": {t.id: {"status": "pending", "branch": None, "pull_request": None,
+                             "issue": None, "base": resolved_base, "brief": None}
                       for t in tasks},
     }
+
+
+def record_sub_task_identity(state: Dict[str, Any], subtask_id: str, issue: int,
+                             base: str, brief: str) -> Dict[str, Any]:
+    """Stamp a sub-task's sub-issue, declared base and brief path into its entry.
+
+    The sibling of ``mark_dispatched``: pure, returns a new state rather than
+    mutating the one it is given, and called by ``/flow`` Step 2.7 through
+    ``--record-subtask <id> --issue <n> --base <branch> --brief <path>``.
+    """
+    st = copy.deepcopy(state)
+    if subtask_id in st["sub_tasks"]:
+        st["sub_tasks"][subtask_id].update({"issue": issue, "base": base, "brief": brief})
+    return st
+
+
+def reconcile_subtask_identity(state_entry: Dict[str, Any],
+                               brief_fields: Dict[str, Any]) -> Optional[str]:
+    """Compare a state entry's issue/base against its brief's id:/base: -- I-7.
+
+    Pure: takes no path and touches no disk -- the caller reads the brief
+    and hands its frontmatter fields in. A mismatch is REFUSED, never
+    reconciled: this returns a description naming both readings, and the
+    caller is the one that halts dispatch on a non-``None`` result. A key
+    missing on either side is not itself a mismatch -- there is nothing to
+    compare a state entry against before a brief exists.
+    """
+    mismatches: List[str] = []
+    entry_issue = state_entry.get("issue")
+    brief_issue_raw = brief_fields.get("id")
+    if entry_issue is not None and brief_issue_raw not in (None, ""):
+        try:
+            brief_issue: Any = int(str(brief_issue_raw).lstrip("#"))
+        except ValueError:
+            brief_issue = brief_issue_raw
+        if entry_issue != brief_issue:
+            mismatches.append(
+                "issue: state entry says %r, brief says %r" % (entry_issue, brief_issue_raw))
+
+    entry_base = state_entry.get("base")
+    brief_base = brief_fields.get("base")
+    if entry_base is not None and brief_base not in (None, "") and entry_base != brief_base:
+        mismatches.append(
+            "base: state entry says %r, brief says %r" % (entry_base, brief_base))
+
+    return "; ".join(mismatches) if mismatches else None
 
 
 def mark_dispatched(state: Dict[str, Any], subtask_id: str, branch: str) -> Dict[str, Any]:
@@ -607,18 +696,61 @@ def write_state(contract_slug: str, state: Dict[str, Any]) -> Path:
     return f
 
 
-def create_branch(branch: str, base: str) -> Tuple[bool, str]:
-    """Cut a sub-task branch from a freshly fetched default branch.
+def create_branch(branch: str, base: str, issue: Optional[int] = None) -> Tuple[bool, str]:
+    """Cut a sub-task branch from a freshly fetched ``base``.
 
-    Never from whatever happens to be checked out. A sub-task seeded from
-    another branch inherits its commits and its review surface.
+    Never from whatever happens to be checked out -- a sub-task seeded from
+    another branch inherits its commits and its review surface. ``base`` is
+    the sub-task's own declared parent branch, not necessarily the
+    repository default branch; the caller decides which.
+
+    With an ``issue`` and a working ``gh``, the branch is cut through
+    ``gh issue develop`` so it is registered against its sub-issue before it
+    exists locally, then fetched and checked out. Without an issue, or when
+    ``gh`` fails, this falls back to the plain ``git switch -c`` form and
+    says which path was taken -- a silent fallback is what hides a missing
+    linked branch.
+
+    Three outcomes are named distinctly in the returned detail, never
+    conflated: (1) ``gh issue develop`` registered the branch and the local
+    checkout followed it -- success; (2) ``gh issue develop`` registered the
+    branch but the local checkout itself failed -- the branch now exists on
+    origin, so this is reported on its own terms rather than falling through
+    to the plain-git path below, which would misreport a branch ``gh`` just
+    correctly created as "branch already exists", a wrong detail worse than
+    a silent one; (3) ``gh issue develop`` was never called, or it failed
+    outright, so the plain-git path ran and the detail says exactly that.
     """
+    if issue is not None:
+        code, _out = _run(["gh", "issue", "develop", str(issue), "--name", branch,
+                           "--base", base])
+        if code == 0:
+            _run(["git", "fetch", "origin", branch])
+            checkout_code, checkout_out = _run(["git", "switch", branch])
+            if checkout_code == 0:
+                return True, (checkout_out or
+                             f"registered {branch} against issue {issue} via gh issue develop")
+            # Outcome (2): gh already registered the branch on origin -- the
+            # local checkout is what failed. Report that on its own terms;
+            # never fall through to the "branch already exists" check below,
+            # which would misreport a branch gh just correctly created as a
+            # fresh-dispatch collision.
+            return False, (
+                f"gh issue develop registered {branch} against issue {issue}, but the "
+                f"local checkout failed ({checkout_out or 'no output'})"
+            )
+        # Outcome (3), gh half: gh issue develop itself failed outright.
+        gh_fallback_detail = f" (gh issue develop failed for issue {issue}, fell back to plain git)"
+    else:
+        gh_fallback_detail = ""
+
     if _run(["git", "rev-parse", "--verify", branch])[0] == 0:
         return False, "branch already exists"
     if _run(["git", "fetch", "origin", base])[0] != 0:
         return False, "could not fetch origin/" + base
     code, out = _run(["git", "switch", "-c", branch, "origin/" + base])
-    return code == 0, out or ("created " + branch)
+    detail = (out or ("created " + branch)) + gh_fallback_detail
+    return code == 0, detail
 
 
 # ---------------------------------------------------------------------------
@@ -635,14 +767,92 @@ def extract_task_block(block_body: str) -> Optional[str]:
     return m.group(1).rstrip() if m else None
 
 
+def declared_phase(task_block_text: Optional[str]) -> Optional[str]:
+    """Read the ``phase:`` line out of a block's own TASK block.
+
+    Returns ``RED`` or ``GREEN`` verbatim -- the closed set, read exactly,
+    never inferred or normalised. ``None`` is returned both for a TASK block
+    that declares no phase and for the absence of a TASK block altogether
+    (``task_block_text`` is ``None``) -- the same answer on purpose, because
+    in both cases the contract did not say. A value outside the closed set
+    (wrong case, a near-miss word such as ``REVIEW`` or ``REFACTOR``) also
+    reads as ``None`` rather than being guessed at.
+
+    Scoped to the TASK block's own text: a ``phase:`` line sitting in prose
+    outside the fenced block is not a declaration, so the caller must pass
+    ``extract_task_block(...)``'s result rather than the whole block body.
+    """
+    if not task_block_text:
+        return None
+    matches = re.findall(r"^[ \t]*phase:[ \t]*(\S+)[ \t]*$", task_block_text, re.M)
+    if not matches:
+        return None
+    values = {value.strip() for value in matches}
+    if len(values) > 1:
+        return None
+    value = matches[0].strip()
+    return value if value in ("RED", "GREEN") else None
+
+
+def _declared_review_verdict_file(task: SubTask) -> Optional[str]:
+    """The one path under ``.claude/reviews/`` a sub-task's own files declare, if any.
+
+    The declared-path rule both ``build_dispatch`` and ``main`` apply when
+    picking the verdict file (MECHANISMS.md:149, VOCABULARY.md:40,
+    project-profile.md:60) -- one function so the two sites cannot drift.
+    """
+    return next((f for f in task.files if f.startswith(".claude/reviews/")), None)
+
+
 def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
-                   block_body: str) -> Dict[str, Any]:
+                   block_body: str, issue: Optional[int] = None,
+                   base: Optional[str] = None, brief: Optional[str] = None,
+                   needs_issue: bool = False) -> Dict[str, Any]:
     """Everything needed to start one sub-task, and nothing more.
 
     This produces the packet. It does not run anything: implementation needs a
     model, and a script cannot be one. The caller executes it.
+
+    ``issue``, ``base`` and ``brief`` are the sub-task's own identity fields,
+    read out of its state entry by the caller -- this function never reads
+    state itself. ``needs_issue`` mirrors ``needs_agent``: the caller sets it
+    true when the contract declares two or more mergeable sub-tasks and the
+    state entry carries no ``issue``, so a caller never dispatches a
+    sub-task that still has no sub-issue created for it.
+
+    ``cycle`` and ``cycle_basis`` (Extension Point 12) are the Sub-Task
+    Cycle: exactly one stage (I-6), decided by what the block DECLARES and
+    never by who is assigned (Non-Goals -- no ``RED_STAGE_AGENT``). First
+    match wins, four arms:
+      1. ``task.files`` names a path under ``.claude/reviews/`` -> one
+         ``review`` stage, basis ``verdict-bearing`` -- the same declared-path
+         rule ``main`` already applies when it picks the verdict file
+         (MECHANISMS.md:149, VOCABULARY.md:40, project-profile.md:60).
+      2. ``declared_phase(...)`` is ``RED`` -> one ``red`` stage, basis
+         ``declared-phase``.
+      3. ``declared_phase(...)`` is ``GREEN`` -> one ``green`` stage, basis
+         ``declared-phase``.
+      4. otherwise -> one ``unphased`` stage, basis ``no-declared-phase``
+         (I-7) -- the contract did not say, and the loop never invents a red
+         stage it did not ask for.
+    Every stage carries the block's own agent and the constant isolation
+    ``fresh-subagent``.
     """
     block = extract_task_block(block_body)
+
+    verdict_file = _declared_review_verdict_file(task)
+    if verdict_file:
+        stage, basis = "review", "verdict-bearing"
+    else:
+        phase = declared_phase(block)
+        if phase == "RED":
+            stage, basis = "red", "declared-phase"
+        elif phase == "GREEN":
+            stage, basis = "green", "declared-phase"
+        else:
+            stage, basis = "unphased", "no-declared-phase"
+    cycle = [{"stage": stage, "agent": task.agent, "isolation": "fresh-subagent"}]
+
     return {
         "sub_task": task.id,
         "branch": branch_for(contract_slug, task.id),
@@ -654,6 +864,12 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
         #: Mirrors needs_authoring. A None agent has no one to dispatch to --
         #: the caller must refuse rather than send an empty name to a model.
         "needs_agent": task.agent is None,
+        "issue": issue,
+        "base": base,
+        "brief": brief,
+        "needs_issue": needs_issue,
+        "cycle": cycle,
+        "cycle_basis": basis,
     }
 
 
@@ -710,25 +926,139 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
             "detail": "sub-tasks remain and none is ready"}
 
 
+#: Extension Point 6. The closed set of moves ``advance()`` can return.
+#: ``contract-defect`` is checked before every other move, so it is the one
+#: an operator meets when a contract is malformed (Open Question one).
+#: New Mechanisms' extension seam: a new move adds one member here and one
+#: arm to ``next_command_for``, in the same change -- the totality test goes
+#: red if only one of the two is done.
+ADVANCE_ACTIONS = (
+    "contract-defect", "nothing-planned", "escalate", "awaiting-merge",
+    "complete", "dispatch", "blocked",
+)
+
+
+def next_command_for(
+    move: Dict[str, Any], contract_slug: str
+) -> Dict[str, Any]:
+    """The Next Command: the runnable line for the loop's own next move.
+
+    New Mechanisms: "a human-facing next step is data the owner returns,
+    never prose a caller composes." One arm per member of ``ADVANCE_ACTIONS``,
+    plus a fail-closed fallback for an action outside the closed set.
+
+    ``move`` is ``advance()``'s own return mapping, never a bare action
+    string -- the blocked arm's reason names what holds each sub-task, and
+    the awaiting-merge arm's reason names the awaiting sub-task and its
+    branch. Neither is derivable from an action string alone.
+
+    I-5: ``commands`` empty is a valid, meaningful value and always travels
+    with a non-empty ``reason``. ``blocked`` is the only move that returns an
+    empty ``commands`` list; every other real move returns at least one line.
+
+    ``complete`` always hands off to /verify-before-done, regardless of how
+    many mergeable sub-tasks the contract declares. Routing a multi-sub-task
+    contract's completion to the parent pull request is deferred -- see
+    .claude/concepts/followups/2026-09-23-complete-move-routes-parent-pull-request.followup.md.
+    """
+    action = move.get("action")
+
+    if action == "dispatch":
+        return {
+            "commands": ["/clear", "/advance %s" % contract_slug],
+            "reason": "a sub-task is ready to dispatch; the next move is a fresh /advance, and "
+                      "clearing keeps this session's context out of it",
+        }
+
+    if action == "awaiting-merge":
+        awaiting = list(move.get("awaiting") or [])
+        parts = ["%s (branch %s)" % (tid, branch_for(contract_slug, tid)) for tid in awaiting]
+        return {
+            "commands": ["/pr-merged <pr-number>"],
+            "reason": ("waiting on a pull request to merge for " + "; ".join(parts))
+                      if parts else "a sub-task is out for merge",
+        }
+
+    if action in ("escalate", "nothing-planned", "contract-defect"):
+        return {
+            "commands": ["/design-first %s" % contract_slug],
+            "reason": "the remedy is amending the contract",
+        }
+
+    if action == "complete":
+        return {
+            "commands": ["/verify-before-done"],
+            "reason": "every sub-task has a completion record",
+        }
+
+    if action == "blocked":
+        blocked = move.get("blocked") or {}
+        holders = "; ".join("%s <- %s" % (tid, ", ".join(why)) for tid, why in blocked.items())
+        return {
+            "commands": [],
+            "reason": "nothing is ready to dispatch; " + (holders or "no sub-task is released"),
+        }
+
+    return {
+        "commands": [],
+        "reason": "advance() returned an action outside ADVANCE_ACTIONS: %r" % (action,),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Hand-resolved files
 # ---------------------------------------------------------------------------
+def summarise_hand_resolved(commit_shas: List[str],
+                            git_combined_diff: Callable[[str], Tuple[List[str], int]]
+                            ) -> Dict[str, Any]:
+    """The Hand-Resolved Summary -- three facts, never one list.
+
+    ``files``: paths differing from BOTH parents of a merge commit -- resolved
+    by hand, or changed during the merge in a way neither side contained.
+    Both entered without ever appearing as a reviewable diff. Ordered,
+    de-duplicated, keeping first-seen order.
+
+    ``merge_commits``: how many of the reported commits carried two or more
+    parents and were therefore inspected. Zero means nothing was
+    detectable -- the pull request's own commits contained no merge commit
+    to read -- which is a different claim from ``files`` being empty because
+    every inspected merge was clean. Collapsing the two into one list is
+    exactly the overclaim Alternatives Considered rejects (Option D).
+
+    ``commits_inspected``: every commit the pull request reported, whatever
+    its parent count. An empty ``commit_shas`` asks git nothing at all and
+    returns all zeroes -- a pull request nobody could inspect.
+
+    Each reported commit is read exactly once. ``detect_resolved_files`` is a
+    projection of this function's ``files`` rather than a second walk.
+    """
+    files_out: List[str] = []
+    merge_commits = 0
+    for sha in commit_shas:
+        files, parents = git_combined_diff(sha)
+        if parents >= 2:
+            merge_commits += 1
+            files_out.extend(files)
+    seen: set = set()
+    deduped = [f for f in files_out if not (f in seen or seen.add(f))]
+    return {
+        "files": deduped,
+        "merge_commits": merge_commits,
+        "commits_inspected": len(commit_shas),
+    }
+
+
 def detect_resolved_files(commit_shas: List[str],
                           git_combined_diff: Callable[[str], Tuple[List[str], int]]) -> List[str]:
     """Files differing from BOTH parents of a merge commit.
 
-    Those were resolved by hand, or changed during the merge in a way neither
-    side contained. Both entered without ever appearing as a reviewable diff.
-
-    A commit with fewer than two parents has no combined diff and is skipped.
+    A projection of ``summarise_hand_resolved(...)["files"]`` -- kept as its
+    own public name because the walk must not happen twice, and because its
+    signature, ordering, de-duplication and skip-commits-with-fewer-than-two-
+    parents rule are load-bearing for existing callers and their mutation
+    probes (Extension Point 2).
     """
-    out: List[str] = []
-    for sha in commit_shas:
-        files, parents = git_combined_diff(sha)
-        if parents >= 2:
-            out.extend(files)
-    seen = set()
-    return [f for f in out if not (f in seen or seen.add(f))]
+    return summarise_hand_resolved(commit_shas, git_combined_diff)["files"]
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +1132,102 @@ def default_branch() -> str:
     return out.rsplit("/", 1)[-1] if code == 0 and out else "master"
 
 
+def _read_issue_state(issue: int) -> Optional[str]:
+    """The sub-issue's own state, read as an allow list -- I-10.
+
+    Returns ``"OPEN"`` or ``"CLOSED"`` only when the payload actually says
+    so. Everything else -- ``gh`` unreachable, unparseable JSON, a payload
+    that parses to something other than a mapping (``json.loads`` can return
+    a list, and ``list.get`` does not exist), a missing ``state`` key, or a
+    value outside the two recognised states -- returns ``None``. This is
+    deliberately an allow list rather than a "not CLOSED" catch-all: reading
+    an unrecognised payload as OPEN would fire the close mutation having
+    read nothing.
+    """
+    code, out = _run(["gh", "issue", "view", str(issue), "--json", "state"])
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    state = payload.get("state")
+    if not isinstance(state, str):
+        return None
+    state = state.upper()
+    return state if state in ("OPEN", "CLOSED") else None
+
+
+def close_sub_issue(issue: int, pr_url: str) -> str:
+    """Close a sub-issue after its pull request has merged -- I-10.
+
+    Refuses to mutate anything before the issue's own state has been read,
+    and only ever acts on an explicit ``OPEN`` reading -- never on the
+    absence of ``CLOSED``. An issue already CLOSED is reported
+    ``already-closed`` without a second write -- the read-before-close
+    ordering that makes a re-run idempotent. An OPEN issue is closed and its
+    state is re-read to confirm the outcome, reporting ``closed`` or
+    ``close-failed``. Anything unverifiable -- unreachable ``gh``, malformed
+    JSON, a non-mapping payload, or a value outside OPEN/CLOSED -- reports
+    ``unverifiable`` rather than being read as either.
+    """
+    state = _read_issue_state(issue)
+    if state is None:
+        return "unverifiable"
+    if state == "CLOSED":
+        return "already-closed"
+
+    close_code, _out = _run(["gh", "issue", "close", str(issue), "--reason", "completed",
+                             "--comment", pr_url])
+    if close_code != 0:
+        return "close-failed"
+
+    after = _read_issue_state(issue)
+    if after is None:
+        return "unverifiable"
+    return "closed" if after == "CLOSED" else "close-failed"
+
+
+_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+
+
+def read_brief_frontmatter(brief_path: Path) -> Optional[Dict[str, str]]:
+    """A minimal frontmatter reader for a brief's ``id:`` and ``base:`` keys.
+
+    Deliberately narrow: ``reconcile_subtask_identity`` only ever compares
+    these two fields against a state entry (I-7), so this reads only what
+    that check needs rather than duplicating ``verify_issue_link.py``'s full
+    frontmatter vocabulary -- the two scripts are synced into a sibling
+    plugin independently, and cross-importing between them would couple
+    their sync lifecycles. That is a worse problem than a small private
+    reader of two keys, so this stays its own minimal parser rather than
+    reusing the sibling's.
+
+    Returns ``None`` when the brief cannot be read at all -- a recorded
+    brief path that no longer resolves is unverifiable, not "nothing to
+    compare"; I-7 is a refusal rule, and a caller must refuse the dispatch
+    on ``None`` rather than fail open. An empty mapping is still returned
+    when the file *is* readable but carries no frontmatter block, since
+    that genuinely is nothing to compare against.
+    """
+    try:
+        text = brief_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _FRONTMATTER.match(text.replace("\r\n", "\n"))
+    if not match:
+        return {}
+    fields: Dict[str, str] = {}
+    for line in match.group(1).split("\n"):
+        if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    return fields
+
+
 def find_contract(slug_or_path: str) -> Optional[Path]:
     p = Path(slug_or_path)
     if p.is_file():
@@ -833,6 +1259,48 @@ def write_record(contract_slug: str, subtask_id: str, record: Dict[str, Any]) ->
     return f
 
 
+def _render_hand_resolved_reading(entry: Dict[str, Any]) -> str:
+    """One of the Hand-Resolved Summary's four readings, as prose for a person.
+
+    Mirrors the four-state reading in Data Shapes: ``not-recorded`` for a
+    record written before this field existed; ``not detectable`` when
+    ``merge_commits`` is zero, whatever ``files`` says -- the pull request's
+    own commits contained no merge commit, so there was nothing to inspect,
+    and that is never rendered as clean; the file list itself when something
+    entered without a reviewable diff; and ``clean`` only when at least one
+    merge commit was genuinely inspected and none was conflicted.
+
+    Fails closed on a malformed ``merge_commits``: anything that is not a
+    genuine, non-negative count -- absent, ``None``, a string, a bool, or a
+    negative number -- reads the same as the literal ``0`` case. A caller
+    cannot trust a count it cannot recognise, and reading it as though the
+    merge were clean would be the overclaim this reading exists to prevent.
+
+    Fails closed on a malformed ``files`` the same way: ``clean`` and the
+    file listing are the only two readings a genuinely inspected merge can
+    produce, so both require ``files`` to be a list whose every element is a
+    string -- absent, ``None``, a dict, an int, a bare string, or a list
+    holding a non-string element all read as unreadable instead. This never
+    raises: a hand-edited or partially-migrated completion record must be
+    reported as unreadable, never allowed to crash an otherwise read-only
+    render (join() over a bare string iterates its characters, and join()
+    over a list holding a non-string element raises TypeError -- both are
+    guarded against here rather than left to the caller).
+    """
+    if entry.get("source") == "not-recorded":
+        return "not-recorded"
+    merge_commits = entry.get("merge_commits")
+    if (not isinstance(merge_commits, int) or isinstance(merge_commits, bool)
+            or merge_commits <= 0):
+        return "not detectable (no merge commits inspected)"
+    files = entry.get("files")
+    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        return "not detectable (files unreadable)"
+    if files:
+        return ", ".join(files)
+    return "clean"
+
+
 # ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description="Close a sub-task whose pull request merged.")
@@ -843,6 +1311,12 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="compute everything, write nothing")
     ap.add_argument("--dispatch", metavar="SUBTASK", help="start this sub-task: cut its branch and record it")
     ap.add_argument("--resume", action="store_true", help="report the stored position and what it waits for")
+    ap.add_argument("--record-subtask", metavar="ID",
+                    help="stamp a sub-task's issue, base and brief into the state store")
+    ap.add_argument("--issue", type=int, help="the sub-task's own sub-issue number, with --record-subtask")
+    ap.add_argument("--base", metavar="BRANCH",
+                    help="the sub-task's declared base branch, with --record-subtask")
+    ap.add_argument("--brief", metavar="PATH", help="the sub-task's brief path, with --record-subtask")
     args = ap.parse_args()
 
     contract = find_contract(args.contract)
@@ -857,6 +1331,51 @@ def main() -> int:
     defects = classification.defects
     records = load_records(slug)
     base = default_branch()
+    # `base` is already resolved on the line above -- hand it to new_state so
+    # a fresh state store costs one subprocess, not two (Extension Points).
+    state = load_state(slug) or new_state(slug, tasks, base=base)
+
+    if args.record_subtask:
+        # /flow Step 2.7's writer: stamp one sub-task's issue, declared base
+        # and brief path into the state store. Pure computation through
+        # record_sub_task_identity; the only mutation here is the write.
+        if args.issue is None or not args.base or not args.brief:
+            print(json.dumps({"error": "record-subtask-incomplete",
+                              "detail": "--record-subtask requires --issue, --base and --brief"}))
+            return 2
+        # I-5's witness is this entry's issue field, so recording against an
+        # id the plan does not contain must never look like it worked: a
+        # typo'd or stale id would otherwise write nothing, report success,
+        # and leave the next run believing no sub-issue exists -- opening a
+        # second one for the same sub-task.
+        known_subtask_ids = list(state.get("sub_tasks", {}))
+        if args.record_subtask not in known_subtask_ids:
+            print(json.dumps({"error": "unknown-sub-task", "sub_task": args.record_subtask,
+                              "known": known_subtask_ids}))
+            return 2
+        state = record_sub_task_identity(state, args.record_subtask, args.issue, args.base, args.brief)
+        # Mirrors the report path below: a dry run computes and prints, but
+        # never writes, and a status query never mutates either. --resume
+        # joins them (Extension Point 10): a flag promising a read-only
+        # report must not stamp an identity into the stored position.
+        if not args.dry_run and not args.status and not args.resume:
+            write_state(slug, state)
+        result = {"recorded": args.record_subtask, "issue": args.issue, "base": args.base,
+                  "brief": args.brief}
+        print(json.dumps(result, indent=2) if args.json else
+              f"recorded {args.record_subtask}: issue={args.issue} base={args.base} brief={args.brief}")
+        return 0
+
+    # The Declared base set (Data Shapes): the repository default branch,
+    # plus every sub-task's own declared base already on record. This is
+    # what lets a pull request merged into a parent branch -- every task
+    # pull request under this topology -- be recognised as merged rather
+    # than reported merged-elsewhere (the measured PR #173 defect).
+    declared_bases = {base}
+    for entry in state.get("sub_tasks", {}).values():
+        entry_base = entry.get("base")
+        if entry_base:
+            declared_bases.add(entry_base)
 
     report: Dict[str, Any] = {
         "contract": slug,
@@ -867,9 +1386,28 @@ def main() -> int:
         "closed": [], "skipped": [], "unmapped": [], "hand_resolved": [], "failed": [],
     }
 
+    # Extension Point 5: seed hand_resolved from the summaries already stored
+    # in the loaded completion records, BEFORE the pull-request loop runs --
+    # so a read-only run that processes no pull request (criterion two) still
+    # reports them. I-2: a record with no hand_resolved key was written before
+    # this change and is reported as not-recorded, never as clean.
+    for tid, rec in records.items():
+        stored = rec.get("hand_resolved")
+        # A stored hand_resolved value that is not a mapping -- a hand-edited
+        # or partially-migrated record -- carries nothing this loop can read;
+        # treated the same as a record with no hand_resolved key at all,
+        # never passed to dict() where a bare scalar would raise.
+        if isinstance(stored, dict):
+            entry = dict(stored)
+            entry["sub_task"] = tid
+            entry["source"] = "stored-record"
+        else:
+            entry = {"sub_task": tid, "source": "not-recorded"}
+        report["hand_resolved"].append(entry)
+
     for number in args.pr:
         pr = gh_pr(number)
-        verdict = classify_pr(pr, base)
+        verdict = classify_pr(pr, base, accepted_bases=declared_bases)
         if verdict in ("not-found", "not-merged", "merged-elsewhere"):
             report["skipped"].append({"pr": number, "verdict": verdict})
             continue
@@ -880,16 +1418,35 @@ def main() -> int:
             continue
 
         shas = [c.get("oid") for c in (pr.get("commits") or []) if c.get("oid")]
-        resolved = detect_resolved_files(shas, git_combined_diff)
-        if resolved:
-            report["hand_resolved"].append({"pr": number, "files": resolved})
+        # Extension Point 1/4: one walk, via summarise_hand_resolved -- never
+        # detect_resolved_files beside it, which would ask git about every
+        # commit twice. Always appended, including an empty file list (I-1):
+        # a walk that inspected commits and found nothing conflicted is a
+        # measurement, not an absence.
+        hand_resolved_summary = summarise_hand_resolved(shas, git_combined_diff)
+        # A sub-task this run's pull request maps to may already carry a
+        # seeded entry from a previous run's stored record (the loop above).
+        # This run just watched the pull request resolve -- merged, or
+        # closed without merging -- so it knows more than a record written
+        # before it ever ran -- drop the stale seeded entry for THIS
+        # sub-task only, never the seeded entries other sub-tasks still own.
+        report["hand_resolved"] = [
+            entry for entry in report["hand_resolved"]
+            if not (entry.get("sub_task") == task.id and entry.get("source") != "measured-this-run")
+        ]
+        report["hand_resolved"].append({
+            "pr": number,
+            "sub_task": task.id,
+            "source": "measured-this-run",
+            **hand_resolved_summary,
+        })
 
         rollup = pr.get("statusCheckRollup")
         checks = rollup[0].get("conclusion") if isinstance(rollup, list) and rollup else None
         merge_sha = (pr.get("mergeCommit") or {}).get("oid")
 
         review_verdict = None
-        verdict_file = next((f for f in task.files if f.startswith(".claude/reviews/")), None)
+        verdict_file = _declared_review_verdict_file(task)
         # A pull request that closed WITHOUT merging has no merge commit, so
         # nothing was read and no reading is stamped -- the key stays absent.
         # Stamping "unreadable" here would claim an attempt that never
@@ -907,9 +1464,21 @@ def main() -> int:
             reading = parse_review_verdict(artefact_text) if artefact_text is not None else None
             review_verdict = reading or "unreadable"
 
+        # I-10: close the sub-issue only once a merge into an accepted base
+        # is confirmed, and only when this sub-task actually has one --
+        # never on a dry run or a status report, since gh issue close is a
+        # real mutation, not a local write.
+        sub_issue_closed = None
+        task_state_entry = state.get("sub_tasks", {}).get(task.id, {})
+        task_issue = task_state_entry.get("issue")
+        if (verdict == "merged" and task_issue is not None and not args.dry_run
+                and not args.status and not args.resume):
+            sub_issue_closed = close_sub_issue(task_issue, pr.get("url", ""))
+
         rec = build_record(verdict, merge_sha, pr.get("url", ""), pr.get("mergedAt"), checks,
-                           review_verdict=review_verdict)
-        if not args.dry_run and not args.status:
+                           review_verdict=review_verdict, sub_issue_closed=sub_issue_closed,
+                           hand_resolved=hand_resolved_summary)
+        if not args.dry_run and not args.status and not args.resume:
             write_record(slug, task.id, rec)
         records[task.id] = rec
         (report["failed"] if rec["status"] == "failed" else report["closed"]).append(
@@ -919,7 +1488,6 @@ def main() -> int:
         tid: rec["review_verdict"] for tid, rec in records.items() if "review_verdict" in rec
     }
 
-    state = load_state(slug) or new_state(slug, tasks)
     state = reconcile_state(state, records)
 
     if args.dispatch:
@@ -943,19 +1511,73 @@ def main() -> int:
                                   "detail": "its dependencies have not landed; dispatching it "
                                             "would build on work that does not exist"}))
             return 3
+
+        task_state_entry = state.get("sub_tasks", {}).get(task.id, {})
+        # I-1 -- the acceptance criterion this whole feature exists to
+        # satisfy: a sub-task branch is cut from ITS OWN declared base, read
+        # out of its state entry, never unconditionally from the default
+        # branch. I-8: an entry with no base key falls back to base.
+        declared_task_base = task_state_entry.get("base") or base
+        task_issue = task_state_entry.get("issue")
+
+        # I-7, run before every dispatch: a state entry's issue/base must
+        # agree with its own brief. A mismatch REFUSES the dispatch and
+        # names both readings -- it is never reconciled silently. No brief
+        # recorded yet is not itself a mismatch; there is nothing to compare
+        # a state entry against before one exists.
+        brief_path_str = task_state_entry.get("brief")
+        if brief_path_str:
+            brief_fields = read_brief_frontmatter(Path(brief_path_str))
+            # A recorded brief path that no longer resolves is unverifiable,
+            # never "nothing to compare" -- I-7 is a refusal rule, and
+            # reading None as {} here would dispatch on a state entry whose
+            # only witness (I-5) cannot be checked against anything.
+            if brief_fields is None:
+                print(json.dumps({"error": "brief-unreadable", "sub_task": task.id,
+                                  "detail": f"recorded brief {brief_path_str!r} could not be "
+                                            "read; refusing to dispatch without checking it "
+                                            "against the state entry (I-7)"}))
+                return 6
+            mismatch = reconcile_subtask_identity(task_state_entry, brief_fields)
+            if mismatch:
+                print(json.dumps({"error": "identity-mismatch", "sub_task": task.id,
+                                  "detail": mismatch}))
+                return 5
+
         branch = branch_for(slug, task.id)
-        ok, detail = (True, "dry run") if args.dry_run else create_branch(branch, base)
+        # Extension Point 10 extended to --dispatch: --resume and --status are
+        # the same read-only front doors as --dry-run here -- each promises a
+        # report of the stored position, never a mutation of it, so all three
+        # take the same "compute, never cut, never stamp" path. Mirrors the
+        # identical three-flag guard already used for --record-subtask and
+        # for closing the sub-issue (both above).
+        read_only_dispatch = args.dry_run or args.resume or args.status
+        ok, detail = (True, "read-only run") if read_only_dispatch else create_branch(
+            branch, declared_task_base, issue=task_issue)
         if not ok:
             print(json.dumps({"error": "branch-failed", "branch": branch, "detail": detail}))
             return 4
         state = mark_dispatched(state, task.id, branch)
-        if not args.dry_run:
+        if not read_only_dispatch:
             write_state(slug, state)
         bodies = handoff_bodies(contract.read_text(encoding="utf-8", errors="replace"))
-        packet = build_dispatch(task, slug, str(contract), bodies.get(task.id, ""))
-        packet["branch_created"] = branch
-        print(json.dumps(packet, indent=2) if args.json else
-              f"dispatched {task.id} on {branch} -> {task.agent}")
+        # needs_issue mirrors needs_agent: true only once the contract is
+        # actually orchestrating two or more mergeable sub-tasks (I-6) and
+        # this one still carries no sub-issue.
+        needs_issue = len(tasks) >= 2 and task_issue is None
+        packet = build_dispatch(task, slug, str(contract), bodies.get(task.id, ""),
+                                issue=task_issue, base=declared_task_base,
+                                brief=task_state_entry.get("brief"), needs_issue=needs_issue)
+        # N-2: a read-only run (--dry-run, --resume or --status) never cuts
+        # the branch (`ok, detail` above is a stub "read-only run" result),
+        # so the packet and the printed line must not claim it did either.
+        packet["branch_created"] = None if read_only_dispatch else branch
+        if args.json:
+            print(json.dumps(packet, indent=2))
+        elif read_only_dispatch:
+            print(f"would dispatch {task.id} on {branch} -> {task.agent}")
+        else:
+            print(f"dispatched {task.id} on {branch} -> {task.agent}")
         return 0
 
     move = advance(tasks, records, state, defects=defects)
@@ -964,16 +1586,35 @@ def main() -> int:
     report["blocked"] = move.get("blocked", {})
     report["complete"] = move["action"] == "complete"
     report["state"] = state
-    if not args.dry_run and not args.status:
+    # Extension Point 8: the Next Command for this move, so both front doors
+    # print one answer instead of each composing an ending.
+    report["next_command"] = next_command_for(move, slug)
+    if not args.dry_run and not args.status and not args.resume:
         write_state(slug, state)
 
     if move["action"] == "dispatch":
         bodies = handoff_bodies(contract.read_text(encoding="utf-8", errors="replace"))
         by_id = {t.id: t for t in tasks}
-        report["dispatch"] = [
-            build_dispatch(by_id[tid], slug, str(contract), bodies.get(tid, ""))
-            for tid in move["sub_tasks"]
-        ]
+        report["dispatch"] = []
+        for tid in move["sub_tasks"]:
+            entry = state.get("sub_tasks", {}).get(tid, {})
+            report["dispatch"].append(build_dispatch(
+                by_id[tid], slug, str(contract), bodies.get(tid, ""),
+                issue=entry.get("issue"), base=entry.get("base") or base,
+                brief=entry.get("brief"),
+                needs_issue=len(tasks) >= 2 and entry.get("issue") is None,
+            ))
+
+    # Extension Point 5 / W2: stamp every hand_resolved entry -- seeded
+    # stored-record entries, not-recorded placeholders, and entries measured
+    # this run alike -- with its own rendered reading, once the list is
+    # final and before either output branch reads it. A caller of --json
+    # output must never have to reimplement the four-state reading the
+    # human-readable branch below already computes; both branches now read
+    # the same stamped value instead of two independent renderings that
+    # could drift apart.
+    for entry in report["hand_resolved"]:
+        entry["reading"] = _render_hand_resolved_reading(entry)
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -986,11 +1627,24 @@ def main() -> int:
             print(f"  blocked:  {tid} <- {', '.join(why)}")
         if report["hand_resolved"]:
             for h in report["hand_resolved"]:
-                print(f"  hand-resolved in #{h['pr']}: {', '.join(h['files'])}")
+                who = h.get("sub_task", "?")
+                # N-4: name the pull request too when this entry carries one
+                # -- a seeded or not-recorded entry has none, and stays
+                # identified by sub-task alone.
+                pr_suffix = f" #{h['pr']}" if h.get("pr") is not None else ""
+                print(f"  hand-resolved {who}{pr_suffix}: {h['reading']}")
         print(f"  next move: {move['action']}" + (f" - {move.get('detail')}" if move.get("detail") else ""))
         for d in report.get("dispatch", []):
             flag = "  [TASK BLOCK MISSING — author it in the contract]" if d["needs_authoring"] else ""
             print(f"    dispatch {d['sub_task']} -> {d['agent']} on {d['branch']}{flag}")
+        # Extension Point 9: the next command is the FINAL line, after the
+        # dispatch listing -- a skill that composes its own ending is the
+        # second implementation of a rule this script owns.
+        nc = report["next_command"]
+        if nc["commands"]:
+            print("next command: " + ", then ".join(nc["commands"]))
+        else:
+            print("next command: none — %s" % nc["reason"])
     return 0
 
 

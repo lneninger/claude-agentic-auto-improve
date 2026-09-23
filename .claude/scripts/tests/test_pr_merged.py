@@ -13,6 +13,7 @@ import inspect
 import io
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,6 +47,52 @@ from pr_merged import (  # noqa: E402
     SubTask,
 )
 import pr_merged  # noqa: E402  -- the module itself, for symbols this contract has not built yet
+
+
+# ---------------------------------------------------------------------------
+# Structural guard: no test in this suite may reach a real GitHub mutation.
+#
+# Six tests correctly intercept pr_merged._run today, by four different
+# hand-written fixture shapes. That protection belongs to nothing but each
+# test author's own discipline -- the next test added inherits none of it,
+# and its failure mode is not a red test, it is a closed issue or a merged
+# pull request on a live tracker. This wraps the real subprocess.run for the
+# whole module: any test that fails to intercept pr_merged._run before a
+# mutating gh command reaches a real process gets a loud RuntimeError instead
+# of a live mutation. It patches subprocess.run itself, never pr_merged._run,
+# so it does not interfere with the tests above that patch _run directly --
+# those never reach subprocess.run at all. Read-only and local git commands
+# (gh issue view, git fetch, git switch, git rev-parse, ...) pass straight
+# through, so it cannot mask a genuine failure in logic that never mutates
+# anything.
+# ---------------------------------------------------------------------------
+_REAL_SUBPROCESS_RUN = subprocess.run
+_FORBIDDEN_GH_MUTATIONS = (
+    ("gh", "issue", "close"),
+    ("gh", "issue", "develop"),
+    ("gh", "pr", "merge"),
+)
+
+
+def _guarded_subprocess_run(cmd, *args, **kwargs):
+    if isinstance(cmd, (list, tuple)):
+        head = tuple(str(c) for c in cmd[:3])
+        for forbidden in _FORBIDDEN_GH_MUTATIONS:
+            if head[:len(forbidden)] == forbidden:
+                raise RuntimeError(
+                    "test suite attempted a real %r -- a test fixture failed to intercept "
+                    "pr_merged._run before this command reached subprocess.run. Never patch "
+                    "this guard away; patch pr_merged._run in the failing test instead."
+                    % (cmd,))
+    return _REAL_SUBPROCESS_RUN(cmd, *args, **kwargs)
+
+
+def setUpModule():
+    subprocess.run = _guarded_subprocess_run
+
+
+def tearDownModule():
+    subprocess.run = _REAL_SUBPROCESS_RUN
 
 
 def _fn(name):
@@ -1389,6 +1436,4353 @@ class TestTheFetcherAsksForEveryFieldItsConsumersRead(unittest.TestCase):
                 field, requested,
                 "main() reads pr.get(%r); a field the fetcher does not request "
                 "arrives empty and its reader fails silently" % field)
+
+
+# --------------------------------------------------------------------------
+# Sub-task 1 (issue #163): "Loop state and the merge recorder"
+#
+# Two independently measured defects, both inside main():
+#   (1) classify_pr(pr, base) is passed only the repository default branch,
+#       so a task pull request merged into its own parent branch is reported
+#       merged-elsewhere and no completion record is ever written. Under this
+#       contract's topology EVERY task pull request merges into a parent
+#       branch, so this alone would release nothing, ever. Measured
+#       2026-09-19 against PR #173:
+#         py -3 .claude/scripts/pr_merged.py --contract ... --pr 173 --json
+#         -> {"skipped": [{"pr": 173, "verdict": "merged-elsewhere"}]}
+#   (2) main() unconditionally passes default_branch() as create_branch's
+#       second argument (pr_merged.py:859, :947), so a dispatched sub-task
+#       branch is always cut from the default branch regardless of what its
+#       own state entry declares -- the acceptance criterion this whole
+#       feature exists to satisfy ("Each sub-task branch is cut from the
+#       parent branch, not from master") is silently unmet.
+#
+# Every main()-level case below drives pr_merged.main() itself against a
+# throwaway contract written to a temp file, with load_state, default_branch,
+# gh_pr, git_combined_diff, write_state, write_record and create_branch all
+# stubbed, so nothing reaches git, GitHub or this project's own orchestrator
+# directories.
+# --------------------------------------------------------------------------
+CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK = """
+## Implementation Handoff
+
+### 1. Backend (`acme-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+"""
+
+
+class TestClassifyPrAcceptsADeclaredBaseSet(unittest.TestCase):
+    """classify_pr(pr, default_branch="master", accepted_bases=None) --
+    Extension Points, pr_merged.py. I-9: with accepted_bases=None the
+    function must behave exactly as it does today; with a set, merged holds
+    for any base inside it and merged-elsewhere stays reachable for every
+    base outside it.
+    """
+
+    def test_classify_pr_accepts_an_accepted_bases_parameter(self):
+        sig = inspect.signature(classify_pr)
+        self.assertIn(
+            "accepted_bases", sig.parameters,
+            "classify_pr must accept a third accepted_bases parameter -- Extension Points: "
+            "classify_pr(pr, default_branch='master', accepted_bases=None). Without it there "
+            "is no way to recognise a merge into a sub-task's own declared parent branch"
+        )
+
+    def test_merged_into_a_declared_non_default_base_is_recognised_as_merged(self):
+        pr = {"state": "MERGED", "mergedAt": "t", "mergeCommit": {"oid": "a"},
+              "baseRefName": "feature/160-parent"}
+        self.assertEqual(
+            classify_pr(pr, default_branch="master",
+                       accepted_bases={"master", "feature/160-parent"}),
+            "merged",
+            "a pull request merged into a base the caller declared must be recognised as "
+            "merged even though it is not the repository default branch -- this is the "
+            "measured PR #173 defect: every task pull request in this contract's design "
+            "merges into a parent branch, and today classify_pr can only ever accept the "
+            "repository default"
+        )
+
+    def test_merged_into_a_branch_outside_the_declared_set_is_still_merged_elsewhere(self):
+        # Positive control: without this the fix could degenerate into accepting
+        # any base at all, rather than only the ones the caller declared.
+        pr = {"state": "MERGED", "mergedAt": "t", "mergeCommit": {"oid": "a"},
+              "baseRefName": "some-other-branch"}
+        self.assertEqual(
+            classify_pr(pr, default_branch="master",
+                       accepted_bases={"master", "feature/160-parent"}),
+            "merged-elsewhere",
+            "a pull request merged into a branch that is in neither the default branch nor "
+            "the declared set must still be reported merged-elsewhere -- accepting a "
+            "declared parent branch must not accept every branch"
+        )
+
+    # I-9 ("called without a declared set it reports exactly what it reports
+    # today") is not re-tested here as a standalone case: classify_pr(pr,
+    # default_branch="master") with no accepted_bases argument is exactly the
+    # call TestClassifyPullRequest.test_merged_into_a_non_default_branch_is_flagged
+    # already makes, and it already passes -- an assertion that could only ever
+    # be green cannot itself be a RED test. That existing, unmodified test is
+    # what enforces I-9 once accepted_bases gains a default of None.
+
+
+class TestNewStateAcceptsABaseParameter(unittest.TestCase):
+    """new_state(contract_slug, tasks, base=None) -- Extension Points. Each
+    fresh entry gains issue: None, base: <base or default>, brief: None.
+    """
+
+    def test_new_state_accepts_a_base_parameter(self):
+        sig = inspect.signature(new_state)
+        self.assertIn(
+            "base", sig.parameters,
+            "new_state must accept an optional base parameter -- Extension Points: "
+            "new_state(contract_slug, tasks, base=None) -- so a fresh sub-task entry can be "
+            "seeded with a declared parent branch instead of always the default branch"
+        )
+
+    def test_a_given_base_is_stamped_into_every_fresh_entry(self):
+        st = new_state("c-slug", _tasks(), base="feature/160-parent")
+        for tid, entry in st["sub_tasks"].items():
+            self.assertEqual(
+                entry.get("base"), "feature/160-parent",
+                "every fresh sub-task entry must be seeded with the base new_state was "
+                "given; sub-task %r was not" % tid
+            )
+
+    def test_every_fresh_entry_also_carries_issue_and_brief_as_none(self):
+        st = new_state("c-slug", _tasks(), base="feature/160-parent")
+        for tid, entry in st["sub_tasks"].items():
+            self.assertIn(
+                "issue", entry,
+                "sub-task %r must carry an issue key from the moment its entry is created, "
+                "even before any sub-issue exists for it" % tid
+            )
+            self.assertIsNone(
+                entry.get("issue"),
+                "a freshly created entry has no sub-issue yet, so issue must be None -- "
+                "sub-task %r read %r" % (tid, entry.get("issue"))
+            )
+            self.assertIn("brief", entry, "sub-task %r must carry a brief key" % tid)
+            self.assertIsNone(entry.get("brief"))
+
+
+class TestRecordSubTaskIdentity(unittest.TestCase):
+    """record_sub_task_identity(state, subtask_id, issue, base, brief) --
+    Extension Points: a new pure writer, the sibling of mark_dispatched,
+    called by /flow Step 2.7 through --record-subtask.
+    """
+
+    def _get(self):
+        fn = _fn("record_sub_task_identity")
+        if fn is None:
+            self.fail(
+                "pr_merged.record_sub_task_identity must exist -- Extension Points names it "
+                "the sibling of mark_dispatched that stamps a sub-task's issue, base and "
+                "brief into the state store"
+            )
+        return fn
+
+    def test_it_writes_issue_base_and_brief_for_the_named_subtask(self):
+        record_sub_task_identity = self._get()
+        st = record_sub_task_identity(new_state("c", _tasks()), "t1-a", 163,
+                                      "feature/160-parent", ".claude/work-items/x.md")
+        entry = st["sub_tasks"]["t1-a"]
+        self.assertEqual(entry.get("issue"), 163,
+                         "the sub-issue number given must be stamped into the named entry")
+        self.assertEqual(entry.get("base"), "feature/160-parent",
+                         "the declared base given must be stamped into the named entry")
+        self.assertEqual(entry.get("brief"), ".claude/work-items/x.md",
+                         "the brief path given must be stamped into the named entry")
+
+    def test_it_does_not_mutate_the_state_it_was_given(self):
+        # A naive in-place writer would still pass the test above; this is the
+        # test that would catch it -- mark_dispatched already sets this precedent
+        # via copy.deepcopy.
+        record_sub_task_identity = self._get()
+        original = new_state("c", _tasks())
+        before = json.dumps(original, sort_keys=True, default=str)
+        record_sub_task_identity(original, "t1-a", 163, "feature/160-parent",
+                                 ".claude/work-items/x.md")
+        after = json.dumps(original, sort_keys=True, default=str)
+        self.assertEqual(
+            before, after,
+            "record_sub_task_identity must return a new state rather than mutating the one "
+            "it was given, exactly as mark_dispatched already does"
+        )
+
+    def test_it_leaves_every_other_subtask_untouched(self):
+        record_sub_task_identity = self._get()
+        st = record_sub_task_identity(new_state("c", _tasks()), "t1-a", 163,
+                                      "feature/160-parent", ".claude/work-items/x.md")
+        for tid in ("t2-b", "t3-c"):
+            self.assertIsNone(
+                st["sub_tasks"][tid].get("issue"),
+                "recording t1-a's identity must not stamp an issue onto %r" % tid
+            )
+
+
+class TestStateRoundTripsIssueBaseAndBriefThroughDisk(unittest.TestCase):
+    def test_write_then_load_preserves_issue_base_and_brief(self):
+        record_sub_task_identity = _fn("record_sub_task_identity")
+        self.assertIsNotNone(
+            record_sub_task_identity,
+            "pr_merged.record_sub_task_identity must exist before a round trip through disk "
+            "can even be attempted"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(pr_merged, "STATE_DIR", Path(d)):
+                st = new_state("c-slug", _tasks())
+                st = record_sub_task_identity(st, "t1-a", 163, "feature/160-parent",
+                                              ".claude/work-items/2026-09-19-163-t1-a.md")
+                pr_merged.write_state("c-slug", st)
+                reloaded = pr_merged.load_state("c-slug")
+
+        self.assertIsNotNone(reloaded, "a state written to disk must be readable back")
+        entry = reloaded["sub_tasks"]["t1-a"]
+        self.assertEqual(entry.get("issue"), 163,
+                         "the sub-issue number must survive a write-then-read round trip")
+        self.assertEqual(entry.get("base"), "feature/160-parent",
+                         "the declared base must survive a write-then-read round trip")
+        self.assertEqual(entry.get("brief"), ".claude/work-items/2026-09-19-163-t1-a.md",
+                         "the brief path must survive a write-then-read round trip")
+
+
+class TestDispatchPacketCarriesIssueBaseAndBrief(unittest.TestCase):
+    """build_dispatch(...) gains issue, base, brief and needs_issue --
+    Extension Points, pr_merged.py.
+    """
+
+    def test_the_packet_carries_issue_base_and_brief_when_given(self):
+        task = SubTask(id="t2-backend", ordinal=2, name="Backend",
+                       agent="dotnet-backend-architect", depends_on=[1], files=["src/Foo/Bar.cs"])
+        d = build_dispatch(task, "c-slug", ".claude/concepts/c-slug.md", BLOCK_WITH_TASK,
+                           issue=163, base="feature/160-parent",
+                           brief=".claude/work-items/2026-09-19-163-t2-backend.md")
+        self.assertEqual(
+            d.get("issue"), 163,
+            "the dispatch packet must carry the sub-task's own sub-issue number"
+        )
+        self.assertEqual(
+            d.get("base"), "feature/160-parent",
+            "the dispatch packet must carry the sub-task's declared base, so whatever ships "
+            "on its behalf knows which branch to target"
+        )
+        self.assertEqual(
+            d.get("brief"), ".claude/work-items/2026-09-19-163-t2-backend.md",
+            "the dispatch packet must carry the sub-task's brief path"
+        )
+
+    def test_needs_issue_is_true_when_flagged_by_the_caller(self):
+        task = SubTask(id="t1-a", ordinal=1, name="A", agent="x", depends_on=[], files=["a"])
+        d = build_dispatch(task, "c", ".claude/concepts/c.md", "**Files to touch:**\n- a\n",
+                           issue=None, needs_issue=True)
+        self.assertIn(
+            "needs_issue", d,
+            "build_dispatch must report needs_issue so a caller never dispatches a sub-task "
+            "that still has no sub-issue created for it"
+        )
+        self.assertTrue(d["needs_issue"])
+
+    def test_needs_issue_positive_control_is_false_when_an_issue_is_present(self):
+        # Positive control mirroring needs_agent's own (test_pr_merged.py:769):
+        # a hard-coded True must not pass both this case and the one above.
+        task = SubTask(id="t1-a", ordinal=1, name="A", agent="x", depends_on=[], files=["a"])
+        d = build_dispatch(task, "c", ".claude/concepts/c.md", "**Files to touch:**\n- a\n",
+                           issue=163, needs_issue=False)
+        self.assertIn("needs_issue", d)
+        self.assertFalse(
+            d["needs_issue"],
+            "needs_issue must be false once a sub-issue has been recorded -- a hard-coded "
+            "True would pass the case above but not this one"
+        )
+
+
+class TestCreateBranchIssueAwareCutover(unittest.TestCase):
+    """create_branch(branch, base, issue=None) -- Extension Points. Without an
+    issue the function must behave exactly as it does today: plain git only,
+    no gh call. With an issue and a working gh, it registers the branch
+    against its sub-issue through gh issue develop before falling back.
+    """
+
+    def test_an_issue_switches_the_cutover_from_plain_git_to_gh_issue_develop(self):
+        """(a) with an issue and a working gh: RED today -- create_branch(branch,
+        base) accepts no issue argument at all, so no gh call can ever happen.
+        (b) without an issue: unchanged -- plain git only, no gh call. Verified
+        together so the no-issue regression travels inside a test that is
+        genuinely RED for reason (a); asserting (b) alone would already pass
+        against today's create_branch(branch, base) and could not itself be RED.
+        """
+        with_issue_calls = []
+
+        def fake_run_with_issue(cmd):
+            with_issue_calls.append(cmd)
+            if cmd[:2] == ["gh", "issue"] and "develop" in cmd:
+                return 0, "https://github.com/acme/repo/tree/task/c/t1-a"
+            if cmd[:2] == ["git", "fetch"]:
+                return 0, ""
+            if cmd[0] == "git" and len(cmd) > 1 and cmd[1] in ("switch", "checkout"):
+                return 0, "switched"
+            return 0, ""
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run_with_issue):
+            ok_with, _detail_with = pr_merged.create_branch(
+                "task/c/t1-a", "feature/160-parent", issue=163)
+
+        self.assertTrue(ok_with, "the gh-issue-develop path must report success when gh succeeds")
+        gh_develop_calls = [c for c in with_issue_calls
+                            if c[:2] == ["gh", "issue"] and "develop" in c]
+        self.assertTrue(
+            gh_develop_calls,
+            "create_branch given an issue must call gh issue develop to register the branch "
+            "against its sub-issue -- the whole reason the parameter exists. Today "
+            "create_branch(branch, base) accepts no issue at all"
+        )
+        call = gh_develop_calls[0]
+        self.assertIn("163", call, "the sub-issue number must be passed to gh issue develop")
+        self.assertIn("feature/160-parent", call,
+                      "the declared base must be passed as gh issue develop's --base")
+
+        without_issue_calls = []
+
+        def fake_run_without_issue(cmd):
+            without_issue_calls.append(cmd)
+            if cmd[:3] == ["git", "rev-parse", "--verify"]:
+                return 1, ""  # branch does not exist yet
+            if cmd[:2] == ["git", "fetch"]:
+                return 0, ""
+            if cmd[:3] == ["git", "switch", "-c"]:
+                return 0, "created it"
+            return 1, "unexpected command: %r" % (cmd,)
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run_without_issue):
+            ok_without, _detail_without = pr_merged.create_branch(
+                "task/c/t1-a", "feature/160-parent")
+
+        self.assertTrue(ok_without, "the plain git path must still succeed when no issue is given")
+        self.assertFalse(
+            any(c and c[0] == "gh" for c in without_issue_calls),
+            "create_branch(branch, base) with no issue must run no gh command at all -- "
+            "today's behaviour for every state entry written before this change"
+        )
+
+
+class TestMainDispatchCutsFromTheSubtasksDeclaredBase(unittest.TestCase):
+    """Extension Points, main(): 'the first amendment's list had four and
+    omitted [reading the sub-task's base], which would have shipped the
+    sub-issue with today's branch topology bolted on.' I-1 -- the acceptance
+    criterion this whole feature exists to satisfy: 'Each sub-task branch is
+    cut from the parent branch, not from master.'
+    """
+
+    def _drive_dispatch(self, state_sub_task_entry, filename="acme-dispatch-fixture.md"):
+        create_branch_mock = mock.MagicMock(return_value=(True, "created it"))
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / filename
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            slug = contract_path.stem
+            branch = f"task/{slug}/t1-backend"
+            state = {
+                "contract": slug,
+                "started_at": "2026-09-19T00:00:00+00:00",
+                "sub_tasks": {"t1-backend": dict(state_sub_task_entry)},
+            }
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path),
+                    "--dispatch", "t1-backend", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "create_branch", create_branch_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                pr_merged.main()
+            printed = out.getvalue()
+        packet = json.loads(printed) if printed.strip().startswith("{") else None
+        return branch, create_branch_mock, packet
+
+    def test_dispatch_cuts_the_branch_from_the_subtasks_declared_base_not_the_default(self):
+        branch, create_branch_mock, packet = self._drive_dispatch(
+            {"status": "pending", "branch": None, "pull_request": None,
+             "issue": 163, "base": "feature/160-parent", "brief": None})
+        self.assertTrue(create_branch_mock.called,
+                        "fixture sanity: dispatching a released sub-task must cut its branch")
+        args, kwargs = create_branch_mock.call_args
+        self.assertEqual(args[0], branch)
+        self.assertEqual(
+            args[1], "feature/160-parent",
+            "main() must read the sub-task's own base out of its state entry and pass it as "
+            "create_branch's second argument -- today it unconditionally passes "
+            "default_branch(), which leaves the feature's headline acceptance criterion "
+            "silently unmet"
+        )
+        self.assertIsNotNone(packet, "fixture sanity: --json dispatch must print a packet")
+        self.assertEqual(
+            packet.get("base"), "feature/160-parent",
+            "the dispatch packet main() prints must also carry the sub-task's declared base"
+        )
+        self.assertEqual(
+            packet.get("issue"), 163,
+            "the dispatch packet main() prints must also carry the sub-task's sub-issue"
+        )
+
+    def test_dispatch_passes_the_subtasks_issue_to_create_branch(self):
+        _, create_branch_mock, _ = self._drive_dispatch(
+            {"status": "pending", "branch": None, "pull_request": None,
+             "issue": 163, "base": "feature/160-parent", "brief": None})
+        args, kwargs = create_branch_mock.call_args
+        self.assertEqual(
+            kwargs.get("issue"), 163,
+            "main() must pass the sub-task's own sub-issue number into create_branch, so the "
+            "branch it cuts is registered against that sub-issue -- today create_branch is "
+            "called with no issue argument at all"
+        )
+
+    def test_a_declared_base_produces_a_different_branch_source_than_no_declared_base(self):
+        # The discriminating control: today main() passes the SAME default_branch()
+        # value to create_branch regardless of the state entry, so a sub-task that
+        # declares its own base and one that declares none currently receive an
+        # IDENTICAL base argument.
+        _, mock_with, _ = self._drive_dispatch(
+            {"status": "pending", "branch": None, "pull_request": None,
+             "issue": 163, "base": "feature/160-parent", "brief": None})
+        base_with = mock_with.call_args[0][1]
+
+        _, mock_without, _ = self._drive_dispatch(
+            {"status": "pending", "branch": None, "pull_request": None})
+        base_without = mock_without.call_args[0][1]
+
+        self.assertEqual(
+            base_without, "master",
+            "a state entry with no base key at all -- every entry written before this "
+            "change -- must fall back to the repository default branch (I-8)"
+        )
+        self.assertNotEqual(
+            base_with, base_without,
+            "a sub-task that declares its own base must be cut from that base, not from "
+            "whatever a sub-task with no declared base falls back to -- today main() passes "
+            "the identical default_branch() value in both cases"
+        )
+
+
+class TestMainAcceptsAMergeIntoTheSubtasksDeclaredBase(unittest.TestCase):
+    """The measured PR #173 defect. classify_pr(pr, base) is passed only the
+    repository default branch, so a task pull request merged into its own
+    parent branch is reported merged-elsewhere and no completion record is
+    ever written. Under this contract's design EVERY task pull request
+    merges into a parent branch, so this defect alone would release nothing,
+    ever:
+
+        py -3 .claude/scripts/pr_merged.py --contract ... --pr 173 --json
+        -> {"skipped": [{"pr": 173, "verdict": "merged-elsewhere"}]}
+    """
+
+    def _drive(self, base_ref_name, declared_base, filename="acme-merge-fixture.md"):
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / filename
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            slug = contract_path.stem
+            branch = f"task/{slug}/t1-backend"
+            pr = {
+                "number": 173,
+                "state": "MERGED",
+                "mergedAt": "2026-09-19T00:00:00Z",
+                "mergeCommit": {"oid": "cafef00d"},
+                "headRefName": branch,
+                "baseRefName": base_ref_name,
+                "url": "https://example.invalid/pull/173",
+                "commits": [{"oid": "cafef00d"}],
+                "statusCheckRollup": None,
+            }
+            state = {
+                "contract": slug,
+                "started_at": "2026-09-19T00:00:00+00:00",
+                "sub_tasks": {"t1-backend": {"status": "pending", "branch": branch,
+                                             "pull_request": None, "issue": 163,
+                                             "base": declared_base, "brief": None}},
+            }
+            write_record_mock = mock.MagicMock(return_value=None)
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "173", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "write_record", write_record_mock), \
+                 mock.patch.object(pr_merged, "gh_pr", side_effect=lambda n: pr if n == 173 else None), \
+                 mock.patch.object(pr_merged, "git_combined_diff", return_value=([], 1)), \
+                 mock.patch.object(pr_merged, "close_sub_issue", return_value=None, create=True), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                pr_merged.main()
+            report = json.loads(out.getvalue())
+        return report, write_record_mock
+
+    def test_a_merge_into_the_declared_base_is_accepted_while_others_are_still_rejected(self):
+        """(a) accepted -- RED today: classify_pr(pr, base) never sees the
+        declared base. (b) rejected -- the positive control, so accepting the
+        parent branch cannot degenerate into accepting any base. (c) default
+        branch -- unchanged; bundled here rather than as its own test because
+        it already passes today and cannot itself be RED, so it is verified
+        inside a test that is genuinely RED for reason (a).
+        """
+        accepted_report, accepted_writes = self._drive("feature/160-parent", "feature/160-parent")
+        rejected_report, rejected_writes = self._drive("some-other-branch", "feature/160-parent")
+        default_report, _default_writes = self._drive("master", "feature/160-parent")
+
+        self.assertTrue(
+            accepted_report.get("closed"),
+            "a pull request merged into the sub-task's own declared base must close it -- "
+            "today classify_pr(pr, base) compares only against the repository default "
+            "branch, so this list stays empty and the sub-issue never releases (measured "
+            "PR #173 defect)"
+        )
+        self.assertTrue(
+            accepted_writes.called,
+            "a completion record must actually be written for a pull request merged into "
+            "the declared base, not merely reported in memory"
+        )
+
+        self.assertEqual(
+            rejected_report.get("closed", []), [],
+            "a pull request merged into a branch that is neither the default branch nor the "
+            "sub-task's declared base must never produce a completion record"
+        )
+        self.assertEqual(
+            [s.get("verdict") for s in rejected_report.get("skipped", [])],
+            ["merged-elsewhere"],
+            "a pull request merged into an undeclared branch must still be reported "
+            "merged-elsewhere -- accepting the parent branch must not accept anything"
+        )
+        self.assertFalse(rejected_writes.called)
+
+        self.assertTrue(
+            default_report.get("closed"),
+            "a pull request merged into the repository default branch must still close its "
+            "sub-task exactly as it does today, regardless of what base the sub-task itself "
+            "declares"
+        )
+
+
+class TestMainAttemptsSubIssueClosureAfterAConfirmedMerge(unittest.TestCase):
+    """main() point 5, Extension Points: after a confirmed merge, attempt the
+    sub-issue closure and stamp the outcome into the completion record as
+    sub_issue_closed -- I-8's omit-rather-than-stamp-null treatment, the same
+    one review_verdict already has.
+    """
+
+    def test_a_confirmed_merge_into_the_declared_base_closes_its_subissue_and_records_it(self):
+        close_sub_issue_mock = mock.MagicMock(return_value="closed")
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / "acme-close-fixture.md"
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            slug = contract_path.stem
+            branch = f"task/{slug}/t1-backend"
+            pr = {
+                "number": 173, "state": "MERGED", "mergedAt": "2026-09-19T00:00:00Z",
+                "mergeCommit": {"oid": "cafef00d"}, "headRefName": branch,
+                "baseRefName": "feature/160-parent",
+                "url": "https://example.invalid/pull/173",
+                "commits": [{"oid": "cafef00d"}], "statusCheckRollup": None,
+            }
+            state = {
+                "contract": slug, "started_at": "2026-09-19T00:00:00+00:00",
+                "sub_tasks": {"t1-backend": {"status": "pending", "branch": branch,
+                                             "pull_request": None, "issue": 163,
+                                             "base": "feature/160-parent", "brief": None}},
+            }
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "173", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "write_record", return_value=None), \
+                 mock.patch.object(pr_merged, "gh_pr", side_effect=lambda n: pr if n == 173 else None), \
+                 mock.patch.object(pr_merged, "git_combined_diff", return_value=([], 1)), \
+                 mock.patch.object(pr_merged, "close_sub_issue", close_sub_issue_mock, create=True), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                pr_merged.main()
+            report = json.loads(out.getvalue())
+
+        self.assertTrue(
+            close_sub_issue_mock.called,
+            "main() must attempt the sub-issue closure once a merge into the declared base "
+            "is confirmed -- Extension Points main() point 5. Today main() never calls "
+            "close_sub_issue at all, whether or not the function exists"
+        )
+        close_sub_issue_mock.assert_called_with(163, pr["url"])
+        closed = report.get("closed", [])
+        self.assertTrue(closed, "fixture sanity: the merge must close t1-backend")
+        self.assertEqual(
+            closed[0]["record"].get("sub_issue_closed"), "closed",
+            "the completion record must carry the closure outcome under sub_issue_closed"
+        )
+
+
+class TestCloseSubIssueReadsBeforeClosing(unittest.TestCase):
+    """close_sub_issue(issue, pr_url) -- Extension Points; enforces I-10: read
+    gh issue view state FIRST, return already-closed without mutating when
+    already closed; otherwise close and re-read to report closed/close-failed.
+    """
+
+    def _get(self):
+        fn = _fn("close_sub_issue")
+        if fn is None:
+            self.fail(
+                "pr_merged.close_sub_issue must exist -- Extension Points names it a new "
+                "edge beside gh_pr, enforcing I-10's read-before-close ordering"
+            )
+        return fn
+
+    def test_an_already_closed_issue_is_reported_closed_without_mutating(self):
+        close_sub_issue = self._get()
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(cmd)
+            if cmd[:2] == ["gh", "issue"] and "view" in cmd:
+                return 0, json.dumps({"state": "CLOSED"})
+            return 1, "close_sub_issue must not issue this command: %r" % (cmd,)
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
+            result = close_sub_issue(163, "https://example.invalid/pull/173")
+
+        self.assertEqual(
+            result, "already-closed",
+            "an issue that is already closed must be reported already-closed, idempotently "
+            "on a re-run -- I-10's read-before-close ordering"
+        )
+        self.assertFalse(
+            any(c[:2] == ["gh", "issue"] and "close" in c for c in calls),
+            "an already-closed issue must never receive a gh issue close call -- that is "
+            "the mutation I-10 forbids on a re-run"
+        )
+
+    def test_an_open_issue_is_closed_and_reported_closed(self):
+        close_sub_issue = self._get()
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(cmd)
+            if cmd[:2] == ["gh", "issue"] and "view" in cmd:
+                view_calls = [c for c in calls if c[:2] == ["gh", "issue"] and "view" in c]
+                state = "OPEN" if len(view_calls) == 1 else "CLOSED"
+                return 0, json.dumps({"state": state})
+            if cmd[:2] == ["gh", "issue"] and "close" in cmd:
+                return 0, ""
+            return 1, "unexpected command: %r" % (cmd,)
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
+            result = close_sub_issue(163, "https://example.invalid/pull/173")
+
+        close_calls = [c for c in calls if c[:2] == ["gh", "issue"] and "close" in c]
+        self.assertTrue(
+            close_calls,
+            "an open sub-issue must be closed through gh issue close once its pull request "
+            "has merged"
+        )
+        self.assertIn("163", close_calls[0],
+                      "the sub-issue number must be passed to gh issue close")
+        self.assertEqual(result, "closed")
+
+
+# --------------------------------------------------------------------------
+# The structural guard itself: proves it is live, not merely present.
+# --------------------------------------------------------------------------
+class TestSubprocessGuardBlocksLiveMutations(unittest.TestCase):
+    """A test that forgets to intercept pr_merged._run must fail loudly, not
+    reach a real gh mutation. Drives pr_merged._run directly -- no mock on
+    _run itself -- so the only thing standing between this call and a real
+    subprocess is the module-level guard installed by setUpModule above.
+    """
+
+    def test_an_unintercepted_close_call_raises_instead_of_running(self):
+        with self.assertRaises(RuntimeError):
+            pr_merged._run(["gh", "issue", "close", "163"])
+
+    def test_an_unintercepted_develop_call_raises_instead_of_running(self):
+        with self.assertRaises(RuntimeError):
+            pr_merged._run(["gh", "issue", "develop", "163", "--name", "x"])
+
+    def test_an_unintercepted_pr_merge_call_raises_instead_of_running(self):
+        with self.assertRaises(RuntimeError):
+            pr_merged._run(["gh", "pr", "merge", "42"])
+
+    def test_a_read_only_gh_call_is_not_blocked(self):
+        # Positive control: the guard must not mask a genuine failure by
+        # blocking commands it was never meant to catch. gh is very unlikely
+        # to be authenticated in this environment, so this asserts only that
+        # no RuntimeError from the guard itself is raised -- _run's own
+        # (OSError, subprocess.TimeoutExpired) handling still applies.
+        try:
+            pr_merged._run(["gh", "issue", "view", "163", "--json", "state"])
+        except RuntimeError as exc:
+            self.fail("the guard must not intercept a read-only gh command: %r" % exc)
+
+
+# --------------------------------------------------------------------------
+# CRITICAL 1: --record-subtask against an unknown id must refuse, not
+# silently no-op while reporting success.
+# --------------------------------------------------------------------------
+class TestRecordSubtaskRefusesUnknownId(unittest.TestCase):
+    """record_sub_task_identity only updates an entry that already exists in
+    state["sub_tasks"], and main()'s --record-subtask handler wrote state,
+    printed a success payload and returned 0 regardless. A typo'd or stale
+    id therefore changed nothing and still reported success -- the state
+    entry's issue field is I-5's ONLY witness that a sub-issue was created
+    exactly once, so a confident success with no witness leaves the next run
+    believing no issue exists and opening a second one for the same
+    sub-task.
+    """
+
+    def _drive(self, subtask_id, extra_args=(), filename="acme-record-fixture.md"):
+        write_state_mock = mock.MagicMock(return_value=None)
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / filename
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path),
+                    "--record-subtask", subtask_id, "--issue", "163",
+                    "--base", "feature/160-parent", "--brief", ".claude/work-items/x.md",
+                    "--json", *extra_args]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=None), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", write_state_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                exit_code = pr_merged.main()
+            printed = out.getvalue()
+        payload = json.loads(printed) if printed.strip().startswith("{") else None
+        return exit_code, payload, write_state_mock
+
+    def test_an_unknown_id_refuses_with_a_non_zero_exit(self):
+        exit_code, payload, write_state_mock = self._drive("t9-does-not-exist")
+        self.assertNotEqual(
+            exit_code, 0,
+            "recording an id absent from the plan must not report success -- it is I-5's "
+            "only witness, and a confident success with no witness lets a typo'd id open a "
+            "second sub-issue on the next run"
+        )
+        self.assertIsNotNone(payload, "fixture sanity: the CLI must print a JSON payload")
+        self.assertEqual(payload.get("error"), "unknown-sub-task")
+        self.assertIn(
+            "t1-backend", payload.get("known", []),
+            "the refusal must name the known sub-task ids so the caller can see the typo"
+        )
+        self.assertFalse(
+            write_state_mock.called,
+            "an unknown id must never be written to the state store -- that write is the "
+            "silent no-op this defect produced"
+        )
+
+    def test_a_known_id_still_succeeds(self):
+        # Positive control: the refusal must not degenerate into rejecting every id.
+        exit_code, payload, write_state_mock = self._drive("t1-backend")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload.get("recorded"), "t1-backend")
+        self.assertTrue(write_state_mock.called)
+
+
+# --------------------------------------------------------------------------
+# Warning 7: --record-subtask must honour --dry-run and --status exactly as
+# the report path already does, rather than writing unconditionally.
+# --------------------------------------------------------------------------
+class TestRecordSubtaskHonoursDryRunAndStatus(unittest.TestCase):
+    def _drive(self, extra_args, filename="acme-record-dryrun-fixture.md"):
+        write_state_mock = mock.MagicMock(return_value=None)
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / filename
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path),
+                    "--record-subtask", "t1-backend", "--issue", "163",
+                    "--base", "feature/160-parent", "--brief", ".claude/work-items/x.md",
+                    "--json", *extra_args]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=None), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", write_state_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                exit_code = pr_merged.main()
+        return exit_code, write_state_mock
+
+    def test_dry_run_computes_and_prints_but_never_writes(self):
+        exit_code, write_state_mock = self._drive(["--dry-run"])
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(
+            write_state_mock.called,
+            "--dry-run's own help text says compute everything and write nothing -- "
+            "--record-subtask must not be the one path that ignores it"
+        )
+
+    def test_status_also_never_writes(self):
+        exit_code, write_state_mock = self._drive(["--status"])
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(write_state_mock.called)
+
+    def test_without_either_flag_the_write_still_happens(self):
+        # Positive control: gating the write must not silently disable it outright.
+        exit_code, write_state_mock = self._drive([])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(write_state_mock.called)
+
+
+# --------------------------------------------------------------------------
+# Warning 3: close_sub_issue reads state as an allow list, not "not CLOSED".
+# --------------------------------------------------------------------------
+class TestCloseSubIssueReadsAsAnAllowList(unittest.TestCase):
+    def _get(self):
+        fn = _fn("close_sub_issue")
+        self.assertIsNotNone(fn, "pr_merged.close_sub_issue must exist")
+        return fn
+
+    def test_a_payload_with_no_state_key_is_unverifiable_not_open(self):
+        close_sub_issue = self._get()
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(cmd)
+            if cmd[:2] == ["gh", "issue"] and "view" in cmd:
+                return 0, json.dumps({})  # no "state" key at all
+            return 1, "close_sub_issue must not issue this command: %r" % (cmd,)
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
+            result = close_sub_issue(163, "https://example.invalid/pull/173")
+
+        self.assertEqual(
+            result, "unverifiable",
+            "a payload that parses but carries no state key must never be read as OPEN -- "
+            "an empty string is not CLOSED, so a 'not CLOSED means close it' rule would fire "
+            "the mutation having read nothing"
+        )
+        self.assertFalse(
+            any(c[:2] == ["gh", "issue"] and "close" in c for c in calls),
+            "an unverifiable read must never be followed by a close mutation"
+        )
+
+    def test_a_list_payload_is_unverifiable_not_a_crash(self):
+        close_sub_issue = self._get()
+
+        def fake_run(cmd):
+            if cmd[:2] == ["gh", "issue"] and "view" in cmd:
+                return 0, json.dumps([])  # json.loads returns a list, not a dict
+            return 1, "close_sub_issue must not issue this command: %r" % (cmd,)
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
+            result = close_sub_issue(163, "https://example.invalid/pull/173")
+
+        self.assertEqual(
+            result, "unverifiable",
+            "json.loads returning a list is not None, so 'or {}' does not catch it -- "
+            "calling .get on a list must never reach an uncaught exception"
+        )
+
+    def test_an_unrecognised_state_value_is_unverifiable_not_open(self):
+        close_sub_issue = self._get()
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(cmd)
+            if cmd[:2] == ["gh", "issue"] and "view" in cmd:
+                return 0, json.dumps({"state": "MERGED"})  # not a real issue state
+            return 1, "close_sub_issue must not issue this command: %r" % (cmd,)
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
+            result = close_sub_issue(163, "https://example.invalid/pull/173")
+
+        self.assertEqual(result, "unverifiable")
+        self.assertFalse(any(c[:2] == ["gh", "issue"] and "close" in c for c in calls))
+
+
+# --------------------------------------------------------------------------
+# Warning 5: create_branch names which path it took, and never misreports a
+# gh-registered branch's failed local checkout as "branch already exists".
+# --------------------------------------------------------------------------
+class TestCreateBranchNamesThePathDistinctly(unittest.TestCase):
+    def test_gh_success_with_a_failed_local_checkout_is_named_on_its_own_terms(self):
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(cmd)
+            if cmd[:2] == ["gh", "issue"] and "develop" in cmd:
+                return 0, "https://github.com/acme/repo/tree/task/c/t1-a"
+            if cmd[:2] == ["git", "fetch"]:
+                return 0, ""
+            if cmd[0] == "git" and len(cmd) > 1 and cmd[1] in ("switch", "checkout"):
+                return 1, "local checkout blew up"
+            return 1, "unexpected command: %r" % (cmd,)
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
+            ok, detail = pr_merged.create_branch("task/c/t1-a", "feature/160-parent", issue=163)
+
+        self.assertFalse(ok, "a failed local checkout must not be reported as success")
+        self.assertIn("163", detail, "the detail must name the sub-issue this path used")
+        self.assertIn(
+            "local checkout failed", detail,
+            "the detail must say the checkout itself failed, not that gh issue develop was "
+            "unavailable -- gh succeeded on this path"
+        )
+        self.assertNotIn(
+            "already exists", detail,
+            "a branch gh just correctly registered must never be reported as a fresh-dispatch "
+            "collision -- the follow-on defect the reviewer found"
+        )
+        self.assertFalse(
+            any(c[:3] == ["git", "rev-parse", "--verify"] for c in calls),
+            "the plain-git 'does it already exist' check must never run once gh has already "
+            "registered the branch -- that is the exact check that misreports outcome (2) as "
+            "outcome (1)"
+        )
+
+    def test_gh_failure_outright_is_named_distinctly_from_a_failed_checkout(self):
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(cmd)
+            if cmd[:2] == ["gh", "issue"] and "develop" in cmd:
+                return 1, ""  # gh issue develop itself failed
+            if cmd[:3] == ["git", "rev-parse", "--verify"]:
+                return 1, ""
+            if cmd[:2] == ["git", "fetch"]:
+                return 0, ""
+            if cmd[:3] == ["git", "switch", "-c"]:
+                return 0, "created it"
+            return 1, "unexpected command: %r" % (cmd,)
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
+            ok, detail = pr_merged.create_branch("task/c/t1-a", "feature/160-parent", issue=163)
+
+        self.assertTrue(ok, "the plain-git fallback must still succeed when gh fails outright")
+        self.assertIn(
+            "gh issue develop failed", detail,
+            "gh failing outright must be named distinctly from a gh success whose local "
+            "checkout failed -- the two must never share one conflated message"
+        )
+
+
+# --------------------------------------------------------------------------
+# Warning 6: an unreadable recorded brief must refuse dispatch, not fail open.
+# --------------------------------------------------------------------------
+class TestMainRefusesDispatchOnAnUnreadableBrief(unittest.TestCase):
+    def test_a_brief_path_that_no_longer_resolves_refuses_the_dispatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / "acme-brief-fixture.md"
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            slug = contract_path.stem
+            state = {
+                "contract": slug,
+                "started_at": "2026-09-19T00:00:00+00:00",
+                "sub_tasks": {"t1-backend": {
+                    "status": "pending", "branch": None, "pull_request": None,
+                    "issue": 163, "base": "feature/160-parent",
+                    "brief": str(Path(d) / "vanished-brief.md"),  # never written
+                }},
+            }
+            create_branch_mock = mock.MagicMock(return_value=(True, "created it"))
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path),
+                    "--dispatch", "t1-backend", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "create_branch", create_branch_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                exit_code = pr_merged.main()
+            printed = out.getvalue()
+        payload = json.loads(printed) if printed.strip().startswith("{") else None
+
+        self.assertNotEqual(
+            exit_code, 0,
+            "a recorded brief path that no longer resolves is unverifiable, not 'nothing to "
+            "compare' -- I-7 is a refusal rule, and dispatching anyway would skip the only "
+            "check standing between a stale pointer and a mismatched identity"
+        )
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload.get("error"), "brief-unreadable")
+        self.assertFalse(
+            create_branch_mock.called,
+            "the dispatch must never cut a branch once its own brief cannot be verified"
+        )
+
+    def test_a_missing_brief_key_is_not_treated_as_unreadable(self):
+        # Positive control: no brief recorded YET is not itself a mismatch or a failure --
+        # there is nothing to compare a state entry against before a brief exists.
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / "acme-brief-fixture-none.md"
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            slug = contract_path.stem
+            state = {
+                "contract": slug,
+                "started_at": "2026-09-19T00:00:00+00:00",
+                "sub_tasks": {"t1-backend": {
+                    "status": "pending", "branch": None, "pull_request": None,
+                    "issue": 163, "base": "feature/160-parent", "brief": None,
+                }},
+            }
+            create_branch_mock = mock.MagicMock(return_value=(True, "created it"))
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path),
+                    "--dispatch", "t1-backend", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "create_branch", create_branch_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                exit_code = pr_merged.main()
+
+        self.assertEqual(
+            exit_code, 0,
+            "a sub-task with no brief recorded yet must still be dispatchable -- absence is "
+            "not the same thing as an unreadable pointer"
+        )
+        self.assertTrue(create_branch_mock.called)
+
+
+# ==========================================================================
+# Contract: "Make the contract loop's next step survive a cleared session"
+#   .claude/concepts/2026-09-22-loop-next-step-survives-clear.md  (approved)
+#
+# RED phase, sub-task 1. Every case below states one behaviour that contract
+# ADDS, and none of it exists yet. Not-yet-built symbols are looked up through
+# _fn() (line 98) so an absent function becomes an explicit assertion failure
+# naming it, never an ImportError that would redden the whole file; not-yet-
+# built PARAMETERS are checked through inspect.signature first, so a missing
+# keyword becomes an assertion failure rather than a TypeError. Both shapes
+# follow the precedent this suite already set for review_verdict.
+#
+# Each class names, in a comment, the one-line mutation that turns its
+# assertions red -- the positive control. Where an assertion is already green
+# today (it pins behaviour the contract says must NOT change), the control is
+# a mutation of a fixture the test owns, and it was run under `py -3 -B` so a
+# stale bytecode cache cannot report a restored file's old answer.
+# ==========================================================================
+
+
+# --------------------------------------------------------------------------
+# (a) The Hand-Resolved Summary -- three facts, never one list.
+#
+# Data Shapes, Hand-Resolved Summary: files (ordered, de-duplicated, possibly
+# empty), merge_commits (inspected commits carrying two or more parents),
+# commits_inspected (commits the pull request reported). The whole point of
+# the shape is that merge_commits separates "nothing was conflicted" from
+# "nothing was inspectable" -- a squash or rebase merge leaves no merge commit
+# to read, and reporting that as clean is a claim nobody measured
+# (Alternatives Considered, Option D).
+# --------------------------------------------------------------------------
+class TestSummariseHandResolved(unittest.TestCase):
+
+    def _summarise(self):
+        fn = _fn("summarise_hand_resolved")
+        self.assertIsNotNone(
+            fn,
+            "pr_merged.summarise_hand_resolved must exist -- Extension Point 1 names it the "
+            "pure function that performs the walk detect_resolved_files performs today and "
+            "returns a Hand-Resolved Summary instead of a bare list"
+        )
+        return fn
+
+    def test_a_merge_commit_reports_its_files_and_is_counted(self):
+        # POSITIVE CONTROL (fixture-owned, run under `py -3 -B`): change this
+        # fixture's parent count from 2 to 1 -- {"m1": (["a.md", "b.md"], 1)} --
+        # and files reads [] with merge_commits 0, turning all three assertions
+        # red. Measured: detect_resolved_files(["m1"], <1-parent fixture>) == [].
+        summarise = self._summarise()
+
+        def fake_git(sha):
+            return {"m1": (["a.md", "b.md"], 2)}[sha]
+
+        got = summarise(["m1"], fake_git)
+        self.assertEqual(
+            got["files"], ["a.md", "b.md"],
+            "the summary's files must carry exactly what the combined diff reported, in the "
+            "order it reported them -- this is the finding that is computed and thrown away today"
+        )
+        self.assertEqual(
+            got["merge_commits"], 1,
+            "a commit with two parents is an inspected merge commit and must be counted, so a "
+            "reader can tell a measured clean merge from an unmeasurable one"
+        )
+        self.assertEqual(
+            got["commits_inspected"], 1,
+            "commits_inspected counts every commit the pull request reported, whatever its "
+            "parent count"
+        )
+
+    def test_the_summary_carries_exactly_those_three_keys_and_no_verdict(self):
+        # The KEY SET, not just the three values. Every other case in this
+        # class passes with a fourth key present, and the fourth key a reader
+        # reaches for first is a derived judgement -- "clean": not files --
+        # which is precisely the overclaim Alternatives Considered rejected
+        # Option D for: it re-collapses the four-state reading the shape exists
+        # to hold open, and it does so under a name nobody can argue with.
+        # POSITIVE CONTROL, measured against a throwaway stub
+        # summarise_hand_resolved that also returns "clean": not files -- this
+        # assertion goes red. Stated exactly, because the run was watched: two
+        # other cases go red with it, the pair in
+        # TestMainPassesTheSummaryIntoBuildRecord, which compare the whole
+        # summary for equality at the call site. No case that reads only the
+        # three values moves, which is the hole this fills.
+        summarise = self._summarise()
+
+        def fake_git(sha):
+            return {"m1": (["a.md"], 2)}[sha]
+
+        got = summarise(["m1"], fake_git)
+        self.assertEqual(
+            set(got), {"files", "merge_commits", "commits_inspected"},
+            "the Hand-Resolved Summary is exactly three facts (Data Shapes, Value Objects). A "
+            "fourth field carrying a judgement -- clean, safe, ok -- is a claim nobody "
+            "measured; the four-state reading belongs to whoever reads the three facts, and "
+            "the summary read %r" % (sorted(got),)
+        )
+
+    def test_files_are_de_duplicated_and_keep_first_seen_order(self):
+        # POSITIVE CONTROL (fixture-owned): make m2 report ["c.md", "b.md"]
+        # instead of ["b.md", "c.md"] and the expected order becomes
+        # ["a.md", "b.md", "c.md"] no longer -- the assertion turns red.
+        summarise = self._summarise()
+
+        def fake_git(sha):
+            return {"m1": (["a.md", "b.md"], 2), "m2": (["b.md", "c.md"], 2)}[sha]
+
+        got = summarise(["m1", "m2"], fake_git)
+        self.assertEqual(
+            got["files"], ["a.md", "b.md", "c.md"],
+            "the summary must de-duplicate exactly as detect_resolved_files does today, "
+            "keeping first-seen order -- Extension Point 2 requires the projection to be "
+            "indistinguishable from the function it replaces"
+        )
+        self.assertEqual(
+            got["merge_commits"], 2,
+            "both inspected commits carried two parents, so both are merge commits"
+        )
+
+    def test_a_commit_list_with_no_merge_commit_yields_zero_merges_and_no_files(self):
+        # POSITIVE CONTROL (fixture-owned): raise this fixture's parent counts
+        # to 2 and merge_commits must read 2 with files ["x", "y"] -- every
+        # assertion below turns red.
+        summarise = self._summarise()
+
+        def fake_git(sha):
+            return {"c1": (["x"], 1), "c2": (["y"], 1)}[sha]
+
+        got = summarise(["c1", "c2"], fake_git)
+        self.assertEqual(
+            got["merge_commits"], 0,
+            "no inspected commit carried two parents, so nothing was detectable -- this is the "
+            "squash-or-rebase reading the summary exists to keep distinct from clean"
+        )
+        self.assertEqual(
+            got["files"], [],
+            "a commit with fewer than two parents has no combined diff to read, so it "
+            "contributes no files"
+        )
+        self.assertEqual(
+            got["commits_inspected"], 2,
+            "both commits were inspected even though neither was a merge -- that is exactly "
+            "what makes merge_commits zero readable as 'not detectable' rather than 'no commits'"
+        )
+
+    def test_an_empty_commit_list_yields_all_zeroes(self):
+        # POSITIVE CONTROL (fixture-owned): pass ["m1"] with a two-parent fake
+        # instead of [] and every one of these assertions turns red.
+        summarise = self._summarise()
+        calls = []
+
+        def fake_git(sha):  # pragma: no cover -- must never be reached
+            calls.append(sha)
+            raise AssertionError("the walk must not ask git about a commit nobody reported")
+
+        got = summarise([], fake_git)
+        self.assertEqual(got["files"], [], "no commits means no files, never a guess")
+        self.assertEqual(got["merge_commits"], 0, "no commits means no merge commits")
+        self.assertEqual(
+            got["commits_inspected"], 0,
+            "a pull request nobody could inspect reads as all zeroes -- Uncertain Assumptions: "
+            "'the walk simply iterates nothing and returns zeroes'"
+        )
+        self.assertEqual(calls, [], "an empty commit list must start no git read at all")
+
+
+# --------------------------------------------------------------------------
+# (b) detect_resolved_files is re-expressed as summarise_hand_resolved(...)
+# ["files"] and must stay indistinguishable from what it is today.
+#
+# Extension Point 2: "Its signature, its ordering, its de-duplication and its
+# skip-commits-with-fewer-than-two-parents rule are unchanged, so its existing
+# tests and its recorded mutation probes stay valid."
+# --------------------------------------------------------------------------
+#: name -> (fake git table, commit shas, the list detect_resolved_files returns
+#: today). The first three rows are exactly the fixtures TestResolvedFiles
+#: already drives (test_pr_merged.py:322-337); the fourth adds the
+#: de-duplication path those three never exercise.
+_RESOLVED_FILE_FIXTURES = (
+    ("a clean merge", {"m1": ([], 2)}, ["m1"], []),
+    ("files differing from both parents", {"m1": (["a.md", "b.md"], 2)}, ["m1"], ["a.md", "b.md"]),
+    ("a single-parent commit", {"c1": (["x"], 1)}, ["c1"], []),
+    ("duplicates across two merges",
+     {"m1": (["a.md", "b.md"], 2), "m2": (["b.md", "c.md"], 2)},
+     ["m1", "m2"], ["a.md", "b.md", "c.md"]),
+)
+
+
+def _fake_git(table):
+    def fake(sha):
+        return table[sha]
+    return fake
+
+
+class TestDetectResolvedFilesIsTheSummarysFileProjection(unittest.TestCase):
+
+    def test_detect_resolved_files_still_returns_exactly_the_same_list(self):
+        # GREEN today and required to stay green: this pins the behaviour the
+        # contract says must NOT change while the walk moves underneath it.
+        # POSITIVE CONTROL (fixture-owned, run under `py -3 -B`): change the
+        # "a single-parent commit" row's parent count from 1 to 2 and its
+        # expected [] becomes ["x"] -- the assertion turns red. Measured.
+        for name, table, shas, expected in _RESOLVED_FILE_FIXTURES:
+            with self.subTest(fixture=name):
+                self.assertEqual(
+                    detect_resolved_files(shas, _fake_git(table)), expected,
+                    "detect_resolved_files must return exactly the same list, in the same "
+                    "order, with the same de-duplication, for %r -- Extension Point 2 keeps "
+                    "the name and forbids changing its rule" % name
+                )
+
+    def test_detect_resolved_files_equals_the_summarys_files_for_every_fixture(self):
+        # RED: summarise_hand_resolved does not exist. Once it does, this pins
+        # that the two names AGREE on every fixture this suite drives -- the
+        # ordering, the de-duplication and the skip-fewer-than-two-parents rule
+        # Extension Point 2 keeps unchanged -- and that each name reads every
+        # reported commit exactly ONCE per call.
+        #
+        # What this case does and does not claim, stated exactly, because two
+        # earlier drafts disagreed with each other inside the same hunk. It
+        # does NOT claim that detect_resolved_files delegates: a genuine second
+        # implementation that iterates once and agrees on these four fixtures
+        # passes here unharmed, and no assertion at this level can tell the two
+        # apart. What Extension Point 2 actually forbids -- "the walk must not
+        # happen twice" -- is pinned where it is observable, in
+        # TestTheWalkHappensOnceForEachCommit below, which counts the reads one
+        # main() run makes per commit identifier. The because-clauses here
+        # claim agreement and one-read-per-commit, and nothing wider.
+        # POSITIVE CONTROL (fixture-owned): drop the "duplicates across two
+        # merges" row's second sha from ["m1", "m2"] to ["m1"] while leaving
+        # its expected list at three entries, and the row turns red.
+        summarise = _fn("summarise_hand_resolved")
+        self.assertIsNotNone(
+            summarise,
+            "pr_merged.summarise_hand_resolved must exist before detect_resolved_files can be "
+            "a projection of it"
+        )
+        for name, table, shas, expected in _RESOLVED_FILE_FIXTURES:
+            with self.subTest(fixture=name):
+                self.assertEqual(
+                    detect_resolved_files(shas, _fake_git(table)),
+                    summarise(shas, _fake_git(table))["files"],
+                    "detect_resolved_files and the summary's files projection must AGREE for "
+                    "%r -- same order, same de-duplication, same skip rule. Extension Point 2 "
+                    "keeps the name and forbids changing its rule" % name
+                )
+                for reader_name, reader in (("detect_resolved_files", detect_resolved_files),
+                                            ("summarise_hand_resolved", summarise)):
+                    seen = []
+
+                    def counting(sha, _table=table, _seen=seen):
+                        _seen.append(sha)
+                        return _table[sha]
+
+                    reader(shas, counting)
+                    self.assertEqual(
+                        seen, list(shas),
+                        "%s must read each reported commit exactly once, in the order the pull "
+                        "request reported them, for %r -- a body that reads a commit twice is "
+                        "asking git the same question twice and paying for it. It read %r"
+                        % (reader_name, name, seen)
+                    )
+
+
+# --------------------------------------------------------------------------
+# (c) build_record writes hand_resolved whenever a summary is supplied,
+# INCLUDING when the file list is empty (invariant I-1), and omits the key
+# only when None is supplied (invariant I-3, which protects every record
+# written before this change).
+# --------------------------------------------------------------------------
+class TestBuildRecordCarriesHandResolved(unittest.TestCase):
+
+    def _require_parameter(self):
+        sig = inspect.signature(build_record)
+        self.assertIn(
+            "hand_resolved", sig.parameters,
+            "build_record must accept a hand_resolved keyword -- Extension Point 3. Today it "
+            "takes verdict, commit, pr_url, merged_at, checks, review_verdict and "
+            "sub_issue_closed, so the finding main() computes at pr_merged.py:1160 is printed "
+            "and then discarded"
+        )
+
+    def test_a_supplied_summary_is_stamped_into_the_record(self):
+        # POSITIVE CONTROL (fixture-owned): change the expected merge_commits
+        # in this fixture from 1 to 2 and the equality assertion turns red.
+        self._require_parameter()
+        summary = {"files": ["src/Hand.cs"], "merge_commits": 1, "commits_inspected": 4}
+        rec = build_record("merged", commit="abc123", pr_url="u", merged_at="t", checks=None,
+                           hand_resolved=summary)
+        self.assertEqual(
+            rec.get("hand_resolved"), summary,
+            "the summary passed to build_record must be stamped into the record it returns, "
+            "whole -- all three fields, not just the file list"
+        )
+
+    def test_an_empty_file_list_is_still_written_never_omitted(self):
+        # I-1: "written on EVERY record produced for a pull request that mapped
+        # to a sub-task, including when no files were found. It is never
+        # omitted to mean empty."
+        # POSITIVE CONTROL, measured against a throwaway stub build_record
+        # that writes the key only when the file list is non-empty (the exact
+        # "omit it to mean empty" defect I-1 forbids). RE-MEASURED at subtest
+        # granularity: TWO cases go red, not one. This case, and
+        # test_a_pull_request_with_nothing_inspectable_still_hands_over_the
+        # _summary, which reaches the same defect through the record main()
+        # actually writes. The earlier "nothing else does" was written before
+        # that second case existed and went stale the moment it was added.
+        # Paired with test_only_none_omits_the_key below,
+        # which goes red against a stub that always stamps the key -- so no
+        # implementation can satisfy both by always writing or always omitting.
+        self._require_parameter()
+        summary = {"files": [], "merge_commits": 2, "commits_inspected": 5}
+        rec = build_record("merged", commit="abc123", pr_url="u", merged_at="t", checks=None,
+                           hand_resolved=summary)
+        self.assertIn(
+            "hand_resolved", rec,
+            "a summary whose file list is empty is a MEASUREMENT (two merge commits were "
+            "inspected and neither was conflicted) and must be recorded; omitting it would "
+            "make it indistinguishable from a record written before this change"
+        )
+        self.assertEqual(
+            rec["hand_resolved"], summary,
+            "the empty file list must be recorded as empty, with its two counts intact"
+        )
+
+    def test_only_none_omits_the_key(self):
+        # POSITIVE CONTROL, measured against a throwaway stub build_record
+        # that stamps rec["hand_resolved"] = hand_resolved unconditionally:
+        # this case goes red and nothing else does, because a null under the
+        # key is exactly the value I-2 must be able to distinguish from an
+        # absent key.
+        self._require_parameter()
+        rec = build_record("merged", commit="abc123", pr_url="u", merged_at="t", checks=None,
+                           hand_resolved=None)
+        self.assertNotIn(
+            "hand_resolved", rec,
+            "None means no summary was supplied, and the key must be OMITTED rather than "
+            "stamped null -- I-2 reads an absent key as not-recorded, so a null would launder "
+            "'nobody measured' into a stored value"
+        )
+
+
+# --------------------------------------------------------------------------
+# (d) + (i) The report side: a read-only run reports the summaries already on
+# disk (Extension Point 5), and a record written before this change is
+# reported as not-recorded rather than as clean (invariant I-2).
+# --------------------------------------------------------------------------
+def _drive_main_with_flags(contract_text, flags, records=None, filename="acme-red-fixture.md"):
+    """Call pr_merged.main() the way the command line does, with chosen flags.
+
+    Mirrors _drive_main_report (test_pr_merged.py:943) exactly, except that the
+    flag list and the stored completion records are the caller's to choose, and
+    write_state / write_record are MagicMocks so a test can ask whether a run
+    wrote anything. The contract is a literal written to a throwaway temp file;
+    nothing reaches git, GitHub or this project's own orchestrator directories.
+
+    Returns (raw stdout, write_state mock, write_record mock).
+    """
+    write_state_mock = mock.MagicMock(return_value=None)
+    write_record_mock = mock.MagicMock(return_value=None)
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path)] + list(flags)
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value=dict(records or {})), \
+             mock.patch.object(pr_merged, "load_state", return_value=None), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", write_state_mock), \
+             mock.patch.object(pr_merged, "write_record", write_record_mock), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        return out.getvalue(), write_state_mock, write_record_mock
+
+
+#: The record a post-change run writes: a summary that measured something.
+_RECORD_WITH_SUMMARY = {
+    "status": "completed", "verified": "github", "pull_request": "u",
+    "hand_resolved": {"files": ["src/Hand.cs"], "merge_commits": 1, "commits_inspected": 3},
+}
+
+#: The record every run written before this change left behind: no key at all.
+_RECORD_WITHOUT_SUMMARY = {"status": "completed", "verified": "github", "pull_request": "u"}
+
+
+#: Both read-only front doors, driven by every case in the class below.
+#: The criterion names --status AND --resume, and a seeding step that runs
+#: under --status alone satisfies a --status-only case. Measured against a
+#: throwaway stub whose seeding loop is skipped whenever args.resume is set:
+#: the --resume row of each case below goes red and the --status row of each
+#: stays green -- and --status was the only flag set this class drove before
+#: it was parametrised.
+_READ_ONLY_FLAG_SETS = (["--status", "--json"], ["--resume", "--json"])
+
+
+class TestReportSeedsHandResolvedFromStoredRecords(unittest.TestCase):
+    """The cases below are the only ones in this block whose control cannot be
+    RUN before the implementation lands: both drive main(), and main()'s
+    seeding step does not exist to be mutated. What was measured instead is
+    that their assertion predicates FLIP between the two entry shapes they pin
+    -- the seeded shape satisfies the (i) assertions and fails the
+    not-recorded one; the absent shape does the reverse. Neither case is
+    vacuous, and an implementation that stamps every entry "not-recorded"
+    fails the first while one that seeds only real summaries fails the second.
+    """
+
+    def _entry_for(self, report, sub_task):
+        self.assertIn(
+            "hand_resolved", report,
+            "the report must carry a hand_resolved entry list -- it does today, but only ever "
+            "filled from the pull-request loop"
+        )
+        return next((e for e in report["hand_resolved"] if e.get("sub_task") == sub_task), None)
+
+    def test_a_read_only_run_reports_a_stored_summary_without_processing_a_pull_request(self):
+        # (i) -- Extension Point 5. RED today: report["hand_resolved"] is
+        # seeded nowhere but inside the pull-request loop, so a read-only run
+        # with no --pr always reports an empty list. Driven over BOTH read-only
+        # front doors, because the criterion names both and seeding placed
+        # under the --status branch alone satisfies neither half of it.
+        # POSITIVE CONTROL (fixture-owned): key the stored record under
+        # "t9-ghost" instead of "t1-backend" and the entry lookup finds
+        # nothing, turning the first assertion red.
+        for flags in _READ_ONLY_FLAG_SETS:
+            with self.subTest(flags=" ".join(flags)):
+                text, _, _ = _drive_main_with_flags(
+                    CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, flags,
+                    records={"t1-backend": _RECORD_WITH_SUMMARY})
+                report = json.loads(text)
+                entry = self._entry_for(report, "t1-backend")
+                self.assertIsNotNone(
+                    entry,
+                    "a session that never saw the merge must still be able to report what was "
+                    "resolved by hand under %r -- the summary is already on disk in the "
+                    "completion record, and Extension Point 5 seeds the report from it before "
+                    "the pull-request loop" % " ".join(flags)
+                )
+                self.assertEqual(
+                    entry.get("files"), ["src/Hand.cs"],
+                    "the stored file list must be reported verbatim, not recomputed -- nothing "
+                    "in a cleared session can walk a branch history that was merged days ago"
+                )
+                self.assertEqual(
+                    entry.get("merge_commits"), 1,
+                    "the stored merge-commit count must travel with the file list; without it "
+                    "the reader cannot tell a measured reading from an unmeasurable one"
+                )
+                self.assertEqual(
+                    entry.get("commits_inspected"), 3,
+                    "the stored inspected-commit count must travel with the file list for the "
+                    "same reason"
+                )
+
+    def test_a_record_with_no_hand_resolved_key_is_reported_as_not_recorded(self):
+        # (d) -- invariant I-2 and the second Failure Mode: "A completion
+        # record written before this change is read as 'no files were resolved
+        # by hand', silently clearing a risk nobody measured." Driven over both
+        # read-only front doors for the reason above.
+        # POSITIVE CONTROL (fixture-owned): swap _RECORD_WITHOUT_SUMMARY for
+        # _RECORD_WITH_SUMMARY here and "not-recorded" must no longer appear
+        # in the entry, turning the assertion red -- so an implementation that
+        # simply stamps every entry "not-recorded" cannot pass both this case
+        # and the one above.
+        for flags in _READ_ONLY_FLAG_SETS:
+            with self.subTest(flags=" ".join(flags)):
+                text, _, _ = _drive_main_with_flags(
+                    CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, flags,
+                    records={"t1-backend": _RECORD_WITHOUT_SUMMARY})
+                report = json.loads(text)
+                entry = self._entry_for(report, "t1-backend")
+                self.assertIsNotNone(
+                    entry,
+                    "a record with no hand_resolved key must still be ACCOUNTED FOR in the "
+                    "report under %r -- silence is what makes an unmeasured risk read as a "
+                    "clean one" % " ".join(flags)
+                )
+                flat = json.dumps(entry, sort_keys=True, default=str)
+                self.assertIn(
+                    "not-recorded", flat,
+                    "I-2: a record with no hand_resolved key was written before this change, "
+                    "and the report must name that reading. The entry read %r" % flat
+                )
+                self.assertNotIn(
+                    "clean", flat,
+                    "nobody measured this pull request, so the report must never describe it "
+                    "as clean"
+                )
+                self.assertNotEqual(
+                    entry.get("files"), [],
+                    "an absent summary must not be rendered as an empty file list -- an empty "
+                    "list is the one reading that means 'inspected and nothing was conflicted', "
+                    "and handing it to a renderer is exactly how not-measured becomes clean"
+                )
+
+
+# --------------------------------------------------------------------------
+# (c2) The CALL SITE: main() passes the summary into build_record.
+#
+# Extension Point 4. build_record's parameter is pinned above in isolation,
+# which says nothing about whether anything ever passes it. Two implementations
+# satisfy every other assertion in this file: one that passes
+# hand_resolved=None, and one that passes the summary only when the file list
+# is non-empty -- the exact "omit it to mean empty" defect I-1 forbids, reached
+# through the one path that writes a record to disk.
+# --------------------------------------------------------------------------
+def _drive_main_over_a_pull_request(contract_text, commits, diff_table,
+                                    filename="acme-red-fixture.md"):
+    """Call pr_merged.main() with --pr so the pull-request loop actually runs.
+
+    Every edge the loop has to the outside is replaced before main() is
+    entered: ``gh_pr`` returns the literal pull request built below,
+    ``git_combined_diff`` answers out of ``diff_table``, ``file_at_commit``
+    returns nothing, ``write_state`` and ``write_record`` are mocks, and
+    ``pr_merged._run`` itself raises -- so no subprocess can start even down a
+    path this fixture did not anticipate. The module's subprocess guard near
+    line 69 is left exactly as it is and is never reached.
+
+    ``build_record`` is WRAPPED rather than replaced. The wrapper records the
+    keyword arguments main() actually passed, then calls the real function with
+    the keywords its current signature accepts -- so the record that reaches
+    ``write_record`` is the real one, and the call site stays observable before
+    the parameter exists. Without the filter an absent parameter would raise
+    TypeError, which is a broken fixture rather than a red test.
+
+    Returns (the keyword arguments main() passed to build_record,
+    the write_record mock, the parsed --json report).
+    """
+    recorded = {}
+    real_build_record = pr_merged.build_record
+    accepted = set(inspect.signature(real_build_record).parameters)
+
+    def recording_build_record(*a, **kw):
+        recorded.clear()
+        recorded.update(kw)
+        return real_build_record(*a, **{k: v for k, v in kw.items() if k in accepted})
+
+    def no_subprocess(cmd):  # pragma: no cover -- must never be reached
+        raise AssertionError(
+            "this fixture must reach no process at all; %r was attempted" % (cmd,))
+
+    pull_request = {
+        "state": "MERGED", "mergedAt": "2026-09-22T00:00:00Z",
+        "mergeCommit": {"oid": "merge-sha"}, "baseRefName": "master",
+        "headRefName": "task/acme-red-fixture/t1-backend", "title": "t1-backend",
+        "url": "https://example.invalid/pr/7",
+        "commits": [{"oid": sha} for sha in commits], "statusCheckRollup": None,
+    }
+    write_record_mock = mock.MagicMock(return_value=None)
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "7", "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state", return_value=None), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", mock.MagicMock(return_value=None)), \
+             mock.patch.object(pr_merged, "write_record", write_record_mock), \
+             mock.patch.object(pr_merged, "build_record", recording_build_record), \
+             mock.patch.object(pr_merged, "gh_pr", lambda number: pull_request), \
+             mock.patch.object(pr_merged, "git_combined_diff", lambda sha: diff_table[sha]), \
+             mock.patch.object(pr_merged, "file_at_commit", lambda sha, path: None), \
+             mock.patch.object(pr_merged, "_run", no_subprocess), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        return recorded, write_record_mock, json.loads(out.getvalue())
+
+
+#: (commit shas the pull request reports, the git table, the summary the walk
+#: must produce from them). The first found a file; the second inspected two
+#: commits and neither was a merge, which is a MEASUREMENT and not an absence.
+_PR_THAT_FOUND_A_FILE = (
+    ["c1", "m1"], {"c1": ([], 1), "m1": (["src/Hand.cs"], 2)},
+    {"files": ["src/Hand.cs"], "merge_commits": 1, "commits_inspected": 2},
+)
+_PR_WITH_NOTHING_INSPECTABLE = (
+    ["c1", "c2"], {"c1": ([], 1), "c2": ([], 1)},
+    {"files": [], "merge_commits": 0, "commits_inspected": 2},
+)
+
+
+class TestMainPassesTheSummaryIntoBuildRecord(unittest.TestCase):
+
+    def _drive(self, case):
+        commits, table, expected = case
+        recorded, write_record_mock, _report = _drive_main_over_a_pull_request(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, commits, table)
+        self.assertTrue(
+            write_record_mock.called,
+            "fixture sanity: this run must reach the pull-request loop and write one record. "
+            "If it does not, every assertion below is measuring a loop that never ran"
+        )
+        return recorded, write_record_mock, expected
+
+    def test_a_pull_request_that_found_files_hands_the_whole_summary_to_build_record(self):
+        # POSITIVE CONTROL, measured against a throwaway stub main() that
+        # computes the summary and passes build_record nothing -- today's
+        # shape, kept after the parameter exists: this case and the one below
+        # both go red naming the keywords that were passed.
+        recorded, write_record_mock, expected = self._drive(_PR_THAT_FOUND_A_FILE)
+        self.assertIn(
+            "hand_resolved", recorded,
+            "main() must PASS the summary into build_record (Extension Point 4). It computes "
+            "the finding at the top of the loop, prints it and discards it, handing build_record "
+            "only review_verdict and sub_issue_closed. The keywords it passed were %r"
+            % (sorted(recorded),)
+        )
+        self.assertEqual(
+            recorded["hand_resolved"], expected,
+            "the three facts must arrive whole at the call site -- a bare file list here is the "
+            "shape the Hand-Resolved Summary exists to replace"
+        )
+        written = write_record_mock.call_args[0][2]
+        self.assertEqual(
+            written.get("hand_resolved"), expected,
+            "and the record that reaches write_record must carry it, which is the only reason "
+            "passing it matters: the record on disk is what a cleared session reads back"
+        )
+
+    def test_a_pull_request_with_nothing_inspectable_still_hands_over_the_summary(self):
+        # I-1 at the only call site that produces a real record: "written on
+        # EVERY record produced for a pull request that mapped to a sub-task,
+        # including when no files were found. It is never omitted to mean
+        # empty."
+        # POSITIVE CONTROL, measured against a throwaway stub main() that
+        # passes hand_resolved only when the summary's file list is non-empty:
+        # this case goes red and the case above stays green. Against a stub
+        # passing hand_resolved=None, both go red, and the None assertion
+        # below is the one that names which defect it was.
+        recorded, write_record_mock, expected = self._drive(_PR_WITH_NOTHING_INSPECTABLE)
+        self.assertIn(
+            "hand_resolved", recorded,
+            "a walk that inspected two commits and found no merge commit MEASURED something, "
+            "and I-1 forbids omitting the key to mean empty -- an absent key is how a record "
+            "written before this change is recognised (I-2), so omitting it here would launder "
+            "a real reading into 'nobody looked'. The keywords passed were %r" % (sorted(recorded),)
+        )
+        self.assertIsNotNone(
+            recorded.get("hand_resolved"),
+            "None is how build_record is told no summary was supplied, and a mapped pull "
+            "request always has one -- passing None reaches I-2's not-recorded reading by a "
+            "different road"
+        )
+        self.assertEqual(
+            recorded["hand_resolved"], expected,
+            "an empty file list travels with its two counts; they are what make it readable as "
+            "'nothing was detectable' rather than 'nothing was conflicted'"
+        )
+        written = write_record_mock.call_args[0][2]
+        self.assertEqual(
+            written.get("hand_resolved"), expected,
+            "and the written record carries the same three facts, empty file list included"
+        )
+
+
+# --------------------------------------------------------------------------
+# (e) ADVANCE_ACTIONS -- the closed set of moves advance() can return.
+#
+# The third Failure Mode: "A new move is added to advance later and ships with
+# no printed next step, so the loop silently regains the defect this contract
+# removes." The mitigation is this constant plus a test that drives advance()
+# into each of the seven REAL scenarios.
+# --------------------------------------------------------------------------
+#: Extension Point 6, verbatim.
+_CONTRACT_ADVANCE_ACTIONS = (
+    "contract-defect", "nothing-planned", "escalate", "awaiting-merge",
+    "complete", "dispatch", "blocked",
+)
+
+
+def _seven_real_moves():
+    """Drive advance() into each of its seven real scenarios.
+
+    Nothing here hand-writes a move mapping: every value is what advance()
+    itself returns, so a move that changed shape or stopped being reachable
+    shows up here rather than in prose.
+    """
+    blocked_tasks = _tasks()
+    blocked_tasks[0].depends_on = [99]  # an ordinal the plan does not contain
+    dispatched = mark_dispatched(new_state("c-slug", _tasks()), "t1-a", "task/c-slug/t1-a")
+    completed = {t.id: {"status": "completed", "verified": "github"} for t in _tasks()}
+    return {
+        "contract-defect": advance(_tasks(), {},
+                                   defects=[{"id": "t9-x",
+                                             "reason": "no-files-but-names-an-agent"}]),
+        "nothing-planned": advance([], {}),
+        "escalate": advance(_tasks(), {"t1-a": {"status": "failed", "verified": "github"}}),
+        "awaiting-merge": advance(_tasks(), {}, state=dispatched),
+        "complete": advance(_tasks(), completed),
+        "dispatch": advance(_tasks(), {}),
+        "blocked": advance(blocked_tasks, {}),
+    }
+
+
+class TestAdvanceActionsIsTheClosedSet(unittest.TestCase):
+
+    def _actions(self):
+        actions = _fn("ADVANCE_ACTIONS")
+        self.assertIsNotNone(
+            actions,
+            "pr_merged.ADVANCE_ACTIONS must exist -- Extension Point 6 names it the module "
+            "constant holding the seven moves advance() can return, and the New Mechanisms "
+            "section makes it the seam a new move must pass through"
+        )
+        return actions
+
+    def test_the_constant_holds_exactly_the_seven_moves_the_contract_lists(self):
+        # POSITIVE CONTROL (fixture-owned): drop "contract-defect" from
+        # _CONTRACT_ADVANCE_ACTIONS and both assertions turn red -- the set
+        # comparison and the length. Open Question one answered that all seven
+        # are covered, contract-defect included.
+        actions = self._actions()
+        self.assertEqual(
+            set(actions), set(_CONTRACT_ADVANCE_ACTIONS),
+            "ADVANCE_ACTIONS must hold exactly the seven moves Extension Point 6 lists -- no "
+            "more, so a member with no arm cannot hide; no fewer, so a move advance() can "
+            "return cannot ship with no printed next step"
+        )
+        self.assertEqual(
+            len(actions), 7,
+            "seven moves, not six: advance() checks contract-defect BEFORE every other move, "
+            "so it is the one an operator meets when a contract is malformed"
+        )
+
+    def test_each_of_the_seven_real_scenarios_returns_a_member_of_the_set(self):
+        # This is the totality test the third Failure Mode names. It never
+        # hand-writes an action string: every one comes out of advance().
+        # POSITIVE CONTROL (fixture-owned): change the "blocked" scenario's
+        # depends_on from [99] to [] and advance() answers "dispatch", so the
+        # observed set loses "blocked" and the last assertion turns red.
+        actions = self._actions()
+        moves = _seven_real_moves()
+        observed = set()
+        for scenario, move in moves.items():
+            with self.subTest(scenario=scenario):
+                self.assertEqual(
+                    move["action"], scenario,
+                    "fixture sanity: the %r scenario must actually drive advance() into the "
+                    "%r move" % (scenario, scenario)
+                )
+                self.assertIn(
+                    move["action"], actions,
+                    "advance() returned %r, which is not in ADVANCE_ACTIONS -- a move outside "
+                    "the closed set has no arm in next_command_for and would ship with no "
+                    "printed next step" % move["action"]
+                )
+            observed.add(move["action"])
+        self.assertEqual(
+            observed, set(actions),
+            "every member of ADVANCE_ACTIONS must be reachable from a real scenario; a member "
+            "no scenario produces is a claim nobody measured"
+        )
+
+
+# --------------------------------------------------------------------------
+# (f) next_command_for -- the Next Command mechanism.
+#
+# New Mechanisms: "a human-facing next step is data the owner returns, never
+# prose a caller composes." One arm per member of ADVANCE_ACTIONS, plus a
+# fail-closed fallback. I-5: an empty command list is a valid, meaningful
+# value and always travels with a non-empty reason.
+#
+# `move` is advance()'s own return mapping, not a bare action string: the
+# blocked arm's reason has to name what holds each sub-task (brief acceptance
+# criterion four), and only the mapping carries that.
+# --------------------------------------------------------------------------
+class TestNextCommandFor(unittest.TestCase):
+
+    def setUp(self):
+        self.next_command_for = _fn("next_command_for")
+        self.assertIsNotNone(
+            self.next_command_for,
+            "pr_merged.next_command_for must exist -- Extension Point 7 names it the pure "
+            "function returning a Next Command, with one arm per member of ADVANCE_ACTIONS"
+        )
+        self.moves = _seven_real_moves()
+
+    def _command_for(self, scenario):
+        nc = self.next_command_for(self.moves[scenario], "c-slug")
+        self.assertIn("commands", nc, "a Next Command must carry a commands list")
+        self.assertIn("reason", nc, "a Next Command must carry a reason")
+        self.assertIsInstance(nc["commands"], list, "commands is an ordered list of lines")
+        self.assertIsInstance(nc["reason"], str, "reason is one plain line")
+        return nc
+
+    def test_dispatch_gives_the_clear_line_then_the_advance_line(self):
+        # POSITIVE CONTROL (fixture-owned): ask for self.moves["complete"]
+        # instead of self.moves["dispatch"] and the clear line is gone,
+        # turning the ordering assertions red.
+        nc = self._command_for("dispatch")
+        self.assertEqual(
+            len(nc["commands"]), 2,
+            "dispatch is the one move whose next step is two lines: clear the session, then "
+            "advance. Isolation that depends on the operator remembering to clear is the third "
+            "gap this contract closes"
+        )
+        self.assertIn(
+            "/clear", nc["commands"][0],
+            "the clear line comes FIRST -- advancing before clearing inherits the previous "
+            "sub-task's transcript, which is the isolation failure this exists to remove"
+        )
+        self.assertIn(
+            "/advance", nc["commands"][1],
+            "the advance line comes second, after the clear"
+        )
+        self.assertIn(
+            "c-slug", nc["commands"][1],
+            "the advance line must name the contract it advances -- a cleared session has no "
+            "memory of which contract it was working on, which is the whole premise"
+        )
+
+    def test_awaiting_merge_gives_the_pr_merged_line(self):
+        # POSITIVE CONTROL (fixture-owned): ask for self.moves["dispatch"]
+        # instead and the command names /advance, not /pr-merged -- red.
+        nc = self._command_for("awaiting-merge")
+        self.assertEqual(
+            len(nc["commands"]), 1,
+            "a sub-task out for merge has exactly one next step and it is not a clear"
+        )
+        self.assertIn(
+            "/pr-merged", nc["commands"][0],
+            "the loop suspends across an unbounded human wait; /pr-merged is what wakes it"
+        )
+
+    def test_the_awaiting_merge_reason_names_the_sub_task_and_its_branch(self):
+        # The fifth Failure Mode's mitigation, which had no witness: "the
+        # reason line names the awaiting sub-task and its branch, so the
+        # number is one command away, and the placeholder is written in angle
+        # brackets so it reads as a slot rather than a value." The blocked
+        # arm's symmetric obligation is pinned above; this arm's was not, so a
+        # reason reading "waiting on a sub-task to merge" passed.
+        # POSITIVE CONTROLS, both measured against a throwaway stub: a
+        # next_command_for whose awaiting arm returns the fixed reason "waiting
+        # on a sub-task to merge" reddens the first assertion and the second;
+        # a stub that names the sub-task but drops branch_for(...) from the
+        # reason reddens only the second. Nothing else in the file moves for
+        # either, which is what made this a hole.
+        nc = self._command_for("awaiting-merge")
+        waiting = list(self.moves["awaiting-merge"].get("awaiting", []))
+        self.assertTrue(waiting, "fixture sanity: the awaiting-merge move must name a sub-task")
+        for tid in waiting:
+            self.assertIn(
+                tid, nc["reason"],
+                "the reason must name the awaiting sub-task %r -- an operator holding a "
+                "generic 'a sub-task is out for merge' cannot tell which pull request number "
+                "to paste into the command's slot. The reason read %r" % (tid, nc["reason"])
+            )
+            self.assertIn(
+                branch_for("c-slug", tid), nc["reason"],
+                "and it must name that sub-task's branch %r, which is what makes the pull "
+                "request number one command away rather than a search. The reason read %r"
+                % (branch_for("c-slug", tid), nc["reason"])
+            )
+        self.assertIn(
+            "<", nc["commands"][0],
+            "the pull request number is a SLOT, not a value: the mitigation writes it in angle "
+            "brackets precisely so an operator cannot paste a placeholder and have it look like "
+            "a number. The command read %r" % (nc["commands"][0],)
+        )
+
+    def test_escalate_nothing_planned_and_contract_defect_all_give_the_design_line(self):
+        # Open Question one, answered: contract-defect gets the SAME design
+        # line as escalate and nothing-planned, because the remedy for all
+        # three is amending the contract.
+        # POSITIVE CONTROL (fixture-owned): substitute "complete" into this
+        # tuple and the /design-first assertion turns red for that member.
+        for scenario in ("escalate", "nothing-planned", "contract-defect"):
+            with self.subTest(scenario=scenario):
+                nc = self._command_for(scenario)
+                self.assertTrue(
+                    nc["commands"],
+                    "%r has a real next step and must never carry an empty command list -- "
+                    "blocked is the only move that does" % scenario
+                )
+                self.assertTrue(
+                    any("/design-first" in c for c in nc["commands"]),
+                    "the remedy for %r is amending the contract, so its next command is the "
+                    "design line. Read %r" % (scenario, nc["commands"])
+                )
+
+    def test_complete_gives_the_verification_line(self):
+        # POSITIVE CONTROL (fixture-owned): ask for self.moves["escalate"]
+        # instead and the command names /design-first, turning this red.
+        nc = self._command_for("complete")
+        self.assertTrue(nc["commands"], "a complete contract has a next step: verification")
+        self.assertTrue(
+            any("/verify-before-done" in c for c in nc["commands"]),
+            "a contract whose every sub-task has a completion record is handed to verification. "
+            "Read %r" % (nc["commands"],)
+        )
+
+    def test_blocked_gives_an_empty_command_list_and_a_non_empty_reason(self):
+        # I-5 -- the one arm whose commands are empty, and the reason is what
+        # makes that empty list meaningful rather than missing.
+        # POSITIVE CONTROL (fixture-owned): ask for self.moves["dispatch"]
+        # instead and commands is two lines long, turning the emptiness
+        # assertion red.
+        nc = self._command_for("blocked")
+        self.assertEqual(
+            nc["commands"], [],
+            "nothing is runnable while every sub-task is held by a dependency that has not "
+            "landed; inventing a command here would send an operator to do work that cannot "
+            "start"
+        )
+        self.assertTrue(
+            nc["reason"].strip(),
+            "I-5: an empty command list is valid and meaningful only because it always travels "
+            "with a non-empty reason -- an empty list with no reason is indistinguishable from "
+            "a missing field"
+        )
+        blocked_ids = list(self.moves["blocked"].get("blocked", {}))
+        self.assertTrue(blocked_ids, "fixture sanity: the blocked move must name blocked sub-tasks")
+        self.assertTrue(
+            any(tid in nc["reason"] for tid in blocked_ids),
+            "the blocked reason must name what holds the sub-tasks (brief acceptance criterion "
+            "four: 'blocked gives no command, plus what holds each sub-task'). Blocked ids were "
+            "%r and the reason read %r" % (blocked_ids, nc["reason"])
+        )
+
+    def test_every_member_of_advance_actions_has_an_arm_and_a_real_scenario(self):
+        # The totality test the New Mechanisms section names as the extension
+        # seam's guard: "a new move added to advance adds one member to
+        # ADVANCE_ACTIONS and one arm to the mapping, in the same change. The
+        # totality test goes red if only one of the two is done."
+        # POSITIVE CONTROL (fixture-owned): delete the "complete" entry from
+        # _seven_real_moves()'s returned mapping and the first assertion names
+        # it as a member with no scenario -- red.
+        actions = _fn("ADVANCE_ACTIONS")
+        self.assertIsNotNone(actions, "ADVANCE_ACTIONS must exist for the totality test to run")
+        for action in actions:
+            with self.subTest(action=action):
+                self.assertIn(
+                    action, self.moves,
+                    "ADVANCE_ACTIONS names %r but no scenario in this suite drives advance() "
+                    "into it -- a member nobody can reach is untested by construction" % action
+                )
+                nc = self.next_command_for(self.moves[action], "c-slug")
+                self.assertIsInstance(
+                    nc.get("commands"), list,
+                    "next_command_for must return a commands list for %r -- a move with no arm "
+                    "ships with no printed next step, which is the third Failure Mode" % action
+                )
+                self.assertTrue(
+                    str(nc.get("reason", "")).strip(),
+                    "every arm carries a reason, including the ones that carry commands"
+                )
+                if action != "blocked":
+                    self.assertTrue(
+                        nc["commands"],
+                        "blocked is the only move that carries an empty command list (Open "
+                        "Question one, answered); %r must carry at least one runnable line"
+                        % action
+                    )
+
+    def test_an_unrecognised_action_fails_closed(self):
+        # Extension Point 7: "plus a fail-closed fallback for an unrecognised
+        # action that returns empty commands and a reason naming the
+        # disagreement."
+        # POSITIVE CONTROL (fixture-owned): pass {"action": "dispatch"} here
+        # instead of the unrecognised action and the empty-commands assertion
+        # turns red.
+        nc = self.next_command_for({"action": "no-such-move-exists"}, "c-slug")
+        self.assertEqual(
+            nc.get("commands"), [],
+            "an action outside the closed set is a disagreement between advance() and this "
+            "mapping; guessing a command from it would be the same overclaim the loop exists "
+            "to avoid"
+        )
+        self.assertTrue(
+            str(nc.get("reason", "")).strip(),
+            "the fallback's reason must name the disagreement rather than leaving an operator "
+            "with an empty field and no explanation"
+        )
+
+
+# --------------------------------------------------------------------------
+# (f2) next_command's complete arm, driven end-to-end through main(): the
+# approved concept contract (.claude/concepts/2026-09-22-loop-next-step-
+# survives-clear.md, Extension Point 7 and criterion (f)) states that the
+# complete move gives the verification line, /verify-before-done, whatever
+# the mergeable sub-task count is (``report["sub_tasks"]``, the mergeable
+# subset classify_handoff resolved). No children-still-open gate exists yet
+# -- not in /flow, not anywhere else in this script -- so nothing here
+# should claim one does or route a multi-sub-task completion around
+# /verify-before-done to reach it.
+#
+# Both cases go through main() rather than calling next_command_for
+# directly: the older TestNextCommandFor.test_complete_gives_the_
+# verification_line test calls next_command_for with a bare move mapping
+# and so never exercises main(). These tests drive main() end to end and
+# pin the exact output.
+# --------------------------------------------------------------------------
+CONTRACT_CLI_TWO_MERGEABLE_INDEPENDENT_TASKS = """
+## Implementation Handoff
+
+### 1. Backend (`acme-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+
+### 2. Frontend (`acme-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Bar.cs
+"""
+
+
+class TestNextCommandCompleteIsTheVerificationLineWhateverTheSubTaskCount(unittest.TestCase):
+
+    def _report_for(self, contract_text, records):
+        raw, _, _ = _drive_main_with_flags(contract_text, ["--status", "--json"], records=records)
+        return json.loads(raw)
+
+    def test_two_or_more_mergeable_subtasks_complete_still_gives_verify_before_done(self):
+        report = self._report_for(
+            CONTRACT_CLI_TWO_MERGEABLE_INDEPENDENT_TASKS,
+            records={
+                "t1-backend": {"status": "completed", "verified": "github", "pull_request": "u1"},
+                "t2-frontend": {"status": "completed", "verified": "github", "pull_request": "u2"},
+            },
+        )
+        self.assertEqual(
+            len(report["sub_tasks"]), 2,
+            "fixture sanity: this contract must declare two mergeable sub-tasks -- the whole "
+            "point of this case is proving the ending holds even once that count reaches two "
+            "or more"
+        )
+        self.assertTrue(
+            report["complete"],
+            "fixture sanity: both sub-tasks carry a github-verified completion record, so "
+            "advance() must report the contract complete -- otherwise this case never reaches "
+            "the complete arm at all"
+        )
+        nc = report["next_command"]
+        commands = nc["commands"]
+        self.assertEqual(
+            commands, ["/verify-before-done"],
+            "criterion (f): the complete move gives the verification line, "
+            "/verify-before-done, whatever the mergeable sub-task count is -- and no command "
+            "here may name /flow, since no children-still-open gate exists to hand a "
+            "two-or-more-mergeable completion off to it. Read %r"
+            % (commands,)
+        )
+
+    def test_positive_control_exactly_one_mergeable_subtask_complete_keeps_verify_before_done(self):
+        # Probably green today: a single-sub-task contract is exactly the
+        # shape TestNextCommandFor.test_complete_gives_the_verification_line
+        # already covers via a bare move mapping -- criterion (f): the
+        # complete move gives /verify-before-done whatever the mergeable
+        # sub-task count is.
+        report = self._report_for(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK,
+            records={"t1-backend": {"status": "completed", "verified": "github", "pull_request": "u"}},
+        )
+        self.assertEqual(
+            len(report["sub_tasks"]), 1,
+            "fixture sanity: this contract must declare exactly one mergeable sub-task"
+        )
+        self.assertTrue(
+            report["complete"],
+            "fixture sanity: the sole sub-task carries a github-verified completion record"
+        )
+        nc = report["next_command"]
+        self.assertEqual(
+            nc["commands"], ["/verify-before-done"],
+            "a contract with exactly one mergeable sub-task keeps today's ending -- "
+            "criterion (f): the complete move gives /verify-before-done whatever the "
+            "mergeable sub-task count is. Read %r"
+            % (nc["commands"],)
+        )
+
+
+# --------------------------------------------------------------------------
+# (g) The human-readable output prints the next command as its FINAL line.
+#
+# Extension Point 9: "prints the next command as its FINAL line, after the
+# dispatch listing".
+# --------------------------------------------------------------------------
+class TestHumanReadableOutputEndsWithTheNextCommand(unittest.TestCase):
+
+    def test_the_next_command_is_the_last_line_printed_after_the_dispatch_listing(self):
+        # POSITIVE CONTROL (fixture-owned): pass ["--status", "--json"]
+        # instead, and the output is a JSON document whose last line is "}" --
+        # the startswith assertion turns red, which proves the assertion reads
+        # the real final line rather than searching the whole output.
+        text, _, _ = _drive_main_with_flags(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--status"])
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        self.assertTrue(lines, "fixture sanity: the human-readable report must print something")
+        dispatch_lines = [i for i, ln in enumerate(lines) if "dispatch t1-backend" in ln]
+        self.assertTrue(
+            dispatch_lines,
+            "fixture sanity: this contract's one sub-task is ready, so the report must list a "
+            "dispatch line"
+        )
+        self.assertTrue(
+            lines[-1].strip().startswith("next command:"),
+            "the next command must be the FINAL line of the human-readable report -- a skill "
+            "that renders an ending of its own is the second implementation of a rule the "
+            "script owns. The last line read %r" % lines[-1]
+        )
+        self.assertGreater(
+            len(lines) - 1, dispatch_lines[-1],
+            "the next command comes AFTER the dispatch listing, not before it"
+        )
+        self.assertIn(
+            "/clear", lines[-1],
+            "this contract's move is dispatch, so the printed line must carry the clear step -- "
+            "the printed reminder is the only thing that makes isolation not depend on the "
+            "operator remembering"
+        )
+        # EVERY command, not just the first. POSITIVE CONTROL, measured against
+        # a throwaway stub main() that prints commands[0] alone: the two
+        # assertions below go red and nothing else in the file moves, because
+        # the assertion above is satisfied by the clear line on its own. A
+        # printed step that stops after the clear leaves the operator in a
+        # cleared session with nothing to run, which is worse than no reminder.
+        self.assertIn(
+            "/advance", lines[-1],
+            "the printed line must carry BOTH halves of the dispatch step. Extension Point 9 "
+            "prints the next command as one line joining every command; printing only the "
+            "first strands the operator in a freshly cleared session with no line to run. The "
+            "last line read %r" % lines[-1]
+        )
+        self.assertLess(
+            lines[-1].index("/clear"), lines[-1].index("/advance"),
+            "and they must be printed in the order the Next Command lists them -- advancing "
+            "before clearing inherits the previous sub-task's transcript. The last line read %r"
+            % lines[-1]
+        )
+
+
+#: name -> (contract literal, the move main() reaches with it, a fragment the
+#: stamped command list must carry). Two DIFFERENT moves on purpose: dispatch
+#: is the one move whose command the human-readable case above already reads,
+#: so a report stamping next_command for dispatch alone passes a one-move case.
+_NEXT_COMMAND_REPORT_CASES = (
+    ("the dispatch move", CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, "dispatch", "/clear"),
+    ("the contract-defect move", CONTRACT_CLI_ALL_MALFORMED, "contract-defect", "/design-first"),
+)
+
+
+class TestTheJsonReportStampsTheNextCommand(unittest.TestCase):
+    """Extension Point 8: main stamps ``report["next_command"]``.
+
+    The case above reads the PRINTED line. The advance skill reads the JSON --
+    Integration Surfaces names the script's JSON report as the mechanism
+    carrying Next Command to both skills, and Extension Point 13 has the skill
+    print the script's next command verbatim from a read-only call. Until this
+    case, no assertion in this file touched the field, so two implementations
+    passed everything: one computing the line inside the human-readable branch
+    and never stamping it, and one stamping it for the dispatch move alone.
+    """
+
+    def test_the_report_carries_a_next_command_for_each_move_it_reaches(self):
+        # POSITIVE CONTROL, measured against a throwaway stub main() that
+        # stamps report["next_command"] only when the move is dispatch: the
+        # contract-defect row goes red naming the absent key while the dispatch
+        # row stays green. That stub also reddens
+        # TestHumanReadableOutputRendersStoredSummaries, whose run raises
+        # KeyError: 'next_command' reaching for the same field -- noted because
+        # it was watched, not predicted. Against a second stub that composes
+        # the line inside the human-readable branch and stamps no field at all,
+        # this case is the ONLY one that goes red in the whole file: the
+        # printed-line case above passes it untouched, which is the gap.
+        for name, contract_text, expected_action, fragment in _NEXT_COMMAND_REPORT_CASES:
+            with self.subTest(case=name):
+                text, _, _ = _drive_main_with_flags(contract_text, ["--status", "--json"])
+                report = json.loads(text)
+                self.assertEqual(
+                    report.get("next_move", {}).get("action"), expected_action,
+                    "fixture sanity: %s must drive main() into the %r move" % (name, expected_action)
+                )
+                self.assertIn(
+                    "next_command", report,
+                    "the JSON report must carry next_command for the %r move -- a line composed "
+                    "inside the human-readable branch reaches no skill at all, and a skill that "
+                    "renders its own ending is the second implementation this contract removes"
+                    % expected_action
+                )
+                nc = report["next_command"]
+                self.assertIsInstance(
+                    nc.get("commands"), list,
+                    "a Next Command carries an ordered commands list (Data Shapes, Next "
+                    "Command); for %r it read %r" % (expected_action, nc)
+                )
+                self.assertTrue(
+                    str(nc.get("reason", "")).strip(),
+                    "I-5: a Next Command always carries a non-empty reason, including when the "
+                    "command list is empty -- the reason is what makes an empty list meaningful "
+                    "rather than missing"
+                )
+                self.assertTrue(
+                    any(fragment in c for c in nc["commands"]),
+                    "the %r move's stamped command must carry %r, so the field is computed from "
+                    "the move rather than filled with one move's answer. It read %r"
+                    % (expected_action, fragment, nc["commands"])
+                )
+
+
+#: name -> (the stored completion record, the fragment the rendered line must
+#: carry). A seeded entry has no "pr" key and a not-recorded entry has no
+#: "files" key, and today's renderer reads both unguarded.
+_HAND_RESOLVED_RENDER_CASES = (
+    ("a stored summary that found a file", _RECORD_WITH_SUMMARY, "src/Hand.cs"),
+    ("a record written before this change", _RECORD_WITHOUT_SUMMARY, "not-recorded"),
+)
+
+
+class TestHumanReadableOutputRendersStoredSummaries(unittest.TestCase):
+    """The human-readable branch, driven with records already on disk.
+
+    ``pr_merged.py`` prints ``hand-resolved in #{h['pr']}: {h['files']}`` with
+    no guard on either key, and the only case in this file that drives that
+    branch supplies no records, so the loop body never executes. Once
+    Extension Point 5 seeds the list from stored records, that line raises
+    KeyError on every run that has any -- and the suite as it stood would stay
+    silent, because the branch it exercises is the empty one.
+    """
+
+    def test_a_read_only_run_renders_each_stored_reading_without_raising(self):
+        # POSITIVE CONTROL, measured against a throwaway stub main() that seeds
+        # the report and leaves the renderer exactly as it is today: both rows
+        # go red, and the message reads "it raised KeyError: 'pr'" -- the
+        # failure this case exists to make visible, on the seeded entry that
+        # has no pull-request number. Against a stub that seeds and guards both
+        # keys, both rows pass.
+        for name, record, fragment in _HAND_RESOLVED_RENDER_CASES:
+            with self.subTest(case=name):
+                try:
+                    text, _, _ = _drive_main_with_flags(
+                        CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--status"],
+                        records={"t1-backend": record})
+                except Exception as exc:  # noqa: BLE001 -- the raise IS the finding
+                    self.fail(
+                        "the human-readable report must render %s and finish; it raised %s: %s. "
+                        "An operator meets this as a stack trace instead of a report, on every "
+                        "run that has stored records" % (name, type(exc).__name__, exc))
+                self.assertIn(
+                    fragment, text,
+                    "the human-readable report must NAME the reading for %s -- %r was nowhere "
+                    "in it, and a reading nobody prints is indistinguishable from a clean "
+                    "merge. The report read:\n%s" % (name, fragment, text)
+                )
+                naming = [ln for ln in text.splitlines() if fragment in ln]
+                self.assertTrue(
+                    any("t1-backend" in ln for ln in naming),
+                    "the line carrying the reading must name the sub-task it belongs to: a "
+                    "seeded entry has no pull-request number to identify it by, and an "
+                    "unattributed reading tells an operator nothing about where to look. The "
+                    "matching lines were %r" % (naming,)
+                )
+
+
+# --------------------------------------------------------------------------
+# (h) --resume is a read-only report.
+#
+# Measured defect (Data Shapes, Commands): --resume is declared at
+# pr_merged.py:1074 and its value is never read in main(), so a run carrying
+# it falls through to the default report path -- which WRITES the state store,
+# because every non-writing branch is gated on --dry-run and --status only.
+# --------------------------------------------------------------------------
+class TestResumeIsAReadOnlyReport(unittest.TestCase):
+
+    def test_resume_writes_neither_the_state_store_nor_any_record(self):
+        # WHICH MOCK THE LIVE CONTROL COVERS -- corrected, because the earlier
+        # version of this comment said "this case is its own live positive
+        # control" without naming a mock, and that is true of one of the two
+        # and false of the other.
+        #
+        # write_state: a genuine live control. Its current output reads
+        # "write_state was called 1 time(s)" -- the mock is watching main()
+        # perform a real write today, on the very flag the contract says must
+        # write nothing, so the count in the message IS the observation. The
+        # paired case test_positive_control_a_default_run_does_write_the_state
+        # _store keeps that true after the implementation lands.
+        #
+        # write_record: NOT a live control here, and the assertion below is
+        # kept only as the shape statement it really is. _drive_main_with_flags
+        # supplies no --pr, so main()'s pull-request loop never runs and
+        # write_record is unreachable on every flag set this fixture can drive.
+        # Measured call counts, all three flag sets, against the throwaway
+        # stub: --resume --json -> write_state 0, write_record 0; --status
+        # --json -> 0 and 0; --json -> write_state 1, write_record 0. The
+        # write_record row never moves, so assertFalse on it cannot fail here.
+        # The REACHABLE witness is
+        # TestResumeIsReadOnlyAtEveryWritingBranch.test_resume_writes_no
+        # _completion_record_for_a_merged_pull_request, which drives the same
+        # flag through the --pr fixture and has its own live control beside it.
+        _text, write_state_mock, write_record_mock = _drive_main_with_flags(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--resume", "--json"])
+        self.assertFalse(
+            write_state_mock.called,
+            "--resume must join --status in every branch currently gated on 'not args.dry_run "
+            "and not args.status' (Extension Point 10). Reporting the stored position must "
+            "never move it -- write_state was called %d time(s)"
+            % write_state_mock.call_count
+        )
+        self.assertFalse(
+            write_record_mock.called,
+            "a --resume run given no --pr has no pull request to record, so it must reach "
+            "write_record zero times. This path cannot distinguish a guarded writer from an "
+            "unreachable one; the case that can is named in the comment above"
+        )
+
+    def test_the_resume_report_leads_with_the_stored_position(self):
+        # Open Question four, answered: "--resume becomes a read-only report:
+        # it writes neither the state store nor any completion record, and its
+        # report leads with THE STORED POSITION and what that position is
+        # waiting for." Until this case nothing asserted the position half, so
+        # an implementation reaching read-only by dropping report["state"]
+        # passed -- and dropping it is the shortest way to make a writer stop
+        # mattering.
+        # What the name calls "leads with" is pinned here as PRESENCE, which is
+        # its testable half: the report is a JSON object, and key order in one
+        # is not a contract, so the two assertions below ask that
+        # report["state"] exists as a dict and names this contract's sub-task
+        # and nothing about where it sits.
+        # POSITIVE CONTROL, measured against a throwaway stub main() that
+        # stamps report["state"] = None whenever args.resume is set: both
+        # assertions below go red and nothing else in the file moves.
+        text, _, _ = _drive_main_with_flags(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--resume", "--json"])
+        report = json.loads(text)
+        self.assertIsInstance(
+            report.get("state"), dict,
+            "a --resume report must still CARRY the stored position -- reaching read-only by "
+            "omitting the position answers the flag's own help text with silence. It read %r"
+            % (report.get("state"),)
+        )
+        self.assertIn(
+            "t1-backend", report["state"].get("sub_tasks", {}),
+            "and the position must name this contract's sub-task, which is the thing a cleared "
+            "session has no other way to learn. The position read %r" % (report["state"],)
+        )
+
+    def test_resume_still_produces_a_report(self):
+        # The other half of Extension Point 10: --resume becomes a read-only
+        # REPORT, not an error and not a silent no-op.
+        # POSITIVE CONTROL, measured: run the same flags against a contract
+        # slug that resolves to nothing --
+        #   py -3 -B .claude/scripts/pr_merged.py --contract zz-no-such-contract-probe
+        #     --resume --json
+        # -- and main() prints {"error": "contract-not-found", "contract":
+        # "zz-no-such-contract-probe"} with exit code 2, so the equality
+        # against "acme-red-fixture" and the assertIn("next_move") both turn
+        # red.
+        text, _, _ = _drive_main_with_flags(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--resume", "--json"])
+        report = json.loads(text)
+        self.assertEqual(
+            report.get("contract"), "acme-red-fixture",
+            "a --resume run must still report the contract it was asked about"
+        )
+        self.assertIn(
+            "next_move", report,
+            "a --resume run reports the stored position and what it waits for, which is the "
+            "move -- the flag's own help text says exactly that"
+        )
+
+    def test_positive_control_a_default_run_does_write_the_state_store(self):
+        # POSITIVE CONTROL for the read-only case above. Must stay green
+        # throughout: it proves this fixture's write_state mock observes a
+        # real write, so assertFalse(write_state_mock.called) is a measurement
+        # and not a mock that was never wired. Mutation that turns it red: add
+        # "--status" to this flag list.
+        _text, write_state_mock, _ = _drive_main_with_flags(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--json"])
+        self.assertTrue(
+            write_state_mock.called,
+            "a plain run with neither --dry-run, --status nor --resume writes the state store "
+            "-- if this ever goes red the read-only assertions above are measuring nothing"
+        )
+
+
+# --------------------------------------------------------------------------
+# (j) The Sub-Task Cycle -- decided by what the block DECLARES, never by who
+# is assigned.
+#
+# Extension Point 12, four arms, first match wins. I-6: the list is always
+# exactly ONE stage. I-7: no-declared-phase always travels with exactly one
+# unphased stage, never with a red stage the contract did not ask for. There
+# is no RED_STAGE_AGENT constant and no case below assumes one: every stage's
+# agent is the block's own.
+# --------------------------------------------------------------------------
+BLOCK_DECLARING_PHASE_RED = """
+**Depends on:** none
+
+**Files to touch:**
+- .claude/scripts/tests/test_thing.py
+
+**Pre-written TASK block:**
+```
+TASK: Write the failing tests for the thing.
+CONTEXT: concept contract at .claude/concepts/c-slug.md
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/c-slug.md
+  contract_status: approved
+  phase: RED
+```
+"""
+
+BLOCK_DECLARING_PHASE_GREEN = """
+**Depends on:** 1
+
+**Files to touch:**
+- .claude/scripts/thing.py
+
+**Pre-written TASK block:**
+```
+TASK: Make the failing tests pass.
+CONTEXT: concept contract at .claude/concepts/c-slug.md
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/c-slug.md
+  contract_status: approved
+  phase: GREEN
+```
+"""
+
+BLOCK_DECLARING_NO_PHASE = """
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+
+**Pre-written TASK block:**
+```
+TASK: Do the thing.
+CONTEXT: concept contract at .claude/concepts/c-slug.md
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/c-slug.md
+  contract_status: approved
+```
+"""
+
+BLOCK_WITH_NO_TASK_BLOCK_AT_ALL = """
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+"""
+
+#: Extension Point 11 defines declared_phase as reading the phase "out of the
+#: block's own TASK block", so the shape that can fool a careless reader is a
+#: `phase:` line at column zero OUTSIDE any fenced TASK block. This repository
+#: already writes that shape: the briefs under .claude/work-items/ carry a
+#: column-zero `phase:` line. Those files never reach build_dispatch -- it is
+#: handed a contract handoff block body, and a brief travels through main() as
+#: a PATH in the state entry, never as content -- so the claim here is about
+#: the shape alone, which handoff prose is equally free to take.
+#: Every other fixture in this file puts its phase line inside a fenced TASK
+#: block: grep '^phase:' over this file finds exactly the one below. So none
+#: of them can tell a reader that honours the TASK block from one that scans
+#: the whole body. Measured against a throwaway stub build_dispatch, swapping
+#: the TASK-block-scoped search for the same regular expression over
+#: block_body turns exactly two subtests red and nothing green -- this
+#: fixture's _CYCLE_CASES row and
+#: test_a_phase_line_in_prose_outside_the_task_block_is_not_a_declaration.
+#: This block declares NO phase; the phase-shaped line below it is a sentence
+#: about the sub-task that came before, and reading it as a declaration hands
+#: this block a red stage the contract never asked for.
+BLOCK_WITH_A_PHASE_LINE_IN_PROSE_ONLY = """
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+
+The brief this block replaces recorded its own metadata in wrapped prose, and one of the lines it
+wrapped onto a column-zero line of its own was
+phase: RED
+which belonged to the sub-task that came before this one and never to this block.
+
+**Pre-written TASK block:**
+```
+TASK: Do the thing.
+CONTEXT: concept contract at .claude/concepts/c-slug.md
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/c-slug.md
+  contract_status: approved
+```
+"""
+
+#: A review gate that DECLARES a review artefact path -- verdict-bearing.
+_ARTEFACT_DECLARING_TASK = SubTask(
+    id="t4-script-review", ordinal=4, name="Script review", agent="acme-reviewer",
+    depends_on=[2], files=[".claude/reviews/c-slug/t4-script-review-acme-reviewer.md"],
+    agent_role="review-gate")
+
+#: The case that proves the rule (Extension Point 12, sub-task 6 of this very
+#: contract): its agent IS a review gate, but it declares ordinary files and
+#: no artefact, so it correctly gets NO review stage.
+_REVIEW_AGENT_ORDINARY_FILES_TASK = SubTask(
+    id="t6-code-review", ordinal=6, name="Code review", agent="fullstack-code-reviewer",
+    depends_on=[2], files=["src/Foo.cs", "src/Bar.cs"], agent_role="review-gate")
+
+_RED_PHASE_TASK = SubTask(
+    id="t1-failing-tests", ordinal=1, name="Failing tests", agent="senior-test-engineer",
+    depends_on=[], files=[".claude/scripts/tests/test_thing.py"], agent_role="implementer")
+
+_GREEN_PHASE_TASK = SubTask(
+    id="t2-script", ordinal=2, name="Script", agent="python-ai-developer",
+    depends_on=[1], files=[".claude/scripts/thing.py"], agent_role="implementer")
+
+#: The two rows that de-confound the red arm from the agent's NAME.
+#: _RED_PHASE_TASK above is owned by senior-test-engineer, so on its own it
+#: cannot tell an arm reading the DECLARED phase from an arm reading "is this
+#: a test engineer" -- the RED_STAGE_AGENT shape Non-Goals forbids. Measured:
+#: that mutation survived every case in this class. These cross the two facts
+#: over, the way _REVIEW_AGENT_ORDINARY_FILES_TASK crosses the review arm
+#: against agent_role.
+_RED_PHASE_TASK_OWNED_BY_A_SCRIPT_AUTHOR = SubTask(
+    id="t7-red-by-a-script-author", ordinal=7, name="Failing tests",
+    agent="python-ai-developer", depends_on=[],
+    files=[".claude/scripts/tests/test_other.py"], agent_role="implementer")
+
+_GREEN_PHASE_TASK_OWNED_BY_A_TEST_ENGINEER = SubTask(
+    id="t8-green-by-a-test-engineer", ordinal=8, name="Script",
+    agent="senior-test-engineer", depends_on=[1],
+    files=[".claude/scripts/other.py"], agent_role="implementer")
+
+#: name -> (sub-task, block body, the one stage expected, the expected basis)
+_CYCLE_CASES = (
+    ("a declared review artefact",
+     _ARTEFACT_DECLARING_TASK, BLOCK_DECLARING_NO_PHASE, "review", "verdict-bearing"),
+    ("a declared review artefact alongside a declared phase",
+     _ARTEFACT_DECLARING_TASK, BLOCK_DECLARING_PHASE_RED, "review", "verdict-bearing"),
+    ("a review-gate agent whose files are ordinary",
+     _REVIEW_AGENT_ORDINARY_FILES_TASK, BLOCK_DECLARING_NO_PHASE, "unphased", "no-declared-phase"),
+    ("a task block declaring phase RED",
+     _RED_PHASE_TASK, BLOCK_DECLARING_PHASE_RED, "red", "declared-phase"),
+    ("a task block declaring phase GREEN",
+     _GREEN_PHASE_TASK, BLOCK_DECLARING_PHASE_GREEN, "green", "declared-phase"),
+    ("a block declaring no phase",
+     _GREEN_PHASE_TASK, BLOCK_DECLARING_NO_PHASE, "unphased", "no-declared-phase"),
+    ("a block with no task block at all",
+     _GREEN_PHASE_TASK, BLOCK_WITH_NO_TASK_BLOCK_AT_ALL, "unphased", "no-declared-phase"),
+    ("a declared RED phase whose agent is not a test engineer",
+     _RED_PHASE_TASK_OWNED_BY_A_SCRIPT_AUTHOR, BLOCK_DECLARING_PHASE_RED, "red", "declared-phase"),
+    ("a test engineer owning a declared GREEN phase",
+     _GREEN_PHASE_TASK_OWNED_BY_A_TEST_ENGINEER, BLOCK_DECLARING_PHASE_GREEN,
+     "green", "declared-phase"),
+    ("a phase line in prose outside the task block",
+     _GREEN_PHASE_TASK, BLOCK_WITH_A_PHASE_LINE_IN_PROSE_ONLY, "unphased", "no-declared-phase"),
+)
+
+
+class TestDispatchPacketCarriesTheSubTaskCycle(unittest.TestCase):
+
+    def _packet(self, case_name):
+        for name, task, body, _stage, _basis in _CYCLE_CASES:
+            if name == case_name:
+                d = build_dispatch(task, "c-slug", ".claude/concepts/c-slug.md", body)
+                self.assertIn(
+                    "cycle", d,
+                    "build_dispatch must carry a cycle key -- Extension Point 12. Today the "
+                    "packet names branch, agent, files, contract and task block, and nothing "
+                    "about the stages the sub-task runs through"
+                )
+                self.assertIn(
+                    "cycle_basis", d,
+                    "build_dispatch must carry a cycle_basis key beside cycle, naming WHICH "
+                    "declaration produced the stage, so a reader can tell a stage the contract "
+                    "asked for from one the loop fell back to"
+                )
+                return d, task
+        raise AssertionError("no cycle case named %r" % case_name)
+
+    def test_a_declared_review_artefact_yields_one_review_stage(self):
+        # POSITIVE CONTROL (fixture-owned): change
+        # _ARTEFACT_DECLARING_TASK.files to ["src/Foo.cs"] and the arm can no
+        # longer fire, so stage reads "unphased" and basis "no-declared-phase"
+        # -- both assertions turn red. That is the same mutation the
+        # ordinary-files case below makes permanent.
+        d, task = self._packet("a declared review artefact")
+        self.assertEqual(
+            len(d["cycle"]), 1,
+            "I-6: the cycle is always exactly one stage; the loop never composes two"
+        )
+        self.assertEqual(
+            d["cycle"][0]["stage"], "review",
+            "a sub-task declaring a path under .claude/reviews/ is verdict-bearing, and that is "
+            "read from the DECLARED PATH -- the rule stated at MECHANISMS.md:149, "
+            "VOCABULARY.md:40 and project-profile.md:60, and already applied by main() when it "
+            "picks the verdict file"
+        )
+        self.assertEqual(
+            d["cycle_basis"], "verdict-bearing",
+            "the basis names which declaration produced the stage"
+        )
+        self.assertEqual(
+            d["cycle"][0]["agent"], task.agent,
+            "every stage carries the block's OWN agent; the script never chooses one"
+        )
+        self.assertEqual(
+            d["cycle"][0]["isolation"], "fresh-subagent",
+            "isolation is the constant fresh-subagent -- that is the capability this cycle "
+            "exists to make explicit instead of leaving it to an operator's memory"
+        )
+
+    def test_the_review_arm_wins_over_a_declared_phase(self):
+        # The ordering test MECHANISMS.md:115 requires of a first-match-wins
+        # procedure: the same block declares BOTH a review artefact and
+        # phase: RED, and review must win.
+        # POSITIVE CONTROL (fixture-owned): swap this case's sub-task for
+        # _RED_PHASE_TASK -- same block body, ordinary files -- and the stage
+        # reads "red" with basis "declared-phase", turning both assertions red.
+        d, _task = self._packet("a declared review artefact alongside a declared phase")
+        self.assertEqual(
+            d["cycle"][0]["stage"], "review",
+            "the review arm is first and first match wins; a block declaring both must not be "
+            "read as a red stage"
+        )
+        self.assertEqual(d["cycle_basis"], "verdict-bearing",
+                         "the basis must name the declaration that actually decided the stage")
+
+    def test_a_review_gate_agent_whose_files_are_ordinary_gets_no_review_stage(self):
+        # The case that proves the rule. Extension Point 12 names it: this
+        # contract's own sub-task 6 is owned by fullstack-code-reviewer, writes
+        # five ordinary files and no artefact, and correctly gets no review
+        # stage. agent_role is deliberately set to "review-gate" on this
+        # fixture, so an implementation that keys on agent_role instead of on
+        # the declared path fails here and only here.
+        # POSITIVE CONTROL, measured against a throwaway stub build_dispatch
+        # that keys the review arm on `task.agent_role == "review-gate"`
+        # instead of on the declared path: this case and the
+        # no-declared-phase row of test_no_case_invents_a_red_stage... are the
+        # only two that go red, which is what makes it the case that proves
+        # the rule.
+        d, task = self._packet("a review-gate agent whose files are ordinary")
+        self.assertEqual(
+            task.agent_role, "review-gate",
+            "fixture sanity: this sub-task's agent IS resolved as a review gate, which is the "
+            "whole point of the case"
+        )
+        self.assertNotEqual(
+            d["cycle"][0]["stage"], "review",
+            "the cycle is keyed on what the block DECLARES and never on agent_role -- a review "
+            "gate that writes ordinary files has no verdict to bear"
+        )
+        self.assertEqual(
+            d["cycle"][0]["stage"], "unphased",
+            "no artefact and no declared phase leaves exactly one unphased stage"
+        )
+        self.assertEqual(d["cycle_basis"], "no-declared-phase",
+                         "the basis must say the phase was ABSENT, not inferred")
+
+    def test_a_declared_red_phase_yields_one_red_stage(self):
+        # POSITIVE CONTROL (fixture-owned): change this block's
+        # "phase: RED" line to "phase: GREEN" and the stage reads "green",
+        # turning the assertion red.
+        d, task = self._packet("a task block declaring phase RED")
+        self.assertEqual(len(d["cycle"]), 1, "I-6: exactly one stage")
+        self.assertEqual(
+            d["cycle"][0]["stage"], "red",
+            "a task block declaring phase: RED is the contract SAYING which half of the "
+            "test-first cycle this block is"
+        )
+        self.assertEqual(d["cycle_basis"], "declared-phase",
+                         "the basis names the phase line as the declaration that decided it")
+        self.assertEqual(
+            d["cycle"][0]["agent"], task.agent,
+            "the red stage carries the block's own agent -- there is no RED_STAGE_AGENT "
+            "constant and the script never guesses who writes a failing test"
+        )
+
+    def test_the_stage_is_keyed_on_the_declared_phase_and_never_on_the_agents_name(self):
+        # The de-confounding case, and the sibling of the ordinary-files case
+        # above. _RED_PHASE_TASK is owned by senior-test-engineer, so the red
+        # arm on its own is indistinguishable from an arm that asks "is this a
+        # test engineer" -- measured: that mutation survived every other case
+        # in this class. These two rows cross the two facts over: a RED
+        # declaration owned by a script author, and a GREEN declaration owned
+        # by a test engineer.
+        # POSITIVE CONTROL, measured against a throwaway stub build_dispatch
+        # whose red arm reads `task.agent == "senior-test-engineer"` instead of
+        # declared_phase(...): this case goes red, and so do exactly the two
+        # rows added with it in test_no_case_invents_a_red_stage_the_block_did
+        # _not_declare. Nothing else in the file moves -- every row that
+        # existed before those two passes the mutation, which is the confound.
+        d, task = self._packet("a declared RED phase whose agent is not a test engineer")
+        self.assertNotEqual(
+            task.agent, "senior-test-engineer",
+            "fixture sanity: this row exists precisely because its agent is not a test engineer"
+        )
+        self.assertEqual(
+            d["cycle"][0]["stage"], "red",
+            "a block declaring phase: RED yields a red stage whoever owns it -- the declaration "
+            "decides the stage, and Non-Goals rules out the script ever reading a name to "
+            "decide it"
+        )
+        mirror, mirror_task = self._packet("a test engineer owning a declared GREEN phase")
+        self.assertEqual(
+            mirror_task.agent, "senior-test-engineer",
+            "fixture sanity: this row exists precisely because a test engineer owns it"
+        )
+        self.assertEqual(
+            mirror["cycle"][0]["stage"], "green",
+            "a block declaring phase: GREEN yields a green stage even when a test engineer owns "
+            "it: the agent who wrote the failing tests is often the obvious owner of the block "
+            "that follows, and a loop reading the name would hand that block a second red stage"
+        )
+
+    def test_a_declared_green_phase_yields_one_green_stage(self):
+        # POSITIVE CONTROL (fixture-owned): change this block's
+        # "phase: GREEN" line to "phase: RED" and the stage reads "red".
+        d, task = self._packet("a task block declaring phase GREEN")
+        self.assertEqual(len(d["cycle"]), 1, "I-6: exactly one stage")
+        self.assertEqual(d["cycle"][0]["stage"], "green",
+                         "a task block declaring phase: GREEN yields one green stage")
+        self.assertEqual(d["cycle_basis"], "declared-phase",
+                         "the basis names the phase line as the declaration that decided it")
+        self.assertEqual(d["cycle"][0]["agent"], task.agent,
+                         "the green stage carries the block's own agent")
+
+    def test_a_block_declaring_no_phase_yields_one_unphased_stage(self):
+        # POSITIVE CONTROL (fixture-owned): add a "  phase: RED" line to
+        # BLOCK_DECLARING_NO_PHASE's task block and both assertions turn red.
+        d, _task = self._packet("a block declaring no phase")
+        self.assertEqual(d["cycle"][0]["stage"], "unphased",
+                         "a block that declares no phase gets ONE stage carrying its own agent")
+        self.assertEqual(
+            d["cycle_basis"], "no-declared-phase",
+            "I-7: the basis must make an absent declaration visible, so an operator can tell a "
+            "fallback from a stage the contract asked for"
+        )
+
+    def test_a_block_with_no_task_block_at_all_yields_one_unphased_stage(self):
+        # Extension Point 11: a block with no TASK block and a block that
+        # declares no phase are the SAME answer on purpose -- in both cases
+        # the contract did not say.
+        # POSITIVE CONTROL (fixture-owned): swap this case's body for
+        # BLOCK_DECLARING_PHASE_RED and the stage reads "red".
+        d, _task = self._packet("a block with no task block at all")
+        self.assertTrue(
+            d["needs_authoring"],
+            "fixture sanity: this block genuinely has no pre-written TASK block"
+        )
+        self.assertEqual(d["cycle"][0]["stage"], "unphased",
+                         "no TASK block means the contract did not say, which is unphased")
+        self.assertEqual(d["cycle_basis"], "no-declared-phase",
+                         "the basis must name the absence rather than hiding it")
+
+    def test_a_phase_line_in_prose_outside_the_task_block_is_not_a_declaration(self):
+        # Extension Point 11 reads the phase out of the BLOCK'S OWN TASK BLOCK.
+        # Every other fixture here puts the phase line only inside one, so none
+        # of them can tell those two readers apart.
+        # POSITIVE CONTROL, measured against a throwaway stub build_dispatch
+        # that searches block_body with the same regular expression instead of
+        # calling declared_phase(extract_task_block(...)): exactly two subtests
+        # go red -- this case, and the 'a phase line in prose outside the task
+        # block' row of test_no_case_invents_a_red_stage_the_block_did_not
+        # _declare. Nothing else in the file moves, before or after this
+        # fixture was added, which is what made this a hole: every other
+        # fixture puts its phase line where it belongs.
+        d, _task = self._packet("a phase line in prose outside the task block")
+        self.assertIn(
+            "\nphase: RED\n", BLOCK_WITH_A_PHASE_LINE_IN_PROSE_ONLY,
+            "fixture sanity: the hazard is real only if the body genuinely carries a "
+            "column-zero phase line outside the fenced TASK block"
+        )
+        self.assertNotIn(
+            "phase: RED", extract_task_block(BLOCK_WITH_A_PHASE_LINE_IN_PROSE_ONLY) or "",
+            "fixture sanity: and that line must be OUTSIDE what extract_task_block returns, or "
+            "this case is measuring an ordinary declared-phase block"
+        )
+        self.assertEqual(
+            d["cycle"][0]["stage"], "unphased",
+            "prose is not a declaration. A block whose TASK block declares no phase is unphased "
+            "however many phase-shaped sentences surround it, and promoting one of them hands "
+            "this block a red stage the contract never asked for"
+        )
+        self.assertEqual(
+            d["cycle_basis"], "no-declared-phase",
+            "and the basis must say the phase was ABSENT from the TASK block, not read from "
+            "somewhere else in the body"
+        )
+
+    def test_no_case_yields_two_stages(self):
+        # I-6 across every arm at once. POSITIVE CONTROL, measured against a
+        # throwaway stub build_dispatch that returns a red stage COMPOSED IN
+        # FRONT of the stage it decided: all TEN rows of this case go red, and
+        # 27 failing subtests across 11 methods in total, because a red stage
+        # in front also makes cycle[0] read "red" everywhere. That is the
+        # defect this case exists to catch -- a two-stage cycle collapses the
+        # two authors the design keeps apart.
+        # The count is stated per ROW and re-measured whenever _CYCLE_CASES
+        # changes: the earlier "all seven rows" was correct when it was
+        # written and went stale twice, once when two de-confounding rows were
+        # added and once when the prose-phase row was. Read the tuple's length
+        # before writing a number here.
+        for name, task, body, _stage, _basis in _CYCLE_CASES:
+            with self.subTest(case=name):
+                d = build_dispatch(task, "c-slug", ".claude/concepts/c-slug.md", body)
+                self.assertIn("cycle", d, "build_dispatch must carry a cycle key")
+                self.assertEqual(
+                    len(d["cycle"]), 1,
+                    "I-6: %r must yield exactly one stage. Two stages would collapse the two "
+                    "authors this design exists to keep apart, since a single dispatch would "
+                    "carry both the failing test and the code that satisfies it" % name
+                )
+
+    def test_no_case_invents_a_red_stage_the_block_did_not_declare(self):
+        # I-7, stated explicitly because a silent default is the defect the
+        # unphased arm exists to avoid.
+        # POSITIVE CONTROL, measured against a throwaway stub build_dispatch
+        # that promotes every no-declared-phase stage to "red": exactly the
+        # FOUR no-declared-phase rows of this case go red, plus the FOUR
+        # single-case tests that pin the same rows -- the review-gate-with-
+        # ordinary-files case, the no-phase case, the no-task-block case and
+        # the phase-in-prose case. Eight failing subtests across five methods.
+        # A stub that leaves them unphased passes. Re-measure both numbers
+        # whenever a no-declared-phase row is added to _CYCLE_CASES; the
+        # earlier "three rows plus two single-case tests" was true of an
+        # earlier tuple and of an earlier set of single-case tests.
+        for name, task, body, expected_stage, expected_basis in _CYCLE_CASES:
+            with self.subTest(case=name):
+                d = build_dispatch(task, "c-slug", ".claude/concepts/c-slug.md", body)
+                self.assertIn("cycle", d, "build_dispatch must carry a cycle key")
+                self.assertEqual(
+                    d["cycle"][0]["stage"], expected_stage,
+                    "%r must yield a %r stage" % (name, expected_stage)
+                )
+                self.assertEqual(
+                    d["cycle_basis"], expected_basis,
+                    "%r must be stamped with basis %r" % (name, expected_basis)
+                )
+                if expected_basis == "no-declared-phase":
+                    self.assertNotEqual(
+                        d["cycle"][0]["stage"], "red",
+                        "I-7: no-declared-phase must never travel with a red stage -- %r "
+                        "declared no phase, so the loop must not ask for a failing test the "
+                        "contract never requested" % name
+                    )
+
+    def test_every_stage_names_the_blocks_own_agent(self):
+        # There is no arm in which the script chooses an agent the contract
+        # did not name, which is why RED_STAGE_AGENT is NOT added (Non-Goals).
+        # POSITIVE CONTROL, measured against a throwaway stub build_dispatch
+        # that names "senior-test-engineer" on every stage instead of the
+        # block's own agent: EIGHT rows of this case go red -- every row whose
+        # agent is not senior-test-engineer, which is eight of the ten in
+        # _CYCLE_CASES. That is exactly the RED_STAGE_AGENT shape Non-Goals
+        # forbids, and only this case and the two single-case agent assertions
+        # catch it: ten failing subtests across three methods. The earlier
+        # "six rows" counted a seven-row tuple and was stale before the
+        # de-confounding rows landed beside it.
+        for name, task, body, _stage, _basis in _CYCLE_CASES:
+            with self.subTest(case=name):
+                d = build_dispatch(task, "c-slug", ".claude/concepts/c-slug.md", body)
+                self.assertIn("cycle", d, "build_dispatch must carry a cycle key")
+                for stage in d["cycle"]:
+                    self.assertEqual(
+                        stage.get("agent"), task.agent,
+                        "%r: every stage's agent is the block's own (%r), never a name the "
+                        "script chose" % (name, task.agent)
+                    )
+                    self.assertEqual(
+                        stage.get("isolation"), "fresh-subagent",
+                        "%r: every stage runs in a fresh subagent -- that constant IS the "
+                        "isolation the operator currently has to produce by remembering to "
+                        "clear" % name
+                    )
+
+
+# --------------------------------------------------------------------------
+# (k) declared_phase -- reads the phase line out of a block's own TASK block.
+#
+# Extension Point 11: returns RED, GREEN or None. None for a block that
+# declares no phase AND for a block with no TASK block at all, and the two are
+# the same answer on purpose: in both cases the contract did not say.
+# --------------------------------------------------------------------------
+class TestDeclaredPhase(unittest.TestCase):
+
+    def _declared_phase(self):
+        fn = _fn("declared_phase")
+        self.assertIsNotNone(
+            fn,
+            "pr_merged.declared_phase must exist -- Extension Point 11 names it the pure "
+            "function that reads the phase line out of a block's own TASK block"
+        )
+        return fn
+
+    def test_a_task_block_declaring_red_reads_red(self):
+        # POSITIVE CONTROL (fixture-owned): read the phase out of
+        # BLOCK_DECLARING_PHASE_GREEN instead and this assertion turns red.
+        declared_phase = self._declared_phase()
+        self.assertEqual(
+            declared_phase(extract_task_block(BLOCK_DECLARING_PHASE_RED)), "RED",
+            "the phase line is the contract's own declaration of which half of the test-first "
+            "cycle a block is, and it is read verbatim"
+        )
+
+    def test_a_task_block_declaring_green_reads_green(self):
+        # POSITIVE CONTROL (fixture-owned): read the phase out of
+        # BLOCK_DECLARING_PHASE_RED instead and this assertion turns red.
+        declared_phase = self._declared_phase()
+        self.assertEqual(
+            declared_phase(extract_task_block(BLOCK_DECLARING_PHASE_GREEN)), "GREEN",
+            "GREEN is read exactly as RED is; neither is inferred from the agent"
+        )
+
+    def test_a_task_block_with_no_phase_line_reads_none(self):
+        # POSITIVE CONTROL (fixture-owned): add a "  phase: RED" line to
+        # BLOCK_DECLARING_NO_PHASE's task block and this assertion turns red.
+        declared_phase = self._declared_phase()
+        self.assertIsNone(
+            declared_phase(extract_task_block(BLOCK_DECLARING_NO_PHASE)),
+            "a block that declares no phase must read None -- the contract did not say, and a "
+            "guess here would invent a stage nobody asked for"
+        )
+
+    def test_an_absent_task_block_reads_none(self):
+        # extract_task_block returns None for a block with no TASK block, and
+        # declared_phase must answer None for it rather than raising --
+        # build_dispatch hands it exactly that value for a needs_authoring
+        # block.
+        # POSITIVE CONTROL (fixture-owned): pass
+        # extract_task_block(BLOCK_DECLARING_PHASE_RED) instead of the absent
+        # one and this assertion turns red.
+        declared_phase = self._declared_phase()
+        self.assertIsNone(
+            extract_task_block(BLOCK_WITH_NO_TASK_BLOCK_AT_ALL),
+            "fixture sanity: this block genuinely has no TASK block"
+        )
+        self.assertIsNone(
+            declared_phase(extract_task_block(BLOCK_WITH_NO_TASK_BLOCK_AT_ALL)),
+            "no TASK block at all is the SAME answer as no phase line, on purpose: in both "
+            "cases the contract did not say (Extension Point 11)"
+        )
+
+    def test_a_phase_value_outside_the_closed_set_reads_none(self):
+        # Four probes, not one. AMBER alone begins with a letter neither member
+        # claims, so it is passed by an implementation returning RED for
+        # anything beginning with R, and by one that upper-cases before
+        # comparing -- measured, both survived. REVIEW catches the first,
+        # because the word an operator most plausibly mistypes into a phase
+        # line is the name of the other kind of block this loop knows about.
+        # Lowercase "red" catches the second.
+        #
+        # REFACTOR is the fourth, and it is the one a real author here is most
+        # likely to write. A repository-wide census of `phase:` values found
+        # exactly three in use -- RED, GREEN and REFACTOR, the last documented
+        # in the test-first skill -- while lowercase "red" appears nowhere. So
+        # REFACTOR is the near-miss with a live author behind it and "red" is
+        # the near-miss with a live implementation defect behind it; both rows
+        # are one line each, and both are kept.
+        # POSITIVE CONTROL (fixture-owned): add "RED" to this tuple and that
+        # row turns red.
+        declared_phase = self._declared_phase()
+        for value in ("AMBER", "REVIEW", "red", "REFACTOR"):
+            with self.subTest(phase=value):
+                block = BLOCK_DECLARING_PHASE_RED.replace("phase: RED", "phase: %s" % value)
+                self.assertIsNone(
+                    declared_phase(extract_task_block(block)),
+                    "RED and GREEN are the closed set and the phase line is read VERBATIM, so "
+                    "%r is unreadable to the loop and must never be passed through as a stage "
+                    "name. A contract that means RED writes RED: normalising the value here "
+                    "lets 'phase: REVIEW' or 'phase: red' decide a stage the contract never "
+                    "declared in the form Extension Point 11 names, which is the same silent "
+                    "default the unphased arm exists to avoid" % value
+                )
+
+
+# --------------------------------------------------------------------------
+# (h2) --resume is read-only at EVERY branch, including the two that reach
+# outside this process.
+#
+# Extension Point 10 says --resume joins --status in every branch currently
+# written as `not args.dry_run and not args.status`. Measured in
+# .claude/scripts/pr_merged.py, that phrase appears exactly four times: the
+# --record-subtask state write, the sub-issue closure, the completion-record
+# write, and the default report's state write. The suite's --resume cases
+# witnessed the LAST one only, and the case above cannot reach the middle two
+# at all, because its fixture supplies no --pr and the pull-request loop
+# therefore never runs.
+#
+# The branch that matters most is the second. It reads
+#   if verdict == "merged" and task_issue is not None and not args.dry_run
+#       and not args.status:
+#       sub_issue_closed = close_sub_issue(task_issue, pr.get("url", ""))
+# and close_sub_issue runs `gh issue close` -- a real mutation on a live
+# tracker. A flag whose entire promise is "report, write nothing" that can
+# still close a GitHub issue is not a missing feature; it is the feature
+# inverted. The measurement that made this a hole: removing --resume from that
+# one branch left the whole suite green.
+# --------------------------------------------------------------------------
+#: A stored position whose one sub-task already carries a sub-issue. Without an
+#: issue on the entry, main() short-circuits before close_sub_issue is ever
+#: considered and the case below would be green for want of an observation.
+_STATE_WITH_A_SUB_ISSUE = {
+    "contract": "acme-red-fixture",
+    "started_at": "2026-09-22T00:00:00Z",
+    "sub_tasks": {
+        "t1-backend": {"status": "awaiting-merge",
+                       "branch": "task/acme-red-fixture/t1-backend",
+                       "pull_request": None, "issue": 4242,
+                       "base": "master", "brief": None},
+    },
+}
+
+
+def _drive_main_over_a_pull_request_with(contract_text, commits, diff_table, flags,
+                                         state=None, filename="acme-red-fixture.md"):
+    """_drive_main_over_a_pull_request, with the flags and the stored position chosen.
+
+    Extends that fixture (test_pr_merged.py:2974) rather than replacing it, and
+    keeps every one of its edges stubbed: ``gh_pr`` returns the literal pull
+    request, ``git_combined_diff`` answers out of ``diff_table``,
+    ``file_at_commit`` returns nothing, ``write_state`` and ``write_record``
+    are mocks, and ``pr_merged._run`` raises so no subprocess can start down a
+    path this fixture did not anticipate. The module's subprocess guard near
+    line 69 is left exactly as it is and is never reached.
+
+    Two edges are added. ``close_sub_issue`` is a mock, so the branch in main()
+    that runs ``gh issue close`` against a live GitHub tracker is observable
+    instead of merely unreached. It is not main()'s only mutating branch --
+    the dispatch path reaches ``create_branch``, which runs ``gh issue
+    develop`` -- so this fixture stubs ``_run`` as well rather than relying on
+    one mock. Patching close_sub_issue is also what keeps a --resume
+    regression from becoming a closed issue on a real repository. And
+    ``git_combined_diff``
+    counts the identifiers it was asked about, so a run that walks the same
+    commit twice is visible.
+
+    Returns a dict rather than a tuple: this fixture has seven observations --
+    text, exit_code, recorded, reads, write_record, write_state and
+    close_sub_issue -- and positional unpacking of seven is how a later reader
+    gets two of them the wrong way round.
+    """
+    recorded = {}
+    reads = []
+    real_build_record = pr_merged.build_record
+    accepted = set(inspect.signature(real_build_record).parameters)
+
+    def recording_build_record(*a, **kw):
+        recorded.clear()
+        recorded.update(kw)
+        return real_build_record(*a, **{k: v for k, v in kw.items() if k in accepted})
+
+    def counting_git_combined_diff(sha):
+        reads.append(sha)
+        return diff_table[sha]
+
+    def no_subprocess(cmd):  # pragma: no cover -- must never be reached
+        raise AssertionError(
+            "this fixture must reach no process at all; %r was attempted" % (cmd,))
+
+    pull_request = {
+        "state": "MERGED", "mergedAt": "2026-09-22T00:00:00Z",
+        "mergeCommit": {"oid": "merge-sha"}, "baseRefName": "master",
+        "headRefName": "task/acme-red-fixture/t1-backend", "title": "t1-backend",
+        "url": "https://example.invalid/pr/7",
+        "commits": [{"oid": sha} for sha in commits], "statusCheckRollup": None,
+    }
+    write_record_mock = mock.MagicMock(return_value=None)
+    write_state_mock = mock.MagicMock(return_value=None)
+    close_sub_issue_mock = mock.MagicMock(return_value="closed")
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "7"] + list(flags)
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state",
+                               return_value=(json.loads(json.dumps(state))
+                                             if state is not None else None)), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", write_state_mock), \
+             mock.patch.object(pr_merged, "write_record", write_record_mock), \
+             mock.patch.object(pr_merged, "close_sub_issue", close_sub_issue_mock), \
+             mock.patch.object(pr_merged, "build_record", recording_build_record), \
+             mock.patch.object(pr_merged, "gh_pr", lambda number: pull_request), \
+             mock.patch.object(pr_merged, "git_combined_diff", counting_git_combined_diff), \
+             mock.patch.object(pr_merged, "file_at_commit", lambda sha, path: None), \
+             mock.patch.object(pr_merged, "_run", no_subprocess), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            exit_code = pr_merged.main()
+    return {"text": out.getvalue(), "exit_code": exit_code, "recorded": recorded,
+            "reads": reads, "write_record": write_record_mock,
+            "write_state": write_state_mock, "close_sub_issue": close_sub_issue_mock}
+
+
+class TestResumeIsReadOnlyAtEveryWritingBranch(unittest.TestCase):
+
+    def test_resume_never_closes_a_sub_issue(self):
+        # The hole this class exists for. RED today: main() never reads
+        # args.resume, so this run reaches `gh issue close` through
+        # close_sub_issue with a real issue number.
+        # POSITIVE CONTROL, and a live one: its paired case
+        # test_positive_control_the_same_run_without_resume_closes_and_writes
+        # drives the identical fixture with --resume removed and asserts the
+        # mock WAS called, so a green assertion here can never mean the mock
+        # was wired to nothing. Measured separately against the throwaway stub
+        # by removing `and not args.resume` from that one branch: this case
+        # goes red alone, which is the mutation the shipped suite survived.
+        run = _drive_main_over_a_pull_request_with(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2],
+            flags=["--resume", "--json"], state=_STATE_WITH_A_SUB_ISSUE)
+        self.assertFalse(
+            run["close_sub_issue"].called,
+            "--resume must join --status in the sub-issue branch as well (Extension Point 10). "
+            "close_sub_issue runs `gh issue close` on a live tracker, so a read-only flag that "
+            "reaches it does not merely write when it promised not to -- it mutates a system "
+            "outside this process. It was called %d time(s) with %r"
+            % (run["close_sub_issue"].call_count, run["close_sub_issue"].call_args_list)
+        )
+
+    def test_resume_writes_no_completion_record_for_a_merged_pull_request(self):
+        # The reachable witness for the write_record half. The --resume case in
+        # TestResumeIsAReadOnlyReport asserts the same thing over a fixture
+        # that supplies no --pr, where write_record is unreachable and the
+        # assertion cannot fail; this one drives the loop that writes.
+        # POSITIVE CONTROL: the paired case below, same fixture without
+        # --resume, asserts write_record WAS called. Measured against the stub
+        # by removing `and not args.resume` from the write_record branch alone:
+        # this case goes red alone.
+        run = _drive_main_over_a_pull_request_with(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2],
+            flags=["--resume", "--json"], state=_STATE_WITH_A_SUB_ISSUE)
+        self.assertFalse(
+            run["write_record"].called,
+            "a --resume run that processes a pull request must write no completion record: a "
+            "read-only report that writes is not read-only. write_record was called %d time(s)"
+            % run["write_record"].call_count
+        )
+        self.assertFalse(
+            run["write_state"].called,
+            "and it must not move the stored position either, on the path that has a pull "
+            "request to reconcile. write_state was called %d time(s)"
+            % run["write_state"].call_count
+        )
+
+    def test_positive_control_the_same_run_without_resume_closes_and_writes(self):
+        # Must stay green throughout. It proves all three mocks above observe
+        # real calls, so the three assertFalse results are measurements rather
+        # than mocks nobody wired. Mutation that turns it red: add "--resume"
+        # to this flag list.
+        run = _drive_main_over_a_pull_request_with(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2],
+            flags=["--json"], state=_STATE_WITH_A_SUB_ISSUE)
+        self.assertTrue(
+            run["close_sub_issue"].called,
+            "a plain run with a confirmed merge and a recorded sub-issue closes it -- if this "
+            "ever goes red the read-only assertions above are measuring nothing"
+        )
+        self.assertEqual(
+            run["close_sub_issue"].call_args[0][0], 4242,
+            "and it closes THIS sub-task's issue, read out of the stored position"
+        )
+        self.assertTrue(
+            run["write_record"].called,
+            "the same plain run writes the completion record, which is what makes the "
+            "write_record assertion above falsifiable"
+        )
+
+    def test_resume_never_writes_the_state_store_on_a_record_subtask_run(self):
+        # The fourth branch: --record-subtask's own write, at the top of
+        # main(). It is gated on --dry-run and --status today, and its two
+        # existing cases (TestRecordSubtaskHonoursDryRunAndStatus) drive
+        # exactly those two flags. Extension Point 10 says every branch, and
+        # this is one.
+        # POSITIVE CONTROL: the paired case below. Measured against the stub by
+        # removing `and not args.resume` from this branch alone: this case goes
+        # red alone.
+        _text, write_state_mock, _ = _drive_main_with_flags(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK,
+            ["--record-subtask", "t1-backend", "--issue", "7", "--base", "master",
+             "--brief", ".claude/work-items/probe.md", "--resume", "--json"])
+        self.assertFalse(
+            write_state_mock.called,
+            "--resume must join --status in the --record-subtask write as well: stamping an "
+            "identity into the stored position is exactly the kind of move a flag promising a "
+            "read-only report must not make. write_state was called %d time(s)"
+            % write_state_mock.call_count
+        )
+
+    def test_positive_control_a_record_subtask_run_without_resume_writes(self):
+        # Must stay green throughout, for the same reason as the control above.
+        # Mutation that turns it red: add "--resume" to this flag list.
+        _text, write_state_mock, _ = _drive_main_with_flags(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK,
+            ["--record-subtask", "t1-backend", "--issue", "7", "--base", "master",
+             "--brief", ".claude/work-items/probe.md", "--json"])
+        self.assertTrue(
+            write_state_mock.called,
+            "a --record-subtask run with no read-only flag writes the stored position -- if "
+            "this ever goes red the assertion above is measuring nothing"
+        )
+
+
+# --------------------------------------------------------------------------
+# (c3) The PROCESSED report entry: Extension Point 4's other half.
+#
+# "main, the pull-request loop -- passes the summary into build_record, AND
+# STAMPS THE REPORT ENTRY WITH THE SUB-TASK IDENTITY AND THE SOURCE OF THE
+# READING." Integration Surfaces lists `sub_task` and `source` on both sides
+# of the pr-merged skill's surface.
+#
+# TestMainPassesTheSummaryIntoBuildRecord reads the build_record call and the
+# written record and never looks at report["hand_resolved"], so the entry the
+# skill actually renders had no assertion at all: reducing it to {"pr": number}
+# left the suite green, and so did dropping just the two counts. The SEEDED
+# entry's counts are pinned by
+# TestReportSeedsHandResolvedFromStoredRecords; the processed entry's were not.
+# The consequence is the failure the contract rejected Option D for: the skill
+# renders its four readings off this entry, so a freshly processed pull request
+# would arrive as a bare file list with no merge_commits, and "not detectable"
+# would be indistinguishable from "clean".
+# --------------------------------------------------------------------------
+class TestTheProcessedReportEntryNamesItsSubTaskAndItsSource(unittest.TestCase):
+
+    def _entry(self, case):
+        commits, table, expected = case
+        _recorded, _mock, report = _drive_main_over_a_pull_request(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, commits, table)
+        entries = [e for e in report.get("hand_resolved", []) if e.get("pr") == 7]
+        self.assertEqual(
+            len(entries), 1,
+            "fixture sanity: this run processes exactly one pull request, so the report must "
+            "carry exactly one entry for it. It carried %r" % (report.get("hand_resolved"),)
+        )
+        return entries[0], expected
+
+    def test_a_processed_entry_carries_its_sub_task_its_source_and_all_three_facts(self):
+        # POSITIVE CONTROL, measured against a throwaway stub main() that
+        # appends {"pr": number} alone -- the reduction the shipped suite
+        # survived: this case goes red, and so does the zero-merge-count case
+        # below. Two failing cases, both in this class, nothing else in the
+        # file. Measured a second time against a stub that stamps sub_task and
+        # source but copies only summary["files"]: the same two cases go red
+        # and every other assertion in this class's first case stays green, so
+        # the counts are pinned by their own assertions rather than by the
+        # identity ones.
+        entry, expected = self._entry(_PR_THAT_FOUND_A_FILE)
+        self.assertEqual(
+            entry.get("sub_task"), "t1-backend",
+            "Extension Point 4: the entry is stamped with the SUB-TASK IDENTITY. A pull request "
+            "number identifies the request; only the sub-task id says which piece of the plan "
+            "the finding belongs to, and the seeded entries beside it have no number at all. "
+            "The entry read %r" % (entry,)
+        )
+        self.assertTrue(
+            str(entry.get("source", "")).strip(),
+            "and with the SOURCE OF THE READING, so a reader can tell a reading this run "
+            "measured from one read back off a completion record. The entry read %r" % (entry,)
+        )
+        self.assertEqual(
+            entry.get("files"), expected["files"],
+            "the file list must reach the report, because the skill renders it"
+        )
+        self.assertEqual(
+            entry.get("merge_commits"), expected["merge_commits"],
+            "and merge_commits with it: the skill distinguishes four readings off this entry, "
+            "and three of the four are decided by this count. Without it a freshly processed "
+            "pull request renders as a bare file list"
+        )
+        self.assertEqual(
+            entry.get("commits_inspected"), expected["commits_inspected"],
+            "and commits_inspected, which is what makes merge_commits zero readable as "
+            "'nothing was detectable' rather than 'no commits were reported'"
+        )
+
+    def test_a_pull_request_with_nothing_inspectable_reports_its_zero_merge_count(self):
+        # The reading that cannot be inferred from the file list. Both cases
+        # carry files == [], so an entry that reports files alone renders them
+        # identically -- one was inspected and clean, the other could not be
+        # measured at all. This is the exact collapse Alternatives Considered
+        # rejected Option D for.
+        # POSITIVE CONTROL (fixture-owned): drive _PR_THAT_FOUND_A_FILE here
+        # instead and merge_commits reads 1, turning the assertion red.
+        entry, expected = self._entry(_PR_WITH_NOTHING_INSPECTABLE)
+        self.assertEqual(entry.get("files"), [],
+                         "fixture sanity: this pull request found no files")
+        self.assertEqual(
+            entry.get("merge_commits"), 0,
+            "zero inspected merge commits is a MEASUREMENT and must reach the report, or a "
+            "squashed pull request is rendered as clean -- the first Failure Mode. The entry "
+            "read %r" % (entry,)
+        )
+        self.assertEqual(entry.get("commits_inspected"), expected["commits_inspected"],
+                         "with the count of commits that were inspected to reach it")
+
+    def test_a_processed_reading_and_a_stored_reading_do_not_share_one_source(self):
+        # `source` is only worth stamping if it discriminates. The contract
+        # does not fix the vocabulary -- it says "the source of the reading" --
+        # so this case pins the property rather than the words: the entry a run
+        # walked and the entry it read back off disk must not answer the same.
+        # POSITIVE CONTROL, measured against a throwaway stub main() that
+        # stamps the same constant on both shapes: this case goes red alone,
+        # while every presence assertion in this file stays green.
+        processed, _expected = self._entry(_PR_THAT_FOUND_A_FILE)
+        text, _, _ = _drive_main_with_flags(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--status", "--json"],
+            records={"t1-backend": _RECORD_WITH_SUMMARY})
+        seeded_entries = [e for e in json.loads(text).get("hand_resolved", [])
+                          if e.get("sub_task") == "t1-backend"]
+        # Looked up as a list and asserted, never with next() over a generator:
+        # a StopIteration escaping a test is a broken fixture, and this file's
+        # rule is that an absent behaviour arrives as an assertion naming it.
+        self.assertEqual(
+            len(seeded_entries), 1,
+            "the seeded half of this comparison needs exactly one entry for t1-backend -- "
+            "Extension Point 5 seeds the report from the stored completion record. The report's "
+            "hand_resolved list read %r" % (json.loads(text).get("hand_resolved"),)
+        )
+        seeded = seeded_entries[0]
+        self.assertNotEqual(
+            processed.get("source"), seeded.get("source"),
+            "a reading this run walked and a reading recovered from a completion record are "
+            "different claims about the same field: the first was measured now against the "
+            "commits GitHub reported, the second was measured by a run nobody in this session "
+            "watched. A source that answers the same for both carries no reading at all. "
+            "Processed read %r, seeded read %r"
+            % (processed.get("source"), seeded.get("source"))
+        )
+
+
+# --------------------------------------------------------------------------
+# (b2) The walk happens ONCE.
+#
+# Extension Point 2 keeps detect_resolved_files "rather than deleting it
+# because it is a public name AND THE WALK MUST NOT HAPPEN TWICE." That is the
+# one claim the unit-level pairing above cannot make, and it is stated there
+# rather than implied. Here it is observable: the fixture injects
+# git_combined_diff, so counting the identifiers one main() run asks about
+# catches a loop that computes the summary and then calls detect_resolved_files
+# beside it -- the most likely way the two names drift back apart.
+# --------------------------------------------------------------------------
+class TestTheWalkHappensOnceForEachCommit(unittest.TestCase):
+
+    def test_one_run_reads_each_reported_commit_exactly_once(self):
+        # POSITIVE CONTROL, measured against a throwaway stub main() that keeps
+        # the summary and adds `summary["files"] = detect_resolved_files(shas,
+        # git_combined_diff)` beside it -- a second walk that agrees on every
+        # value and costs one extra git read per commit: this case goes red
+        # naming the doubled reads, and nothing else in the file moves. That
+        # is what makes it the witness for a claim the value comparisons
+        # cannot make.
+        commits, table, _expected = _PR_THAT_FOUND_A_FILE
+        run = _drive_main_over_a_pull_request_with(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, commits, table,
+            flags=["--json"], state=_STATE_WITH_A_SUB_ISSUE)
+        self.assertTrue(
+            run["write_record"].called,
+            "fixture sanity: this run must reach the pull-request loop, or the read count "
+            "below is counting a loop that never ran"
+        )
+        self.assertEqual(
+            run["reads"], list(commits),
+            "one run must ask git about each reported commit exactly once, in the order the "
+            "pull request reported them. A second walk beside the first doubles every read "
+            "against a real repository and is how the projection quietly becomes two "
+            "implementations that agree until one of them changes. It read %r" % (run["reads"],)
+        )
+
+
+# --------------------------------------------------------------------------
+# (g2) The printed next-command line when there IS no command.
+#
+# Extension Point 9 names two forms, `next command: <lines joined by ", then
+# ">` and `next command: none - <reason>`. Only the first was driven, so a
+# printed line that stops after the prefix survived, and so did an arm that
+# invents a runnable line for the one move that has none -- the defect
+# test_blocked_gives_an_empty_command_list_and_a_non_empty_reason names in its
+# own because-clause, pinned there on the function and nowhere on the output an
+# operator actually reads.
+# --------------------------------------------------------------------------
+#: One sub-task, declaring a dependency on an ordinal the plan does not
+#: contain, which is what drives main() into the blocked move.
+CONTRACT_CLI_ONE_BLOCKED_TASK = """
+## Implementation Handoff
+
+### 1. Backend (`acme-dev`)
+
+**Depends on:** 9
+
+**Files to touch:**
+- src/Foo.cs
+"""
+
+#: The loop commands that must never appear on a blocked line: the move's
+#: whole content is that there is nothing to run. /flow stays in the tuple
+#: as a guard against the reverted arm coming back.
+_LOOP_COMMAND_TOKENS = ("/clear", "/advance", "/pr-merged", "/design-first", "/verify-before-done", "/flow")
+
+
+class TestTheHumanReadableLineForAMoveWithNoCommand(unittest.TestCase):
+
+    def test_a_blocked_move_prints_none_and_the_reason_rather_than_a_bare_prefix(self):
+        # POSITIVE CONTROLS, both measured against throwaway stubs. A main()
+        # whose empty-command branch prints "next command:" and stops: the
+        # reason assertions go red and nothing else in the file moves. A
+        # next_command_for whose blocked arm returns ["/advance <slug>"]
+        # instead of []: the last assertion goes red here, alongside the
+        # function-level case that already pins the empty list -- which is the
+        # point, because until this case the printed output had no witness at
+        # all.
+        text, _, _ = _drive_main_with_flags(CONTRACT_CLI_ONE_BLOCKED_TASK, ["--status"])
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        self.assertTrue(lines, "fixture sanity: the human-readable report must print something")
+        self.assertIn(
+            "blocked:", text,
+            "fixture sanity: this contract's one sub-task depends on an ordinal the plan does "
+            "not contain, so the report must reach the blocked move. It read:\n%s" % text
+        )
+        last = lines[-1].strip()
+        self.assertTrue(
+            last.startswith("next command: none"),
+            "a move with no runnable line still prints a next-command line, and it says NONE "
+            "rather than trailing off after the prefix -- an operator who reads a bare 'next "
+            "command:' cannot tell an empty answer from a truncated one. The last line read %r"
+            % last
+        )
+        self.assertTrue(
+            last[len("next command: none"):].strip(" -–—\t"),
+            "I-5: the empty command list is meaningful only because a non-empty reason travels "
+            "with it. Printing the word none alone is the missing field it exists to prevent. "
+            "The last line read %r" % last
+        )
+        self.assertIn(
+            "t1-backend", last,
+            "and the reason names what is held, exactly as the blocked arm's own case requires "
+            "of the function -- an operator reading the printed line is the only reader who "
+            "ever sees it. The last line read %r" % last
+        )
+        for token in _LOOP_COMMAND_TOKENS:
+            self.assertNotIn(
+                token, last,
+                "nothing is runnable while every sub-task is held, so the printed line must "
+                "carry no runnable command -- %r appeared in %r. Inventing one here sends an "
+                "operator to do work that cannot start" % (token, last)
+            )
+
+
+### --------------------------------------------------------------------------
+# RED (t2-script-and-skills): W1 -- read-only flags must not reach a mutating
+# callee through --dispatch.
+#
+# Extension Point 10 says --resume joins --status "in every branch currently
+# written as `not args.dry_run and not args.status`". Measured against
+# .claude/scripts/pr_merged.py, the dispatch section's two writes (create_branch
+# at line 1493, write_state at line 1499) are gated on `args.dry_run` alone --
+# neither `--status` nor `--resume` is read there at all, so a run carrying
+# either flag alongside --dispatch still cuts a real branch (gh issue develop /
+# git switch -c) and stamps the sub-task as dispatched in the state store.
+# --------------------------------------------------------------------------
+def _drive_dispatch_with_flags(extra_flags, filename="acme-dispatch-readonly-fixture.md"):
+    """Drive --dispatch through main() with a chosen extra flag set.
+
+    Mirrors TestMainDispatchCutsFromTheSubtasksDeclaredBase._drive_dispatch
+    (test_pr_merged.py:1780), except write_state is a MagicMock rather than a
+    bare return_value=None, so a case can ask whether main() wrote the state
+    store as well as whether it cut a branch. The state entry is fixed --
+    pending, with an issue and a declared base -- so advance() reports
+    t1-backend ready to dispatch regardless of which extra flags are given;
+    the only thing that varies between cases is the flag list.
+
+    Returns (create_branch mock, write_state mock).
+    """
+    create_branch_mock = mock.MagicMock(return_value=(True, "created it"))
+    write_state_mock = mock.MagicMock(return_value=None)
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+        slug = contract_path.stem
+        state = {
+            "contract": slug,
+            "started_at": "2026-09-19T00:00:00+00:00",
+            "sub_tasks": {"t1-backend": {"status": "pending", "branch": None,
+                                          "pull_request": None, "issue": 163,
+                                          "base": "feature/160-parent", "brief": None}},
+        }
+        out = io.StringIO()
+        argv = (["pr_merged.py", "--contract", str(contract_path),
+                 "--dispatch", "t1-backend"] + list(extra_flags))
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state", return_value=state), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", write_state_mock), \
+             mock.patch.object(pr_merged, "create_branch", create_branch_mock), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+    return create_branch_mock, write_state_mock
+
+
+class TestReadOnlyFlagsNeverReachDispatchMutationsThroughDispatch(unittest.TestCase):
+    """Extension Point 10 extended to --dispatch: --resume and --status must
+    each keep create_branch and write_state unreached even when --dispatch
+    names a sub-task advance() reports ready. Before this fix, main()'s
+    read-only guard in the --dispatch branch (`read_only_dispatch`) was
+    `args.dry_run` alone.
+    """
+
+    def test_resume_with_dispatch_never_calls_create_branch(self):
+        # Was RED before the fix: measured directly against pr_merged.main()
+        # -- this exact flag combination called create_branch with a real
+        # branch name and a real issue number, which is what create_branch's
+        # own docstring calls "a real mutation on a live tracker" one
+        # function further down.
+        create_branch_mock, _write_state_mock = _drive_dispatch_with_flags(
+            ["--resume", "--json"])
+        self.assertFalse(
+            create_branch_mock.called,
+            "--resume --dispatch <id> must not cut a branch -- --resume promises a read-only "
+            "report (Extension Point 10), and create_branch runs `gh issue develop` / `git "
+            "switch -c`, both real mutations against a live tracker and a real working tree. "
+            "It was called %d time(s) with %r"
+            % (create_branch_mock.call_count, create_branch_mock.call_args_list)
+        )
+
+    def test_resume_with_dispatch_never_calls_write_state(self):
+        # Was RED before the fix, same call: main() stamps the sub-task as
+        # dispatched in the state store immediately after cutting the
+        # branch, gated on the same `args.dry_run`-only condition.
+        _create_branch_mock, write_state_mock = _drive_dispatch_with_flags(
+            ["--resume", "--json"])
+        self.assertFalse(
+            write_state_mock.called,
+            "--resume --dispatch <id> must not stamp the sub-task as dispatched in the state "
+            "store -- a read-only report must never move the stored position. write_state was "
+            "called %d time(s)" % write_state_mock.call_count
+        )
+
+    def test_status_with_dispatch_never_calls_create_branch(self):
+        # Was RED before the fix: --status carries the identical read-only
+        # promise as --resume, and the gate at the time read neither.
+        create_branch_mock, _write_state_mock = _drive_dispatch_with_flags(
+            ["--status", "--json"])
+        self.assertFalse(
+            create_branch_mock.called,
+            "--status --dispatch <id> must not cut a branch either -- --status is the other "
+            "read-only front door Extension Point 10 names. It was called %d time(s) with %r"
+            % (create_branch_mock.call_count, create_branch_mock.call_args_list)
+        )
+
+    def test_status_with_dispatch_never_calls_write_state(self):
+        _create_branch_mock, write_state_mock = _drive_dispatch_with_flags(
+            ["--status", "--json"])
+        self.assertFalse(
+            write_state_mock.called,
+            "--status --dispatch <id> must not stamp the state store. write_state was called "
+            "%d time(s)" % write_state_mock.call_count
+        )
+
+    def test_positive_control_the_same_dispatch_without_a_read_only_flag_mutates_both(self):
+        # Must stay green throughout. Proves the two mocks above observe real
+        # calls, so the four assertFalse results above are measurements, never
+        # mocks wired to nothing. Mutation that turns it red: add "--resume"
+        # (or "--status") to this flag list -- measured directly, both mutate
+        # this exact assertion.
+        create_branch_mock, write_state_mock = _drive_dispatch_with_flags(["--json"])
+        self.assertTrue(
+            create_branch_mock.called,
+            "fixture sanity: a plain --dispatch run on a released sub-task cuts its branch -- "
+            "if this ever goes red the assertFalse results above are measuring nothing"
+        )
+        self.assertTrue(
+            write_state_mock.called,
+            "fixture sanity: and it stamps the state store, for the same reason"
+        )
+
+
+# --------------------------------------------------------------------------
+# RED (t2-script-and-skills): W2 -- one hand-resolved entry per sub-task.
+#
+# main()'s seeding loop (the `for tid, rec in records.items():` loop) runs
+# BEFORE the pull-request loop and appends one entry per stored completion
+# record, unconditionally. The pull-request loop (`for number in args.pr:`)
+# appends its own entry for whatever sub-task the measured pull request maps
+# to. Nothing removes the
+# seeded entry once the measured one exists, so a sub-task that is BOTH stored
+# AND measured this run carries two entries in report["hand_resolved"] -- one
+# stale, one fresh, with two different "source" readings for the same
+# identity. Data Shapes' invariant on this field (I-1/I-2) never claims two
+# entries are acceptable; the pr-merged skill renders one line per sub-task,
+# so a second entry is either silently dropped by the renderer or silently
+# doubles the printed line, and neither is a report the skill promised.
+# --------------------------------------------------------------------------
+def _no_subprocess_reached(cmd):  # pragma: no cover -- must never be reached
+    raise AssertionError(
+        "this fixture must reach no process at all; %r was attempted" % (cmd,))
+
+
+def _drive_main_over_a_pull_request_with_stored_records(contract_text, commits, diff_table,
+                                                         records, filename="acme-red-fixture.md"):
+    """Like _drive_main_over_a_pull_request (test_pr_merged.py:2974), except
+    load_records returns the caller's own stored records instead of {} -- so
+    the pull request measured this run can map to a sub-task that ALREADY
+    carries a seeded hand_resolved entry from a previous run's completion
+    record. Every edge to the outside world is stubbed exactly as that
+    fixture stubs it: gh_pr returns the literal pull request built below,
+    git_combined_diff answers out of diff_table, file_at_commit returns
+    nothing, write_state and write_record are mocks, and pr_merged._run
+    raises so no subprocess can start.
+
+    Returns the parsed --json report.
+    """
+    pull_request = {
+        "state": "MERGED", "mergedAt": "2026-09-22T00:00:00Z",
+        "mergeCommit": {"oid": "merge-sha"}, "baseRefName": "master",
+        "headRefName": "task/acme-red-fixture/t1-backend", "title": "t1-backend",
+        "url": "https://example.invalid/pr/7",
+        "commits": [{"oid": sha} for sha in commits], "statusCheckRollup": None,
+    }
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "7", "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value=dict(records)), \
+             mock.patch.object(pr_merged, "load_state", return_value=None), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", mock.MagicMock(return_value=None)), \
+             mock.patch.object(pr_merged, "write_record", mock.MagicMock(return_value=None)), \
+             mock.patch.object(pr_merged, "gh_pr", lambda number: pull_request), \
+             mock.patch.object(pr_merged, "git_combined_diff", lambda sha: diff_table[sha]), \
+             mock.patch.object(pr_merged, "file_at_commit", lambda sha, path: None), \
+             mock.patch.object(pr_merged, "_run", _no_subprocess_reached), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        return json.loads(out.getvalue())
+
+
+#: A stale reading left on disk by a previous run, for the same sub-task this
+#: run's pull request maps to.
+_STORED_HAND_RESOLVED_FOR_T1 = {
+    "status": "completed", "verified": "github", "pull_request": "u",
+    "hand_resolved": {"files": ["stale.txt"], "merge_commits": 1, "commits_inspected": 1},
+}
+#: A stored reading for a sub-task this run's pull request does NOT touch --
+#: the positive control that proves the fix removes a duplicate rather than
+#: every seeded entry.
+_STORED_HAND_RESOLVED_FOR_OTHER = {
+    "status": "completed", "verified": "github", "pull_request": "u",
+    "hand_resolved": {"files": ["other.txt"], "merge_commits": 2, "commits_inspected": 2},
+}
+
+
+def _drive_main_over_two_pull_requests_mapping_to_the_same_subtask(
+        contract_text, commits, diff_table, records, filename="acme-red-fixture.md"):
+    """Like _drive_main_over_a_pull_request_with_stored_records (test_pr_merged.py:4960),
+    except TWO pull requests (#7 and #8) are processed in ONE run, and BOTH map to the
+    same sub-task -- gh_pr answers with the identical headRefName whatever number it is
+    asked about, so map_pr_to_subtask resolves both to t1-backend. Every edge to the
+    outside world is stubbed exactly the same way: git_combined_diff answers out of
+    diff_table, file_at_commit returns nothing, write_state and write_record are mocks,
+    and pr_merged._run raises so no subprocess can start.
+
+    Returns the parsed --json report.
+    """
+    def pull_request_for(number):
+        return {
+            "state": "MERGED", "mergedAt": "2026-09-22T00:00:00Z",
+            "mergeCommit": {"oid": "merge-sha-%d" % number}, "baseRefName": "master",
+            "headRefName": "task/acme-red-fixture/t1-backend", "title": "t1-backend",
+            "url": "https://example.invalid/pr/%d" % number,
+            "commits": [{"oid": sha} for sha in commits], "statusCheckRollup": None,
+        }
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path),
+                "--pr", "7", "--pr", "8", "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value=dict(records)), \
+             mock.patch.object(pr_merged, "load_state", return_value=None), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", mock.MagicMock(return_value=None)), \
+             mock.patch.object(pr_merged, "write_record", mock.MagicMock(return_value=None)), \
+             mock.patch.object(pr_merged, "gh_pr", pull_request_for), \
+             mock.patch.object(pr_merged, "git_combined_diff", lambda sha: diff_table[sha]), \
+             mock.patch.object(pr_merged, "file_at_commit", lambda sha, path: None), \
+             mock.patch.object(pr_merged, "_run", _no_subprocess_reached), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        return json.loads(out.getvalue())
+
+
+class TestHandResolvedReportsExactlyOneEntryPerSubTask(unittest.TestCase):
+
+    def _entries_for(self, report, sub_task):
+        return [e for e in report.get("hand_resolved", []) if e.get("sub_task") == sub_task]
+
+    def test_a_measured_subtask_keeps_only_its_measured_entry(self):
+        # Was RED before the fix: measured directly against pr_merged.main()
+        # -- t1-backend carried two entries, one seeded with source
+        # "stored-record" and one appended with source "measured-this-run".
+        report = _drive_main_over_a_pull_request_with_stored_records(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2],
+            records={"t1-backend": _STORED_HAND_RESOLVED_FOR_T1})
+        entries = self._entries_for(report, "t1-backend")
+        self.assertEqual(
+            len(entries), 1,
+            "a sub-task both stored AND measured this run must carry exactly one hand_resolved "
+            "entry -- the seeded entry from the stored record and the freshly measured entry "
+            "must not both survive into the report. Found %r" % (entries,)
+        )
+        self.assertEqual(
+            entries[0].get("source"), "measured-this-run",
+            "the surviving entry must be the one this run measured, not the stale one read "
+            "back off disk -- a session that just watched the merge knows more than a "
+            "completion record written before it ever ran. The surviving entry read %r"
+            % (entries[0],)
+        )
+        self.assertEqual(
+            entries[0].get("files"), _PR_THAT_FOUND_A_FILE[2]["files"],
+            "and it must carry the freshly measured file list, not the stale one from the "
+            "stored record. The surviving entry read %r" % (entries[0],)
+        )
+
+    def test_a_stored_subtask_not_measured_this_run_keeps_its_seeded_entry(self):
+        # POSITIVE CONTROL: a different sub-task, not mapped by this run's
+        # pull request, must be unaffected by whatever dedup rule fixes the
+        # case above -- proving the fix removes the DUPLICATE for the
+        # colliding identity rather than discarding seeded entries altogether.
+        # Measured against a throwaway stub that drops every seeded entry
+        # unconditionally: this case goes red while the one above stays green.
+        report = _drive_main_over_a_pull_request_with_stored_records(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2],
+            records={"t1-backend": _STORED_HAND_RESOLVED_FOR_T1,
+                     "t2-other": _STORED_HAND_RESOLVED_FOR_OTHER})
+        entries = self._entries_for(report, "t2-other")
+        self.assertEqual(
+            len(entries), 1,
+            "a sub-task this run never measured must keep exactly its one seeded entry -- a "
+            "dedup rule that discards every seeded entry regardless of whether it collides "
+            "with a measured one would pass the case above and fail this one. Found %r"
+            % (entries,)
+        )
+        self.assertEqual(
+            entries[0].get("source"), "stored-record",
+            "and that entry must still read as a stored reading, since nothing measured "
+            "t2-other this run. The entry read %r" % (entries[0],)
+        )
+        self.assertEqual(
+            entries[0].get("files"), ["other.txt"],
+            "and it must still carry the stored file list, unchanged by the dedup rule"
+        )
+
+    def test_two_pull_requests_mapping_to_the_same_subtask_both_keep_their_measured_entries(self):
+        # W-3b (t2-script-and-skills). This may already pass: main()'s dedup filter
+        # (the `report["hand_resolved"] = [...]` comprehension inside the pull-request
+        # loop) keeps every entry whose source IS "measured-this-run"
+        # and drops only entries that are NOT, so a second measured pull request landing
+        # on the same sub-task this run should already survive beside the first, and the
+        # stale stored entry should already be gone by the time the second iteration
+        # runs. Pinned here as a mutation probe: a dedup rule mutated to "keep only the
+        # LAST measured-this-run entry for a sub-task" would still pass every other case
+        # in this class and go red only here.
+        report = _drive_main_over_two_pull_requests_mapping_to_the_same_subtask(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2],
+            records={"t1-backend": _STORED_HAND_RESOLVED_FOR_T1})
+        entries = self._entries_for(report, "t1-backend")
+        prs = sorted(e.get("pr") for e in entries)
+        self.assertEqual(
+            prs, [7, 8],
+            "both pull requests mapped to t1-backend this run, and both must keep their own "
+            "measured entry -- one per pull request, never a single winner. Found %r" % (entries,)
+        )
+        for entry in entries:
+            self.assertEqual(
+                entry.get("source"), "measured-this-run",
+                "every surviving entry for a sub-task measured this run must read as measured, "
+                "never as the stale stored reading left on disk. Entry read %r" % (entry,)
+            )
+        self.assertEqual(
+            len(entries), 2,
+            "no stored entry may survive alongside the two measured ones for this sub-task -- "
+            "found %r" % (entries,)
+        )
+
+
+# --------------------------------------------------------------------------
+# RED (t2-script-and-skills): W3 -- _render_hand_resolved_reading fails
+# closed on a malformed stored count.
+#
+# Measured directly against pr_merged._render_hand_resolved_reading
+# (pr_merged.py:1242): the only special case is the LITERAL value 0
+# (`if entry.get("merge_commits") == 0:`). An absent key, an explicit None, a
+# string, or a negative value all fail that comparison and fall through to
+# the files check, which reads "clean" whenever files is also empty -- the
+# exact overclaim the Hand-Resolved Summary's four-state reading exists to
+# prevent (Failure Modes, first entry).
+# --------------------------------------------------------------------------
+class TestRenderHandResolvedReadingFailsClosedOnAMalformedCount(unittest.TestCase):
+
+    def _reading(self, entry):
+        fn = _fn("_render_hand_resolved_reading")
+        self.assertIsNotNone(
+            fn, "pr_merged._render_hand_resolved_reading must exist -- Data Shapes names it "
+                "the renderer of the Hand-Resolved Summary's four readings"
+        )
+        return fn(entry)
+
+    def _not_detectable_prefix(self):
+        # Read the function's OWN wording for the literal-0 case, once, so
+        # every malformed-count case below compares against words the
+        # function already uses rather than a copy that could drift from it.
+        return self._reading(
+            {"source": "measured-this-run", "files": [], "merge_commits": 0,
+             "commits_inspected": 2}).split(" (")[0]
+
+    def test_positive_control_zero_merge_commits_with_no_files_reads_not_detectable(self):
+        reading = self._reading({"source": "measured-this-run", "files": [],
+                                 "merge_commits": 0, "commits_inspected": 2})
+        self.assertTrue(
+            reading.startswith("not detectable"),
+            "fixture sanity: zero merge commits inspected must already read as not detectable "
+            "-- if this is not true nothing below is measuring the right function. Read %r"
+            % reading
+        )
+
+    def test_positive_control_two_merge_commits_with_no_files_reads_clean(self):
+        reading = self._reading({"source": "measured-this-run", "files": [],
+                                 "merge_commits": 2, "commits_inspected": 2})
+        self.assertEqual(
+            reading, "clean",
+            "fixture sanity: a genuinely measured, genuinely clean merge must still read "
+            "clean -- otherwise the fail-closed cases below could not be told apart from a "
+            "function that just always refuses to say clean"
+        )
+
+    def test_positive_control_two_merge_commits_with_files_lists_them(self):
+        reading = self._reading({"source": "measured-this-run",
+                                 "files": ["src/Hand.cs"], "merge_commits": 2,
+                                 "commits_inspected": 2})
+        self.assertEqual(
+            reading, "src/Hand.cs",
+            "fixture sanity: a measured merge that found a file names it, unaffected by "
+            "whatever fail-closed rule the malformed-count cases below require"
+        )
+
+    def test_an_absent_merge_commits_key_never_reads_clean(self):
+        # RED today: measured directly -- entry.get("merge_commits") is None,
+        # None == 0 is False, files is empty, so this reads "clean".
+        prefix = self._not_detectable_prefix()
+        reading = self._reading({"source": "measured-this-run", "files": []})
+        self.assertNotEqual(
+            reading, "clean",
+            "a stored hand_resolved summary with no merge_commits key at all must never read "
+            "as clean -- 'clean' claims a merge was inspected and found nothing, and nothing "
+            "was inspected here. Read %r" % reading
+        )
+        self.assertTrue(
+            reading.startswith(prefix),
+            "and it should read with the function's own not-detectable wording, the same "
+            "words it already uses for a literal 0, since a caller cannot trust a count that "
+            "is not there. Read %r" % reading
+        )
+
+    def test_a_none_merge_commits_value_never_reads_clean(self):
+        # RED today: same failure, this time with the key present and holding
+        # an explicit None -- which a hand-edited or partially-migrated record
+        # could carry.
+        prefix = self._not_detectable_prefix()
+        reading = self._reading({"source": "measured-this-run", "files": [],
+                                 "merge_commits": None})
+        self.assertNotEqual(
+            reading, "clean",
+            "an explicit None must never read as clean either. Read %r" % reading
+        )
+        self.assertTrue(
+            reading.startswith(prefix),
+            "and it should carry the same not-detectable wording. Read %r" % reading
+        )
+
+    def test_a_string_merge_commits_value_never_reads_clean(self):
+        # RED today: a merge_commits value that survived a YAML round trip as
+        # text rather than a number is not a count the reader can trust, and
+        # "2" == 0 is False just as surely as None == 0 is.
+        prefix = self._not_detectable_prefix()
+        reading = self._reading({"source": "measured-this-run", "files": [],
+                                 "merge_commits": "2"})
+        self.assertNotEqual(
+            reading, "clean",
+            "a merge_commits value that arrived as a string is not a count the reader can "
+            "trust -- a hand-corrupted completion record can carry exactly this shape. "
+            "Read %r" % reading
+        )
+        self.assertTrue(
+            reading.startswith(prefix),
+            "and it should carry the same not-detectable wording. Read %r" % reading
+        )
+
+    def test_a_negative_merge_commits_value_never_reads_clean(self):
+        # RED today: -1 == 0 is False, so a nonsensical negative count is
+        # treated exactly like a genuinely inspected, genuinely clean merge.
+        prefix = self._not_detectable_prefix()
+        reading = self._reading({"source": "measured-this-run", "files": [],
+                                 "merge_commits": -1})
+        self.assertNotEqual(
+            reading, "clean",
+            "a negative merge_commits count is nonsensical and must never be read as a clean "
+            "measurement -- today only the literal value 0 is special-cased. Read %r" % reading
+        )
+        self.assertTrue(
+            reading.startswith(prefix),
+            "and it should carry the same not-detectable wording. Read %r" % reading
+        )
+
+    def test_a_scalar_hand_resolved_value_does_not_crash_main(self):
+        # RED today, and for a different reason than the six cases above: a
+        # stored record's hand_resolved should always be a mapping, but a
+        # hand-edited or corrupted YAML file could carry a bare scalar.
+        # main()'s seeding loop does `dict(_stored)` unconditionally
+        # (pr_merged.py:1356), and dict("x") raises ValueError -- measured
+        # directly against pr_merged.main(). A malformed record on disk must
+        # never crash an otherwise read-only report; wrapped in try/except so
+        # an uncaught exception here is reported as THIS assertion failing,
+        # never as an unrelated test-runner error.
+        try:
+            text, _, _ = _drive_main_with_flags(
+                CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--status", "--json"],
+                records={"t1-backend": {"status": "completed", "hand_resolved": "x"}})
+        except Exception as exc:
+            self.fail(
+                "a scalar hand_resolved value on a stored record must not crash main() -- it "
+                "raised %s: %s. The seeding loop must treat an unreadable shape the same way "
+                "it treats a missing key, never let it propagate out of a read-only report"
+                % (type(exc).__name__, exc)
+            )
+        report = json.loads(text)
+        entries = [e for e in report.get("hand_resolved", [])
+                  if e.get("sub_task") == "t1-backend"]
+        self.assertEqual(
+            len(entries), 1,
+            "the malformed record must still be accounted for as one entry, not silently "
+            "dropped nor allowed to crash the run. Found %r" % (entries,)
+        )
+
+    def test_a_bool_true_merge_commits_value_never_reads_clean(self):
+        # W-3a (t2-script-and-skills). Already fails closed today: the guard reads
+        # `isinstance(merge_commits, bool)` explicitly, so a literal True short-circuits
+        # before `merge_commits <= 0` is ever evaluated. Pinned here as a regression
+        # guard against a future refactor of that isinstance check, not as a new RED.
+        prefix = self._not_detectable_prefix()
+        reading = self._reading({"source": "measured-this-run", "files": [],
+                                 "merge_commits": True})
+        self.assertNotEqual(
+            reading, "clean",
+            "a bool True is not a genuine merge-commit count and must never read as clean. "
+            "Read %r" % reading
+        )
+        self.assertTrue(
+            reading.startswith(prefix),
+            "and it should carry the same not-detectable wording as every other malformed "
+            "count. Read %r" % reading
+        )
+
+    def test_a_bool_false_merge_commits_value_never_reads_clean(self):
+        # W-3a (t2-script-and-skills). Same guard, the other bool value.
+        prefix = self._not_detectable_prefix()
+        reading = self._reading({"source": "measured-this-run", "files": [],
+                                 "merge_commits": False})
+        self.assertNotEqual(
+            reading, "clean",
+            "a bool False is not a genuine merge-commit count and must never read as clean. "
+            "Read %r" % reading
+        )
+        self.assertTrue(
+            reading.startswith(prefix),
+            "and it should carry the same not-detectable wording. Read %r" % reading
+        )
+
+    def _reading_no_raise(self, entry):
+        """Like _reading, except an exception from the function under test is converted
+        into self.fail -- so a malformed `files` field that crashes
+        _render_hand_resolved_reading registers as THIS test's own assertion failure,
+        never as an unrelated test-runner error.
+        """
+        fn = _fn("_render_hand_resolved_reading")
+        self.assertIsNotNone(
+            fn, "pr_merged._render_hand_resolved_reading must exist -- Data Shapes names it "
+                "the renderer of the Hand-Resolved Summary's four readings"
+        )
+        try:
+            return fn(entry)
+        except Exception as exc:
+            self.fail(
+                "_render_hand_resolved_reading must never raise on a malformed files field -- "
+                "it raised %s: %s for entry %r" % (type(exc).__name__, exc, entry)
+            )
+
+    def test_an_absent_files_key_never_reads_clean(self):
+        # W-1 (t2-script-and-skills). RED today: entry.get("files") returns None,
+        # `None or []` collapses to [], and `if files:` reads False -- the exact same
+        # path a genuinely inspected, genuinely clean merge takes. An absent files
+        # field is a different claim: the shape could not be read at all, and reading
+        # it as clean is the overclaim this reading exists to prevent.
+        reading = self._reading_no_raise({"source": "measured-this-run", "merge_commits": 2})
+        self.assertNotEqual(
+            reading, "clean",
+            "an absent files field must not read the same as an inspected-and-clean merge. "
+            "Read %r" % reading
+        )
+
+    def test_a_none_files_value_never_reads_clean(self):
+        # W-1 (t2-script-and-skills). RED today: same collapse as the absent case, this
+        # time with the key present and holding an explicit None.
+        reading = self._reading_no_raise(
+            {"source": "measured-this-run", "merge_commits": 2, "files": None})
+        self.assertNotEqual(
+            reading, "clean",
+            "an explicit None files value must not read as clean either. Read %r" % reading
+        )
+
+    def test_an_empty_dict_files_value_never_reads_clean(self):
+        # W-1 (t2-script-and-skills). RED today: `{} or []` is falsy-collapsed to [] the
+        # same way, so a files field that is not even the right SHAPE -- a mapping,
+        # never a list -- is read as though it were an inspected, empty list.
+        reading = self._reading_no_raise(
+            {"source": "measured-this-run", "merge_commits": 2, "files": {}})
+        self.assertNotEqual(
+            reading, "clean",
+            "a files field holding a mapping is not a file list and must not read as clean. "
+            "Read %r" % reading
+        )
+
+    def test_a_zero_files_value_never_reads_clean(self):
+        # W-1 (t2-script-and-skills). RED today: `0 or []` is falsy-collapsed the same way.
+        reading = self._reading_no_raise(
+            {"source": "measured-this-run", "merge_commits": 2, "files": 0})
+        self.assertNotEqual(
+            reading, "clean",
+            "a files field holding the integer 0 is not a file list and must not read as "
+            "clean. Read %r" % reading
+        )
+
+    def test_a_string_files_value_is_not_rendered_character_by_character(self):
+        # W-1 (t2-script-and-skills). RED today: a non-empty string is truthy, so
+        # `", ".join(files)` runs -- and join() over a string iterates its CHARACTERS,
+        # not a one-element file list. A hand-edited or partially-migrated record
+        # carrying a bare path string here must not silently explode into its letters.
+        reading = self._reading_no_raise(
+            {"source": "measured-this-run", "merge_commits": 2, "files": "src/a.cs"})
+        char_joined = ", ".join("src/a.cs")
+        self.assertNotEqual(
+            reading, "clean",
+            "fixture sanity: a truthy files value must not fall through to clean either. "
+            "Read %r" % reading
+        )
+        self.assertNotEqual(
+            reading, char_joined,
+            "a bare string files value must never be rendered character by character -- "
+            "join() iterating a string's letters is the overclaim this test pins shut. "
+            "Read %r" % reading
+        )
+
+    def test_a_list_with_a_non_string_element_does_not_crash(self):
+        # W-1 (t2-script-and-skills). RED today: `", ".join(["a", None])` raises
+        # TypeError -- str.join demands every element be a string, and a hand-edited
+        # or partially-migrated completion record can carry exactly this shape. Failing
+        # closed means reporting something readable, never crashing an otherwise
+        # read-only render.
+        reading = self._reading_no_raise(
+            {"source": "measured-this-run", "merge_commits": 2, "files": ["a", None]})
+        self.assertNotEqual(
+            reading, "clean",
+            "a file list carrying a non-string element is not a genuinely clean measurement "
+            "and must not read as one. Read %r" % reading
+        )
+
+    def test_main_does_not_crash_on_a_stored_record_with_a_malformed_files_list(self):
+        # W-1 (t2-script-and-skills). RED today: main()'s human-readable branch calls
+        # _render_hand_resolved_reading(h) directly for every seeded entry
+        # (pr_merged.py:1592) -- a stored record with files=['a', None] crashes that
+        # call with the same TypeError the unit-level case above pins, this time
+        # reached through main() itself rather than the function in isolation.
+        try:
+            text, _, _ = _drive_main_with_flags(
+                CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["--status"],
+                records={"t1-backend": {"status": "completed", "verified": "github",
+                                        "pull_request": "u",
+                                        "hand_resolved": {"merge_commits": 2,
+                                                          "files": ["a", None]}}})
+        except Exception as exc:
+            self.fail(
+                "a stored record with a malformed files list must not crash main() -- it "
+                "raised %s: %s. A malformed shape on disk must be reported as unreadable, "
+                "never allowed to propagate out of a read-only report"
+                % (type(exc).__name__, exc)
+            )
+        self.assertIn(
+            "hand-resolved", text,
+            "fixture sanity: the human-readable report must reach the hand-resolved line "
+            "rather than crashing before it. It read:\n%s" % text
+        )
+
+
+# --------------------------------------------------------------------------
+# RED (t2-script-and-skills): W2 -- every hand_resolved entry in --json output
+# carries its own rendered reading.
+#
+# Data Shapes' Hand-Resolved Summary names four readings a person interprets
+# from files/merge_commits/source -- today that rendering exists ONLY in
+# main()'s human-readable branch (pr_merged.py:1592), one call to
+# _render_hand_resolved_reading per printed line. A caller reading --json
+# output -- the orchestrator loop, or a skill rendering the report itself --
+# gets the raw files/merge_commits/commits_inspected/source fields and must
+# reimplement the same four-state reading a second time, which is exactly the
+# drift Alternatives Considered rejects for the printed line. Every entry
+# report["hand_resolved"] carries, whatever produced it -- a seeded
+# stored-record, a not-recorded placeholder, or a freshly measured entry --
+# must carry its own "reading" field in --json output too.
+# --------------------------------------------------------------------------
+#: Three sub-tasks, so one run can carry all three sources at once: t1-backend
+#: is the one this run's pull request measures, t2-other keeps a stored
+#: completion record with a hand_resolved summary, and t3-third keeps a
+#: completion record with no hand_resolved key at all.
+CONTRACT_CLI_THREE_SUBTASKS_FOR_READING_FIELD = """
+## Implementation Handoff
+
+### 1. Backend (`acme-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+
+### 2. Other (`acme-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Bar.cs
+
+### 3. Third (`acme-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Baz.cs
+"""
+
+
+class TestEveryHandResolvedEntryCarriesItsOwnRenderedReadingInJson(unittest.TestCase):
+
+    def test_a_seeded_stored_record_a_not_recorded_entry_and_a_measured_entry_all_carry_their_reading(self):
+        # RED today: measured through main() with --json -- report["hand_resolved"]
+        # entries carry files/merge_commits/commits_inspected/source and a sub_task,
+        # but no "reading" key at all, on any of the three sources this run produces
+        # in one pass.
+        render = _fn("_render_hand_resolved_reading")
+        self.assertIsNotNone(
+            render, "pr_merged._render_hand_resolved_reading must exist -- Data Shapes "
+                    "names it the renderer of the Hand-Resolved Summary's four readings"
+        )
+        report = _drive_main_over_a_pull_request_with_stored_records(
+            CONTRACT_CLI_THREE_SUBTASKS_FOR_READING_FIELD, *_PR_THAT_FOUND_A_FILE[:2],
+            records={
+                "t2-other": _STORED_HAND_RESOLVED_FOR_OTHER,
+                "t3-third": {"status": "completed", "verified": "github", "pull_request": "u"},
+            })
+        by_subtask = {e.get("sub_task"): e for e in report.get("hand_resolved", [])}
+        for sub_task, expected_source in (
+                ("t1-backend", "measured-this-run"),
+                ("t2-other", "stored-record"),
+                ("t3-third", "not-recorded")):
+            with self.subTest(sub_task=sub_task):
+                entry = by_subtask.get(sub_task)
+                self.assertIsNotNone(
+                    entry,
+                    "fixture sanity: this run must produce exactly one entry for %r. The "
+                    "report's hand_resolved list read %r"
+                    % (sub_task, report.get("hand_resolved"))
+                )
+                self.assertEqual(
+                    entry.get("source"), expected_source,
+                    "fixture sanity: %r must carry the %r source, or this case is not "
+                    "measuring the reading it claims to. Entry read %r"
+                    % (sub_task, expected_source, entry)
+                )
+                self.assertIn(
+                    "reading", entry,
+                    "every hand_resolved entry in --json output must carry its own rendered "
+                    "reading -- a caller reading --json must not reimplement the four-state "
+                    "reading main()'s own human-readable branch already computes. Entry read "
+                    "%r" % entry
+                )
+                self.assertEqual(
+                    entry.get("reading"), render(entry),
+                    "and the stamped reading must equal _render_hand_resolved_reading(entry) "
+                    "for that same entry -- the JSON output and the printed line must never "
+                    "disagree about what a reader is told this entry means. Entry read %r"
+                    % entry
+                )
+
+
+# --------------------------------------------------------------------------
+# RED (t2-script-and-skills): W6 -- declared_phase reads one line only.
+#
+# Measured directly against pr_merged.declared_phase (pr_merged.py:770): the
+# regex `r"^\s*phase:\s*(\S+)\s*$"` uses re.M, but \s (unlike a literal space)
+# matches a newline character too, so the `\s*` between the colon and the
+# value can cross a line boundary. A phase line broken across two lines is
+# read as if it were one line, and two CONFLICTING phase lines inside one
+# TASK block resolve silently to whichever comes first, rather than reading
+# as the ambiguous declaration it is.
+# --------------------------------------------------------------------------
+#: A TASK block whose PRIOR_FINDINGS carries the phase line TWICE, with
+#: disagreeing values -- an author who edited the line and left the old one
+#: behind, or a merge that combined two authors' TASK blocks. declared_phase
+#: must read this as undeclared, the same as no phase line at all, never as
+#: whichever value the regex happens to match first.
+BLOCK_DECLARING_CONFLICTING_PHASES = """
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+
+**Pre-written TASK block:**
+```
+TASK: Do the thing.
+CONTEXT: concept contract at .claude/concepts/c-slug.md
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/c-slug.md
+  contract_status: approved
+  phase: RED
+  phase: GREEN
+```
+"""
+
+
+class TestDeclaredPhaseReadsOneLineOnly(unittest.TestCase):
+
+    def _declared_phase(self):
+        fn = _fn("declared_phase")
+        self.assertIsNotNone(
+            fn, "pr_merged.declared_phase must exist -- Extension Point 11 names it the pure "
+                "function that reads the phase line out of a block's own TASK block"
+        )
+        return fn
+
+    def test_a_phase_value_split_across_two_lines_reads_none(self):
+        # RED today: measured directly -- declared_phase("phase:\nGREEN")
+        # returns "GREEN", because \s* between "phase:" and the value happily
+        # consumes the newline. The value never sat on the phase line at all;
+        # reading it anyway is the same silent-default failure the unphased
+        # arm of build_dispatch exists to avoid, one level down.
+        declared_phase = self._declared_phase()
+        self.assertIsNone(
+            declared_phase("phase:\nGREEN"),
+            "a phase value that is not on the same line as the phase: label was never "
+            "declared on that line -- declared_phase must read this as undeclared (None), "
+            "never cross the newline to find a value sitting on the next line"
+        )
+
+    def test_two_conflicting_phase_lines_in_one_task_block_read_none(self):
+        # RED today: measured directly against
+        # declared_phase(extract_task_block(BLOCK_DECLARING_CONFLICTING_PHASES))
+        # -- today's regex is a plain re.search, so it returns the FIRST
+        # match ("RED") and never notices the second, contradicting line.
+        declared_phase = self._declared_phase()
+        task_block = extract_task_block(BLOCK_DECLARING_CONFLICTING_PHASES)
+        self.assertIsNotNone(
+            task_block, "fixture sanity: this block genuinely carries a TASK block"
+        )
+        self.assertIsNone(
+            declared_phase(task_block),
+            "a TASK block carrying two disagreeing phase: lines is an ambiguous declaration, "
+            "not a declaration of whichever line the regex happens to match first -- "
+            "declared_phase must read None here, the same undeclared answer it gives a block "
+            "with no phase line at all, because in both cases which phase the contract means "
+            "is not something this function may guess"
+        )
+
+    def test_positive_control_a_phase_value_padded_with_spaces_on_one_line_still_reads(self):
+        # Must stay green throughout: the fix for the two RED cases above must
+        # narrow \s* so it never crosses a newline, not so it stops matching
+        # the ordinary padding a hand-typed phase line already carries.
+        # Mutation that turns it red: any fix that requires the value to sit
+        # immediately after the colon with no padding at all.
+        declared_phase = self._declared_phase()
+        self.assertEqual(
+            declared_phase("  phase: GREEN  "),
+            "GREEN",
+            "fixture sanity: ordinary horizontal padding around a phase value that stays on "
+            "one line must still be read -- if this is not true the two RED cases above could "
+            "be satisfied by an implementation that refuses every phase line, real or not"
+        )
+
+    def test_positive_control_two_identical_phase_lines_are_not_ambiguous(self):
+        # Probably green today: this is the mirror of
+        # test_two_conflicting_phase_lines_in_one_task_block_read_none above.
+        # That case reads None because "phase: RED" and "phase: GREEN"
+        # disagree -- two identical "phase: GREEN" lines carry only one
+        # value between them and must still read GREEN. A mutation that
+        # turns declared_phase's ambiguity check into "more than one phase:
+        # line at all reads None" -- rather than "more than one DISTINCT
+        # value reads None" -- would answer None here too; this case exists
+        # to keep that mutation caught.
+        declared_phase = self._declared_phase()
+        self.assertEqual(
+            declared_phase("phase: GREEN\nphase: GREEN"),
+            "GREEN",
+            "two identical phase: lines are not a disagreement -- declared_phase must read the "
+            "one value they agree on, not treat repetition itself as ambiguity"
+        )
 
 
 if __name__ == "__main__":

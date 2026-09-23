@@ -50,9 +50,12 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — ninety-three cases over identity, parsing, block classification, verdicts, records, releases and conflict detection. They were
-mutation-probed: disabling the verification check, reading a missing dependency line as none,
-and counting scope notes as sub-tasks each turn the suite red.
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 226 cases over
+identity, parsing, block classification, verdicts, records, releases, conflict detection, the
+Hand-Resolved Summary, the Next Command and the Sub-Task Cycle. Measured by running
+`py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own `unittest` summary line:
+`Ran 226 tests ... OK`. They were mutation-probed: disabling the verification check, reading a
+missing dependency line as none, and counting scope notes as sub-tasks each turn the suite red.
 
 **Read the script's output rather than re-deriving it.** Everything below describes what the
 script does and how to act on what it returns. Where this file and the script disagree, the
@@ -142,9 +145,16 @@ Judge each against this table. The set is closed, and the first match wins.
 | Merged, with a timestamp and a merge commit | `merged` | Continue with this one |
 | State open | `not-merged` | Skip it, and say so. Write nothing |
 | Closed, no merge timestamp | `closed-unmerged` | **Not a skip.** The sub-task could not be delivered — see the failure section below |
-| Merged, base is not the default branch | `merged-elsewhere` | **Halt this one and ask.** It landed on a branch, so dependents may still have nothing to build on |
+| Merged, base is not in the declared base set | `merged-elsewhere` | **Halt this one and ask.** It landed on a branch nobody declared, so dependents may still have nothing to build on |
 | No such pull request | `not-found` | Skip it, and report the number |
 | GitHub client missing or unauthenticated | `unverifiable` | **Halt the whole skill** |
+
+**The declared base set** is the repository default branch plus every sub-task's own declared
+base already on record in the state store. Under this contract's topology, every task pull
+request merges into a parent branch rather than the default branch, so a merge landing there is
+`merged`, not `merged-elsewhere` — the measured PR #173 defect this rule exists to close.
+`merged-elsewhere` stays reachable for a base that is genuinely undeclared: nobody said the
+dependents could build on that branch.
 
 **On `unverifiable`, stop everything.** Without GitHub there is no way to tell a merged pull
 request from a closed one, and guessing writes a lie into the completion store. Tell the user:
@@ -224,11 +234,39 @@ and show both rather than picking.
 **If the contract has neither a generated plan nor handoff blocks,** say so and stop.
 Do not invent a decomposition.
 
+## Step 2.5: Close the sub-issue, once the merge is confirmed
+
+**Only for a sub-task that carries a sub-issue.** Under this contract's topology a task pull
+request merges into its parent branch, so GitHub's own keyword auto-close never fires for it —
+the resolved link and the closing action are two different things. This step is what performs
+the closing action `/ship` cannot: `/ship`'s own hard rule is *never* `gh issue close` by hand,
+because for a pull request based on the default branch the resolved link is the honest closing
+moment. That rule does not cover a task pull request based on a parent branch, and this step is
+the scoped exception, gated on a GitHub-confirmed merge, never on a local belief.
+
+**Read before you close (I-10). Never close on a local belief that a pull request merged.**
+
+1. `gh pr view` must already have reported this pull request MERGED — Step 1's own verification,
+   never re-derived here.
+2. `gh issue view <sub> --json state` — read the sub-issue's own state first, and only then decide:
+   - Already `CLOSED` → record `sub_issue_closed: already-closed` and do nothing further. This is
+     what makes a re-run idempotent, and it is also what happens harmlessly if two runs race, or
+     if GitHub ever does close the issue itself once the parent branch reaches the default branch.
+   - `OPEN` → `gh issue close <sub> --reason completed --comment "<pull request url>"`, then
+     re-read the state and record `closed` or `close-failed`.
+
+**Never close a sub-issue without first reading its own state.** A close call issued on the
+strength of "the pull request merged" alone, without the read in step 2, is exactly the anti-
+pattern this step exists to prevent.
+
 ## Step 3: Write the completion record
 
 For each merged pull request that mapped to a sub-task, write
 `.claude/orchestrator/results/<contract-id>/<task-id>.yaml` in the shape above, with the merge
-commit GitHub reported and `verified: github`.
+commit GitHub reported and `verified: github`. **The record's shape gains `sub_issue_closed`**,
+carrying Step 2.5's outcome (`already-closed` | `closed` | `close-failed` | `unverifiable`). The
+key is **omitted entirely** when no closure was attempted — a sub-task with no sub-issue, or a
+merge that never reached Step 2.5 — exactly as `review_verdict` is omitted when nothing was read.
 
 **A completion record is append-only in spirit.** If one already exists for that sub-task,
 do not silently overwrite it. Show both and ask. Two different commits claiming to finish the
@@ -287,10 +325,18 @@ things driving the same queue.
 - **One or more released** → name them, and offer `/advance`, which takes the next step.
   Do not start a sub-task from here; `/advance` owns dispatch.
 
-**When every sub-task has a completion record,** say that the contract's implementation is
-complete and hand to `/verify-before-done`, then `/ship`. Do not declare the contract finished
-from here. Completion of the last sub-task is a fact this phase can report. Whether the
-contract is done is a verdict that belongs to verification.
+**When every sub-task has a completion record,** hand off using the script's own `next_command`
+— printed verbatim, never re-derived here (Step 7 below). Today that command is always
+`/verify-before-done`; `/ship` follows verification. Do not declare the contract finished from
+here. Completion
+of the last sub-task is a fact this phase can report. Whether the contract is done is a verdict
+that belongs to verification.
+
+For a contract with two or more mergeable sub-tasks, the end of the contract is also its
+**parent** pull request, not any sub-task's own. The rule that the parent must not be marked
+ready while any child issue is still open (the topology contract's I-12) is not enforced by any
+step yet, so the operator must confirm every sub-issue is closed before marking the parent pull
+request ready.
 
 ## When a sub-task cannot be delivered
 
@@ -374,20 +420,48 @@ keeps the branch reserved.
 
 ## Step 7: Report
 
+**Render every entry in the JSON report's `hand_resolved` list by printing its own `reading`
+field verbatim — never collapse it, and never derive a reading yourself from `merge_commits`
+and `files`.** `pr_merged.py`'s `_render_hand_resolved_reading` computes the reading once and
+stamps it onto every entry — a seeded stored-record entry, a not-recorded placeholder, and an
+entry measured this run alike — before either of its own output branches reads it. Re-deriving
+the same reading here would be a second implementation of the same rule, which is exactly the
+drift Alternatives Considered rejects; it also risks disagreeing with the script's own wording,
+which is the overclaim the Hand-Resolved Summary exists to prevent.
+
+For reference only, never as a decision rule to re-derive, `reading` is always one of four
+shapes:
+
+- `not-recorded` — a completion record written before this field existed, or a stored
+  `hand_resolved` value the script could not read (hand-edited or partially-migrated)
+- `not detectable (...)` — nothing was genuinely inspectable: zero, missing or otherwise
+  malformed `merge_commits`, or a `files` value the script could not read as a list of strings
+- `clean` — at least one merge commit was inspected and none was conflicted
+- the comma-separated file list — files differing from both parents of an inspected merge
+  commit, resolved by hand or changed during the merge
+
+Print each entry as `<sub-task>[ #<pr>]: <reading>` (`h.get("reading")`), naming the pull
+request only when the entry carries one — a seeded or not-recorded entry does not.
+
+**The closing line is the script's own `next_command`, printed verbatim — never composed
+prose.** `report["next_command"]["commands"]`, joined by `", then "`, or, when that list is
+empty, `"none — " + report["next_command"]["reason"]`.
+
 ```
 ### PR-MERGED REPORT
 - Verified merged: <number -> sub-task, one line each>
 - Skipped: <number — verdict, one line each>
 - Unmapped: <numbers that matched no sub-task>
 - Contract defects: <block id — reason (files-but-no-recognised-agent | no-files-but-names-an-agent), one line each | none>
-- Hand-resolved files: <pr -> merge commit -> files, or none detected, or not detectable (squash/rebase)>
+- Hand-resolved: <sub-task[ #pr] — <entry's own `reading` field, printed verbatim>, one line each | none>
 - Completion records written: <paths>
 - Review verdicts: <sub-task — pass | pass-with-findings | blocked | unreadable, one line each | none read this run>
 - Released: <sub-tasks now unblocked, and what released them>
 - Still blocked: <sub-task — waiting on X>
 - Failed: <sub-task — severity, one-line reason, and what it now blocks | none>
-- Contract complete: <yes, hand to /verify-before-done | no, N sub-tasks remain | blocked on architect re-entry>
+- Contract complete: <yes — /verify-before-done, printed verbatim by the script (for two or more mergeable sub-tasks, the end-of-contract hand-off is the parent pull request; confirm every sub-issue is closed before marking it ready — I-12 is not enforced by any step yet) | no, N sub-tasks remain | blocked on architect re-entry>
 - Cleanup: <removed, or offered and declined>
+- Next command: <report["next_command"], rendered exactly as the rule above says>
 ```
 
 State what was skipped as plainly as what succeeded.
@@ -451,6 +525,19 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
   things driving one queue will disagree the moment either changes.
 - **Declaring the contract finished** because the last sub-task closed. That verdict belongs
   to `/verify-before-done`.
+- **Closing a sub-issue on a local belief that a pull request merged.** Step 1's GitHub
+  verification must already have confirmed the merge before Step 2.5 runs.
+- **Closing a sub-issue without first reading the issue's own state.** I-10's read-before-close
+  ordering is what makes a re-run idempotent; skipping it risks a redundant mutation and a
+  comment posted twice.
+- **Rendering a zero `merge_commits` count as "none detected" or "clean".** It means nothing
+  was inspectable, not that nothing was found — the exact overclaim the Hand-Resolved Summary's
+  three-field shape exists to prevent.
+- **Collapsing the four hand-resolved readings into a bare file list.** An empty list from a
+  genuinely clean merge and an empty list from an uninspectable one are different claims; render
+  both distinctly.
+- **Composing the closing "next command" line as prose.** Print `report["next_command"]`
+  verbatim — a second implementation of a rule the script owns is how the two drift.
 
 ## When NOT to use this skill
 
@@ -466,7 +553,12 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
 - **Sits inside** `/flow`, which owns the outer chain for one whole work item.
 - **Offers released sub-tasks to** `/tdd-first` on the person-called path only, with the
   contract as the authority.
-- **Hands a finished contract to** `/verify-before-done`, then `/ship`.
+- **Hands a finished contract to** `/verify-before-done` — the script's printed `next_command`,
+  whatever the sub-task count; `/ship` follows verification. For a contract with two or more mergeable
+  sub-tasks, the end-of-contract pull request is the parent one; confirming every child issue is
+  closed before marking it ready is on the operator today, since the topology contract's I-12
+  children-still-open gate is not implemented by any step (see
+  `.claude/concepts/followups/2026-09-23-complete-move-routes-parent-pull-request.followup.md`).
 - **Complements** `/ship`, which opens pull requests. This skill handles what happens after
   one merges.
 - **Implemented by** `.claude/scripts/pr_merged.py`, which the loop calls directly.
