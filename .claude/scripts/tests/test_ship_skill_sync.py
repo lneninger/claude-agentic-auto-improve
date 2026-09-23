@@ -102,7 +102,7 @@ WRITES = literal_dict("ISSUE_LINK_WRITES")
 HALTING = literal_set("HALTING")
 
 print("\nthe script's closed sets were readable")
-check("VERDICTS parsed (expected 15)", len(VERDICTS) == 15, str(len(VERDICTS)))
+check("VERDICTS parsed (expected 16)", len(VERDICTS) == 16, str(len(VERDICTS)))
 check("ISSUE_LINK_WRITES parsed", len(WRITES) >= 4, str(WRITES))
 check("HALTING parsed", len(HALTING) >= 10, str(len(HALTING)))
 

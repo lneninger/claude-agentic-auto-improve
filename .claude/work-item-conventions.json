@@ -30,8 +30,23 @@
     "$tokenComment": "TWO lists, because the tokens mean opposite things. An absent id is a deliberate 'this work has no issue' and is a SUCCESS path. An unresolved id is a placeholder nobody filled in and must HALT. Folding them together is how an unresolved field ships unlinked and is reported as success.",
     "partialField": "partial",
     "linkStateField": "issue_link",
-    "linkStates": ["closes", "refs", "none", "unresolved", "manual", "unknown"],
-    "maxRepairAttempts": 1
+    "linkStates": ["closes", "refs", "none", "unresolved", "manual", "unknown", "deferred"],
+    "verdicts": [
+      "unverifiable", "malformed-id", "unresolved-id", "not-applicable",
+      "issue-unreachable", "issue-already-closed", "pr-not-open",
+      "foreign-closing-ref", "unexpected-closing-ref", "exempt-partial",
+      "deferred-close", "linked", "undeclared-target", "refs-without-partial",
+      "absent-repairable", "still-absent"
+    ],
+    "maxRepairAttempts": 1,
+    "parentLink": {
+      "$comment": "Single source of truth for the sub-issue-to-parent link verified by .claude/scripts/verify_parent_link.py (sub-task 2, contract .claude/concepts/2026-09-19-flow-parent-subissue-topology.md). That script reads its verdict names and its gh read-back command from here and restates neither -- restating is how two readers drift. maxRepairAttempts is NOT duplicated here: it is owned by the outer issueLink block above (issueLink.maxRepairAttempts), which is the single source of truth for both links.",
+      "createFlag": "--parent",
+      "editFlag": "--parent",
+      "readCommand": "gh issue view <sub> --json parent",
+      "parentListCommand": "gh issue view <parent> --json subIssues",
+      "verdicts": ["unverifiable", "no-parent", "foreign-parent", "linked"]
+    }
   },
   "prTitle": {
     "$comment": "Pull-request titles are prefixed with EVERY touched module, in the fixed 'order' below. Derived from the diff, never guessed. POPULATE 'order' and 'map' per project: they name this project's own source layout and nothing else here does.",

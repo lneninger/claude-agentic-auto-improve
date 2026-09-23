@@ -100,10 +100,13 @@ work that has nothing to build on. Add `--dry-run` to see the packet without cut
 
 
 Each packet names the sub-task, its branch, its agent, its file scope, the pre-written TASK
-block the architect wrote into the contract, and the Sub-Task Cycle: `cycle` (always exactly
-one stage, since this repository's decomposition rule already splits a red stage and a green
-stage across two separate blocks, each with its own pull request — decided by what the block
-DECLARES, never by who is assigned) and `cycle_basis` (which declaration decided it).
+block the architect wrote into the contract, the Sub-Task Cycle, and the sub-task's own
+identity.
+
+**The Sub-Task Cycle** — `cycle` (always exactly one stage, since this repository's
+decomposition rule already splits a red stage and a green stage across two separate blocks,
+each with its own pull request — decided by what the block DECLARES, never by who is assigned)
+and `cycle_basis` (which declaration decided it).
 
 **Render `cycle_basis` before dispatching**, so an operator can tell a stage the contract asked
 for from an unphased stage the loop fell back to:
@@ -116,6 +119,13 @@ for from an unphased stage the loop fell back to:
 
 Each `stage["stage"]` is one of exactly four names — `review`, `red`, `green`, `unphased`. **Never
 print a stage word the packet did not ship.**
+
+**The sub-task's own identity** is read by the caller out of its state entry rather than
+re-derived: `issue` (its own sub-issue number, or `null` when none is recorded yet — never the
+parent's issue), `base` (the branch its branch and its pull request are cut from — the parent
+branch for a Sub-Task Work Item, the default branch for an ordinary one), `brief` (the path to
+its Work Item Brief), and `needs_issue` (true only once the contract declares two or more
+mergeable sub-tasks and this one's `issue` is still `null`).
 
 **One released sub-task** → start it. **Several** → list them and ask which. Each is a full
 implementation run, and starting three at once spends a lot of work on the operator's behalf.
@@ -150,6 +160,30 @@ dispatched, so the earlier question always catches it first. The refusal is kept
 packet built by hand — `build_dispatch` is public and a caller may construct one directly. Kept
 rather than deleted on the operator's decision of 2026-09-16, recorded so nobody removes it as
 dead code or re-derives the contradiction.
+
+**A packet flagged `needs_issue` has no sub-issue recorded for it.** Refuse it — but say plainly
+that, unlike `needs_agent` above, this refusal *does* arise from the loop's own dispatch. By the
+time the script computes `needs_issue`, `--dispatch` has already cut the branch and written
+`awaiting-merge` into the sub-task's state entry — both happen before the flag is even checked.
+So "stop" here does not undo either one: the branch exists, and the next `--status` call reports
+this sub-task as out for merge, waiting on a pull request that was never opened. Say which
+sub-task is missing its sub-issue, and say this plainly rather than reporting a clean halt.
+
+**The remedy closes the gap forward; it does not abandon the branch.** Create the sub-issue now
+(the same `gh issue create --parent` form Parent-aware mode uses), then stamp it into the
+already-dispatched sub-task's state entry:
+
+```bash
+py -3 "$PRM" --contract <slug> --record-subtask <sub-task-id> --issue <n> --base <base> --brief <brief>
+```
+
+(Run `/task` in Parent-aware mode first if this sub-task has no brief yet — `--record-subtask`
+requires one.) Then continue on the branch `--dispatch` already cut: run `/tdd-first` and `/ship`
+as normal. Do not re-dispatch; the branch and its `awaiting-merge` state already exist, and
+dispatching again would cut a second branch for the same sub-task. Never link the pull request at
+the parent issue, and never retarget it at the default branch — both are forbidden by name in the
+work item: the sub-issue is this task's own, and the base is the parent branch, not a substitute
+for either.
 
 **A packet flagged `needs_authoring` has no TASK block in the contract.** Do not write one and
 carry on. Say which sub-task is missing it, and that the contract needs amending. Inventing the

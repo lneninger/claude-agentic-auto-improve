@@ -23,13 +23,17 @@ Opening a pull request is the easy half. The half that silently fails is the lin
 the work item, and it fails in a way that looks exactly like success.
 
 **A `Closes #N` line in a pull-request body is a REQUEST for a link, never proof of one.**
-GitHub declines the request without saying so when the reference is cross-repository, when
-the pull request's base is not the default branch, or when several numbers are comma-joined
-onto one keyword. The body still reads `Closes #12`, the pull request still merges, and the
-issue stays open. `.claude/work-item-conventions.json` states this as
-`resolvesToClosingLink: false`, and `verify_issue_link.py` exists because of a measurement:
-five of the last twelve merged pull requests in the originating repository carried no
-resolved link at all.
+GitHub declines the request without saying so when the reference is cross-repository, or
+when several numbers are comma-joined onto one keyword. A pull request whose base is not the
+default branch sits in a third, unsettled case: whether the reference resolves there at all
+has not been shown either way, but merging into that base does not close the issue even when
+the reference did resolve -- resolving a reference and closing an issue are two different
+things, and this file used to conflate them. The body still reads `Closes #12`, the pull
+request still merges, and the issue may still be open afterward regardless of which reading
+turns out to be true. `.claude/work-item-conventions.json` states the cross-repository and
+comma-joined cases as `resolvesToClosingLink: false`, and `verify_issue_link.py` exists
+because of a measurement: five of the last twelve merged pull requests in the originating
+repository carried no resolved link at all.
 
 So this skill's real job is not "open a pull request." It is: open one, then **ask GitHub
 whether the link resolved**, and treat the answer as the deliverable. The only admissible
@@ -55,7 +59,16 @@ brief written after the fact records what you did, not what was asked, and the a
 criteria are the only thing that makes the PR body checkable. Send the user to `/task`.
 
 Read and hold: `id`, `url`, `repo`, `title`, `type`, `branch`, `worktree`, `contract`,
-`partial`, `issue_link`, `status`.
+`partial`, `issue_link`, `status`, `base`.
+
+**The declared base.** The brief's `base:` field, when present, is the declared base this
+whole skill measures against: what "commits ahead" is counted from, what the pull request is
+opened against, and what the closing link is verified against. No brief, or a brief with no
+`base:` field, means the declared base falls back to the repository's default branch (confirm
+it with `git symbolic-ref refs/remotes/origin/HEAD` rather than assuming `main` or `master`).
+An ordinary work item with no parent therefore reads exactly as it always has, because its
+declared base *is* the default branch. Every `<base>` placeholder below this point means the
+declared base, never a hardcoded default branch name.
 
 **An `id:` reading of `UNKNOWN` or `unknown` halts here.** Those are the
 `unresolvedIdTokens` in `work-item-conventions.json` → `issueLink`, and they mean nobody
@@ -86,6 +99,10 @@ git -C <tree> status --short                  # uncommitted work is not shipped
 git -C <tree> fetch origin
 git -C <tree> log --oneline origin/<base>..HEAD
 ```
+
+**If the declared base names a branch absent from `origin`, this fetch or log step fails
+outright.** Halt and say so plainly — that is a readable reason, and reporting it as an empty
+commit list would be a worse, misleading halt.
 
 An empty list means the implementation happened somewhere else — the classic outcome of a
 contract implemented in the parent tree while the branch lived in a worktree. Halt and say
@@ -176,6 +193,10 @@ Contract: <the brief's contract: path, or "none — <size> item, routed direct">
 ## North-star alignment
 <the brief's grade, verbatim>
 
+## Notes
+<anything a reviewer should not have to discover on their own — see the declared-base
+ rule below for one thing that belongs here>
+
 Closes #<id>
 ```
 
@@ -188,16 +209,27 @@ Rules for the closing line:
   not completed by this pull request, and a closing keyword would shut a live work item.
 - **`id: none` means no line at all.** That is a success path, not a defect — see Step 3.5.
 
+**If the declared base is not the default branch**, write into the Notes section that the
+closing reference will not fire the issue closed on this merge, and that `/pr-merged`
+performs the close afterward — see Step 4d's `deferred-close` row for the mechanism. Draft
+this now: Step 0 already knows the declared base before this step starts, so there is no
+need to wait for Step 4d's verdict and edit the body back in afterward.
+
 An unticked acceptance criterion is not a blocker to shipping, but it **must** be visible in
 the body with a one-line reason. Silently ticking everything is how an item is reported
 delivered and reopened a week later.
 
 ## Step 3.5: Offer to open an issue when there is none
 
-**Gate — both must hold:** the brief's id reading is `absent` (the `absentIdTokens` list in
-`work-item-conventions.json` → `issueLink`, whose values are not restated here) **and** `gh`
-is available and authenticated. Gate on the **id**, never on the `source:` string — that
-field is free prose in practice.
+**Gate — all three must hold:** the brief's id reading is `absent` (the `absentIdTokens` list
+in `work-item-conventions.json` → `issueLink`, whose values are not restated here) **and**
+`gh` is available and authenticated **and** the brief's `parent_issue:` reading is `none` or
+the key is absent. Gate on the **id**, never on the `source:` string — that field is free
+prose in practice. A resolved `parent_issue:` means this brief belongs to a Sub-Task Work
+Item whose own sub-issue was already created at intake time — this offer never fires for one,
+because offering to create a second issue for work that already has one is how duplicates get
+made. This skill has no parent-aware mode of its own; this gate is the one place it needs to
+tell the two cases apart, and it does so on the normalized reading, never on free prose.
 
 A brief whose id is `unresolved` never reaches this offer; Step 0 already halted on it.
 Offering to *create* an issue for work that may already have one is how duplicates get made.
@@ -235,6 +267,20 @@ gh pr create --base <base> --head <branch> \
   --title "<composed title>" --body-file <path> --draft
 ```
 
+`<base>` is Step 0's declared base — the brief's `base:` field, falling back to the
+repository's default branch when the brief or the field is absent. For an ordinary work item
+with no parent the declared base *is* the default branch, so this reads exactly as it always
+has.
+
+**Ordering matters, and no verdict below can catch a violation of it.** GitHub parses the
+body's closing keywords against the base **at the moment the body is saved**, and does not
+re-parse when the base changes afterwards. The command above already satisfies this — `--base`
+and `--body-file` are one `gh pr create` call. If this pull request already exists and needs
+retargeting, the retarget and the body **must** be written in the same `gh pr edit` call
+(`gh pr edit --base <base> --body-file <path>`) — never a `--base` edit followed by a later,
+separate body edit. The command looks correct either way; only the ordering decides whether
+the link resolves.
+
 Open as a **draft** unless the user asked otherwise, and say that you did. A draft is
 reversible; a review request pinging five people is not.
 
@@ -253,16 +299,27 @@ py -3 .claude/scripts/verify_issue_link.py --brief <brief path> --pr <n> --json
 ```
 
 The script performs **no mutation** of any GitHub object; it only reads. It returns a
-`verdict` from a closed set of fifteen. Branch on it:
+`verdict` from a closed set of sixteen. Branch on it:
 
 | Verdict | Meaning | Action |
 |---|---|---|
+| `deferred-close` | The declared base is not the default branch — either GitHub resolved the closing reference or the body carries one GitHub has not resolved; either way this base will not fire it on merge | Proceed. `issue_link: deferred`. `/pr-merged` owns the close, after confirming the merge. |
 | `linked` | GitHub reports a resolved closing reference | Success. `issue_link: closes` |
 | `not-applicable` | No issue to link (`id: none`), or no conventions data file | Success. `issue_link: none` |
 | `exempt-partial` | `Refs #N` on a deliberately partial item | Success. `issue_link: refs` |
 | `absent-repairable` | No link, and the body can be repaired | **The one repairable row** — see below |
 | `still-absent` | Repair was attempted and the link is still missing | HALT. `issue_link: unresolved` |
-| everything else | `unverifiable`, `malformed-id`, `unresolved-id`, `issue-unreachable`, `issue-already-closed`, `pr-not-open`, `foreign-closing-ref`, `unexpected-closing-ref`, `not-linkable`, `refs-without-partial` | HALT. Report the `reason` and `remediation` verbatim |
+| everything else | `unverifiable`, `malformed-id`, `unresolved-id`, `issue-unreachable`, `issue-already-closed`, `pr-not-open`, `foreign-closing-ref`, `unexpected-closing-ref`, `undeclared-target`, `refs-without-partial` | HALT. Report the `reason` and `remediation` verbatim |
+
+**Whether a closing reference resolves at all from a non-default base is unsettled** — do not
+build a check on either reading of it. **What is settled: merging into a non-default base
+does not close the issue, whether or not the reference resolved.** That is why `deferred-close`
+fires either way: its two conditions (a resolved match, or a body carrying a reference GitHub
+has not resolved) cover both readings, so a pull request against a declared, non-default base
+reaches this verdict regardless of which reading turns out to be true. `/pr-merged` performs
+the close after confirming the merge and reading the sub-issue's own state first — that
+exception belongs to `/pr-merged`, never to this skill, which runs before the merge it would
+need to confirm even exists.
 
 **The repair loop runs at most ONCE** (`maxRepairAttempts: 1`). On `absent-repairable` the
 result carries a `bodyDiff`. Apply it with a single `gh pr edit --body-file <path>`, then
@@ -285,7 +342,9 @@ That is an honest partial delivery; a silent `status: shipped` is not.
 Only from Step 4d's verdict, never from intent:
 
 - `pr:` — the URL from Step 4c.
-- `issue_link:` — `closes` | `refs` | `none` | `unresolved`, exactly as the verdict maps.
+- `issue_link:` — `closes` | `refs` | `none` | `unresolved` | `deferred`, exactly as the
+  verdict maps. `deferred` is written only by the `deferred-close` verdict — the declared base
+  will not fire the closing keyword on merge, and `/pr-merged` owns the eventual close.
   **Never write `manual`.** That value exists in `linkStates` for a human who reconciled an
   issue by hand, and an agent writing it fakes a human action.
 - `status:` — `shipped` only when Step 4d returned a non-halting verdict. On a halting

@@ -20,7 +20,7 @@ resolved closing link, and issue #6 is still open although PR #30 delivered
 it. The only admissible proof is GitHub's own resolved reference, exposed by
 `gh pr view --json closingIssuesReferences` (INV-1).
 
-This suite pins the 15-verdict ORDERED decision procedure. Order IS the
+This suite pins the 16-verdict ORDERED decision procedure. Order IS the
 enforcement mechanism for INV-3 (never rewrite Refs into Closes) and INV-13,
 so a rule moved "for readability" must go RED here.
 
@@ -31,7 +31,7 @@ the real .claude/work-items/, or the real network. Every case builds fixture
 files under a temp dir and injects run_gh. The subject is resolved via
 __file__.
 
-NO ANY-MATCH ASSERTIONS over a value set. Each of the 15 verdicts and each
+NO ANY-MATCH ASSERTIONS over a value set. Each of the 16 verdicts and each
 of the 5 unverifiable causes has its OWN case with its OWN fixture, because
 an array-wide positive control cannot prove a newly-added token is
 detectable (JOURNAL 2026-08-26).
@@ -118,8 +118,8 @@ ISSUE_LINK_BLOCK = {
         "unverifiable", "malformed-id", "unresolved-id", "not-applicable",
         "issue-unreachable", "issue-already-closed", "pr-not-open",
         "foreign-closing-ref", "unexpected-closing-ref", "exempt-partial",
-        "linked", "not-linkable", "refs-without-partial", "absent-repairable",
-        "still-absent",
+        "deferred-close", "linked", "undeclared-target", "refs-without-partial",
+        "absent-repairable", "still-absent",
     ],
     "unverifiableCauses": ["gh-missing", "gh-unauthenticated", "query-failed",
                            "pr-not-found", "conventions-missing"],
@@ -395,26 +395,26 @@ def case_05_absent_repairable():
 
 
 # ==========================================================================
-# Case 6 -- not-linkable, two checks
+# Case 6 -- undeclared-target, two checks
 # ==========================================================================
-def case_06_not_linkable():
-    name = "6a not-linkable: cross-repo id"
+def case_06_undeclared_target():
+    name = "6a undeclared-target: cross-repo id"
     if need_subject(name):
         return
     with tmp() as d:
         root = Path(d)
         r = verify(write_brief(root, id="other/repo#7"), write_conventions(root), gh_stub())
-        check(name, r["verdict"] == "not-linkable", "got %r" % r["verdict"])
+        check(name, r["verdict"] == "undeclared-target", "got %r" % r["verdict"])
         check("6a cross-repo halts with ZERO repairs",
               r.get("halt") is True and r.get("proposedBody") is None,
               "halt=%r proposedBody=%r" % (r.get("halt"), r.get("proposedBody")))
 
-    name = "6b not-linkable: base is not the default branch"
+    name = "6b undeclared-target: base is not the declared base"
     with tmp() as d:
         root = Path(d)
         r = verify(write_brief(root), write_conventions(root),
                    gh_stub(base="develop", default_branch="master"))
-        check(name, r["verdict"] == "not-linkable", "got %r" % r["verdict"])
+        check(name, r["verdict"] == "undeclared-target", "got %r" % r["verdict"])
         check("6b non-default base halts with ZERO repairs",
               r.get("halt") is True and r.get("proposedBody") is None,
               "halt=%r proposedBody=%r" % (r.get("halt"), r.get("proposedBody")))
@@ -801,12 +801,12 @@ def case_14_rule_order():
                    gh_stub(body="## Summary\n\nRefs #39\n"))
         check(name, r["verdict"] == "refs-without-partial", "got %r" % r["verdict"])
 
-    name = "14 rule order: not-linkable (12) wins over refs-without-partial (13)"
+    name = "14 rule order: undeclared-target (12) wins over refs-without-partial (13)"
     with tmp() as d:
         root = Path(d)
         r = verify(write_brief(root), write_conventions(root),
                    gh_stub(base="develop", body="## Summary\n\nRefs #39\n"))
-        check(name, r["verdict"] == "not-linkable", "got %r" % r["verdict"])
+        check(name, r["verdict"] == "undeclared-target", "got %r" % r["verdict"])
 
 
 # ==========================================================================
@@ -816,8 +816,8 @@ ALL_VERDICTS = [
     "unverifiable", "malformed-id", "unresolved-id", "not-applicable",
     "issue-unreachable", "issue-already-closed", "pr-not-open",
     "foreign-closing-ref", "unexpected-closing-ref", "exempt-partial",
-    "linked", "not-linkable", "refs-without-partial", "absent-repairable",
-    "still-absent",
+    "deferred-close", "linked", "undeclared-target", "refs-without-partial",
+    "absent-repairable", "still-absent",
 ]
 ALL_CAUSES = ["gh-missing", "gh-unauthenticated", "query-failed",
               "pr-not-found", "conventions-missing"]
@@ -886,16 +886,16 @@ def case_17_resolver_failure_on_every_gh_read():
         r = verify(write_brief(root), write_conventions(root),
                    gh_stub(closing=[], base="main", default_branch="main"))
         check(name, r["verdict"] == "absent-repairable",
-              "a hardcoded 'master' default would say not-linkable; got %r" % r["verdict"])
+              "a hardcoded 'master' default would say undeclared-target; got %r" % r["verdict"])
 
     # NEGATIVE CONTROL: a base that genuinely is NOT the default must still halt,
     # so the fix cannot be "stop checking the base branch at all".
-    name = "17 NEGATIVE CONTROL: a genuinely non-default base is still not-linkable"
+    name = "17 NEGATIVE CONTROL: a genuinely non-default base is still undeclared-target"
     with tmp() as d:
         root = Path(d)
         r = verify(write_brief(root), write_conventions(root),
                    gh_stub(closing=[], base="master", default_branch="main"))
-        check(name, r["verdict"] == "not-linkable", "got %r" % r["verdict"])
+        check(name, r["verdict"] == "undeclared-target", "got %r" % r["verdict"])
 
     # gh issue view failing is a RESOLVER failure, not "issue transferred/deleted".
     name = "17 gh issue view transport failure -> unverifiable, not issue-unreachable"
@@ -1149,7 +1149,7 @@ def case_16_rename_and_real_shape():
 
 
 def case_15_declared_sets():
-    name = "15 subject declares exactly the 15 contract verdicts"
+    name = "15 subject declares exactly the 16 contract verdicts"
     if need_subject(name):
         return
     check(name, list(V.VERDICTS) == ALL_VERDICTS,
@@ -1159,11 +1159,290 @@ def case_15_declared_sets():
           "got %r" % (list(getattr(V, "UNVERIFIABLE_CAUSES", [])),))
 
 
+# ==========================================================================
+# Case 22-27 -- deferred-close, the sixteenth verdict.
+#
+# Contract: .claude/concepts/2026-09-19-flow-parent-subissue-topology.md,
+# sub-task 3 ("Base aware closing link verifier"). New rule, ONE only,
+# inserted immediately before rule 11 (linked), between rule 10
+# (exempt-partial) and rule 11:
+#
+#   sameRepo and baseIsDeclaredBase and not baseIsDefaultBranch and (
+#       relation == "match"
+#       or (bodyHasClosingRefToThisIssue and not bodyHasRefsToThisIssue)
+#   )
+#
+# verify() and compute_expectation() each gain ONE new keyword-defaulted
+# parameter, declared_base=None, appended LAST. Before that parameter exists,
+# every case below fails on TypeError -- reported as a named FAILED CHECK by
+# _try_verify_declared, never an uncaught traceback.
+# ==========================================================================
+def verify_declared(brief, conv, run_gh, declared_base, pr=40, repair_attempted=False):
+    """Like verify() above, but forwards declared_base.
+
+    A SEPARATE wrapper, not an edit to verify(): that function is exercised
+    by every existing case and sits outside the forced-edit table, so a new
+    keyword belongs in a new function, never inserted into the old one.
+    """
+    return V.verify(
+        brief_path=brief,
+        pr_number=pr,
+        repo=REPO,
+        conventions_path=conv,
+        run_gh=run_gh,
+        repair_attempted=repair_attempted,
+        declared_base=declared_base,
+    )
+
+
+def _try_verify_declared(name, brief, conv, run_gh, declared_base,
+                         pr=40, repair_attempted=False):
+    """Call verify_declared, turning a not-yet-existing signature into a named
+    FAILED check instead of letting TypeError abort the whole case function.
+
+    Returns the result dict, or None when the call could not even be made --
+    callers must return early in that case, since there is nothing left to
+    assert against.
+    """
+    try:
+        return verify_declared(brief, conv, run_gh, declared_base, pr=pr,
+                               repair_attempted=repair_attempted)
+    except TypeError as exc:
+        check(name, False,
+              "V.verify() has no declared_base parameter yet -- %s" % exc)
+        return None
+
+
+def case_22_deferred_close_headline():
+    """Headline behaviour AND the ordering pin, as one pair.
+
+    The SAME resolved-link fixture must return "linked" when the base is the
+    default branch, and "deferred-close" -- never "linked" -- the moment the
+    base becomes the work item's DECLARED non-default target. The pairing is
+    what proves the new rule now wins over rule 11 for exactly this slice of
+    input space: a headline check alone would pass just as well if
+    deferred-close had quietly replaced linked everywhere.
+    """
+    name = "22 deferred-close: resolved link + non-default DECLARED base"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        root = Path(d)
+        r = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=MATCHING, base="feature/160-parent", default_branch="master"),
+            declared_base="feature/160-parent",
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "deferred-close", "got %r" % r["verdict"])
+        check("22 deferred-close is NOT linked -- the new rule wins the position",
+              r["verdict"] != "linked", "got %r" % r["verdict"])
+        check("22 deferred-close writes issue_link: deferred",
+              r.get("issue_link") == "deferred", "got %r" % r.get("issue_link"))
+        check("22 deferred-close does not halt", r.get("halt") is False,
+              "got %r" % r.get("halt"))
+
+    name = "22 PAIRED CONTROL: identical fixture, base IS the default branch -> linked"
+    with tmp() as d:
+        root = Path(d)
+        r = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=MATCHING, base="master", default_branch="master"),
+            declared_base="master",
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "linked", "got %r" % r["verdict"])
+
+
+def case_23_deferred_close_guard_same_repo():
+    """POSITIVE CONTROL for the sameRepo term.
+
+    Cross-repo, but the base matches what was declared and is non-default,
+    and the reference resolves. Dropping sameRepo from the new rule's
+    condition would wrongly return deferred-close instead of the cross-repo
+    halt that must still fire.
+    """
+    name = "23 GUARD sameRepo: cross-repo resolved link on a declared non-default base"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        root = Path(d)
+        other = [resolved_link(7, owner="other-owner", repo="other-repo")]
+        r = _try_verify_declared(
+            name, write_brief(root, id="other-owner/other-repo#7"), write_conventions(root),
+            gh_stub(closing=other, base="feature/non-default", default_branch="master"),
+            declared_base="feature/non-default",
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "undeclared-target", "got %r" % r["verdict"])
+        check("23 GUARD sameRepo: still halts with ZERO repairs",
+              r.get("halt") is True and r.get("proposedBody") is None,
+              "halt=%r proposedBody=%r" % (r.get("halt"), r.get("proposedBody")))
+
+
+def case_24_deferred_close_guard_declared_base():
+    """POSITIVE CONTROL for the baseIsDeclaredBase term.
+
+    Same repo, resolved link, a non-default actual base -- but the PR is NOT
+    aimed at the base the work item declared. Dropping baseIsDeclaredBase
+    from the condition would wrongly return deferred-close instead of
+    halting as undeclared-target.
+    """
+    name = "24 GUARD baseIsDeclaredBase: resolved link on an UNDECLARED non-default base"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        root = Path(d)
+        r = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=MATCHING, base="random-topic-branch", default_branch="master"),
+            declared_base="feature/160-parent",
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "undeclared-target", "got %r" % r["verdict"])
+        check("24 GUARD baseIsDeclaredBase: still halts with ZERO repairs",
+              r.get("halt") is True and r.get("proposedBody") is None,
+              "halt=%r proposedBody=%r" % (r.get("halt"), r.get("proposedBody")))
+
+
+def case_25_deferred_close_guard_default_branch():
+    """POSITIVE CONTROL for the not-baseIsDefaultBranch term.
+
+    Resolved link, base IS the default branch and IS the declared base --
+    linked really does fire here and must stay reachable. Dropping
+    not-baseIsDefaultBranch would wrongly return deferred-close instead.
+    Also proves declared_base=None resolves to the default branch INSIDE
+    compute_expectation, not at the call site.
+    """
+    name = "25 GUARD not-baseIsDefaultBranch: declared base IS the default branch -> linked"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        root = Path(d)
+        r = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=MATCHING, base="master", default_branch="master"),
+            declared_base="master",
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "linked", "got %r" % r["verdict"])
+
+    name = "25 GUARD not-baseIsDefaultBranch: declared_base=None falls back to default -> linked"
+    with tmp() as d:
+        root = Path(d)
+        r = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=MATCHING, base="master", default_branch="master"),
+            declared_base=None,
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "linked", "got %r" % r["verdict"])
+
+
+def case_26_deferred_close_guard_refs_residue():
+    """POSITIVE CONTROL for the stale-parse-residue term.
+
+    Body carries BOTH a closing keyword and a reference keyword for THIS
+    issue on a declared non-default base, and GitHub has resolved neither
+    (relation == "none"). Rule 13 must still win this input as
+    refs-without-partial. Weakening the residue term
+    (bodyHasClosingRefToThisIssue and not bodyHasRefsToThisIssue) to drop its
+    second half would wrongly return deferred-close and swallow rule 13's
+    halt for a body carrying both keywords.
+    """
+    name = "26 GUARD residue: body carries BOTH Closes AND Refs -> refs-without-partial"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        root = Path(d)
+        body = "## Summary\n\nRefs #39\n\nCloses #39\n"
+        r = _try_verify_declared(
+            name, write_brief(root, partial=None), write_conventions(root),
+            gh_stub(closing=[], body=body, base="feature/160-parent",
+                    default_branch="master"),
+            declared_base="feature/160-parent",
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "refs-without-partial", "got %r" % r["verdict"])
+        check("26 GUARD residue: still produces NO proposedBody",
+              r.get("proposedBody") is None, "got %r" % r.get("proposedBody"))
+
+
+def case_27_deferred_close_is_non_halting():
+    """deferred-close is NOT a member of HALTING, and the exit code says so.
+
+    A closed-set membership property, pinned directly against HALTING rather
+    than read only off one fixture's halt flag.
+    """
+    name = "27 deferred-close is NOT a member of HALTING"
+    if need_subject(name):
+        return
+    check(name, "deferred-close" not in getattr(V, "HALTING", set()),
+          "HALTING=%r" % (getattr(V, "HALTING", None),))
+
+    name = "27 deferred-close exit code is 0 end to end"
+    with tmp() as d:
+        root = Path(d)
+        r = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=MATCHING, base="feature/160-parent", default_branch="master"),
+            declared_base="feature/160-parent",
+        )
+        if r is None:
+            return
+        check(name, r.get("exit_code", 0) == 0, "got %r" % r.get("exit_code"))
+        check("27 deferred-close halt flag is False",
+              r.get("halt") is False, "got %r" % r.get("halt"))
+
+
+def case_28_undeclared_target_rename_is_complete():
+    """The retired verdict name must not survive anywhere this sub-task owns.
+
+    Three spellings: the verdict string itself ("not-linkable"), the Python
+    identifier form ("not_linkable"), and a COMMENT in prose with a SPACE
+    ("not linkable") that a hyphen-only search misses. Scoped to
+    .claude/scripts/ (recursively) and .claude/work-item-conventions.json --
+    NOT .claude/concepts/, NOT docs/handbook/ (the retired name is kept there
+    on purpose, a recorded Non-Goal) and NOT .claude/skills/ (sub-task 6's
+    half of the rename). THIS FILE IS EXCLUDED from the scan: it necessarily
+    carries the three search patterns as literal strings in this very
+    docstring and case name, which would otherwise make it match itself
+    forever, even after the rename lands everywhere else.
+    """
+    name = "28 rename complete: no retired verdict name anywhere this sub-task owns"
+    if need_subject(name):
+        return
+    this_file = Path(__file__).resolve()
+    conventions_path = Path(V.work_item_conventions_path())
+    targets = [p for p in sorted(SCRIPTS_DIR.rglob("*.py"))
+              if p.resolve() != this_file and "__pycache__" not in p.parts]
+    targets.append(conventions_path)
+
+    patterns = ["not-linkable", "not_linkable", "not linkable"]
+    hits = []
+    for path in targets:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for pattern in patterns:
+            if pattern in text:
+                hits.append("%s: %r" % (path, pattern))
+
+    check(name, hits == [], "found the retired verdict name: %r" % (hits,))
+
+
 def main():
     for fn in (
         case_01_linked, case_02_not_applicable, case_02b_unresolved_id,
         case_03_exempt_partial, case_04_unexpected_closing_ref,
-        case_05_absent_repairable, case_06_not_linkable, case_07_still_absent,
+        case_05_absent_repairable, case_06_undeclared_target, case_07_still_absent,
         case_08_malformed_id, case_09_unverifiable, case_09b_unmapped_states,
         case_10_negative_control, case_11_brief_corpus,
         case_12_read_only_proof, case_13_refs_without_partial,
@@ -1174,6 +1453,13 @@ def main():
         case_19_declared_sets_match_the_conventions_file,
         case_20_real_corpus_integration,
         case_21_fail_open_and_relative_brief,
+        case_22_deferred_close_headline,
+        case_23_deferred_close_guard_same_repo,
+        case_24_deferred_close_guard_declared_base,
+        case_25_deferred_close_guard_default_branch,
+        case_26_deferred_close_guard_refs_residue,
+        case_27_deferred_close_is_non_halting,
+        case_28_undeclared_target_rename_is_complete,
     ):
         try:
             fn()

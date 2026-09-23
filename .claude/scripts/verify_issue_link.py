@@ -48,9 +48,9 @@ INV-12  Every path resolves through ``_claude_paths``. No ``Path.home()``,
 
 THE ORDER IS THE ENFORCEMENT
 ----------------------------
-``evaluate`` implements rules 1..15 literally, first match wins. The order
-is not stylistic: rule 7 before rule 14 is what stops a ``gh pr edit``
-firing against a merged PR, and rule 13 before rule 14 is what stops a
+``evaluate`` implements rules 1..16 literally, first match wins. The order
+is not stylistic: rule 7 before rule 15 is what stops a ``gh pr edit``
+firing against a merged PR, and rule 14 before rule 15 is what stops a
 deliberate ``Refs #N`` being repaired into ``Closes #N`` (INV-3 / AC-4).
 Do not rearrange these for readability -- the suite's ordering guard
 (case 14) will go RED, and it is meant to.
@@ -87,11 +87,12 @@ VERDICTS = [
     "foreign-closing-ref",      # 8
     "unexpected-closing-ref",   # 9
     "exempt-partial",           # 10
-    "linked",                   # 11
-    "not-linkable",             # 12
-    "refs-without-partial",     # 13
-    "absent-repairable",        # 14
-    "still-absent",             # 15
+    "deferred-close",           # 11
+    "linked",                   # 12
+    "undeclared-target",        # 13
+    "refs-without-partial",     # 14
+    "absent-repairable",        # 15
+    "still-absent",             # 16
 ]
 
 UNVERIFIABLE_CAUSES = [
@@ -119,6 +120,7 @@ REMEDIATION = {
 # is the exact failure this work item exists to fix.
 ISSUE_LINK_WRITES = {
     "linked": "closes",
+    "deferred-close": "deferred",
     "not-applicable": "none",
     "exempt-partial": "refs",
     "still-absent": "unresolved",
@@ -127,7 +129,7 @@ ISSUE_LINK_WRITES = {
 HALTING = {
     "unverifiable", "malformed-id", "unresolved-id", "issue-unreachable",
     "issue-already-closed", "pr-not-open", "foreign-closing-ref",
-    "unexpected-closing-ref", "not-linkable", "refs-without-partial",
+    "unexpected-closing-ref", "undeclared-target", "refs-without-partial",
     "still-absent",
 }
 
@@ -403,18 +405,24 @@ def render_diff(before, after):
 
 
 # --------------------------------------------------------------------------
-# The ordered decision procedure -- rules 1..15, first match wins.
+# The ordered decision procedure -- rules 1..16, first match wins.
 # --------------------------------------------------------------------------
 def evaluate(exp):
     """Map a Link Expectation onto exactly one verdict.
 
     Closure is by construction: rules 1-4 partition the resolver status and
     the four Id Reading kinds; 5-6 partition issueState; 7 partitions
-    prState; 8/9/11 partition the resolved-link relation with 9-10
-    partitioning ``partial`` inside it; 12 partitions the structural pair;
-    13 partitions bodyHasRefsToThisIssue; 14-15 partition repairAttempted,
-    which is boolean. Every rule consumes a field of the tuple and the tuple
-    has no unread field, so the fall-through set is empty.
+    prState; 8/9/12 partition the resolved-link relation, and rule 11
+    (deferred-close) joins that same partition for the declared,
+    non-default-base slice, with 9-10 partitioning ``partial`` inside it;
+    13 partitions the structural pair (undeclared-target), and ALSO
+    consumes the resolved-link relation a second time for that same
+    structural-pair slice -- a cross-repo or undeclared-base input can
+    still carry a resolved match, and rule 13's wording branches on it
+    without changing the verdict; 14 partitions bodyHasRefsToThisIssue;
+    15-16 partition repairAttempted, which is boolean. Every rule consumes
+    a field of the tuple and the tuple has no unread field, so the
+    fall-through set is empty.
     """
     def out(verdict, reason, **extra):
         result = {
@@ -467,7 +475,7 @@ def evaluate(exp):
                    "work shipped without a link (the #6 pathology)."
                    % exp["issueRef"]["number"], exit_code=2)
 
-    # 7 -- BEFORE rule 14. A gh pr edit against a merged PR is a remote
+    # 7 -- BEFORE rule 15. A gh pr edit against a merged PR is a remote
     #      mutation with no effect on the merge that already happened.
     if exp.get("prState") != "open":
         return out("pr-not-open",
@@ -495,30 +503,116 @@ def evaluate(exp):
                    "Brief marks this partial; Refs #%d is correct and no closing link is "
                    "expected." % exp["issueRef"]["number"])
 
-    # 11 -- the good case.
-    if relation == "match":
+    # 11 -- deferred-close: the reference targets a base this work item
+    #       DECLARED, and that base is not the default branch. FACT ONE --
+    #       CORRECTED 2026-09-19 (see the contract's "FACT ONE -- CORRECTED"
+    #       banner): a closing keyword alone does NOT reliably resolve from
+    #       a non-default base -- pull request #173 carried one and never
+    #       resolved. The one probe that did resolve also carried a
+    #       development link, and a second variable was never isolated, so
+    #       neither reading is something to build on. Settled instead:
+    #       merging into a non-default base does NOT close the issue, even
+    #       when the reference DID resolve; that closure is owned by
+    #       /pr-merged once the merge lands, not by this script. So this
+    #       rule fires on either reading -- a resolved reference
+    #       (relation == "match", which would otherwise reach "linked" at
+    #       rule 12) or a body carrying an unresolved closing reference
+    #       (bodyHasClosingRefToThisIssue) -- deferred-close is reached
+    #       either way. sameRepo and baseIsDeclaredBase are required so the
+    #       cross-repo halt and the undeclared-base halt at rule 13 are
+    #       never repealed by this rule; not baseIsDefaultBranch is required
+    #       so "linked" stays reachable on the default branch; the residue
+    #       disjunct's "not bodyHasRefsToThisIssue" term is required so a
+    #       body carrying both Refs #N and Closes #N still halts at rule 14
+    #       as refs-without-partial.
+    if (exp.get("sameRepo") and exp.get("baseIsDeclaredBase")
+            and not exp.get("baseIsDefaultBranch")
+            and (relation == "match"
+                 or (exp.get("bodyHasClosingRefToThisIssue")
+                     and not exp.get("bodyHasRefsToThisIssue")))):
+        if relation == "match":
+            why = ("This PR is based on %r, the base this work item declared but not the "
+                   "default branch %r. GitHub resolves the closing reference, but "
+                   "merging will not close #%d -- /pr-merged records that closure once the "
+                   "merge lands."
+                   % (exp.get("baseRefName"), exp.get("defaultBranch"),
+                      exp["issueRef"]["number"]))
+        else:
+            why = ("This PR is based on %r, the base this work item declared but not the "
+                   "default branch %r. The body carries a closing reference for #%d that "
+                   "GitHub has not resolved, and merging will not close it -- /pr-merged "
+                   "records that closure once the merge lands."
+                   % (exp.get("baseRefName"), exp.get("defaultBranch"),
+                      exp["issueRef"]["number"]))
+        return out("deferred-close", why)
+
+    # 12 -- the good case. Gated on baseIsDefaultBranch (unchanged meaning:
+    #       baseRefName == defaultBranch) because a resolved reference on a
+    #       non-default base does NOT mean the merge will close the issue
+    #       (Fact Three, measured 2026-09-19) -- rule 11 above already claims
+    #       every declared-non-default-base input that has a resolved match,
+    #       so this guard only ever turns away the undeclared-base and
+    #       cross-repo residue that rule 13 exists to catch.
+    if relation == "match" and exp.get("baseIsDefaultBranch"):
         return out("linked",
                    "GitHub reports a closing link for #%d on this PR."
                    % exp["issueRef"]["number"])
 
-    # 12 -- structurally not linkable. Zero repairs; a body edit cannot help.
-    if not exp.get("sameRepo") or not exp.get("baseIsDefaultBranch"):
-        why = ("the issue reference is cross-repo" if not exp.get("sameRepo")
-               else "the PR's base %r is not the default branch %r"
-                    % (exp.get("baseRefName"), exp.get("defaultBranch")))
-        return out("not-linkable",
-                   "GitHub will not resolve a closing link because %s." % why, exit_code=2)
+    # 13 -- undeclared target: the closing link's target sits outside what
+    #       this work item declared -- a different repository, or a base
+    #       branch nobody named -- so nothing here can say whether the link
+    #       will fire. Zero repairs; a body edit cannot fix where a PR is
+    #       aimed.
+    if not exp.get("sameRepo") or not exp.get("baseIsDeclaredBase"):
+        if not exp.get("sameRepo"):
+            if relation == "match":
+                # The guard promoted to `linked` (rule 12) now sends this
+                # input here instead: GitHub DID resolve it, so the old
+                # unconditional "will not resolve" sentence would be false.
+                why = ("GitHub resolved a cross-repo closing reference for #%d, but a "
+                       "cross-repo target is outside what this work item declared, so "
+                       "nothing here can say what merging it would close."
+                       % exp["issueRef"]["number"])
+            else:
+                # Kept VERBATIM (contract 2026-09-19): not covered by the
+                # base-branch probe, so its wording is not touched by that
+                # measurement.
+                why = "GitHub will not resolve a closing link because the issue reference is cross-repo."
+        else:
+            # FACT ONE -- CORRECTED 2026-09-19: a closing keyword alone does
+            # NOT reliably resolve from a non-default base -- pull request
+            # #173 carried one and never resolved, and the one probe that
+            # did resolve also carried a development link nobody isolated
+            # from the resolution. So this rule can make no claim about
+            # whether GitHub will resolve the reference at all; the claim it
+            # CAN make is only about what can be VERIFIED once it lands
+            # here undeclared or cross-repo.
+            declared_base = exp.get("declaredBase")
+            default_branch = exp.get("defaultBranch")
+            if declared_base == default_branch:
+                # No --base-branch was declared, so declaredBase fell back to
+                # the default branch (see compute_expectation). Naming both
+                # here would read "neither master nor master".
+                why = ("This PR is based on %r, which is not the default branch %r, so "
+                       "nothing here can say what merging it would close."
+                       % (exp.get("baseRefName"), default_branch))
+            else:
+                why = ("This PR is based on %r, which is neither the default branch %r nor "
+                       "the base %r this work item declared, so nothing here can say what "
+                       "merging it would close."
+                       % (exp.get("baseRefName"), default_branch, declared_base))
+        return out("undeclared-target", why, exit_code=2)
 
-    # 13 -- BEFORE rule 14. This is INV-3 / AC-4's enforcement (D-3): a body
+    # 14 -- BEFORE rule 15. This is INV-3 / AC-4's enforcement (D-3): a body
     #       already carrying Refs #N for THIS issue can never be repaired into
-    #       Closes #N. Rule 14 would otherwise do exactly that.
+    #       Closes #N. Rule 15 would otherwise do exactly that.
     if exp.get("bodyHasRefsToThisIssue"):
         return out("refs-without-partial",
                    "PR body carries Refs #%d but the brief does not mark this partial. "
                    "Set partial: true, or remove the Refs line -- I will not rewrite it "
                    "into a closing keyword." % exp["issueRef"]["number"], exit_code=2)
 
-    # 14 -- the one repairable state, and the ONLY row that proposes a body.
+    # 15 -- the one repairable state, and the ONLY row that proposes a body.
     if not exp.get("repairAttempted"):
         closing = render_closing_line(exp["issueRef"], exp.get("sameRepo"),
                                       exp.get("issueLinkBlock") or {})
@@ -528,7 +622,7 @@ def evaluate(exp):
                    proposedBody=proposed,
                    bodyDiff=render_diff(exp.get("body"), proposed))
 
-    # 15 -- repaired once already and GitHub still reports nothing.
+    # 16 -- repaired once already and GitHub still reports nothing.
     return out("still-absent",
                "Repaired once and GitHub still reports no closing link for #%d."
                % exp["issueRef"]["number"], exit_code=2)
@@ -557,9 +651,20 @@ def _classify_gh_failure(stderr):
 
 
 def compute_expectation(brief_text, pr_json, default_branch, repo,
-                        issue_link_block, issue_state, repair_attempted):
-    """Build the Link Expectation tuple that ``evaluate`` reads."""
+                        issue_link_block, issue_state, repair_attempted,
+                        declared_base=None):
+    """Build the Link Expectation tuple that ``evaluate`` reads.
+
+    ``declared_base`` is the branch this work item declared it would target
+    (``--base-branch``). ``None`` means "the repository default branch" and
+    is resolved to ``default_branch`` HERE, inside this function, so there is
+    exactly one place the fallback lives (never at a call site).
+    ``baseIsDefaultBranch`` keeps its present meaning exactly:
+    ``baseRefName == default_branch``. It is NOT redefined by the addition of
+    ``declaredBase`` / ``baseIsDeclaredBase``.
+    """
     id_reading = read_brief_id(brief_text, issue_link_block, repo)
+    resolved_declared_base = declared_base if declared_base is not None else default_branch
     exp = {
         "idReading": id_reading,
         "issueRef": id_reading.get("issueRef"),
@@ -569,6 +674,7 @@ def compute_expectation(brief_text, pr_json, default_branch, repo,
         "issueLinkBlock": issue_link_block,
         "issueState": issue_state,
         "defaultBranch": default_branch,
+        "declaredBase": resolved_declared_base,
     }
     if pr_json is not None:
         body = pr_json.get("body") or ""
@@ -576,6 +682,7 @@ def compute_expectation(brief_text, pr_json, default_branch, repo,
         exp["prState"] = (pr_json.get("state") or "").lower()
         exp["baseRefName"] = pr_json.get("baseRefName")
         exp["baseIsDefaultBranch"] = pr_json.get("baseRefName") == default_branch
+        exp["baseIsDeclaredBase"] = pr_json.get("baseRefName") == resolved_declared_base
         resolved = [normalize_resolved_link(r)
                     for r in (pr_json.get("closingIssuesReferences") or [])]
         exp["resolvedLinks"] = resolved
@@ -587,12 +694,23 @@ def compute_expectation(brief_text, pr_json, default_branch, repo,
             exp["foreignRefs"] = others or None
             exp["bodyHasRefsToThisIssue"] = body_has_reference(
                 body, issue_link_block.get("referenceKeyword", "Refs"), ref["number"])
+            # Same helper body_has_reference already uses for Refs -- this
+            # adds no new matching logic, only a different keyword/field.
+            exp["bodyHasClosingRefToThisIssue"] = body_has_reference(
+                body, issue_link_block.get("closingKeyword", "Closes"), ref["number"])
     return exp
 
 
 def verify(brief_path, pr_number, repo, conventions_path=None,
-           run_gh=None, repair_attempted=False):
-    """Answer the question, and never mutate anything answering it (INV-10)."""
+           run_gh=None, repair_attempted=False, declared_base=None):
+    """Answer the question, and never mutate anything answering it (INV-10).
+
+    ``declared_base`` is appended last, keyword-defaulted to ``None``: every
+    existing caller of this function is positional, and inserting a
+    parameter earlier would silently re-bind ``run_gh`` or
+    ``repair_attempted``. ``None`` means "the repository default branch" and
+    is resolved inside :func:`compute_expectation`, not here.
+    """
     run_gh = run_gh or default_run_gh
 
     block, cause = read_conventions(conventions_path)
@@ -668,7 +786,8 @@ def verify(brief_path, pr_number, repo, conventions_path=None,
         issue_state = (issue_json.get("state") or "unreachable").lower()
 
     exp = compute_expectation(
-        brief_text, pr_json, default_branch, repo, block, issue_state, repair_attempted)
+        brief_text, pr_json, default_branch, repo, block, issue_state, repair_attempted,
+        declared_base)
     result = evaluate(exp)
 
     # Bookkeeping only -- the brief's pr: decides no verdict (/ship passes the
@@ -728,11 +847,15 @@ def main(argv=None):
              "canonical name. Defaults to the origin remote.")
     parser.add_argument("--repair-attempted", action="store_true",
                         help="Set on the re-query after /ship's single repair (INV-2).")
+    parser.add_argument(
+        "--base-branch", default=None,
+        help="The branch this work item declared it would target. Defaults to the "
+             "repository default branch when omitted.")
     parser.add_argument("--json", action="store_true", help="Emit the full verdict as JSON.")
     args = parser.parse_args(argv)
 
     result = verify(brief_path=args.brief, pr_number=args.pr, repo=args.repo,
-                    repair_attempted=args.repair_attempted)
+                    repair_attempted=args.repair_attempted, declared_base=args.base_branch)
 
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))

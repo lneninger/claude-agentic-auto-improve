@@ -35,11 +35,182 @@ The argument may be any of:
 | `AB#1234` or a `dev.azure.com/.../_workitems/...` URL | Azure DevOps work item — see 1c |
 | Anything else (free prose) | Untracked request — skip to Step 1d |
 | *(empty)* | List open issues assigned to the user (`gh issue list --assignee @me`) and ask which to pick up |
+| `PARENT_ISSUE:`, `BASE_BRANCH:`, `BRANCH_NAME:`, `CONTRACT:` and `SUB_TASK:` — **all five** present in the invocation | **Parent-aware mode.** Not a shape a person normally types — see "Parent-aware mode" below and skip the rest of this cascade. A partial set (some but not all five) matches no row in this table — halt and name the missing fields rather than guessing or filling one in from context. |
 
 A bare number is a GitHub issue. This project tracks work in GitHub Issues; do not
 interpret `1234` as an Azure DevOps id.
 
 Record the raw argument verbatim in the brief. Do not normalize away information (a URL carries org/project that a bare id does not).
+
+## Parent-aware mode
+
+A second invocation shape, used when this skill is producing one task of an already-approved
+contract rather than intaking fresh work. `/flow`, once a contract is approved and declares two
+or more mergeable sub-tasks, invokes this mode once per sub-task; a person does not normally
+type this form by hand.
+
+```
+/task <the sub-task's name from its handoff heading>
+PARENT_ISSUE: <n>
+BASE_BRANCH: <the parent branch>
+BRANCH_NAME: task/<contract-slug>/<sub-task-id>
+CONTRACT: .claude/concepts/<slug>.md
+SUB_TASK: <the contract's numbered handoff block, verbatim>
+```
+
+**All five fields above are required — this mode never triggers on a subset.** The mode reads
+the sub-task name (the bare argument after `/task`), `PARENT_ISSUE`, `BASE_BRANCH`,
+`BRANCH_NAME`, `CONTRACT` and `SUB_TASK`; every one of them is consumed somewhere below. An
+invocation carrying some but not all five matches no row in Step 0's table. Halt and name the
+missing fields — do not fill one in from context and do not treat a partial set as the no-parent
+path; it is neither.
+
+**Order of operations — stated explicitly, because two things below used to disagree about it.**
+The step numbers name the no-parent path's usual sequence; this mode runs three of them in a
+different order, forced by one dependency: the sub-issue create needs a title before any brief
+exists to draw one from, and the brief needs an `id:` that only the create can produce.
+
+1. **Classify the effort type**, using Step 2.5's matching procedure only — not its point 6 issue
+   offer, which never fires in this mode (see below). Default the proposed type to the parent
+   item's own `type:`, confirming with `AskUserQuestion` only when it cannot be derived that way.
+   This runs first because the create below interpolates `[<TYPE>]` into the sub-issue's title.
+2. **Create the sub-issue** (procedure below), titled from step 1's type, with a body taken from
+   the supplied `SUB_TASK` block verbatim — no brief exists yet at this point to draw a body from.
+3. **Verify the parent link** (procedure below).
+4. **Write the brief** (Step 2's template, extended by the keys listed below), because its `id:`
+   is the sub-issue number step 3 just confirmed `linked`.
+
+**The branch name is load-bearing — never improvise it.** The delivery loop maps a merged pull
+request back to its sub-task by matching its branch, exactly, against
+`task/<contract-slug>/<sub-task-id>`. A branch cut under any other name — including a
+plausible-looking rename — falls through to unmapped, and the merge can never be attributed to
+the sub-task it closed. This is the concrete failure a hand-cut branch produced before this mode
+existed; state it here so it cannot happen again through this mode either.
+
+**Identical to the no-parent path — stated as identical here so the two never drift into two
+mechanisms:**
+
+- Step 2 writes a brief at `.claude/work-items/`, from the same template, with the same
+  frontmatter keys plus the ones described below — written after the create-and-verify sequence
+  above, not in Step 2's usual position; see "Order of operations" above.
+- Step 2.5's effort-prefix classification reads the same `issueTitle` block from
+  `.claude/work-item-conventions.json` and matches the same `pattern`. Default the proposed type
+  to the parent item's own `type:`, already settled at the parent's own intake, and still confirm
+  with a single `AskUserQuestion` only when it cannot be derived from that.
+- Step 5's linked-branch registration is the same `gh issue develop` form with the same plain
+  `git switch -c` fallback — with one difference, named in Step 5's own text: in this mode the
+  branch is recorded, not cut.
+- The brief is committed to the repository like any other, and it is not a product deliverable.
+
+**Four differences from the no-parent path, each with its reason:**
+
+1. **Step 3 (clarify before designing) is skipped.** The sub-task's acceptance criteria are its
+   handoff block, already approved by the user at the contract gate. Re-interrogating them
+   re-opens a decision that is not this mode's to reopen.
+2. **Step 3.5 (grade against the north-stars) is skipped.** The work was graded once at the
+   parent item's own intake and again when the contract was designed. Grading a task of an
+   already-approved contract re-litigates a settled decision. The brief records
+   `north_stars: inherited from <parent brief path>`.
+3. **Step 4 (size and route) is skipped.** The route is fixed: the sub-task is dispatched to
+   `/tdd-first` once it is released, never sized here. The brief records
+   `Routing: task of <contract path> — dispatched by /advance`, and Step 6's handoff to
+   `/design-first` never fires for a brief written in this mode.
+4. **Step 5 records the supplied branch name and creates nothing.** Say this loudly, because
+   ordinary Step 5 exists to create a branch. Cutting every sub-task's branch at contract-approval
+   time would seed each one from a parent branch that none of its own dependencies has actually
+   merged into yet. The branch is cut later, when the sub-task is released for dispatch, by the
+   delivery loop's own merge-gated dispatcher — which is also where the `gh issue develop`
+   registration finally runs.
+
+**Step 2.5 point 6, the offer to open an issue, does not fire in this mode.** Creating the
+sub-issue is this mode's whole purpose — the invocation itself is the request, on the same
+pre-authorization terms Step 6 already grants the `/design-first` handoff. Never ask again.
+
+**Create the sub-issue, then verify — a create's exit code is a request, never a fact:**
+
+```
+gh issue create --parent <PARENT_ISSUE> --title "[<TYPE>] <bare title>" --body "<the supplied SUB_TASK block, verbatim — no brief exists yet at this point to draw a body from>"
+```
+
+exits `0` when the request was accepted, not when the link exists. Immediately read it back.
+
+**Finding the script, under either install mode.** The script ships with the plugin and with a
+vendored copy, the same as `/advance`'s `pr_merged.py` lookup — resolve it once, the same way,
+then use the result:
+
+```bash
+VPL=$(ls .claude/scripts/verify_parent_link.py \
+         "$CLAUDE_PLUGIN_ROOT/.claude/scripts/verify_parent_link.py" \
+         ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/verify_parent_link.py \
+         2>/dev/null | head -1)
+```
+
+**If `VPL` comes back empty, halt loud and say so.** The four-row table below is what this mode
+branches on, and an unresolvable path produces no verdict at all — that silence must never be
+read as `linked`, or as anything else.
+
+```bash
+py -3 "$VPL" --sub <sub> --parent <PARENT_ISSUE> --json
+```
+
+Branch on its `verdict`. The verdict set and the repair budget both live in
+`.claude/work-item-conventions.json` → `issueLink` and its nested `parentLink` block, which is
+the single source of truth for both; where the table below and that file ever disagree, the
+conventions file governs. The table exists because the per-verdict *action* genuinely lives
+nowhere else:
+
+| Verdict | What it means | What this mode does |
+|---|---|---|
+| `unverifiable` | the resolver itself could not be reached — `gh` missing, unauthenticated, or the query failed | Halt loud. The create command's own exit code is never read as the answer. |
+| `no-parent` | GitHub reports no parent for the new sub-issue | Repair, up to `issueLink.maxRepairAttempts` time(s) — read the count from the conventions file, never hardcode it here: `gh issue edit <sub> --parent <PARENT_ISSUE>`, then re-run the verifier, passing `--repair-attempted`. Still `no-parent` once the budget is spent → halt. |
+| `foreign-parent` | GitHub reports a parent, but it names a different issue | Halt. Never re-parent automatically — reassigning an issue's parent is a destructive tracker mutation with no undo. |
+| `linked` | GitHub reports the expected parent | Proceed to write the brief. |
+
+**Fill in every frontmatter key the skipped steps would otherwise have set.** Steps 3, 3.5 and 4
+are skipped in this mode (below), and Step 5 creates nothing — which is exactly the set of steps
+that ordinarily assign `id:`, `url:`, `contract:`, `worktree:` and `status:`. Nothing else in
+this file fills them in for a Sub-Task Work Item, so this mode sets all five explicitly, plus the
+ordinary title/type split every brief gets:
+
+- `id:` — the sub-issue number `verify_parent_link.py` just confirmed `linked`. **Never the
+  parent's number** — the parent's number lives only in `parent_issue:` below (I-2).
+- `url:` and `repo:` — the created sub-issue's own link and its own owner/repository — never the
+  parent issue's.
+- `contract:` — the supplied `CONTRACT` value, verbatim. `/design-first` never runs in this mode,
+  so nothing else will ever fill this field in.
+- `worktree: none` — this mode creates no branch and no checkout; see Step 5 below.
+- `status: implementing`. This is settled, not a judgment call for whoever implements this mode:
+  sub-issue creation sits between two lifecycle values with no name of its own, because the
+  design is already done — it IS the contract — and the next thing that happens to a Sub-Task
+  Work Item is implementation.
+- `title:` and `type:` — the sub-task's name from its own handoff heading, split into a bare
+  title and an effort tag by Step 2.5's own matching procedure, exactly as any other brief's
+  title is split — this classification runs before the create, not after (see "Order of
+  operations" above).
+
+**Write the brief with its two new frontmatter keys.** Both are single tokens with no colon —
+the brief parser reads any colon-bearing line as a new key:
+
+- `parent_issue: <n>` — the parent issue's number.
+- `base: <branch name>` — the branch this sub-task's own branch will be cut from, i.e. the
+  supplied `BASE_BRANCH`.
+
+`parent_issue: none` if and only if `base:` names the repository default branch, in both
+directions. A brief carrying exactly one of the two keys without the other is a defect, not a
+shorthand, and halts. An ordinary brief written outside this mode carries neither key, and that
+absence is not a violation of the rule above — the rule binds a brief that carries at least one
+of the two keys, not every brief that has ever existed.
+
+**The brief path and the `branch:` field, and why both are exact.** Write the brief to
+`.claude/work-items/<date>-<sub-issue>-<sub-task-id>.md`, and set its `branch:` field to the
+caller-supplied `task/<contract-slug>/<sub-task-id>` verbatim — never a paraphrase of it. That
+exact value is what makes `/ship`'s own Step 0 branch-match lookup find this brief with no change
+to that lookup, and it is the same value the delivery loop's merge-to-sub-task mapper reads back
+at close time.
+
+**Never invent the sub-task's acceptance criteria.** The `SUB_TASK` field supplied at invocation
+is the contract's own numbered handoff block, already approved by the user — copy it into the
+brief's `## Acceptance criteria` section rather than re-deriving or summarizing it.
 
 ## Step 1: Resolve the work item
 
@@ -124,6 +295,8 @@ worktree: <path to the isolated checkout, or none — filled in Step 5>
 north_stars: <one-line grade summary from Step 3.5, e.g. advances gex-ui-narrative-insights,
              orthogonal to the rest — or none when the register holds no active thought.
              Keep it colon-free; the brief parser reads any colon line as a new key.>
+parent_issue: <n | none — set only by Parent-aware mode, see the prose below the template>
+base: <branch name | none — set only by Parent-aware mode, see the prose below the template>
 contract: <path — filled by /design-first>
 pr: <url — filled by /ship>
 partial: <true when the PR will deliberately NOT complete this item — /ship then
@@ -168,6 +341,19 @@ description field, or from the user. Never invented.>
 <trivial → direct implementer | non-trivial → /design-first>
 ```
 
+`parent_issue:` and `base:` are set **only** by Parent-aware mode (above). Per I-3, `parent_issue:
+none` if and only if `base:` names the repository default branch, in both directions. A brief
+carrying exactly one of the two without the other is a defect, not a shorthand, and halts. An
+ordinary brief written outside that mode carries **neither** key at all; that absence is not a
+violation of I-3 — I-3 binds a brief that carries at least one of the two keys, not every brief
+that has ever existed. `base:` records the branch this item's own branch is cut from — the parent
+branch, for a Parent-aware sub-task.
+
+**An agent writing an ordinary, no-parent brief from this template must not copy these two keys
+into it.** They exist in the template only to document what Parent-aware mode adds. The shape of
+a template is a stronger cue than a sentence inside it, so the omission is stated here as its own
+paragraph rather than left to be inferred from the placeholder wording.
+
 Fields you could not resolve are written as `UNKNOWN` — never guessed, never left blank.
 
 ## Step 2.5: Effort-type prefix
@@ -195,7 +381,11 @@ The three canonical types are `[BUG]`, `[IMPROVEMENT]`, `[FEATURE]`; the file al
 
    Ask before editing — you are modifying a shared artifact other people are looking at. If the user declines, keep the correct `type:` in the brief and note that the issue title is out of sync.
 5. **Free-text work (no issue)** → still classify. The type flows into the brief and into the title of the issue point 6 offers to open.
-6. **Offer to open the issue** (work item #39). Free-text work has always been a
+6. **Offer to open the issue** (work item #39). **This point does not fire in Parent-aware
+   mode** — creating the sub-issue is that mode's entire purpose, and the invocation itself is
+   already the request, on the same pre-authorization terms Step 6 grants its own handoff. See
+   "Parent-aware mode" for the create-and-verify procedure it runs instead. Everything below
+   this line describes the no-parent path. Free-text work has always been a
    first-class mode here, but it produced briefs with `id: none`, so `/ship` correctly
    omitted the closing line and the tracker never learned the work happened — 4 of the
    14 briefs in this repo, including PR #40's.
@@ -240,6 +430,11 @@ The three canonical types are `[BUG]`, `[IMPROVEMENT]`, `[FEATURE]`; the file al
 
 ## Step 3: Clarify before designing
 
+**Skipped entirely in Parent-aware mode.** See "Parent-aware mode" above, difference 1 — the
+sub-task's acceptance criteria are its handoff block, already approved by the user at the
+contract gate, and re-interrogating them re-opens a decision that is not this mode's to reopen.
+Everything below describes the no-parent path only.
+
 This is the step that earns the skill its place. Read the brief you just wrote and interrogate it:
 
 1. **Is every acceptance criterion verifiable?** "Works well" and "is fast" are not. Push each one to a form a test could assert. If the tracker's criteria are vague, that is a finding, not something to smooth over.
@@ -254,9 +449,17 @@ Use `AskUserQuestion` to resolve every gap. Batch related questions into one cal
 
 ## Step 3.5: Grade the item against the north-stars
 
+**Skipped entirely in Parent-aware mode.** See "Parent-aware mode" above, difference 2 — the
+work was graded once at the parent item's own intake and again when the contract was designed,
+so grading a task of an already-approved contract re-litigates a settled decision. The brief
+records `north_stars: inherited from <parent brief path>` instead. Everything below describes
+the no-parent path only.
+
 `.claude/north-stars/` is this project's WHAT-WE-WANT register. Until now it was read in exactly one place — `data-architect` Step 0.5, which only runs under `/design-first`. That left two holes this step closes. An XS/S item never reaches a contract, so it was never graded against the direction at all. And an aspiration the user voiced during intake was lost unless they separately remembered to type `/north-star`.
 
-Run this step for every item, whatever its size, after Step 3's clarification and before Step 4 sizes it. A conflict can change both the scope and the route, so the grade has to land first.
+In the no-parent path, run this step for every item that reaches it, whatever its size, after
+Step 3's clarification and before Step 4 sizes it. A conflict can change both the scope and the
+route, so the grade has to land first.
 
 ### 3.5a. Read the active register
 
@@ -302,6 +505,11 @@ Two boundaries:
 
 ## Step 4: Size and route
 
+**Skipped entirely in Parent-aware mode.** See "Parent-aware mode" above, difference 3 — the
+route is fixed: the sub-task is dispatched to `/tdd-first` once released, never sized here. The
+brief records `Routing: task of <contract path> — dispatched by /advance` instead. Everything
+below describes the no-parent path only.
+
 Classify, and record the justification in the brief:
 
 | Size | Shape | Route |
@@ -317,6 +525,11 @@ Apply `/design-first` Step 1's own rule when torn: **if unsure, treat as non-tri
 Set `status: clarified` in the frontmatter.
 
 ## Step 5: Workspace — branch, optionally a parallel worktree
+
+**In Parent-aware mode this step creates nothing.** It records the caller-supplied
+`BRANCH_NAME` into the brief's `branch:` field and stops there — see "Parent-aware mode" above
+for why the branch is cut later, at dispatch, rather than here. Everything below this line
+describes the no-parent path.
 
 **Pre-flight.** Read the current branch first. **Detached HEAD, mid-rebase, or mid-merge → halt.** Tell the user to resolve it before any branch or worktree is created; both paths below produce garbage from an unresolved index.
 
@@ -437,6 +650,10 @@ Write the branch name into the brief's `branch:` field and the worktree path (or
 
 ## Step 6: Hand off to /design-first
 
+**Parent-aware mode never reaches this step.** Its own Step 4 is skipped, so there is no size
+classification to route on — a task of an already-approved contract is dispatched to
+`/tdd-first` once released, never through this handoff.
+
 **This handoff is automatic and pre-authorized. Do not ask for permission, and do not hand the command back to the user to type.** Invoking `/task` on an M/L/XL item *is* the request for the chain this skill fronts — the contract is `/task → /design-first → …`, declared in the first line of this file. Stopping at Step 5 to print a `/design-first` command the user must run themselves delivers an intake and calls it a delivery. Run it in the same turn that finished Step 5.
 
 **This authorization extends to the agents `/design-first` dispatches on its own** — `data-architect` at its Step 2 and `contract-critic` at its Step 2.5, both spawned via the `Agent` tool. A standing "do not spawn agents unless the user asked for it" rule is *satisfied* here, not overridden: the user asked when they typed `/task`. Do not treat those dispatches as a separate decision requiring its own approval.
@@ -475,6 +692,11 @@ The `status:` frontmatter field tracks the item through the chain. Each stage up
 
 ## Anti-patterns (halt immediately)
 
+**Binds the no-parent path by default.** Parent-aware mode deviates from three of these on
+purpose — skipping Step 3, sizing before grading against the north-stars, and stopping after
+Step 5 without a design handoff — each already covered by its own skip notice at the step in
+question; that notice governs, not the entry below. Every other entry applies to both paths.
+
 - **Inventing acceptance criteria** because the tracker field was empty. Ask.
 - **Paraphrasing the issue into the contract** instead of passing the brief. The paraphrase drops the criteria that were not obvious to you — especially ones added in comments.
 - **Skipping Step 3 because the ticket "looks clear."** Tickets that look clear are the ones that ship the wrong thing.
@@ -489,6 +711,10 @@ The `status:` frontmatter field tracks the item through the chain. Each stage up
 - **Recording a `conflicts` grade without asking.** The conflict is the user's call to make. Noting it in the brief and proceeding hands `contract-critic` a blocker the user never saw.
 - **Folding a captured aspiration into the acceptance criteria.** The north-star is the long horizon and the work item is this week. Merging them produces an item that cannot be finished.
 - **Writing the brief anywhere but `.claude/work-items/`.** As of 2026-08-22 the brief IS committed to the repo — that is deliberate, so a work item travels with the branch instead of living only on one workstation. It is still not a *product* deliverable: it does not ship to users and it does not belong under `docs/` or `src/`.
+- **Naming a Parent-aware task's branch anything other than `task/<contract-slug>/<sub-task-id>`.** The delivery loop maps a merged pull request to its sub-task by that exact branch name; anything else — including a name that reads as an obvious improvement — falls through to unmapped, and the merge cannot be attributed to the work it closed. This is the concrete defect that motivated writing this mode at all.
+- **Creating a sub-issue in Parent-aware mode without reading the parent link back.** `gh issue create --parent`'s exit code is a request, never a fact. Always follow it with `verify_parent_link.py` and branch on its verdict before writing anything else.
+- **Cutting a task's branch at creation time in Parent-aware mode.** Its own Step 5 records the branch name only. Cutting it early seeds the sub-task from a parent branch that none of its own dependencies has merged into yet.
+- **Writing a Parent-aware brief's acceptance criteria after delivery, or inventing them at creation.** The `SUB_TASK` field supplied at invocation is the contract's own approved handoff block — copy it into the brief when the brief is written, never after the work is done and never re-derived from memory.
 
 ## When NOT to use this skill
 
@@ -498,6 +724,9 @@ The `status:` frontmatter field tracks the item through the chain. Each stage up
 
 ## Skill integrations
 
+- **Invoked in Parent-aware mode by** `/flow`, once per mergeable sub-task of an approved
+  contract — see "Parent-aware mode" above. The branch it records is cut later, by the delivery
+  loop's own merge-gated dispatcher, never by this skill.
 - **Hands off to** `/design-first` (M/L/XL) or `/debug` (bugs) or a direct implementer (XS).
 - **Invokes** `/north-star` at Step 3.5d, when the intake text carries an aspiration alongside the concrete request. That invocation is pre-authorized by `/task` itself.
 - **Reads** `.claude/north-stars/` at Step 3.5 and writes the grade into the brief, which `data-architect` Step 0.5 then verifies rather than re-derives. `/north-star-review` remains the only thing that maintains a north-star's Current gap and Suggested next steps sections — this skill never edits a north-star file.
