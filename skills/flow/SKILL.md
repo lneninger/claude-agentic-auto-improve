@@ -111,6 +111,171 @@ When the contract is approved, write its path into the brief's `contract:` field
 Orchestrator. Respect it: under `/flow`, always take the traditional workflow and go to
 Step 4. The closing section of this file records why.
 
+## Step 2.7: Open the sub-tasks
+
+**Guard, checked first, before anything else in this step, on every entry — a fresh run and a
+resumed one alike.** If this run's own brief carries a `parent_issue:` field, this run is one of
+the sub-tasks this step creates, not the contract's parent run, and this step never executes for
+it. The factory writes the same `status:` value into a sub-task's own brief that it writes into
+the parent's, so `status:` alone cannot tell the two apart — `parent_issue:`, the field this
+mechanism introduced, is what does. This check belongs here and not only in the resume table
+below, because a resumed run is not the only way this step gets reached. Skipping is not
+optional: running this step again from a sub-task's own brief would open a second set of
+sub-issues against the very contract that already produced this one, which is the failure this
+whole design exists to prevent.
+
+Runs once the contract is approved, between the design gate above and implementation below —
+it cannot run any earlier, because the sub-task list exists only once the contract does.
+
+Ask the contract's own script whether it decomposes into more than one deliverable. Never answer
+that by re-reading the contract's handoff section — the same rule `/advance` follows for the same
+reason: two implementations of one rule will disagree.
+
+**Finding the script, under either install mode** — the identical lookup `/advance` Step 1
+already documents, reused rather than restated as a second copy:
+
+```bash
+PRM=$(ls .claude/scripts/pr_merged.py \
+         "$CLAUDE_PLUGIN_ROOT/.claude/scripts/pr_merged.py" \
+         ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/pr_merged.py \
+         2>/dev/null | head -1)
+```
+
+**If `PRM` comes back empty, stop and say so** — the same halt `/advance` takes, for the same
+reason: every rule this step needs lives in that file.
+
+```bash
+py -3 "$PRM" --contract <slug> --status --json
+```
+
+Read `defects` and `sub_tasks` from the answer and go no further into the contract than that,
+with one named exception: `sub_tasks` carries each block's identity and its heading-derived name,
+never the block's own body text, because the script's `--status` mode never calls its own body
+reader — that reader only runs in the release path, and only for a sub-task already merged.
+Where a later step in this section needs the numbered handoff block itself, matching the heading
+`sub_tasks` already gave is the one place this step reads the contract directly. No other read
+into the contract is licensed here.
+
+1. **`defects` non-empty → report each one, its block and its reason, and stop. Create nothing.**
+   Asked first, before the count below, for the reason `/advance` asks it first: a contract whose
+   blocks are all malformed parses to an empty task list, and opening tracker records for a plan
+   that cannot be delivered makes records for work nobody can do.
+2. **`len(sub_tasks) <= 1` → stop here.** No sub-issue, no state-store identity fields, no change
+   to Step 3 below. This is the true no-op case, and the discriminator is the script's own
+   mergeable count — never a second reading of the contract, and never a heading count taken by
+   eye.
+3. **`len(sub_tasks) >= 2` → open one sub-task per entry, in ordinal order.**
+
+   Before creating anything:
+
+   ```bash
+   gh --version && gh auth status
+   ```
+
+   **Unavailable → stop the run and say so.** Do not fall back to running the contract as a
+   single block, and do not fall back to cutting branches from the default branch. Either
+   fallback produces today's topology while the operator believes they got the new one, which is
+   worse than a halt.
+
+   For each sub-task, decide what to do from stored evidence, in this declared order — **never**
+   from a title search, because two sub-tasks of one contract can legitimately share a title
+   prefix, and a search that matched one would silently skip a sub-task that has none:
+
+   1. **The state store already carries an `issue` for this sub-task** — read
+      `state.sub_tasks.<sub-task-id>.issue` off the same `--status --json` answer, not a second
+      query — **skip creating it**, and re-verify that stored number's Parent Link before
+      trusting it, through the same verifier `/task` uses on its own create, resolved the same
+      way:
+
+      ```bash
+      VPL=$(ls .claude/scripts/verify_parent_link.py \
+               "$CLAUDE_PLUGIN_ROOT/.claude/scripts/verify_parent_link.py" \
+               ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/verify_parent_link.py \
+               2>/dev/null | head -1)
+      py -3 "$VPL" --sub <stored issue> --parent <the parent issue number> --json
+      ```
+
+      Anything other than `linked` halts this sub-task — but not "the same way a fresh create's
+      own verification would": a fresh create still has `/task`'s own single repair attempt
+      available before it settles on a verdict, and this read-back issues no tracker mutation of
+      any kind, repair included. The halt here is still correct; it follows because this step may
+      make no tracker write at all, not because it mirrors a create that can.
+   2. **No state entry, but a Sub-Task Work Item already exists** whose `branch:` field equals
+      `task/<contract-slug>/<sub-task-id>` exactly — the same match `/ship` Step 0 already uses to
+      find a brief by its current branch — and whose `id:` is resolved → re-verify that brief's
+      `id:` against the parent issue before adopting it, through the same verifier point 1 uses,
+      resolved the same way:
+
+      ```bash
+      VPL=$(ls .claude/scripts/verify_parent_link.py \
+               "$CLAUDE_PLUGIN_ROOT/.claude/scripts/verify_parent_link.py" \
+               ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/verify_parent_link.py \
+               2>/dev/null | head -1)
+      py -3 "$VPL" --sub <brief's issue id> --parent <the parent issue number> --json
+      ```
+
+      Anything other than `linked` halts this sub-task, for the same narrower reason point 1's
+      halt carries. Only on `linked` → adopt that `id:` and `base:` into the state store and
+      create nothing. A brief on disk is not a stronger witness than a stored number for being
+      newer — if anything it is weaker, since nothing else in this design re-reads or re-checks
+      it once written — so it earns the same scrutiny, not less.
+
+      **This step does not reconcile a state entry and a brief that disagree with each other**
+      about which issue a sub-task resolves to. By the declared order above, a given sub-task
+      only ever consults one of the two, so a live disagreement between them is never visible
+      here. What does catch a wrongly adopted number is point 4's roll-up below: an id adopted
+      here that the parent's own sub-issue list does not actually carry surfaces there as a
+      mismatch.
+   3. **Neither** → invoke `/task` through the Skill tool in parent-aware mode, all five fields
+      present every time — this mode never triggers on a subset, and a partial set produces
+      neither the old path nor the new one:
+
+      ```
+      /task <the sub-task's name from its handoff heading>
+      PARENT_ISSUE: <the parent issue number, from this run's own brief>
+      BASE_BRANCH: <the parent branch, from this run's own brief>
+      BRANCH_NAME: task/<contract-slug>/<sub-task-id>
+      CONTRACT: <this run's contract path>
+      SUB_TASK: <the contract's numbered handoff block, verbatim — the one named exception to
+                the "go no further into the contract" rule above>
+      ```
+
+      `/task` creates the sub-issue, verifies its own Parent Link, and writes the sub-task's own
+      brief. This step issues no tracker command of its own and repeats none of that work — if a
+      line here starts to read like `gh issue create`, stop, because every tracker artifact in
+      this design comes from `/task` and a create issued from this file duplicates the exact
+      thing this feature exists to remove.
+
+      Then find the brief `/task` just wrote — the same `branch:` match used in point 2 above —
+      and read its `id:` and `base:` back. Record all three into the state store through the
+      script's own writer, never by hand:
+
+      ```bash
+      py -3 "$PRM" --contract <slug> --record-subtask <sub-task-id> --issue <n> --base <branch> --brief <brief-path>
+      ```
+
+   **A create or its verification fails part-way through the set → halt, and report exactly
+   which sub-tasks have an issue and which do not.** Say that re-running this step creates only
+   the missing ones. **Do not roll back** — deleting tracker records to tidy a partial run loses
+   more than it saves.
+
+4. **Roll up.** Once every sub-task above has been handled, read the parent issue's own
+   sub-issue list once and compare it against the sub-issue numbers just created or adopted, in
+   both directions. Report the comparison.
+
+   - **A sub-issue this run expected but the parent does not report → halt.** Something between
+     creation and this check did not land.
+   - **A sub-issue the parent reports that this run did not expect → name it and halt, without
+     closing it.** An amended contract is the ordinary way this happens, leaving an earlier
+     sub-task the contract has since dropped still open on the parent. Whether that orphan should
+     be closed is not this step's call to make on a local belief about the contract's current
+     shape; report it and let the operator decide.
+
+**No new `status:` value.** Sub-issue creation sits between `designing` and `implementing` in
+the brief's lifecycle, but the state store already carries the finer-grained record, and a
+seventh status would need every consumer of the existing six updated for a distinction this file
+does not need. This is a decision, not an omission.
+
 ## Step 3: Implement, test first
 
 **If the contract carries sub-tasks, hand the inner loop to `/advance`.** A contract whose
@@ -214,6 +379,49 @@ produced.
 If the target was `--to-commit`, report and stop here.
 
 ## Step 7: Ship
+
+**Before invoking `/ship`, check whether this run is the parent of any sub-tasks.** Step 2.7
+already answered this once, but ask again here: the run may have taken hours or days to reach
+this point, and a child sub-task can still be sitting open.
+
+**If this run's own brief carries no issue, skip this whole check and proceed to `/ship`
+unchanged.** A brief with no issue has no children by definition, and querying a tracker record
+that does not exist returns an error with no defined outcome — never read that as "no children
+open."
+
+Otherwise, read the child list with the command `.claude/work-item-conventions.json` names at
+`issueLink.parentLink.parentListCommand`, filling in this run's own `id:` from the brief for the
+placeholder that key uses. That key is the single source of truth for this query — do not write
+a second copy of it here, and on any disagreement between this section and what that key names,
+the key governs. Read each child's `state` in the casing that command's own JSON actually uses: a
+`gh issue view --json` call reports state as `OPEN` / `CLOSED`, nested under
+`.subIssues.nodes[]` — not the lowercase `open` / `closed` a `gh api .../sub_issues` call would
+report for the identical children. The two `gh` forms are not interchangeable, and a check
+written against the wrong one passes with every child open, which is the exact failure this step
+exists to prevent. Confirm the casing against the live tracker before trusting either form.
+
+**The query itself can fail** — `gh` missing, the token expired, the network down, or the
+request erroring outright. This step runs long after intake, which is exactly when a token can
+expire. Check the tool first, the way Step 2.7 already does, and **halt the run and say so** if
+the command errors or returns no valid JSON. Reading a failed or unreachable query as "no
+children open" would ship the parent pull request with every child still open and report
+success — worse than having no gate here at all.
+
+**An empty list is the single-block case and every ordinary item's case alike — proceed to
+`/ship` exactly as below, unchanged.** A non-empty list means this run is a parent, whether or
+not Step 2.7 ran in this same session — a run resumed straight from a stored `id:` reaches this
+same check.
+
+**Any child reporting `state: OPEN` → refuse to invoke `/ship`.** Report which sub-issues are
+still open and stop. Do not push, do not open the pull request, and do not report a partial
+success. Read the children from the parent issue itself, never from the state store, so a
+sub-task somebody merged by hand outside this run still counts. This is the one gate this
+mechanism adds to a step that otherwise does not change, and it is what stops the parent pull
+request from merging while work beneath it is still open — the same merge that, through the
+linked branch cut back at Step 1, would otherwise auto-close the parent issue regardless of
+intent.
+
+**Every child reporting `state: CLOSED`, or no children at all → proceed.**
 
 Invoke `/ship`. It re-runs the verification gate, commits anything outstanding, pushes the
 branch from the tree that holds the commits, and opens a draft pull request linked back to
