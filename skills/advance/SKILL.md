@@ -55,8 +55,10 @@ py -3 "$PRM" --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
-by ninety-three tests and has been mutation-probed. **Read its answer. Do not recompute it from
-the contract**, or there are two implementations of the same rules and they will disagree.
+by 226 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
+`unittest` summary line reads `Ran 226 tests ... OK` — and has been mutation-probed. **Read its
+answer. Do not recompute it from the contract**, or there are two implementations of the same
+rules and they will disagree.
 
 The answer carries `next_move.action`, plus `dispatch` packets when there is something to start.
 
@@ -97,8 +99,23 @@ It cuts the branch from a freshly fetched default branch, records the sub-task a
 work that has nothing to build on. Add `--dry-run` to see the packet without cutting anything.
 
 
-Each packet names the sub-task, its branch, its agent, its file scope, and the pre-written TASK
-block the architect wrote into the contract.
+Each packet names the sub-task, its branch, its agent, its file scope, the pre-written TASK
+block the architect wrote into the contract, and the Sub-Task Cycle: `cycle` (always exactly
+one stage, since this repository's decomposition rule already splits a red stage and a green
+stage across two separate blocks, each with its own pull request — decided by what the block
+DECLARES, never by who is assigned) and `cycle_basis` (which declaration decided it).
+
+**Render `cycle_basis` before dispatching**, so an operator can tell a stage the contract asked
+for from an unphased stage the loop fell back to:
+
+| `cycle_basis` | What decided the stage |
+|---|---|
+| `verdict-bearing` | the block's `Files to touch` names a path under `.claude/reviews/` |
+| `declared-phase` | the block's own TASK block declares `phase: RED` or `phase: GREEN` |
+| `no-declared-phase` | the block declared neither — the packet's `unphased` stage is the loop's own fallback, never a stage the contract asked for |
+
+Each `stage["stage"]` is one of exactly four names — `review`, `red`, `green`, `unphased`. **Never
+print a stage word the packet did not ship.**
 
 **One released sub-task** → start it. **Several** → list them and ask which. Each is a full
 implementation run, and starting three at once spends a lot of work on the operator's behalf.
@@ -106,10 +123,19 @@ implementation run, and starting three at once spends a lot of work on the opera
 For the one being started:
 
 1. **The branch already exists** — the dispatch command cut it and recorded it in state.
-2. **Run `/tdd-first`** with the packet's TASK block as the task, its file list as the scope,
-   and the contract as the authority. Tests fail first; then the least code that turns them
-   green.
-3. **Run `/ship`** to open a draft pull request for that sub-task, and only that sub-task.
+2. **Dispatch every stage of `cycle`, in order, as its own fresh subagent.** This project's own
+   decomposition already splits red and green across two separate sub-tasks (Non-Goals), so
+   `cycle` in practice carries exactly one stage — but the loop reads however many the contract
+   declares, never a fixed count this prose assumes. For each stage, launch a **fresh subagent**
+   of `stage["agent"]` — never this session — and give it exactly four things: the contract path
+   (`packet["contract"]`), the packet's own pre-written TASK block (`packet["task_block"]`), the
+   packet's file list (`packet["files"]`), and the branch (`packet["branch"]`).
+   `stage["isolation"]` is always the constant `fresh-subagent`: that constant IS the isolation
+   an operator used to have to produce by remembering to `/clear` between sub-tasks, and the loop
+   now produces it by launching a new subagent per stage instead.
+3. **Run `/ship`** to open a draft pull request for that sub-task, and only that sub-task. This
+   stays in the main session and is unchanged — Non-Goals rules out the dispatched subagent
+   opening its own pull request.
 4. **Stop.** Report the pull request and say plainly that the contract now waits for a merge,
    and that `/pr-merged` is what continues it.
 
@@ -143,7 +169,10 @@ decisions the architect makes.
 
 ### `complete` — every sub-task has a record
 
-Say so, then hand to `/verify-before-done` and afterwards `/ship` for the contract as a whole.
+Say so, then hand off using the closing call's `next_command`, printed verbatim (Step 3 below).
+Today that is `/verify-before-done`, followed by `/ship` for the contract as a whole. For a
+contract with two or more mergeable sub-tasks, confirm every sub-issue is closed before the
+contract's parent pull request is marked ready — nothing enforces it yet.
 
 **Do not declare the contract finished here.** That the last sub-task closed is a fact this
 skill can report. Whether the contract is done is a verdict belonging to verification.
@@ -176,20 +205,34 @@ blocks. `/design-first` is where that happens.
 
 ## Step 3: Report, in the same shape every time
 
+**First, make one more call to the script — read-only, and AFTER the move this skill just
+took:**
+
+```bash
+py -3 "$PRM" --contract <slug> --status --json
+```
+
+**The closing line comes from THIS call's `next_command`, never from Step 1's.** Step 1's
+answer described the state *before* this skill acted; printing it as the closing line says
+"clear, then advance" at the exact moment this skill is about to dispatch — the stale-answer
+defect this ordering exists to remove. The script computes the Next Command; this skill only
+prints it verbatim, exactly as `pr_merged.py`'s own human-readable output does.
+
 ```
 ### ADVANCE REPORT
 - Contract: <slug>  (<n> sub-tasks)
 - Next move: <action>
 - Contract defects: <block — reason, one line each | none>
-- Started: <sub-task -> branch -> pull request url, or none>
+- Started: <sub-task -> branch -> cycle stage(s) dispatched -> pull request url, or none>
 - Failed: <sub-task — severity, reason | none>
 - Blocked: <sub-task <- what holds it, one line each | none>
 - Waiting on: <the merge this now needs, or nothing>
-- Continue with: </pr-merged <pr> | /design-first | /verify-before-done | nothing>
+- Next command: <the FINAL call's next_command.commands, joined by ", then ", or "none — <reason>">
 ```
 
 The last two lines matter most. An operator who cannot see what the contract is waiting for,
-and what to type next, will either sit watching it or walk away at the wrong moment.
+and what to type next, will either sit watching it or walk away at the wrong moment. **The next
+command is the script's own field, read after the move — never a line this skill composes.**
 
 ## Where this sits
 
@@ -206,8 +249,8 @@ directly.
 ## What is pre-authorized, and what is not
 
 **Pre-authorized when `/flow` or the operator invoked this:** reading the script's answer,
-creating the branch the packet names, running `/tdd-first` for the dispatched sub-task, and
-reporting.
+creating the branch the packet names, dispatching the packet's cycle stage(s) as fresh
+subagents, and reporting.
 
 **Always the operator's call:** which sub-task to start when several are released, the commit
 confirmation, opening the pull request, amending a contract after an escalation, and anything
@@ -226,6 +269,13 @@ that would start work the script did not release.
   avoid.
 - **Declaring the contract finished** because the last sub-task closed. Verification decides.
 - **Retrying a failed sub-task** without the architect. Whether to retry is their decision.
+- **Running a cycle stage inline, in this session,** instead of dispatching it as a fresh
+  subagent. `stage["isolation"]` is the constant `fresh-subagent` for a reason.
+- **Naming a cycle stage the packet did not ship,** or inferring one from `agent_role`. The
+  closed set is `review`, `red`, `green`, `unphased`, read off `stage["stage"]` for each entry
+  of `cycle`, in order — never `cycle[0]` alone.
+- **Printing Step 1's `next_command` as the closing line.** It describes the state before this
+  skill acted. Only a call made *after* the move reflects what changed.
 
 ## When NOT to use this skill
 
