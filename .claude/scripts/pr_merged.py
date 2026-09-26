@@ -639,6 +639,52 @@ def reconcile_subtask_identity(state_entry: Dict[str, Any],
     return "; ".join(mismatches) if mismatches else None
 
 
+def base_not_declared(state: Dict[str, Any], subtask_id: str,
+                       default_base: str) -> Optional[str]:
+    """Refuse a dispatch whose own entry declares no base beside a sibling
+    that already declares a real parent -- Defect Two, second half.
+
+    Pure. Fires only when BOTH hold: the subject's own entry has no base
+    (the key is missing, or it is ``null``), and at least one OTHER entry
+    in the same state declares a base that is not ``default_base``.
+    Otherwise returns ``None`` -- this is I-8's own carve-out, kept intact:
+    a state where no entry declares a non-default base triggers nothing,
+    however the subject's own entry reads, and it dispatches from
+    ``default_base`` exactly as before this refusal existed. The subject's
+    own entry is never counted among the "other" entries, and an id with no
+    entry in the state at all counts as having no base, the same as a
+    present entry with a missing or null base key.
+
+    Returns a description naming every other declared base on record, for
+    the caller to print as the refusal's detail -- never a bare boolean --
+    so the operator sees the remedy (record the sub-task's own identity
+    with ``--record-subtask ... --base <parent>``) without having to go
+    read the state store by hand.
+    """
+    sub_tasks = state.get("sub_tasks", {})
+    subject = sub_tasks.get(subtask_id) or {}
+    if subject.get("base"):
+        return None
+
+    other_bases = {
+        entry.get("base")
+        for tid, entry in sub_tasks.items()
+        if tid != subtask_id and entry.get("base")
+    }
+    other_bases.discard(default_base)
+    if not other_bases:
+        return None
+
+    return (
+        "sub-task %r declares no base, but this state already declares %s on "
+        "another sub-task in the same contract -- record this sub-task's own "
+        "identity with --record-subtask %s --issue <n> --base <parent> "
+        "--brief <path> (running /task in Parent-aware mode first if it has "
+        "no brief yet), then dispatch again"
+        % (subtask_id, sorted(other_bases), subtask_id)
+    )
+
+
 def mark_dispatched(state: Dict[str, Any], subtask_id: str, branch: str) -> Dict[str, Any]:
     """Record that a sub-task was started and is now waiting for a merge.
 
@@ -665,6 +711,37 @@ def reconcile_state(state: Dict[str, Any], records: Dict[str, Dict[str, Any]]) -
         status = rec.get("status")
         if status in ("completed", "failed"):
             st["sub_tasks"][tid]["status"] = status
+    return st
+
+
+def backfill_state(state: Dict[str, Any], tasks: List[SubTask]) -> Dict[str, Any]:
+    """Add a pending entry for every planned id the stored state lacks.
+
+    Defect Two: a sub-task appended to a contract after its state store was
+    first written is invisible to ``--record-subtask`` and to every other
+    read of ``state["sub_tasks"]`` until something adds it. This is that
+    something, applied by ``main()`` right after loading so every existing
+    path -- including the refusal of an id outside the plan -- works on the
+    complete set. Pure: returns a new state, never mutates the one it is
+    given.
+
+    Each added entry carries ``new_state``'s own six keys, with ``base``
+    explicitly ``None`` -- never the repository default branch. The only
+    base ``main()`` holds at this point is ``default_branch()``, and
+    stamping it here would silently cut a backfilled sub-task from the
+    default branch even where a sibling in this same contract carries a
+    declared parent branch (Defect Two, second half; see
+    ``base_not_declared``, the refusal that catches exactly that). It only
+    ever adds: an existing entry, whatever it already carries, is left
+    byte-identical, and an entry whose id is no longer planned is never
+    removed.
+    """
+    st = copy.deepcopy(state)
+    sub_tasks = st.setdefault("sub_tasks", {})
+    for t in tasks:
+        if t.id not in sub_tasks:
+            sub_tasks[t.id] = {"status": "pending", "branch": None, "pull_request": None,
+                               "issue": None, "base": None, "brief": None}
     return st
 
 
@@ -1127,6 +1204,29 @@ def file_at_commit(sha: str, path: str) -> Optional[str]:
     return out if code == 0 else None
 
 
+def ensure_commit_local(sha: str, ref: str) -> bool:
+    """Confirm the merge commit is in the local clone -- Defect One's edge.
+
+    Consulted only when a first read at ``sha`` yields nothing, so that a
+    commit already present costs one presence check and nothing else. Runs
+    ``git cat-file -e <sha>^{commit}``; only on failure does it run ONE
+    ``git fetch origin <ref>`` -- ``ref`` is the pull request's own
+    ``baseRefName``, where the merge commit lives, never the repository
+    default branch -- and checks presence again, whatever the fetch's own
+    exit code reports. A fetch that itself succeeds is not proof the commit
+    is now present; only the re-check answers that. Every call goes through
+    ``_run``, so no real git process starts under a patched module, and no
+    more than one fetch is ever attempted per call.
+    """
+    presence_cmd = ["git", "cat-file", "-e", f"{sha}^{{commit}}"]
+    code, _out = _run(presence_cmd)
+    if code == 0:
+        return True
+    _run(["git", "fetch", "origin", ref])
+    code, _out = _run(presence_cmd)
+    return code == 0
+
+
 def default_branch() -> str:
     code, out = _run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"])
     return out.rsplit("/", 1)[-1] if code == 0 and out else "master"
@@ -1334,6 +1434,13 @@ def main() -> int:
     # `base` is already resolved on the line above -- hand it to new_state so
     # a fresh state store costs one subprocess, not two (Extension Points).
     state = load_state(slug) or new_state(slug, tasks, base=base)
+    # Defect Two: a sub-task the plan already declares but the stored state
+    # was written before may still be entirely absent from it (an amendment
+    # appended it after the fact). backfill_state applies right here, before
+    # anything below reads `state["sub_tasks"]` -- including --record-subtask,
+    # which would otherwise refuse an id /flow's sub-issue step already
+    # opened a sub-issue for on GitHub.
+    state = backfill_state(state, tasks)
 
     if args.record_subtask:
         # /flow Step 2.7's writer: stamp one sub-task's issue, declared base
@@ -1457,12 +1564,26 @@ def main() -> int:
         if verdict_file and merge_sha:
             artefact_text = file_at_commit(merge_sha, verdict_file)
             # parse_review_verdict stays pure: it reports what the artefact
-            # says, or nothing. "unreadable" is the loop's own judgement
-            # about an artefact -- absent, unparseable, or out of the closed
-            # set -- and is never something a gate writes, so it is named
-            # here rather than by the parser.
-            reading = parse_review_verdict(artefact_text) if artefact_text is not None else None
-            review_verdict = reading or "unreadable"
+            # says, or nothing. Two readings are this loop's own judgement,
+            # never something a gate writes, so both are named here rather
+            # than by the parser. "unreadable" means the commit is in the
+            # local clone but the artefact still can't be parsed -- absent,
+            # malformed, or out of the closed set. "unfetched" means the
+            # commit itself never made it into the local clone even after
+            # one fetch attempt -- a different failure with a different
+            # remedy (fetch it, don't rewrite it), so Defect One's fetch
+            # (ensure_commit_local) runs only on a first empty read, and
+            # only that outcome decides between the two.
+            if artefact_text is None:
+                if ensure_commit_local(merge_sha, pr.get("baseRefName") or base):
+                    artefact_text = file_at_commit(merge_sha, verdict_file)
+                    reading = parse_review_verdict(artefact_text) if artefact_text is not None else None
+                    review_verdict = reading or "unreadable"
+                else:
+                    review_verdict = "unfetched"
+            else:
+                reading = parse_review_verdict(artefact_text)
+                review_verdict = reading or "unreadable"
 
         # I-10: close the sub-issue only once a merge into an accepted base
         # is confirmed, and only when this sub-task actually has one --
@@ -1511,6 +1632,22 @@ def main() -> int:
                                   "detail": "its dependencies have not landed; dispatching it "
                                             "would build on work that does not exist"}))
             return 3
+
+        # Defect Two, second half: an entry with no declared base falls back
+        # to `base` (default_branch()) two lines below, silently, even where
+        # a sibling in this same contract already declares a real parent
+        # branch -- sub-task 10's own position. This refusal runs BEFORE
+        # that fallback is ever read, before the identity check, and before
+        # any branch is cut, in every mode including --dry-run -- a dry run
+        # must preview the real run, not silently succeed. I-8 stays intact:
+        # a state where no OTHER entry declares a non-default base triggers
+        # nothing here, and dispatch proceeds exactly as it did before this
+        # refusal existed.
+        base_refusal = base_not_declared(state, task.id, base)
+        if base_refusal:
+            print(json.dumps({"error": "base-not-declared", "sub_task": task.id,
+                              "detail": base_refusal}))
+            return 7
 
         task_state_entry = state.get("sub_tasks", {}).get(task.id, {})
         # I-1 -- the acceptance criterion this whole feature exists to

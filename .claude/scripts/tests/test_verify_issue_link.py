@@ -874,11 +874,14 @@ def case_17_resolver_failure_on_every_gh_read():
     # The hardcoded "master" fallback must be gone: a repo whose default branch
     # is `main` must NOT be told its base is not the default branch.
     #
-    # `closing=[]` IS THE POINT. Rule 12 is the only rule that reads
-    # baseIsDefaultBranch, and it sits BELOW rule 11 (`linked`). An earlier
-    # version of this check passed `closing=MATCHING`, so rule 11 fired first
-    # and the guarded field was never evaluated -- hardcoding "master" back into
-    # the subject left the whole suite green. In a first-match-wins procedure a
+    # `closing=[]` IS THE POINT. baseIsDefaultBranch is read by TWO rules now --
+    # rule 11 (deferred-close, `not baseIsDefaultBranch`) and rule 12 (`linked`,
+    # `baseIsDefaultBranch`) -- and this fixture carries no resolved link and no
+    # body residue, so rule 11 never fires and the base==default-branch guard on
+    # rule 12 is the one actually exercised. An earlier version of this check
+    # passed `closing=MATCHING`, so a resolved-link rule fired first and the
+    # guarded field was never evaluated -- hardcoding "master" back into the
+    # subject left the whole suite green. In a first-match-wins procedure a
     # fixture must be built to REACH the rule under test.
     name = "17 default branch is read from gh, not hardcoded to master"
     with tmp() as d:
@@ -1236,7 +1239,8 @@ def case_22_deferred_close_headline():
         if r is None:
             return
         check(name, r["verdict"] == "deferred-close", "got %r" % r["verdict"])
-        check("22 deferred-close is NOT linked -- the new rule wins the position",
+        check("22 deferred-close is NOT linked -- guarded by the baseIsDefaultBranch "
+              "check on rule 12 (linked), not by rule position",
               r["verdict"] != "linked", "got %r" % r["verdict"])
         check("22 deferred-close writes issue_link: deferred",
               r.get("issue_link") == "deferred", "got %r" % r.get("issue_link"))
@@ -1438,6 +1442,186 @@ def case_28_undeclared_target_rename_is_complete():
     check(name, hits == [], "found the retired verdict name: %r" % (hits,))
 
 
+# ==========================================================================
+# Case 29-31 -- B1: the residue disjunct of rule 11 (deferred-close), the
+# half no case 22-27 ever reaches. Every case there carries a RESOLVED link
+# (relation == "match"). These three carry NO resolved link and instead read
+# `bodyHasClosingRefToThisIssue and not bodyHasRefsToThisIssue` -- the
+# contract's block 9 tests 3 and 4, plus a cross-repository variant of test
+# 3. Probe P3 (delete the residue disjunct, leaving `relation == "match"`
+# only) must turn cases 29 and 30 red; probe P5 (delete sameRepo from rule
+# 11) must turn case 31 red as well as case 23.
+# ==========================================================================
+def case_29_deferred_close_body_only_closing_ref():
+    """Contract block 9, test 3: B1.
+
+    A body already carrying "Closes #39" with NO resolved link, on a
+    declared non-default base, must return deferred-close with zero repairs
+    and no duplicated closing line. On the mutant (probe P3) this exact
+    input reaches rule 15 instead and returns absent-repairable, proposing a
+    body with the closing line DUPLICATED -- the defect measured on pull
+    request #173.
+    """
+    name = "29 deferred-close: body carries Closes #39, no resolved link, declared non-default base"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        root = Path(d)
+        body = "## Summary\n\nCloses #39\n"
+        r = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=[], body=body, base="feature/160-parent",
+                    default_branch="master"),
+            declared_base="feature/160-parent",
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "deferred-close", "got %r" % r["verdict"])
+        check("29 deferred-close: proposedBody is None (zero repairs)",
+              r.get("proposedBody") is None, "got %r" % r.get("proposedBody"))
+        check("29 deferred-close: exactly one 'Closes #39' line, never duplicated",
+              body.count("Closes #39") == 1, "body=%r" % body)
+
+
+def case_30_deferred_close_repair_then_requery():
+    """Contract block 9, test 4: B1.
+
+    Two steps. An empty body reaches absent-repairable and proposes a
+    repaired body. Feeding that proposedBody back with repair_attempted=True
+    must return deferred-close, NEVER still-absent -- the repaired body now
+    carries the closing line the residue disjunct reads. On the mutant
+    (probe P3) the second step returns still-absent instead.
+    """
+    name = "30 deferred-close step 1: empty body -> absent-repairable"
+    if need_subject(name):
+        return
+    repaired_body = None
+    with tmp() as d:
+        root = Path(d)
+        r1 = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=[], body=PLAIN_BODY, base="feature/160-parent",
+                    default_branch="master"),
+            declared_base="feature/160-parent",
+        )
+        if r1 is None:
+            return
+        check(name, r1["verdict"] == "absent-repairable", "got %r" % r1["verdict"])
+        repaired_body = r1.get("proposedBody")
+        check("30 deferred-close step 1: a body was actually proposed",
+              bool(repaired_body), "got %r" % repaired_body)
+    if not repaired_body:
+        return
+
+    name = ("30 deferred-close step 2: re-query with the repaired body -> "
+            "deferred-close, not still-absent")
+    with tmp() as d:
+        root = Path(d)
+        r2 = _try_verify_declared(
+            name, write_brief(root), write_conventions(root),
+            gh_stub(closing=[], body=repaired_body, base="feature/160-parent",
+                    default_branch="master"),
+            declared_base="feature/160-parent",
+            repair_attempted=True,
+        )
+        if r2 is None:
+            return
+        check(name, r2["verdict"] == "deferred-close", "got %r" % r2["verdict"])
+        check("30 deferred-close step 2: is NOT still-absent",
+              r2["verdict"] != "still-absent", "got %r" % r2["verdict"])
+
+
+def case_31_deferred_close_cross_repo_residue_variant():
+    """Contract block 9, test 3's cross-repository variant: B1.
+
+    Same shape as case 29 -- a body carrying a closing keyword with no
+    resolved link, on a declared non-default base -- but the id is
+    cross-repository. sameRepo must still gate the residue disjunct, exactly
+    as it already gates the resolved-link disjunct (case 23).
+    """
+    name = ("31 deferred-close GUARD sameRepo (residue half): cross-repo closing ref, "
+            "unresolved -> undeclared-target")
+    if need_subject(name):
+        return
+    with tmp() as d:
+        root = Path(d)
+        body = "## Summary\n\nCloses other-owner/other-repo#7\n"
+        r = _try_verify_declared(
+            name, write_brief(root, id="other-owner/other-repo#7"), write_conventions(root),
+            gh_stub(closing=[], body=body, base="feature/non-default",
+                    default_branch="master"),
+            declared_base="feature/non-default",
+        )
+        if r is None:
+            return
+        check(name, r["verdict"] == "undeclared-target", "got %r" % r["verdict"])
+        check("31 deferred-close GUARD sameRepo (residue half): NOT deferred-close",
+              r["verdict"] != "deferred-close", "got %r" % r["verdict"])
+
+
+# ==========================================================================
+# Case 32 -- W1: the --base-branch command-line flag, driven through main().
+# No existing case drove the CLI itself; cases 22-31 all call verify()/
+# verify_declared() directly. This is the only way /ship hands over a
+# declared base (ship/SKILL.md:262). Probe P7 (drop
+# declared_base=args.base_branch from main()'s call to verify()) must turn
+# the first check below red.
+# ==========================================================================
+def case_32_command_line_drives_declared_base():
+    name = "32 --base-branch flag reaches verify() through main(): deferred-close"
+    if need_subject(name):
+        return
+    import contextlib
+    import io
+
+    with tmp() as d:
+        root = Path(d)
+        brief = write_brief(root)
+        stub = gh_stub(closing=MATCHING, base="feature/160-parent", default_branch="master")
+        saved = V.default_run_gh
+        try:
+            V.default_run_gh = stub  # type: ignore[attr-defined]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exit_code = V.main([
+                    "--brief", str(brief),
+                    "--pr", "40",
+                    "--repo", REPO,
+                    "--base-branch", "feature/160-parent",
+                    "--json",
+                ])
+        finally:
+            V.default_run_gh = saved  # type: ignore[attr-defined]
+        payload = json.loads(buf.getvalue())
+        check(name, payload.get("verdict") == "deferred-close",
+              "got %r" % payload.get("verdict"))
+        check("32 --base-branch flag: exit code is 0 (deferred-close does not halt)",
+              exit_code == 0, "got %r" % exit_code)
+
+    name = "32 TWIN: no --base-branch flag on the SAME fixture -> undeclared-target"
+    with tmp() as d:
+        root = Path(d)
+        brief = write_brief(root)
+        stub = gh_stub(closing=MATCHING, base="feature/160-parent", default_branch="master")
+        saved = V.default_run_gh
+        try:
+            V.default_run_gh = stub  # type: ignore[attr-defined]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exit_code = V.main([
+                    "--brief", str(brief),
+                    "--pr", "40",
+                    "--repo", REPO,
+                    "--json",
+                ])
+        finally:
+            V.default_run_gh = saved  # type: ignore[attr-defined]
+        payload = json.loads(buf.getvalue())
+        check(name, payload.get("verdict") == "undeclared-target",
+              "got %r" % payload.get("verdict"))
+        check("32 TWIN: undeclared-target halts", exit_code != 0, "got %r" % exit_code)
+
+
 def main():
     for fn in (
         case_01_linked, case_02_not_applicable, case_02b_unresolved_id,
@@ -1460,6 +1644,10 @@ def main():
         case_26_deferred_close_guard_refs_residue,
         case_27_deferred_close_is_non_halting,
         case_28_undeclared_target_rename_is_complete,
+        case_29_deferred_close_body_only_closing_ref,
+        case_30_deferred_close_repair_then_requery,
+        case_31_deferred_close_cross_repo_residue_variant,
+        case_32_command_line_drives_declared_base,
     ):
         try:
             fn()
