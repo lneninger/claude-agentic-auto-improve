@@ -50,11 +50,11 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 226 cases over
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 267 cases over
 identity, parsing, block classification, verdicts, records, releases, conflict detection, the
 Hand-Resolved Summary, the Next Command and the Sub-Task Cycle. Measured by running
 `py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own `unittest` summary line:
-`Ran 226 tests ... OK`. They were mutation-probed: disabling the verification check, reading a
+`Ran 267 tests ... OK`. They were mutation-probed: disabling the verification check, reading a
 missing dependency line as none, and counting scope notes as sub-tasks each turn the suite red.
 
 **Read the script's output rather than re-deriving it.** Everything below describes what the
@@ -464,15 +464,17 @@ empty, `"none — " + report["next_command"]["reason"]`.
 - Next command: <report["next_command"], rendered exactly as the rule above says>
 ```
 
-State what was skipped as plainly as what succeeded.
-
-“unfetched” means the merge commit itself never made it into the local clone, even after this
-run’s own fetch attempt — not a malformed or missing artefact, a commit the clone still does not hold.
-It clears itself: fetch the commit, or restore the network, then run `/pr-merged <pr>` again — the new
-run overwrites the record. If the pull request’s base branch has since been deleted, the loop’s own
-fetch can never bring the commit down, and the reading will not clear on its own — the operator must
-bring the commit into the local clone by hand before rerunning. No command for that case is verified
+**The two loop-owned review readings.** `unreadable` means the merge commit is in the local
+clone but the declared artefact is absent, malformed or outside the closed set. `unfetched` means
+the merge commit itself is not in the local clone, even after this run's one fetch of the pull
+request's base branch. It is not a bad artefact; it is a commit the clone does not hold. To clear
+it, fetch the commit or restore the network, then run `/pr-merged <pr>` again. The new run
+overwrites the record. If the pull request's base branch has since been deleted, the loop's fetch
+can never bring the commit down, and the reading will not clear on its own. The operator must bring
+the commit into the local clone by hand before rerunning. No command for that case is verified
 here, so none is suggested.
+
+State what was skipped as plainly as what succeeded.
 
 ## The stores, and the design that defined them
 
