@@ -93,10 +93,21 @@ re-check all belong to one command:
 py -3 "$PRM" --contract <slug> --dispatch <sub-task-id> --json
 ```
 
-It cuts the branch from a freshly fetched default branch, records the sub-task as
-`awaiting-merge` with that branch in the state store, and returns the packet. It refuses with
-`not-released` if the sub-task's dependencies have not landed, so a wrong identity cannot start
-work that has nothing to build on. Add `--dry-run` to see the packet without cutting anything.
+It cuts the branch from the sub-task's own base, read out of its state entry — the parent
+branch for a Sub-Task Work Item, the repository default branch only when that entry carries no
+base at all — fetching that base first (`create_branch`), then records the sub-task as
+`awaiting-merge` with the cut branch in the state store, and returns the packet.
+
+It refuses with `not-released` if the sub-task's dependencies have not landed, so a wrong
+identity cannot start work that has nothing to build on. It also refuses with exit code 7,
+`base-not-declared`, when the dispatched entry itself carries no declared base while another
+entry in the same state already declares a real parent branch — never a silent fallback to
+the default branch beside a sibling that says otherwise. Either refusal cuts no branch and
+writes nothing; the remedy for `base-not-declared` is recording the sub-task's own identity
+first (`--record-subtask <sub-task-id> --issue <n> --base <parent> --brief <path>`, running
+`/task` in Parent-aware mode first if it has no brief yet), then dispatching again. Add
+`--dry-run` to see the packet without cutting anything — both refusals hold under `--dry-run`
+too, so a dry run always previews what the real run would do.
 
 
 Each packet names the sub-task, its branch, its agent, its file scope, the pre-written TASK

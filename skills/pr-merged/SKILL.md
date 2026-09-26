@@ -455,7 +455,7 @@ empty, `"none — " + report["next_command"]["reason"]`.
 - Contract defects: <block id — reason (files-but-no-recognised-agent | no-files-but-names-an-agent), one line each | none>
 - Hand-resolved: <sub-task[ #pr] — <entry's own `reading` field, printed verbatim>, one line each | none>
 - Completion records written: <paths>
-- Review verdicts: <sub-task — pass | pass-with-findings | blocked | unreadable, one line each | none read this run>
+- Review verdicts: <sub-task — pass | pass-with-findings | blocked | unreadable | unfetched, one line each | none read this run>
 - Released: <sub-tasks now unblocked, and what released them>
 - Still blocked: <sub-task — waiting on X>
 - Failed: <sub-task — severity, one-line reason, and what it now blocks | none>
@@ -465,6 +465,14 @@ empty, `"none — " + report["next_command"]["reason"]`.
 ```
 
 State what was skipped as plainly as what succeeded.
+
+“unfetched” means the merge commit itself never made it into the local clone, even after this
+run’s own fetch attempt — not a malformed or missing artefact, a commit the clone still does not hold.
+It clears itself: fetch the commit, or restore the network, then run `/pr-merged <pr>` again — the new
+run overwrites the record. If the pull request’s base branch has since been deleted, the loop’s own
+fetch can never bring the commit down, and the reading will not clear on its own — the operator must
+bring the commit into the local clone by hand before rerunning. No command for that case is verified
+here, so none is suggested.
 
 ## The stores, and the design that defined them
 

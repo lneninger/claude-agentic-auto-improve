@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-test_verify_parent_link.py -- RED suite for the parent-link verifier
+test_verify_parent_link.py -- test suite for the parent-link verifier
 (work item #164, contract
 .claude/concepts/2026-09-19-flow-parent-subissue-topology.md, sub-task 2).
 
@@ -60,19 +60,26 @@ seam gets a loud `RuntimeError` instead of a real mutation reaching GitHub.
 MUTATION PROBE (contract CONSTRAINTS, sub-task 2): "delete the foreign-parent
 rule and prove the tool then reports a wrong parent as linked. Run every
 probe with python -B; a restored source file still executes the mutant from
-its __pycache__." The probe below transiently rewrites the real
+its __pycache__." The probe below (case C1) NEVER writes the tracked
 `verify_parent_link.py` on disk (neutralising the one `if` guard that
-detects a foreign parent), runs a subprocess with `-B` against it, restores
-the original bytes and purges any `__pycache__` entry in a `finally` block.
-This is a real, if brief, on-disk mutation of a tracked file inside a git
-worktree -- safe only when no concurrent process is editing the same file
-at the same moment (see memory note "Mutation probes race parallel
-editors"). It is gated on the subject existing at all, so during RED it
-degrades to the same named import-failure check every other case uses.
+detects a foreign parent happens on a STRING, in memory): the mutated
+source is written only to a throwaway copy under a temporary directory, and
+a subprocess is pointed at that directory FIRST on sys.path, so the mutant
+it imports is the throwaway copy, never the tracked file (W3 -- an earlier
+revision wrote the mutant to the tracked file itself and restored it in a
+`finally` block, which left a real on-disk mutation exposed to a killed
+process or a concurrent reader for the width of that window; see memory
+note "Mutation probes race parallel editors"). The case also hashes the
+tracked file's bytes before and after the probe and asserts they are
+identical, so a future edit that reintroduces a write to the tracked path
+is itself caught. It is gated on the subject existing at all, so if the
+subject were ever missing it would degrade to the same named
+import-failure check every other case uses.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -473,6 +480,7 @@ def case_mutation_probe_foreign_parent_guard_is_load_bearing():
     if need_subject(name):
         return
     original = SUBJECT_PATH.read_text(encoding="utf-8")
+    original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
     mutated = _disable_foreign_parent_guard(original)
     if mutated is None:
         check(
@@ -482,15 +490,23 @@ def case_mutation_probe_foreign_parent_guard_is_load_bearing():
             "probe itself found no shape to mutate" % SUBJECT_PATH,
         )
         return
-    pycache = SUBJECT_PATH.parent / "__pycache__"
     fixture = exp(reported_parent=FOREIGN_PARENT)
     mutant_verdict = None
     stdout, stderr, returncode = "", "", None
-    try:
-        SUBJECT_PATH.write_text(mutated, encoding="utf-8")
+    # W3: the mutant NEVER touches the tracked file. It is written only to a
+    # throwaway copy under a temporary directory, and the probe subprocess
+    # puts that directory FIRST on sys.path -- SCRIPTS_DIR follows it, so a
+    # sibling import (e.g. _claude_paths) still resolves, but the
+    # `verify_parent_link` module name itself resolves to the throwaway
+    # mutant. The tracked file at SUBJECT_PATH is opened for reading only,
+    # both here and by the CONTROL assertion below.
+    with tmp() as d:
+        mutant_dir = Path(d)
+        (mutant_dir / "verify_parent_link.py").write_text(mutated, encoding="utf-8")
         code = (
             "import sys, json\n"
-            "sys.path.insert(0, %r)\n" % str(SCRIPTS_DIR)
+            "sys.path.insert(0, %r)\n" % str(mutant_dir)
+            + "sys.path.insert(1, %r)\n" % str(SCRIPTS_DIR)
             + "import verify_parent_link as M\n"
             "print(json.dumps(M.evaluate(json.loads(sys.argv[1]))))\n"
         )
@@ -499,7 +515,7 @@ def case_mutation_probe_foreign_parent_guard_is_load_bearing():
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=str(SCRIPTS_DIR),
+            cwd=str(mutant_dir),
         )
         stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
         if returncode == 0 and stdout.strip():
@@ -507,20 +523,23 @@ def case_mutation_probe_foreign_parent_guard_is_load_bearing():
                 mutant_verdict = json.loads(stdout.strip().splitlines()[-1]).get("verdict")
             except (ValueError, IndexError):
                 mutant_verdict = None
-    finally:
-        SUBJECT_PATH.write_text(original, encoding="utf-8")
-        if pycache.exists():
-            for p in pycache.glob("verify_parent_link.*"):
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
 
     check(
         name,
         mutant_verdict == "linked",
         "expected the disabled guard to silently pass the SAME fixture as 'linked'; "
         "got verdict=%r rc=%r stdout=%r stderr=%r" % (mutant_verdict, returncode, stdout, stderr),
+    )
+
+    # W3: the tracked file must be byte-identical before and after the probe
+    # -- it was never opened for writing at all, but this hash comparison
+    # catches a future edit that reintroduces one.
+    after_hash = hashlib.sha256(SUBJECT_PATH.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    check(
+        "C1 the tracked verify_parent_link.py is byte-identical before and after the probe",
+        after_hash == original_hash,
+        "the probe must never write the tracked file -- got before=%s after=%s"
+        % (original_hash, after_hash),
     )
 
     # POSITIVE CONTROL pairing (required by the brief): the UNMUTATED subject

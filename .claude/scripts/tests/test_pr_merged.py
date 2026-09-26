@@ -1310,6 +1310,7 @@ def _drive_main_pr_report_for_verdict_bearing_dependent(artefact_text, filename=
              mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
              mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
              mock.patch.object(pr_merged, "file_at_commit", fake_file_at_commit, create=True), \
+             mock.patch.object(pr_merged, "ensure_commit_local", return_value=True, create=True), \
              contextlib.redirect_stdout(out):
             pr_merged.main()
         return json.loads(out.getvalue())
@@ -1366,7 +1367,7 @@ class TestMainNamesAnUnreadableVerdictAndWithholdsRelease(unittest.TestCase):
         self.assertEqual(
             closed[0]["record"].get("review_verdict"), "unreadable",
             "a declared review artefact absent from the merge commit -- file_at_commit "
-            "returning None, the shape a missing file or an unfetched commit produces -- is "
+            "returning None, the shape a missing file produces -- is "
             "the loop's own ReviewVerdictReading of \"unreadable\" (ReviewVerdictReading row: "
             "\"the declared artefact is absent from that commit\"). Today main() only reads "
             "artefact_text when it is not None (pr_merged.py:895), so an absent artefact never "
@@ -1502,8 +1503,9 @@ class TestClassifyPrAcceptsADeclaredBaseSet(unittest.TestCase):
             "a pull request merged into a base the caller declared must be recognised as "
             "merged even though it is not the repository default branch -- this is the "
             "measured PR #173 defect: every task pull request in this contract's design "
-            "merges into a parent branch, and today classify_pr can only ever accept the "
-            "repository default"
+            "merges into a parent branch, and without a declared accepted_bases set "
+            "classify_pr falls back to treating only the repository default branch as "
+            "merged (I-9's unchanged default)"
         )
 
     def test_merged_into_a_branch_outside_the_declared_set_is_still_merged_elsewhere(self):
@@ -1902,11 +1904,17 @@ class TestMainAcceptsAMergeIntoTheSubtasksDeclaredBase(unittest.TestCase):
             state = {
                 "contract": slug,
                 "started_at": "2026-09-19T00:00:00+00:00",
+                # 4343 is not a real issue (this repository's numbers stood near 206 on
+                # 2026-09-25) -- amended 2026-09-25, fourth pass, from 163, which is t1's
+                # REAL sub-issue (state.yaml:8). No assertion in this test reads the issue
+                # number, so the change alters no outcome; it only stops this fixture from
+                # naming a live tracker issue.
                 "sub_tasks": {"t1-backend": {"status": "pending", "branch": branch,
-                                             "pull_request": None, "issue": 163,
+                                             "pull_request": None, "issue": 4343,
                                              "base": declared_base, "brief": None}},
             }
             write_record_mock = mock.MagicMock(return_value=None)
+            close_sub_issue_mock = mock.MagicMock(return_value=None)
             out = io.StringIO()
             argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "173", "--json"]
             with mock.patch.object(sys, "argv", argv), \
@@ -1917,13 +1925,13 @@ class TestMainAcceptsAMergeIntoTheSubtasksDeclaredBase(unittest.TestCase):
                  mock.patch.object(pr_merged, "write_record", write_record_mock), \
                  mock.patch.object(pr_merged, "gh_pr", side_effect=lambda n: pr if n == 173 else None), \
                  mock.patch.object(pr_merged, "git_combined_diff", return_value=([], 1)), \
-                 mock.patch.object(pr_merged, "close_sub_issue", return_value=None, create=True), \
+                 mock.patch.object(pr_merged, "close_sub_issue", close_sub_issue_mock, create=True), \
                  mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
                  mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
                  contextlib.redirect_stdout(out):
                 pr_merged.main()
             report = json.loads(out.getvalue())
-        return report, write_record_mock
+        return report, write_record_mock, close_sub_issue_mock
 
     def test_a_merge_into_the_declared_base_is_accepted_while_others_are_still_rejected(self):
         """(a) accepted -- RED today: classify_pr(pr, base) never sees the
@@ -1933,9 +1941,12 @@ class TestMainAcceptsAMergeIntoTheSubtasksDeclaredBase(unittest.TestCase):
         it already passes today and cannot itself be RED, so it is verified
         inside a test that is genuinely RED for reason (a).
         """
-        accepted_report, accepted_writes = self._drive("feature/160-parent", "feature/160-parent")
-        rejected_report, rejected_writes = self._drive("some-other-branch", "feature/160-parent")
-        default_report, _default_writes = self._drive("master", "feature/160-parent")
+        accepted_report, accepted_writes, _accepted_close = self._drive(
+            "feature/160-parent", "feature/160-parent")
+        rejected_report, rejected_writes, rejected_close = self._drive(
+            "some-other-branch", "feature/160-parent")
+        default_report, _default_writes, _default_close = self._drive(
+            "master", "feature/160-parent")
 
         self.assertTrue(
             accepted_report.get("closed"),
@@ -1962,12 +1973,84 @@ class TestMainAcceptsAMergeIntoTheSubtasksDeclaredBase(unittest.TestCase):
             "merged-elsewhere -- accepting the parent branch must not accept anything"
         )
         self.assertFalse(rejected_writes.called)
+        self.assertFalse(
+            rejected_close.called,
+            "B3-a: a pull request merged into a branch that is neither the default branch "
+            "nor the sub-task's declared base must never close its sub-issue either -- "
+            "close_sub_issue's only guard is the verdict == 'merged' term at the one call "
+            "site (pr_merged.py:1474)"
+        )
 
         self.assertTrue(
             default_report.get("closed"),
             "a pull request merged into the repository default branch must still close its "
             "sub-task exactly as it does today, regardless of what base the sub-task itself "
             "declares"
+        )
+
+    def test_a_closed_unmerged_pull_request_never_closes_its_subissue(self):
+        """B3-b: closed-unmerged must not close the sub-issue either.
+
+        classify_pr returns closed-unmerged for a PR that is CLOSED with no
+        mergedAt/mergeCommit (pr_merged.py:433). That state is NOT in
+        main()'s early-continue skip tuple ("not-found", "not-merged",
+        "merged-elsewhere", pr_merged.py:1411), so this input reaches the
+        close gate at :1474 -- unlike B3-a's rejected-merge case, which
+        classify_pr reports merged-elsewhere and main() skips before the
+        gate is ever reached (probe P10b's whole reason for existing). Only
+        the verdict == "merged" term at the gate stops this one from
+        closing. This case cannot go through _drive: _drive hard-codes a
+        merged pull request (state MERGED, a mergedAt and a mergeCommit),
+        and the edit rule for that helper allows only its two named changes.
+        The state entry's issue is 4242 (not a real issue), matching the
+        read-only-flags tests' own convention. Run without --dry-run,
+        --status or --resume: any one of those would keep the close gate
+        shut regardless of the probe and make this assertion inert.
+        """
+        close_sub_issue_mock = mock.MagicMock(return_value=None)
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / "acme-closed-unmerged-fixture.md"
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            slug = contract_path.stem
+            branch = f"task/{slug}/t1-backend"
+            pr = {
+                "number": 173, "state": "CLOSED", "mergedAt": None, "mergeCommit": None,
+                "headRefName": branch, "baseRefName": "feature/160-parent",
+                "url": "https://example.invalid/pull/173",
+                "commits": [{"oid": "cafef00d"}], "statusCheckRollup": None,
+            }
+            state = {
+                "contract": slug, "started_at": "2026-09-19T00:00:00+00:00",
+                "sub_tasks": {"t1-backend": {"status": "pending", "branch": branch,
+                                             "pull_request": None, "issue": 4242,
+                                             "base": "feature/160-parent", "brief": None}},
+            }
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "173", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "write_record", return_value=None), \
+                 mock.patch.object(pr_merged, "gh_pr", side_effect=lambda n: pr if n == 173 else None), \
+                 mock.patch.object(pr_merged, "git_combined_diff", return_value=([], 1)), \
+                 mock.patch.object(pr_merged, "close_sub_issue", close_sub_issue_mock, create=True), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                pr_merged.main()
+            report = json.loads(out.getvalue())
+
+        self.assertEqual(
+            [c.get("verdict") for c in report.get("skipped", [])], [],
+            "fixture sanity: closed-unmerged must NOT be skipped at the early continue -- it "
+            "must reach the close gate for this assertion to mean anything"
+        )
+        self.assertFalse(
+            close_sub_issue_mock.called,
+            "B3-b: a closed-but-unmerged pull request must never close its sub-issue -- only "
+            "the verdict == 'merged' term at the close gate (pr_merged.py:1474) stops it"
         )
 
 
@@ -2121,14 +2204,38 @@ class TestSubprocessGuardBlocksLiveMutations(unittest.TestCase):
 
     def test_a_read_only_gh_call_is_not_blocked(self):
         # Positive control: the guard must not mask a genuine failure by
-        # blocking commands it was never meant to catch. gh is very unlikely
-        # to be authenticated in this environment, so this asserts only that
-        # no RuntimeError from the guard itself is raised -- _run's own
-        # (OSError, subprocess.TimeoutExpired) handling still applies.
+        # blocking commands it was never meant to catch. W2: this used to run
+        # a REAL `gh issue view 163` -- issue 163 is a real, live issue in
+        # this repository's own tracker, and the assertion only ever proved
+        # the guard did not raise, so the network result was irrelevant.
+        # Swapped for a recorder, mirroring
+        # test_verify_parent_link.py:997-1009's shape: the real subprocess
+        # runner is replaced for the duration of this one call, so the
+        # assertion is that the read reached the recorder, never a live
+        # process.
+        global _REAL_SUBPROCESS_RUN
+        saved = _REAL_SUBPROCESS_RUN
+        seen = []
+
+        def fake_real(cmd, *args, **kwargs):
+            seen.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"state": "OPEN"}), "")
+
+        _REAL_SUBPROCESS_RUN = fake_real
         try:
-            pr_merged._run(["gh", "issue", "view", "163", "--json", "state"])
+            code, out = pr_merged._run(["gh", "issue", "view", "163", "--json", "state"])
         except RuntimeError as exc:
             self.fail("the guard must not intercept a read-only gh command: %r" % exc)
+        finally:
+            _REAL_SUBPROCESS_RUN = saved
+
+        self.assertEqual(
+            seen, [["gh", "issue", "view", "163", "--json", "state"]],
+            "the read-only call must reach the recorder -- after this change the suite must "
+            "launch NO gh process at all"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out, json.dumps({"state": "OPEN"}))
 
 
 # --------------------------------------------------------------------------
@@ -5783,6 +5890,1150 @@ class TestDeclaredPhaseReadsOneLineOnly(unittest.TestCase):
             "two identical phase: lines are not a disagreement -- declared_phase must read the "
             "one value they agree on, not treat repetition itself as ambiguity"
         )
+
+
+# --------------------------------------------------------------------------
+# B2 -- needs_issue's real rule (I-6), driven through main() at BOTH copies:
+# --dispatch (pr_merged.py:1567) and the report path's dispatch list
+# (pr_merged.py:1605). TestDispatchPacketCarriesIssueBaseAndBrief's own
+# needs_issue pair only drives build_dispatch, which merely ECHOES the
+# argument it is handed -- it cannot fail on the real rule,
+# len(tasks) >= 2 and issue is None, which lives in main() itself, in two
+# copies.
+# --------------------------------------------------------------------------
+CONTRACT_CLI_TWO_MERGEABLE_TASKS = """
+## Implementation Handoff
+
+### 1. Backend (`acme-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+
+### 2. Frontend (`acme-dev`)
+
+**Depends on:** 1
+
+**Files to touch:**
+- src/Bar.cs
+"""
+
+
+def _drive_dispatch_needs_issue(sub_task_entries, dispatch_id="t1-backend",
+                                contract_text=CONTRACT_CLI_TWO_MERGEABLE_TASKS,
+                                filename="acme-needs-issue-dispatch-fixture.md"):
+    """Drive main() through --dispatch and read the printed packet's needs_issue.
+
+    Mirrors TestMainDispatchCutsFromTheSubtasksDeclaredBase._drive_dispatch,
+    but accepts the WHOLE sub_tasks state mapping (not one entry) and the
+    contract text, so a two-sub-task contract can be built without adding a
+    second helper class. FIXTURE RULE: every sub_task_entries mapping this
+    module passes here gives every entry the SAME base, or gives none of
+    them a base key at all -- sub-task 13 later refuses to dispatch an entry
+    with no base beside a sibling that declares a non-default base, and a
+    mixed fixture here would change meaning once that lands.
+    """
+    create_branch_mock = mock.MagicMock(return_value=(True, "created it"))
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        slug = contract_path.stem
+        state = {
+            "contract": slug,
+            "started_at": "2026-09-19T00:00:00+00:00",
+            "sub_tasks": sub_task_entries,
+        }
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path),
+                "--dispatch", dispatch_id, "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state", return_value=state), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", return_value=None), \
+             mock.patch.object(pr_merged, "create_branch", create_branch_mock), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        printed = out.getvalue()
+    packet = json.loads(printed) if printed.strip().startswith("{") else None
+    return packet
+
+
+def _drive_report_needs_issue(sub_task_entries, contract_text=CONTRACT_CLI_TWO_MERGEABLE_TASKS,
+                              filename="acme-needs-issue-report-fixture.md"):
+    """Drive main() through the default report path (no --dispatch, no --pr)
+    and read report["dispatch"]'s needs_issue for whichever sub-task the
+    plan releases.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        slug = contract_path.stem
+        state = {
+            "contract": slug,
+            "started_at": "2026-09-19T00:00:00+00:00",
+            "sub_tasks": sub_task_entries,
+        }
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path), "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state", return_value=state), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", return_value=None), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        report = json.loads(out.getvalue())
+    return report
+
+
+class TestNeedsIssueAtTheDispatchCallSite(unittest.TestCase):
+    """B2, pr_merged.py:1567 -- the --dispatch copy of needs_issue."""
+
+    def test_two_subtask_contract_no_issue_recorded_needs_issue_true(self):
+        packet = _drive_dispatch_needs_issue({
+            "t1-backend": {"status": "pending", "branch": None, "pull_request": None,
+                          "issue": None, "brief": None},
+            "t2-frontend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "brief": None},
+        })
+        self.assertIsNotNone(packet, "fixture sanity: --json dispatch must print a packet")
+        self.assertTrue(
+            packet.get("needs_issue"),
+            "a contract orchestrating two or more mergeable sub-tasks, dispatching one that "
+            "carries no recorded issue, must flag needs_issue -- main()'s own copy at "
+            "pr_merged.py:1567, not build_dispatch's echo of an argument"
+        )
+
+    def test_two_subtask_contract_with_issue_recorded_needs_issue_false(self):
+        packet = _drive_dispatch_needs_issue({
+            "t1-backend": {"status": "pending", "branch": None, "pull_request": None,
+                          "issue": 163, "brief": None},
+            "t2-frontend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "brief": None},
+        })
+        self.assertIsNotNone(packet, "fixture sanity: --json dispatch must print a packet")
+        self.assertFalse(
+            packet.get("needs_issue"),
+            "needs_issue must be false once the dispatched sub-task's own state entry "
+            "already carries a recorded issue"
+        )
+
+    def test_one_subtask_contract_no_issue_needs_issue_false(self):
+        # Positive control for the "two or more" term: a lone sub-task must
+        # never be flagged, however its issue field reads.
+        packet = _drive_dispatch_needs_issue(
+            {"t1-backend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "brief": None}},
+            contract_text=CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK,
+        )
+        self.assertIsNotNone(packet, "fixture sanity: --json dispatch must print a packet")
+        self.assertFalse(
+            packet.get("needs_issue"),
+            "a contract with only ONE mergeable sub-task must never flag needs_issue, even "
+            "with no issue recorded -- this is the positive control for the "
+            "len(tasks) >= 2 term"
+        )
+
+
+class TestNeedsIssueAtTheReportCallSite(unittest.TestCase):
+    """B2, pr_merged.py:1605 -- the report path's dispatch-list copy of needs_issue."""
+
+    def _dispatch_entry(self, report, sub_task_id="t1-backend"):
+        entries = [d for d in report.get("dispatch", []) if d.get("sub_task") == sub_task_id]
+        self.assertTrue(
+            entries, "fixture sanity: %r must appear in report['dispatch'] -- got %r"
+                     % (sub_task_id, report.get("dispatch"))
+        )
+        return entries[0]
+
+    def test_two_subtask_contract_no_issue_recorded_needs_issue_true(self):
+        report = _drive_report_needs_issue({
+            "t1-backend": {"status": "pending", "branch": None, "pull_request": None,
+                          "issue": None, "brief": None},
+            "t2-frontend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "brief": None},
+        })
+        entry = self._dispatch_entry(report)
+        self.assertTrue(
+            entry.get("needs_issue"),
+            "a contract orchestrating two or more mergeable sub-tasks, releasing one that "
+            "carries no recorded issue, must flag needs_issue -- main()'s own copy at "
+            "pr_merged.py:1605, not build_dispatch's echo of an argument"
+        )
+
+    def test_two_subtask_contract_with_issue_recorded_needs_issue_false(self):
+        report = _drive_report_needs_issue({
+            "t1-backend": {"status": "pending", "branch": None, "pull_request": None,
+                          "issue": 163, "brief": None},
+            "t2-frontend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "brief": None},
+        })
+        entry = self._dispatch_entry(report)
+        self.assertFalse(
+            entry.get("needs_issue"),
+            "needs_issue must be false once the released sub-task's own state entry already "
+            "carries a recorded issue"
+        )
+
+    def test_one_subtask_contract_no_issue_needs_issue_false(self):
+        # Positive control for the "two or more" term.
+        report = _drive_report_needs_issue(
+            {"t1-backend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "brief": None}},
+            contract_text=CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK,
+        )
+        entry = self._dispatch_entry(report)
+        self.assertFalse(
+            entry.get("needs_issue"),
+            "a contract with only ONE mergeable sub-task must never flag needs_issue, even "
+            "with no issue recorded -- this is the positive control for the "
+            "len(tasks) >= 2 term"
+        )
+
+
+# --------------------------------------------------------------------------
+# B4 -- reconcile_subtask_identity (I-7) had no test at all before this
+# sub-task, neither a unit test of the function nor a main() case driving
+# the mismatch branch.
+# --------------------------------------------------------------------------
+class TestReconcileSubtaskIdentity(unittest.TestCase):
+    """reconcile_subtask_identity(state_entry, brief_fields) -- I-7."""
+
+    def _get(self):
+        fn = _fn("reconcile_subtask_identity")
+        self.assertIsNotNone(
+            fn, "pr_merged.reconcile_subtask_identity must exist -- I-7's dispatch refusal "
+                "compares a state entry against its own brief before every dispatch"
+        )
+        return fn
+
+    def test_an_issue_mismatch_is_reported_naming_both_readings(self):
+        fn = self._get()
+        result = fn({"issue": 163}, {"id": "9999"})
+        self.assertIsNotNone(result, "an issue mismatch must be reported, never silently ignored")
+        self.assertIn("163", result)
+        self.assertIn("9999", result)
+
+    def test_a_base_mismatch_is_reported_naming_both_readings(self):
+        fn = self._get()
+        result = fn({"base": "feature/160-parent"}, {"base": "some-other-branch"})
+        self.assertIsNotNone(result, "a base mismatch must be reported, never silently ignored")
+        self.assertIn("feature/160-parent", result)
+        self.assertIn("some-other-branch", result)
+
+    def test_agreement_on_issue_and_base_is_not_a_mismatch(self):
+        fn = self._get()
+        result = fn({"issue": 163, "base": "feature/160-parent"},
+                   {"id": "163", "base": "feature/160-parent"})
+        self.assertIsNone(result, "matching readings must never be reported as a mismatch")
+
+    def test_a_hash_prefixed_brief_id_agrees_with_a_bare_state_entry_number(self):
+        # "#5" in the brief must agree with 5 in the state entry once the '#'
+        # is stripped -- a literal string comparison would wrongly report a
+        # mismatch.
+        fn = self._get()
+        result = fn({"issue": 5}, {"id": "#5"})
+        self.assertIsNone(
+            result, "'#5' in the brief must agree with 5 in the state entry once the '#' is "
+                    "stripped before comparing"
+        )
+
+    def test_a_key_missing_on_the_state_entry_side_is_not_a_mismatch(self):
+        fn = self._get()
+        result = fn({}, {"id": "163", "base": "feature/160-parent"})
+        self.assertIsNone(
+            result, "there is nothing to compare a state entry against before it records an "
+                    "issue or a base of its own -- a missing key is not a mismatch"
+        )
+
+    def test_a_key_missing_on_the_brief_side_is_not_a_mismatch(self):
+        fn = self._get()
+        result = fn({"issue": 163, "base": "feature/160-parent"}, {})
+        self.assertIsNone(
+            result, "a brief that has not yet recorded an id or a base has nothing to compare "
+                    "against either -- not itself a mismatch"
+        )
+
+
+class TestMainRefusesDispatchOnIdentityMismatch(unittest.TestCase):
+    """I-7, B4's main() case: a state entry whose brief disagrees with it
+    must refuse the dispatch rather than proceed on the stale reading.
+    """
+
+    def test_a_readable_brief_disagreeing_with_the_state_entry_refuses_the_dispatch(self):
+        create_branch_mock = mock.MagicMock(return_value=(True, "created it"))
+        with tempfile.TemporaryDirectory() as d:
+            brief_path = Path(d) / "acme-identity-mismatch-brief.md"
+            brief_path.write_text(
+                "---\nid: 9999\ntitle: Something else entirely\n---\n\n# Body\n",
+                encoding="utf-8",
+            )
+            contract_path = Path(d) / "acme-identity-mismatch-fixture.md"
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            slug = contract_path.stem
+            state = {
+                "contract": slug,
+                "started_at": "2026-09-19T00:00:00+00:00",
+                "sub_tasks": {"t1-backend": {
+                    "status": "pending", "branch": None, "pull_request": None,
+                    "issue": 163, "base": "feature/160-parent",
+                    "brief": str(brief_path),
+                }},
+            }
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path),
+                    "--dispatch", "t1-backend", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "create_branch", create_branch_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                exit_code = pr_merged.main()
+            printed = out.getvalue()
+        payload = json.loads(printed) if printed.strip().startswith("{") else None
+
+        self.assertEqual(
+            exit_code, 5,
+            "an identity mismatch between a state entry and its own brief must refuse the "
+            "dispatch with exit code 5 (I-7) -- without reconcile_subtask_identity wired in, "
+            "a mismatch dispatches anyway"
+        )
+        self.assertIsNotNone(payload, "fixture sanity: the CLI must print a JSON payload")
+        self.assertEqual(payload.get("error"), "identity-mismatch")
+        self.assertEqual(payload.get("sub_task"), "t1-backend")
+        detail = payload.get("detail", "")
+        self.assertIn("163", detail, "the refusal must name the state entry's own reading")
+        self.assertIn("9999", detail, "the refusal must name the brief's own reading")
+        self.assertFalse(
+            create_branch_mock.called,
+            "a refused dispatch must never cut a branch -- create_branch must not be called "
+            "when the identity check fails"
+        )
+
+
+# ==========================================================================
+# Contract block 12: failing tests for the loop fix.
+#
+# Defect one: an unfetched merge commit reads as "unreadable". Today main()
+# reads the declared review artefact once at the merge commit
+# (pr_merged.py:1457-1465); a commit the local clone does not hold returns
+# None, exactly as a missing file does, and the loop never distinguishes the
+# two. ensure_commit_local(sha, ref) -> bool is the new edge: consulted only
+# when the first read yields nothing, it fetches once if the commit is
+# absent and reports whether it is present afterwards. "unreadable" is kept
+# for a commit the clone genuinely holds but whose artefact still can't be
+# parsed; "unfetched" is new, for a commit that stays absent after the one
+# fetch attempt.
+# ==========================================================================
+CONTRACT_CLI_MARKDOWN_OUTSIDE_REVIEWS_WITH_DEPENDENT = """
+## Implementation Handoff
+
+### 1. Docs (`acme-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- docs/plan.md
+
+### 2. Backend (`acme-dev`)
+
+**Depends on:** 1
+
+**Files to touch:**
+- src/Foo.cs
+"""
+
+
+def _drive_main_pr_fetch_case(contract_text, head_task_id, file_at_commit_side_effect,
+                              ensure_commit_local_return=True, base_ref_name="master",
+                              extra_cli_flags=("--dry-run",),
+                              filename="acme-fetch-fixture.md",
+                              state_base_overrides=None):
+    """Drive pr_merged.main() end to end for a merged pull request, with both
+    ``file_at_commit`` and the not-yet-built ``ensure_commit_local`` injected.
+
+    Mirrors ``_drive_main_pr_report_for_verdict_bearing_dependent``
+    (test_pr_merged.py:1269) exactly, except the head sub-task id, the merged
+    pull request's own ``baseRefName``, the CLI flags and ``file_at_commit``'s
+    sequence of readings are all the caller's to choose -- Defect One's own
+    cases vary every one of those. Returns
+    ``(report, fake_file_at_commit, fake_ensure_commit_local)``.
+
+    ``state_base_overrides``, when given, is a ``{sub_task_id: base}`` mapping
+    used to build a stored state ``load_state`` returns instead of ``None``.
+    Without it every entry's base is the default branch (``"master"``), so a
+    pull request merged into a non-default ``baseRefName`` classifies as
+    merged-elsewhere and is skipped before ``file_at_commit`` or
+    ``ensure_commit_local`` is ever reached -- (e) needs a declared base that
+    matches its own non-default ``baseRefName`` so the merge is accepted and
+    the fetch edge is actually exercised.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        slug = contract_path.stem
+        branch = f"task/{slug}/{head_task_id}"
+        pr = {
+            "number": 42,
+            "state": "MERGED",
+            "mergedAt": "2026-01-01T00:00:00Z",
+            "mergeCommit": {"oid": "deadbeef"},
+            "headRefName": branch,
+            "baseRefName": base_ref_name,
+            "url": "https://example.invalid/pull/42",
+            "commits": [{"oid": "deadbeef"}],
+            "statusCheckRollup": None,
+        }
+        stored_state = None
+        if state_base_overrides:
+            stored_state = {
+                "contract": slug,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "sub_tasks": {
+                    tid: {"status": "pending", "branch": None, "pull_request": None,
+                         "issue": None, "base": base, "brief": None}
+                    for tid, base in state_base_overrides.items()
+                },
+            }
+        fake_file_at_commit = mock.MagicMock(side_effect=list(file_at_commit_side_effect))
+        fake_ensure_commit_local = mock.MagicMock(return_value=ensure_commit_local_return)
+        out = io.StringIO()
+        argv = (["pr_merged.py", "--contract", str(contract_path),
+                "--pr", "42", "--json"] + list(extra_cli_flags))
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state", return_value=stored_state), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", return_value=None), \
+             mock.patch.object(pr_merged, "write_record", return_value=None), \
+             mock.patch.object(pr_merged, "gh_pr", side_effect=lambda n: pr if n == 42 else None), \
+             mock.patch.object(pr_merged, "git_combined_diff", return_value=([], 1)), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             mock.patch.object(pr_merged, "file_at_commit", fake_file_at_commit, create=True), \
+             mock.patch.object(pr_merged, "ensure_commit_local", fake_ensure_commit_local,
+                               create=True), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        report = json.loads(out.getvalue())
+    return report, fake_file_at_commit, fake_ensure_commit_local
+
+
+class TestMainFetchesAnAbsentMergeCommitBeforeNamingUnreadable(unittest.TestCase):
+    """Contract block 12, Defect One. Every case except (f) drives main()
+    through --pr for t1-review, a verdict-bearing sub-task, with t2-backend
+    depending on it -- ``CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT``, the
+    same fixture ``TestMainNamesAnUnreadableVerdictAndWithholdsRelease``
+    already uses.
+    """
+
+    def test_a_commit_fetched_successfully_then_read_reports_the_retried_verdict(self):
+        # (a) -- the 2026-09-25 case exactly.
+        report, _fake_file_at_commit, _fake_ensure_commit_local = _drive_main_pr_fetch_case(
+            CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT, "t1-review",
+            [None, "**Verdict:** blocked\n\n## What was checked\n- x: ok\n"],
+            ensure_commit_local_return=True,
+        )
+        closed = report.get("closed", [])
+        self.assertTrue(closed, "fixture sanity: the merged pull request must close t1-review")
+        self.assertEqual(
+            closed[0]["record"].get("review_verdict"), "blocked",
+            "an absent artefact read whose commit ensure_commit_local reports present after "
+            "fetching must be RE-READ, and the retried read's verdict is what gets stamped -- "
+            "today main() reads the artefact exactly once and stamps 'unreadable' on the "
+            "first empty read, so a commit that never even needed a network fetch is "
+            "misdiagnosed as an unreadable artefact"
+        )
+
+    def test_a_commit_still_absent_after_a_failed_fetch_is_named_unfetched(self):
+        # (b)
+        report, _fake_file_at_commit, _fake_ensure_commit_local = _drive_main_pr_fetch_case(
+            CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT, "t1-review",
+            [None],
+            ensure_commit_local_return=False,
+        )
+        closed = report.get("closed", [])
+        self.assertTrue(closed, "fixture sanity: the merged pull request must close t1-review")
+        self.assertEqual(
+            closed[0]["record"].get("review_verdict"), "unfetched",
+            "a commit ensure_commit_local reports still absent after attempting a fetch must "
+            "be named 'unfetched', a distinct ReviewVerdictReading from 'unreadable' -- today "
+            "there is no such reading at all, and every empty read stamps 'unreadable' whether "
+            "or not the commit could ever have been fetched"
+        )
+        self.assertNotIn(
+            "t2-backend", report.get("released", []),
+            "an unfetched review verdict must not release what depends on it, exactly like an "
+            "unreadable one"
+        )
+        blocked = report.get("blocked", {})
+        self.assertTrue(
+            any("(review verdict: unfetched)" in reason
+                for reason in blocked.get("t2-backend", [])),
+            "the blocked reason must name the unfetched reading so an operator knows the "
+            "remedy is a fetch, not a rewrite of the artefact -- got %r"
+            % blocked.get("t2-backend")
+        )
+
+    def test_a_commit_present_but_still_empty_after_fetch_is_unreadable_not_unfetched(self):
+        # (c) -- pairs with (b); also proves ensure_commit_local is consulted
+        # exactly once, never once per retried read.
+        report, _fake_file_at_commit, fake_ensure_commit_local = _drive_main_pr_fetch_case(
+            CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT, "t1-review",
+            [None, None],
+            ensure_commit_local_return=True,
+        )
+        closed = report.get("closed", [])
+        self.assertTrue(closed, "fixture sanity: the merged pull request must close t1-review")
+        self.assertEqual(
+            closed[0]["record"].get("review_verdict"), "unreadable",
+            "a commit ensure_commit_local reports present, whose re-read still yields "
+            "nothing, is 'unreadable' -- the artefact really is absent or malformed at a "
+            "commit the clone holds -- and must never be confused with 'unfetched'"
+        )
+        self.assertEqual(
+            fake_ensure_commit_local.call_count, 1,
+            "ensure_commit_local must be consulted exactly once per empty read -- without "
+            "this assertion this case passes on today's code, which already stamps "
+            "'unreadable' for an empty read and never calls ensure_commit_local at all"
+        )
+
+    def test_positive_control_a_first_read_pass_never_consults_ensure_commit_local(self):
+        # (d)
+        report, _fake_file_at_commit, fake_ensure_commit_local = _drive_main_pr_fetch_case(
+            CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT, "t1-review",
+            ["**Verdict:** pass\n\n## What was checked\n- x: ok\n"],
+        )
+        closed = report.get("closed", [])
+        self.assertTrue(closed, "fixture sanity: the merged pull request must close t1-review")
+        self.assertEqual(closed[0]["record"].get("review_verdict"), "pass")
+        self.assertIn("t2-backend", report.get("released", []))
+        self.assertFalse(
+            fake_ensure_commit_local.called,
+            "a first read that already yields text must never consult ensure_commit_local -- "
+            "a fix that fetches on every merge, not only an empty read, must fail this control"
+        )
+
+    def test_ensure_commit_local_receives_the_pull_requests_own_base_ref_not_the_default(self):
+        # (e). The pull request merges into "feature/160-parent", a
+        # non-default branch -- the stored state must declare that same
+        # base for t1-review, or classify_pr reports merged-elsewhere and
+        # the pull request is skipped before file_at_commit or
+        # ensure_commit_local is ever reached.
+        report, _fake_file_at_commit, fake_ensure_commit_local = _drive_main_pr_fetch_case(
+            CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT, "t1-review",
+            [None, "**Verdict:** pass\n"],
+            ensure_commit_local_return=True,
+            base_ref_name="feature/160-parent",
+            state_base_overrides={"t1-review": "feature/160-parent"},
+        )
+        self.assertTrue(
+            report.get("closed"),
+            "fixture sanity: a pull request merged into the sub-task's own declared base "
+            "must close it -- otherwise this case never reaches file_at_commit or "
+            "ensure_commit_local at all, and the assertions below would be measuring nothing"
+        )
+        self.assertTrue(
+            fake_ensure_commit_local.called,
+            "an empty first read must consult ensure_commit_local"
+        )
+        fake_ensure_commit_local.assert_called_with("deadbeef", "feature/160-parent")
+
+    def test_a_non_review_artefact_never_consults_ensure_commit_local(self):
+        # (f) -- POSITIVE CONTROL. A declared markdown file OUTSIDE
+        # .claude/reviews/, so this also fails a fix that widens the
+        # verdict-bearing rule to any markdown file.
+        report, fake_file_at_commit, fake_ensure_commit_local = _drive_main_pr_fetch_case(
+            CONTRACT_CLI_MARKDOWN_OUTSIDE_REVIEWS_WITH_DEPENDENT, "t1-docs",
+            [None],
+            ensure_commit_local_return=True,
+        )
+        self.assertTrue(
+            report.get("closed"), "fixture sanity: the merged pull request must close t1-docs"
+        )
+        self.assertFalse(
+            fake_file_at_commit.called,
+            "fixture sanity: t1-docs declares no path under .claude/reviews/, so nothing is "
+            "verdict-bearing and file_at_commit must never be called for it"
+        )
+        self.assertFalse(
+            fake_ensure_commit_local.called,
+            "a merge whose sub-task declares no .claude/reviews/ artefact must never consult "
+            "ensure_commit_local -- a declared markdown file outside .claude/reviews/ must "
+            "not be enough to trigger it either"
+        )
+
+    def test_ensure_commit_local_is_consulted_under_dry_run(self):
+        # (g), --dry-run half.
+        _report, _fake_file_at_commit, fake_ensure_commit_local = _drive_main_pr_fetch_case(
+            CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT, "t1-review",
+            [None, "**Verdict:** pass\n"],
+            ensure_commit_local_return=True,
+            extra_cli_flags=("--dry-run",),
+        )
+        self.assertTrue(
+            fake_ensure_commit_local.called,
+            "Open Question 4 was answered yes on 2026-09-25: the fetch runs in every mode, "
+            "including --dry-run, because a dry run must preview what the real run would do"
+        )
+
+    def test_ensure_commit_local_is_consulted_under_status(self):
+        # (g), --status half.
+        _report, _fake_file_at_commit, fake_ensure_commit_local = _drive_main_pr_fetch_case(
+            CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT, "t1-review",
+            [None, "**Verdict:** pass\n"],
+            ensure_commit_local_return=True,
+            extra_cli_flags=("--status",),
+        )
+        self.assertTrue(
+            fake_ensure_commit_local.called,
+            "the fetch must also run under --status -- a read-only report that silently "
+            "skips the fetch would misreport what the real run reads"
+        )
+
+
+class TestEnsureCommitLocal(unittest.TestCase):
+    """ensure_commit_local(sha, ref) -> bool -- Defect One's own edge, over a
+    patched ``pr_merged._run``. No real git process is ever started.
+    """
+
+    def _get(self):
+        fn = _fn("ensure_commit_local")
+        self.assertIsNotNone(
+            fn, "pr_merged.ensure_commit_local must exist -- Defect One's fetch-then-recheck "
+                "edge that tells an unfetched merge commit apart from a genuinely unreadable "
+                "artefact"
+        )
+        return fn
+
+    def test_a_commit_already_present_runs_no_fetch(self):
+        fn = self._get()
+        commands = []
+
+        def fake_run(cmd):
+            commands.append(list(cmd))
+            return (0, "deadbeef")
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            result = fn("deadbeef", "master")
+
+        self.assertTrue(result, "a commit already present locally must report True")
+        self.assertFalse(
+            any("fetch" in c for c in commands),
+            "a commit already present must never trigger a fetch -- got %r" % commands
+        )
+
+    def test_an_absent_commit_runs_exactly_one_fetch_and_checks_again(self):
+        # W2: the responses are keyed strictly by call ORDER (first call =
+        # the presence check, second = the fetch, third = the re-check), so
+        # the assertions below must pin the exact command SEQUENCE -- not
+        # merely that a fetch happened and True came back. An implementation
+        # that treats the fetch's own exit code as "the commit is now
+        # present" and never re-checks would make only two calls and still
+        # report True; asserting the full three-call shape is what catches
+        # that shortcut.
+        fn = self._get()
+        commands = []
+        responses = iter([(1, ""), (0, ""), (0, "deadbeef")])
+
+        def fake_run(cmd):
+            commands.append(list(cmd))
+            return next(responses)
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            result = fn("deadbeef", "master")
+
+        self.assertTrue(
+            result, "once the fetch succeeds and the commit checks present, "
+                    "ensure_commit_local must report True"
+        )
+        self.assertEqual(
+            len(commands), 3,
+            "ensure_commit_local must run exactly three commands for an absent commit whose "
+            "fetch succeeds: a presence check, the fetch, then a SECOND presence check -- an "
+            "implementation that returns the fetch's own exit code instead of re-checking "
+            "would stop at two commands and still report True. Got %r" % commands
+        )
+        self.assertNotIn(
+            "fetch", commands[0],
+            "the first command must be a presence check, not the fetch itself -- got %r"
+            % commands[0]
+        )
+        self.assertEqual(
+            commands[1], ["git", "fetch", "origin", "master"],
+            "the second command must be exactly one 'git fetch origin <ref>' -- got %r"
+            % commands
+        )
+        self.assertEqual(
+            commands[2], commands[0],
+            "the third command must be the SAME presence check re-run after the fetch, not a "
+            "different query -- got %r" % commands
+        )
+
+    def test_a_successful_fetch_whose_recheck_still_reports_absent_returns_false(self):
+        # New case, added after review: a fetch that itself succeeds is not
+        # the same claim as the commit being present afterwards -- for
+        # example a fetch of a tag or a shallow history that never actually
+        # brought the merge commit down. Without this case, an
+        # implementation that returns True on any fetch exit code 0, with no
+        # real re-check, would still pass every other test here.
+        fn = self._get()
+        commands = []
+        responses = iter([(1, ""), (0, ""), (1, "")])
+
+        def fake_run(cmd):
+            commands.append(list(cmd))
+            return next(responses)
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            result = fn("deadbeef", "master")
+
+        self.assertFalse(
+            result, "a fetch that succeeds but whose re-check still reports the commit "
+                    "absent must report False -- a successful fetch is not itself proof the "
+                    "commit is now present"
+        )
+
+    def test_a_failed_fetch_returns_false(self):
+        # W1: the fake answers by COMMAND rather than by call count, so an
+        # implementation that re-checks presence even after a failed fetch
+        # (a defensible choice the TASK block does not forbid) gets a
+        # consistent "still absent" / "fetch fails" answer for as many calls
+        # as it makes, instead of raising StopIteration on a third call this
+        # test did not originally anticipate.
+        fn = self._get()
+        commands = []
+
+        def fake_run(cmd):
+            commands.append(list(cmd))
+            if "fetch" in cmd:
+                return (1, "")  # the fetch itself fails
+            return (1, "")  # every presence check reports the commit absent
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            result = fn("deadbeef", "master")
+
+        self.assertFalse(result, "a fetch that itself fails must report False, never True")
+        fetch_calls = [c for c in commands if "fetch" in c]
+        self.assertEqual(
+            len(fetch_calls), 1,
+            "a failed fetch must still have been attempted exactly once -- got %r" % commands
+        )
+
+
+# ==========================================================================
+# Contract block 12, Defect Two: sub-tasks appended by an amendment cannot
+# be recorded. main() loads the stored state and never adds a planned
+# sub-task the stored state lacks, so --record-subtask refuses an id
+# /flow's sub-issue step has already opened on GitHub.
+# backfill_state(state, tasks) -> state is the new pure function: it adds a
+# pending entry, in new_state's own shape, for every planned id the stored
+# state lacks, with base explicitly None -- never the repository default
+# branch. It never removes an entry and never rewrites an existing one.
+# ==========================================================================
+class TestBackfillStateAddsMissingPlannedEntries(unittest.TestCase):
+    def _get(self):
+        fn = _fn("backfill_state")
+        self.assertIsNotNone(
+            fn, "pr_merged.backfill_state must exist -- Defect Two: a sub-task appended to a "
+                "contract whose state store already exists is never added, so "
+                "--record-subtask refuses an id /flow's sub-issue step has already opened on "
+                "GitHub"
+        )
+        return fn
+
+    def test_a_missing_planned_id_is_added_as_a_pending_entry_with_base_none(self):
+        fn = self._get()
+        state = {
+            "contract": "c-slug", "started_at": "2026-09-25T00:00:00+00:00",
+            "sub_tasks": {
+                "t1-a": {"status": "completed", "branch": "task/c-slug/t1-a",
+                         "pull_request": "u1", "issue": 163, "base": "feature/x",
+                         "brief": ".claude/work-items/x.md"},
+                "t2-b": {"status": "pending", "branch": None, "pull_request": None},
+            },
+        }
+        result = fn(state, _tasks())
+
+        self.assertIn(
+            "t3-c", result["sub_tasks"],
+            "backfill_state must add an entry for every planned id the stored state lacks -- "
+            "today nothing in main() ever adds one"
+        )
+        entry = result["sub_tasks"]["t3-c"]
+        self.assertEqual(
+            set(entry.keys()), {"status", "branch", "pull_request", "issue", "base", "brief"},
+            "a backfilled entry must carry new_state's own six keys, no more and no fewer"
+        )
+        self.assertEqual(entry["status"], "pending")
+        self.assertIsNone(entry["branch"])
+        self.assertIsNone(entry["pull_request"])
+        self.assertIsNone(entry["issue"])
+        self.assertIn(
+            "base", entry,
+            "the backfilled entry must carry a base key explicitly, not merely omit one"
+        )
+        self.assertIsNone(
+            entry["base"],
+            "a backfilled entry's base must be null, never the repository default branch -- "
+            "the only base main() holds at this point is default_branch(), and stamping it "
+            "here would silently cut the sub-task from master even where every sibling in "
+            "this same contract carries a declared parent branch"
+        )
+        self.assertIsNone(entry["brief"])
+
+        self.assertEqual(
+            result["sub_tasks"]["t1-a"], state["sub_tasks"]["t1-a"],
+            "an existing completed entry -- issue, base and brief included -- must survive "
+            "backfill_state byte-identical; it adds, it never rewrites"
+        )
+        self.assertEqual(
+            result["sub_tasks"]["t2-b"], state["sub_tasks"]["t2-b"],
+            "an existing entry with no base key at all must be left exactly as it was -- "
+            "backfill_state must never invent a base for an entry that already exists"
+        )
+        self.assertNotIn(
+            "base", result["sub_tasks"]["t2-b"],
+            "backfill_state must never add a base key to an existing entry that never had one"
+        )
+
+    def test_an_entry_no_longer_planned_is_never_removed(self):
+        fn = self._get()
+        state = {
+            "contract": "c-slug", "started_at": "2026-09-25T00:00:00+00:00",
+            "sub_tasks": {
+                "t1-a": {"status": "pending", "branch": None, "pull_request": None,
+                         "issue": None, "base": "master", "brief": None},
+                "t9-ghost": {"status": "pending", "branch": None, "pull_request": None,
+                             "issue": None, "base": "master", "brief": None},
+            },
+        }
+        result = fn(state, [_tasks()[0]])
+        self.assertIn(
+            "t9-ghost", result["sub_tasks"],
+            "backfill_state must never remove an entry whose id the plan no longer contains "
+            "-- it only ever adds"
+        )
+
+
+class TestMainRecordSubtaskAfterBackfill(unittest.TestCase):
+    """Defect Two, main() case (k): a sub-task appended to the contract after
+    its state store was first written is invisible to --record-subtask
+    until backfill_state runs right after loading. (l) is the required
+    positive control.
+    """
+
+    def _drive(self, subtask_id, filename="acme-backfill-record-fixture.md"):
+        write_state_mock = mock.MagicMock(return_value=None)
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / filename
+            contract_path.write_text(CONTRACT_CLI_TWO_MERGEABLE_TASKS, encoding="utf-8")
+            slug = contract_path.stem
+            state = {
+                "contract": slug,
+                "started_at": "2026-09-25T00:00:00+00:00",
+                # t2-frontend was appended by an amendment after this state store was
+                # first written and is entirely absent -- the amendment scenario
+                # Defect Two names.
+                "sub_tasks": {"t1-backend": {"status": "pending", "branch": None,
+                                             "pull_request": None, "issue": 100,
+                                             "base": "master", "brief": None}},
+            }
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path),
+                    "--record-subtask", subtask_id, "--issue", "200",
+                    "--base", "feature/x", "--brief", ".claude/work-items/t2.md", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", write_state_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                exit_code = pr_merged.main()
+            printed = out.getvalue()
+        payload = json.loads(printed) if printed.strip().startswith("{") else None
+        return exit_code, payload, write_state_mock
+
+    def test_a_planned_id_missing_from_stored_state_is_now_recorded(self):
+        # (k)
+        exit_code, payload, write_state_mock = self._drive("t2-frontend")
+        self.assertEqual(
+            exit_code, 0,
+            "a sub-task the plan already declares, appended after the state store was first "
+            "written, must be recordable through --record-subtask -- today main() never adds "
+            "the missing entry, so this refuses unknown-sub-task even though /flow's "
+            "sub-issue step already opened the sub-issue on GitHub"
+        )
+        self.assertIsNotNone(payload, "fixture sanity: the CLI must print a JSON payload")
+        self.assertEqual(payload.get("recorded"), "t2-frontend")
+        self.assertTrue(write_state_mock.called)
+
+    def test_positive_control_an_id_outside_the_plan_is_still_refused(self):
+        # (l)
+        exit_code, payload, write_state_mock = self._drive("t9-does-not-exist")
+        self.assertEqual(
+            exit_code, 2,
+            "backfilling every PLANNED id must never widen --record-subtask to accept an id "
+            "the plan itself does not declare"
+        )
+        self.assertEqual(payload.get("error"), "unknown-sub-task")
+        self.assertFalse(write_state_mock.called)
+
+
+class TestMainStatusReportsABackfilledIdWithoutWritingIt(unittest.TestCase):
+    """Defect Two, main() case (m). The in-memory backfill must appear in
+    the report's own state object even though nothing is written to disk
+    under --status.
+    """
+
+    def test_a_planned_id_missing_from_stored_state_appears_in_the_reports_state(self):
+        write_state_mock = mock.MagicMock(return_value=None)
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / "acme-backfill-status-fixture.md"
+            contract_path.write_text(CONTRACT_CLI_TWO_MERGEABLE_TASKS, encoding="utf-8")
+            slug = contract_path.stem
+            state = {
+                "contract": slug,
+                "started_at": "2026-09-25T00:00:00+00:00",
+                "sub_tasks": {"t1-backend": {"status": "pending", "branch": None,
+                                             "pull_request": None, "issue": 100,
+                                             "base": "master", "brief": None}},
+            }
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path), "--status", "--json"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", write_state_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                pr_merged.main()
+            report = json.loads(out.getvalue())
+
+        self.assertIn(
+            "t2-frontend", report.get("state", {}).get("sub_tasks", {}),
+            "the report's own state object must list every PLANNED sub-task, not only the "
+            "ones the stored state already had on disk -- this is the in-memory backfill "
+            "main() must apply right after loading. Asserting only on report['sub_tasks'] "
+            "(the plan list, always complete) would pass today and prove nothing"
+        )
+        self.assertFalse(
+            write_state_mock.called,
+            "--status must never write the backfilled state to disk -- the backfill is "
+            "in-memory only, exactly like every other read-only path"
+        )
+
+
+# ==========================================================================
+# Contract block 12, Defect Two, second half (added 2026-09-25, third pass):
+# an entry with no base is cut from the default branch. backfill_state
+# writes base: null for an entry it adds, and the same fallback reaches an
+# entry that already exists with no base key -- sub-task 10's own position.
+# base_not_declared(state, subtask_id, default_base) -> Optional[str] is the
+# new --dispatch refusal: it fires only when the dispatched entry has no
+# base AND at least one OTHER entry in the same state declares a non-default
+# base -- I-8 stays intact for every state where no entry declares one.
+# ==========================================================================
+class TestMainDispatchRefusesWhenTheDispatchedEntryDeclaresNoBase(unittest.TestCase):
+    """Every case drives --dispatch over CONTRACT_CLI_TWO_MERGEABLE_TASKS
+    (t1-backend, depends on none; t2-frontend, depends on 1), with
+    advance() releasing t2-frontend through a completed, github-verified
+    t1-backend record.
+    """
+
+    def _drive(self, sub_task_entries, dispatch_id="t2-frontend", extra_flags=(),
+              filename="acme-base-not-declared-fixture.md"):
+        create_branch_mock = mock.MagicMock(return_value=(True, "created it"))
+        write_state_mock = mock.MagicMock(return_value=None)
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / filename
+            contract_path.write_text(CONTRACT_CLI_TWO_MERGEABLE_TASKS, encoding="utf-8")
+            slug = contract_path.stem
+            state = {
+                "contract": slug,
+                "started_at": "2026-09-25T00:00:00+00:00",
+                "sub_tasks": sub_task_entries,
+            }
+            records = {"t1-backend": {"status": "completed", "verified": "github",
+                                      "pull_request": "u1"}}
+            out = io.StringIO()
+            argv = (["pr_merged.py", "--contract", str(contract_path),
+                    "--dispatch", dispatch_id, "--json"] + list(extra_flags))
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value=records), \
+                 mock.patch.object(pr_merged, "load_state", return_value=state), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", write_state_mock), \
+                 mock.patch.object(pr_merged, "create_branch", create_branch_mock), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                exit_code = pr_merged.main()
+            printed = out.getvalue()
+        payload = json.loads(printed) if printed.strip().startswith("{") else None
+        return exit_code, payload, create_branch_mock, write_state_mock
+
+    def test_a_backfilled_entry_with_no_base_beside_a_declared_parent_base_is_refused(self):
+        # (n) -- the exact 2026-09-25 scenario: t2-frontend is entirely
+        # absent from the stored state and only reaches --dispatch through
+        # backfill_state's own base: null.
+        exit_code, payload, create_branch_mock, write_state_mock = self._drive({
+            "t1-backend": {"status": "completed", "branch": "task/x/t1-backend",
+                          "pull_request": "u1", "issue": 163, "base": "feature/x",
+                          "brief": None},
+        })
+        self.assertEqual(
+            exit_code, 7,
+            "dispatching a sub-task whose entry declares no base, beside another entry in "
+            "the same state that declares a non-default base, must refuse with exit code 7 "
+            "-- today this falls back to default_branch() and cuts from master silently"
+        )
+        self.assertIsNotNone(payload, "fixture sanity: the CLI must print a JSON payload")
+        self.assertEqual(payload.get("error"), "base-not-declared")
+        self.assertEqual(payload.get("sub_task"), "t2-frontend")
+        self.assertIn(
+            "feature/x", payload.get("detail", ""),
+            "the refusal must name the other base already on record so the remedy is obvious"
+        )
+        self.assertFalse(create_branch_mock.called)
+        self.assertFalse(write_state_mock.called)
+
+    def test_an_existing_entry_with_no_base_key_beside_a_declared_parent_base_is_refused(self):
+        # (o) -- sub-task 10's position today: the entry EXISTS but never
+        # had a base key at all, rather than being added by backfill_state.
+        exit_code, payload, create_branch_mock, write_state_mock = self._drive({
+            "t1-backend": {"status": "completed", "branch": "task/x/t1-backend",
+                          "pull_request": "u1", "issue": 163, "base": "feature/x",
+                          "brief": None},
+            "t2-frontend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "brief": None},
+        })
+        self.assertEqual(exit_code, 7)
+        self.assertEqual(payload.get("error"), "base-not-declared")
+        self.assertEqual(payload.get("sub_task"), "t2-frontend")
+        self.assertIn("feature/x", payload.get("detail", ""))
+        self.assertFalse(create_branch_mock.called)
+        self.assertFalse(write_state_mock.called)
+
+    def test_positive_control_a_declared_base_dispatches_normally(self):
+        # (p)
+        exit_code, _payload, create_branch_mock, _write_state_mock = self._drive({
+            "t1-backend": {"status": "completed", "branch": "task/x/t1-backend",
+                          "pull_request": "u1", "issue": 163, "base": "feature/x",
+                          "brief": None},
+            "t2-frontend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "base": "feature/x", "brief": None},
+        })
+        self.assertEqual(
+            exit_code, 0,
+            "a dispatched entry that DOES declare its own base must never be refused, "
+            "whatever its siblings declare"
+        )
+        self.assertTrue(create_branch_mock.called)
+        self.assertEqual(create_branch_mock.call_args[0][1], "feature/x")
+
+    def test_positive_control_i8_neither_entry_declares_a_base(self):
+        # (q) -- pinned 2026-09-25, fourth pass: neither entry carries a
+        # base key at all, not "both with the default branch" -- that
+        # variant cannot catch a refusal widened to fire on every missing
+        # base.
+        exit_code, _payload, create_branch_mock, _write_state_mock = self._drive({
+            "t1-backend": {"status": "completed", "branch": "task/x/t1-backend",
+                          "pull_request": "u1", "issue": 163, "brief": None},
+            "t2-frontend": {"status": "pending", "branch": None, "pull_request": None,
+                           "issue": None, "brief": None},
+        })
+        self.assertEqual(
+            exit_code, 0,
+            "I-8: a state where no entry declares a non-default base must dispatch exactly "
+            "as today -- a refusal that fires on every missing base, not only one "
+            "contradicted by a sibling, fails this control"
+        )
+        self.assertTrue(create_branch_mock.called)
+        self.assertEqual(create_branch_mock.call_args[0][1], "master")
+
+    def test_the_refusal_holds_under_dry_run(self):
+        # (r)
+        exit_code, payload, create_branch_mock, _write_state_mock = self._drive(
+            {
+                "t1-backend": {"status": "completed", "branch": "task/x/t1-backend",
+                              "pull_request": "u1", "issue": 163, "base": "feature/x",
+                              "brief": None},
+                "t2-frontend": {"status": "pending", "branch": None, "pull_request": None,
+                               "issue": None, "brief": None},
+            },
+            extra_flags=["--dry-run"],
+        )
+        self.assertEqual(
+            exit_code, 7,
+            "the refusal must hold under --dry-run too, before the identity check and before "
+            "any branch is cut -- a dry run must preview the real run, not silently succeed"
+        )
+        self.assertEqual(payload.get("error"), "base-not-declared")
+        self.assertFalse(create_branch_mock.called)
+
+
+class TestBaseNotDeclared(unittest.TestCase):
+    """base_not_declared(state, subtask_id, default_base) -> Optional[str],
+    as a pure function -- every branch (s).
+    """
+
+    def _get(self):
+        fn = _fn("base_not_declared")
+        self.assertIsNotNone(
+            fn, "pr_merged.base_not_declared must exist -- the --dispatch refusal that stops "
+                "an entry with no declared base from being silently cut from the default "
+                "branch beside a sibling that declares a real parent"
+        )
+        return fn
+
+    def test_a_missing_base_key_on_the_subject_counts_as_no_base(self):
+        fn = self._get()
+        state = {"sub_tasks": {"t1-backend": {}, "t2-frontend": {"base": "feature/x"}}}
+        self.assertIsNotNone(fn(state, "t1-backend", "master"))
+
+    def test_a_null_base_on_the_subject_counts_as_no_base(self):
+        fn = self._get()
+        state = {"sub_tasks": {"t1-backend": {"base": None},
+                               "t2-frontend": {"base": "feature/x"}}}
+        self.assertIsNotNone(fn(state, "t1-backend", "master"))
+
+    def test_an_other_entry_carrying_exactly_the_default_base_does_not_trigger(self):
+        fn = self._get()
+        state = {"sub_tasks": {"t1-backend": {}, "t2-frontend": {"base": "master"}}}
+        self.assertIsNone(
+            fn(state, "t1-backend", "master"),
+            "an other entry whose base IS the default branch is not the contradiction this "
+            "refusal exists for -- I-8 must stay intact"
+        )
+
+    def test_the_subjects_own_entry_is_never_counted_as_the_other(self):
+        fn = self._get()
+        state = {"sub_tasks": {"t1-backend": {}}}
+        self.assertIsNone(
+            fn(state, "t1-backend", "master"),
+            "with no OTHER entry in the state, nothing can contradict the subject's own "
+            "missing base, however that entry itself reads"
+        )
+
+    def test_an_id_absent_from_the_state_entirely_counts_as_no_base(self):
+        fn = self._get()
+        state = {"sub_tasks": {"t2-frontend": {"base": "feature/x"}}}
+        self.assertIsNotNone(fn(state, "t1-backend", "master"))
 
 
 if __name__ == "__main__":
