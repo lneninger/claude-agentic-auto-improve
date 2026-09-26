@@ -95,8 +95,10 @@ py -3 "$PRM" --contract <slug> --dispatch <sub-task-id> --json
 
 It cuts the branch from the sub-task's own base, read out of its state entry — the parent
 branch for a Sub-Task Work Item, the repository default branch only when that entry carries no
-base at all — fetching that base first (`create_branch`), then records the sub-task as
-`awaiting-merge` with the cut branch in the state store, and returns the packet.
+base at all. How `create_branch` cuts it depends on whether a sub-issue is recorded. With one,
+`gh issue develop` cuts the branch on GitHub from that base, and the new branch is then fetched.
+Without one, it fetches the base first and cuts the branch locally. It then records the sub-task
+as `awaiting-merge` with the cut branch in the state store, and returns the packet.
 
 It refuses with `not-released` if the sub-task's dependencies have not landed, so a wrong
 identity cannot start work that has nothing to build on. It also refuses with exit code 7,

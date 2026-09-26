@@ -1207,8 +1207,9 @@ def file_at_commit(sha: str, path: str) -> Optional[str]:
 def ensure_commit_local(sha: str, ref: str) -> bool:
     """Confirm the merge commit is in the local clone -- Defect One's edge.
 
-    Consulted only when a first read at ``sha`` yields nothing, so that a
-    commit already present costs one presence check and nothing else. Runs
+    Consulted only when a first read at ``sha`` yields nothing, so a
+    commit already present costs one presence check here, and never a
+    fetch. Runs
     ``git cat-file -e <sha>^{commit}``; only on failure does it run ONE
     ``git fetch origin <ref>`` -- ``ref`` is the pull request's own
     ``baseRefName``, where the merge commit lives, never the repository
@@ -1634,9 +1635,9 @@ def main() -> int:
             return 3
 
         # Defect Two, second half: an entry with no declared base falls back
-        # to `base` (default_branch()) two lines below, silently, even where
-        # a sibling in this same contract already declares a real parent
-        # branch -- sub-task 10's own position. This refusal runs BEFORE
+        # to `base` (default_branch()) at `declared_task_base` below,
+        # silently, even where a sibling in this same contract already
+        # declares a real parent branch. This refusal runs BEFORE
         # that fallback is ever read, before the identity check, and before
         # any branch is cut, in every mode including --dry-run -- a dry run
         # must preview the real run, not silently succeed. I-8 stays intact:
