@@ -12,6 +12,7 @@ import contextlib
 import inspect
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -2591,7 +2592,7 @@ class TestMainRefusesDispatchOnAnUnreadableBrief(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# (a) The Hand-Resolved Summary -- three facts, never one list.
+# (a) The Hand-Resolved Summary -- four facts, never one list.
 #
 # Data Shapes, Hand-Resolved Summary: files (ordered, de-duplicated, possibly
 # empty), merge_commits (inspected commits carrying two or more parents),
@@ -2645,7 +2646,7 @@ class TestSummariseHandResolved(unittest.TestCase):
         # class passes with a fourth key present, and the fourth key a reader
         # reaches for first is a derived judgement -- "clean": not files --
         # which is precisely the overclaim Alternatives Considered rejected
-        # Option D for: it re-collapses the four-state reading the shape exists
+        # Option D for: it re-collapses the five-state reading the shape exists
         # to hold open, and it does so under a name nobody can argue with.
         # POSITIVE CONTROL, measured against a throwaway stub
         # summarise_hand_resolved that also returns "clean": not files -- this
@@ -2661,11 +2662,12 @@ class TestSummariseHandResolved(unittest.TestCase):
 
         got = summarise(["m1"], fake_git)
         self.assertEqual(
-            set(got), {"files", "merge_commits", "commits_inspected"},
-            "the Hand-Resolved Summary is exactly three facts (Data Shapes, Value Objects). A "
-            "fourth field carrying a judgement -- clean, safe, ok -- is a claim nobody "
-            "measured; the four-state reading belongs to whoever reads the three facts, and "
-            "the summary read %r" % (sorted(got),)
+            set(got), {"files", "merge_commits", "commits_inspected", "commits_unread"},
+            "the Hand-Resolved Summary is exactly four facts (Data Shapes, Value Objects). "
+            "commits_unread is the fourth -- a MEASUREMENT of how many reported commits could "
+            "not be read even after one fetch attempt, never a judgement like clean/safe/ok. "
+            "The five-state reading belongs to whoever reads these four facts, and the "
+            "summary read %r" % (sorted(got),)
         )
 
     def test_files_are_de_duplicated_and_keep_first_seen_order(self):
@@ -2862,7 +2864,7 @@ class TestBuildRecordCarriesHandResolved(unittest.TestCase):
         self.assertEqual(
             rec.get("hand_resolved"), summary,
             "the summary passed to build_record must be stamped into the record it returns, "
-            "whole -- all three fields, not just the file list"
+            "whole -- all four fields, not just the file list"
         )
 
     def test_an_empty_file_list_is_still_written_never_omitted(self):
@@ -2951,7 +2953,8 @@ def _drive_main_with_flags(contract_text, flags, records=None, filename="acme-re
 #: The record a post-change run writes: a summary that measured something.
 _RECORD_WITH_SUMMARY = {
     "status": "completed", "verified": "github", "pull_request": "u",
-    "hand_resolved": {"files": ["src/Hand.cs"], "merge_commits": 1, "commits_inspected": 3},
+    "hand_resolved": {"files": ["src/Hand.cs"], "merge_commits": 1, "commits_inspected": 3,
+                      "commits_unread": 0},
 }
 
 #: The record every run written before this change left behind: no key at all.
@@ -3149,11 +3152,11 @@ def _drive_main_over_a_pull_request(contract_text, commits, diff_table,
 #: commits and neither was a merge, which is a MEASUREMENT and not an absence.
 _PR_THAT_FOUND_A_FILE = (
     ["c1", "m1"], {"c1": ([], 1), "m1": (["src/Hand.cs"], 2)},
-    {"files": ["src/Hand.cs"], "merge_commits": 1, "commits_inspected": 2},
+    {"files": ["src/Hand.cs"], "merge_commits": 1, "commits_inspected": 2, "commits_unread": 0},
 )
 _PR_WITH_NOTHING_INSPECTABLE = (
     ["c1", "c2"], {"c1": ([], 1), "c2": ([], 1)},
-    {"files": [], "merge_commits": 0, "commits_inspected": 2},
+    {"files": [], "merge_commits": 0, "commits_inspected": 2, "commits_unread": 0},
 )
 
 
@@ -3185,7 +3188,7 @@ class TestMainPassesTheSummaryIntoBuildRecord(unittest.TestCase):
         )
         self.assertEqual(
             recorded["hand_resolved"], expected,
-            "the three facts must arrive whole at the call site -- a bare file list here is the "
+            "the four facts must arrive whole at the call site -- a bare file list here is the "
             "shape the Hand-Resolved Summary exists to replace"
         )
         written = write_record_mock.call_args[0][2]
@@ -3227,7 +3230,7 @@ class TestMainPassesTheSummaryIntoBuildRecord(unittest.TestCase):
         written = write_record_mock.call_args[0][2]
         self.assertEqual(
             written.get("hand_resolved"), expected,
-            "and the written record carries the same three facts, empty file list included"
+            "and the written record carries the same four facts, empty file list included"
         )
 
 
@@ -4788,7 +4791,7 @@ class TestResumeIsReadOnlyAtEveryWritingBranch(unittest.TestCase):
 # entry's counts are pinned by
 # TestReportSeedsHandResolvedFromStoredRecords; the processed entry's were not.
 # The consequence is the failure the contract rejected Option D for: the skill
-# renders its four readings off this entry, so a freshly processed pull request
+# renders its five readings off this entry, so a freshly processed pull request
 # would arrive as a bare file list with no merge_commits, and "not detectable"
 # would be indistinguishable from "clean".
 # --------------------------------------------------------------------------
@@ -4835,7 +4838,7 @@ class TestTheProcessedReportEntryNamesItsSubTaskAndItsSource(unittest.TestCase):
         )
         self.assertEqual(
             entry.get("merge_commits"), expected["merge_commits"],
-            "and merge_commits with it: the skill distinguishes four readings off this entry, "
+            "and merge_commits with it: the skill distinguishes five readings off this entry, "
             "and three of the four are decided by this count. Without it a freshly processed "
             "pull request renders as a bare file list"
         )
@@ -5373,7 +5376,7 @@ class TestHandResolvedReportsExactlyOneEntryPerSubTask(unittest.TestCase):
 # (`if entry.get("merge_commits") == 0:`). An absent key, an explicit None, a
 # string, or a negative value all fail that comparison and fall through to
 # the files check, which reads "clean" whenever files is also empty -- the
-# exact overclaim the Hand-Resolved Summary's four-state reading exists to
+# exact overclaim the Hand-Resolved Summary's five-state reading exists to
 # prevent (Failure Modes, first entry).
 # --------------------------------------------------------------------------
 class TestRenderHandResolvedReadingFailsClosedOnAMalformedCount(unittest.TestCase):
@@ -5382,7 +5385,7 @@ class TestRenderHandResolvedReadingFailsClosedOnAMalformedCount(unittest.TestCas
         fn = _fn("_render_hand_resolved_reading")
         self.assertIsNotNone(
             fn, "pr_merged._render_hand_resolved_reading must exist -- Data Shapes names it "
-                "the renderer of the Hand-Resolved Summary's four readings"
+                "the renderer of the Hand-Resolved Summary's five readings"
         )
         return fn(entry)
 
@@ -5405,8 +5408,12 @@ class TestRenderHandResolvedReadingFailsClosedOnAMalformedCount(unittest.TestCas
         )
 
     def test_positive_control_two_merge_commits_with_no_files_reads_clean(self):
+        # R-9 now withholds "clean" from an entry that never counted unread
+        # commits at all, so this control needs commits_unread: 0 to reach
+        # R-10 instead of R-9 -- it stands for a genuinely MEASURED zero.
         reading = self._reading({"source": "measured-this-run", "files": [],
-                                 "merge_commits": 2, "commits_inspected": 2})
+                                 "merge_commits": 2, "commits_inspected": 2,
+                                 "commits_unread": 0})
         self.assertEqual(
             reading, "clean",
             "fixture sanity: a genuinely measured, genuinely clean merge must still read "
@@ -5565,7 +5572,7 @@ class TestRenderHandResolvedReadingFailsClosedOnAMalformedCount(unittest.TestCas
         fn = _fn("_render_hand_resolved_reading")
         self.assertIsNotNone(
             fn, "pr_merged._render_hand_resolved_reading must exist -- Data Shapes names it "
-                "the renderer of the Hand-Resolved Summary's four readings"
+                "the renderer of the Hand-Resolved Summary's five readings"
         )
         try:
             return fn(entry)
@@ -5685,13 +5692,13 @@ class TestRenderHandResolvedReadingFailsClosedOnAMalformedCount(unittest.TestCas
 # RED (t2-script-and-skills): W2 -- every hand_resolved entry in --json output
 # carries its own rendered reading.
 #
-# Data Shapes' Hand-Resolved Summary names four readings a person interprets
+# Data Shapes' Hand-Resolved Summary names five readings a person interprets
 # from files/merge_commits/source -- today that rendering exists ONLY in
 # main()'s human-readable branch (pr_merged.py:1592), one call to
 # _render_hand_resolved_reading per printed line. A caller reading --json
 # output -- the orchestrator loop, or a skill rendering the report itself --
 # gets the raw files/merge_commits/commits_inspected/source fields and must
-# reimplement the same four-state reading a second time, which is exactly the
+# reimplement the same five-state reading a second time, which is exactly the
 # drift Alternatives Considered rejects for the printed line. Every entry
 # report["hand_resolved"] carries, whatever produced it -- a seeded
 # stored-record, a not-recorded placeholder, or a freshly measured entry --
@@ -5737,7 +5744,7 @@ class TestEveryHandResolvedEntryCarriesItsOwnRenderedReadingInJson(unittest.Test
         render = _fn("_render_hand_resolved_reading")
         self.assertIsNotNone(
             render, "pr_merged._render_hand_resolved_reading must exist -- Data Shapes "
-                    "names it the renderer of the Hand-Resolved Summary's four readings"
+                    "names it the renderer of the Hand-Resolved Summary's five readings"
         )
         report = _drive_main_over_a_pull_request_with_stored_records(
             CONTRACT_CLI_THREE_SUBTASKS_FOR_READING_FIELD, *_PR_THAT_FOUND_A_FILE[:2],
@@ -5767,7 +5774,7 @@ class TestEveryHandResolvedEntryCarriesItsOwnRenderedReadingInJson(unittest.Test
                 self.assertIn(
                     "reading", entry,
                     "every hand_resolved entry in --json output must carry its own rendered "
-                    "reading -- a caller reading --json must not reimplement the four-state "
+                    "reading -- a caller reading --json must not reimplement the five-state "
                     "reading main()'s own human-readable branch already computes. Entry read "
                     "%r" % entry
                 )
@@ -7034,6 +7041,1249 @@ class TestBaseNotDeclared(unittest.TestCase):
         fn = self._get()
         state = {"sub_tasks": {"t2-frontend": {"base": "feature/x"}}}
         self.assertIsNotNone(fn(state, "t1-backend", "master"))
+
+
+# ==========================================================================
+# Contract: "Loop merge readings: an unread commit is never clean, and a
+#   pull request in another repository can be recorded"
+#   .claude/concepts/2026-09-27-213-loop-merge-readings.md  (approved)
+#
+# RED phase, sub-task 1 (issue 228). Every case below states one behaviour
+# this contract ADDS or CHANGES, and most of it does not exist yet.
+# Not-yet-built symbols and not-yet-built keyword PARAMETERS are looked up or
+# checked first (via _fn() at line 98, or inspect.signature), so an absent
+# behaviour turns into an explicit assertion naming it, never a bare
+# ImportError/TypeError that would redden the whole file or hide behind an
+# unrelated crash. Every driver that reaches pr_merged.main() patches
+# pr_merged._run (or reaches it only through the module-level subprocess
+# guard at line 69, never bypassing it), so nothing here starts a real git or
+# gh process.
+# ==========================================================================
+
+
+def _staged_git_combined_diff(readings):
+    """sha -> a scripted git_combined_diff, for the walk tests (item c/e).
+
+    ``readings`` maps a commit sha to an ORDERED list of ``(files,
+    parent_count)`` answers -- the first element is what a first read
+    returns, the second (if present) is what a second, post-fetch read
+    returns. Once a sha's list is exhausted, its last answer repeats, so a
+    commit that is only ever read once never needs a padding entry. The
+    returned callable carries a ``.calls`` dict (sha -> read count) so a test
+    can assert exactly how many times each commit was read, in what order,
+    without threading a second list through by hand.
+    """
+    calls: dict = {}
+
+    def fake(sha):
+        idx = calls.get(sha, 0)
+        seq = readings[sha]
+        result = seq[idx] if idx < len(seq) else seq[-1]
+        calls[sha] = idx + 1
+        return result
+
+    fake.calls = calls
+    return fake
+
+
+# --------------------------------------------------------------------------
+# (a) git_combined_diff honours BOTH exit codes -- CR-1 to CR-4 (Data Shapes,
+# Commit reading). pr_merged._run is patched directly; no real git process
+# starts. Today git_combined_diff discards both exit codes entirely
+# (pr_merged.py:1186-1192, "_, parents = _run(...)"), so a failed read is
+# indistinguishable from a genuinely tiny parent count.
+# --------------------------------------------------------------------------
+class TestGitCombinedDiffHonoursBothExitCodes(unittest.TestCase):
+
+    def test_cr1_a_nonzero_rev_list_exit_reads_as_unknown(self):
+        # POSITIVE CONTROL (fixture-owned): change the rev-list exit code
+        # from 128 to 0 with a genuine "<sha> <parent>" line and parent_count
+        # reads a trustworthy integer instead of None, turning the assertion
+        # red.
+        def fake_run(cmd):
+            if cmd[:2] == ["git", "rev-list"]:
+                return 128, ""
+            raise AssertionError(
+                "git show must never run when rev-list itself failed; got %r" % (cmd,))
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            files, parent_count = pr_merged.git_combined_diff("deadbeef")
+
+        self.assertIsNone(
+            parent_count,
+            "CR-1: a rev-list that exits non-zero means the commit could not be read at all, "
+            "and must report unknown (Python None), never a trustworthy count derived from "
+            "empty output. Read %r" % (parent_count,)
+        )
+        self.assertEqual(files, [], "an unreadable commit contributes no files")
+
+    def test_cr1_b_an_exit_zero_rev_list_that_prints_nothing_also_reads_as_unknown(self):
+        # POSITIVE CONTROL (fixture-owned): change the rev-list response to a
+        # genuine "<sha> <parent>" line and parent_count reads 1 instead of
+        # None, turning the assertion red.
+        def fake_run(cmd):
+            if cmd[:2] == ["git", "rev-list"]:
+                return 0, ""
+            raise AssertionError(
+                "git show must never run off an unreadable rev-list; got %r" % (cmd,))
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            files, parent_count = pr_merged.git_combined_diff("deadbeef")
+
+        self.assertIsNone(
+            parent_count,
+            "CR-1: an exit-zero rev-list that prints nothing is exactly as unreadable as a "
+            "non-zero exit and must report unknown, never fall through to a derived count of "
+            "zero. Read %r" % (parent_count,)
+        )
+        self.assertEqual(files, [])
+
+    def test_cr2_one_parent_runs_no_git_show(self):
+        # CR-2, unchanged behaviour. May already pass today -- named because
+        # the contract requires it covered as its own case, not because it
+        # is expected RED (see the handoff for the note on this).
+        show_calls = []
+
+        def fake_run(cmd):
+            if cmd[:2] == ["git", "rev-list"]:
+                return 0, "deadbeef parent1"
+            show_calls.append(cmd)
+            return 0, ""
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            files, parent_count = pr_merged.git_combined_diff("deadbeef")
+
+        self.assertEqual(parent_count, 1, "fewer than two parents must report the genuine count")
+        self.assertEqual(files, [], "a non-merge commit has no combined diff to read")
+        self.assertEqual(show_calls, [], "CR-2: git show must never run for fewer than two parents")
+
+    def test_cr3_two_parents_show_exit_1_reads_as_unknown_case_d(self):
+        # POSITIVE CONTROL (fixture-owned): change the show response's exit
+        # code from 1 to 0 with an empty listing and parent_count reads 2
+        # instead of None -- that mutation IS CR-4, proving this case is
+        # genuinely pinned on the show failure.
+        def fake_run(cmd):
+            if cmd[:2] == ["git", "rev-list"]:
+                return 0, "deadbeef p1 p2"
+            return 1, ""
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            files, parent_count = pr_merged.git_combined_diff("deadbeef")
+
+        self.assertIsNone(
+            parent_count,
+            "CR-3: two parents but a git show that itself fails means the merge could not be "
+            "read -- this is the t4 artefact's case D, and it must report unknown rather than "
+            "the raw parent count, which is exactly the shape that let case D render clean "
+            "today. Read %r" % (parent_count,)
+        )
+        self.assertEqual(files, [], "an unreadable merge contributes no files")
+
+    def test_cr4_positive_control_two_parents_show_exit_0_empty_stays_a_clean_merge(self):
+        # Must stay green throughout: a fix that reads every empty listing
+        # as unknown would fail this control.
+        def fake_run(cmd):
+            if cmd[:2] == ["git", "rev-list"]:
+                return 0, "deadbeef p1 p2"
+            return 0, ""
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            files, parent_count = pr_merged.git_combined_diff("deadbeef")
+
+        self.assertEqual(
+            parent_count, 2,
+            "CR-4: an exit-zero, empty file listing is a genuinely clean merge, and must be "
+            "reported as such, with the true parent count -- never as unknown"
+        )
+        self.assertEqual(files, [], "a clean merge contributes no files")
+
+
+# --------------------------------------------------------------------------
+# (b) Case D never renders clean, end to end -- the REAL git_combined_diff,
+# summarise_hand_resolved and _render_hand_resolved_reading, with only
+# pr_merged._run patched. No unit-level stub stands in for any of the three;
+# this is the fix's whole chain, walked exactly as main() walks it.
+# --------------------------------------------------------------------------
+class TestCaseDNeverRendersCleanEndToEnd(unittest.TestCase):
+
+    def _run_stub(self, table):
+        def fake_run(cmd):
+            sha = cmd[-1]
+            if cmd[1] == "rev-list":
+                return table[sha]["rev_list"]
+            if cmd[1] == "show":
+                return table[sha].get("show", (0, ""))
+            raise AssertionError("unexpected command %r" % (cmd,))
+        return fake_run
+
+    def test_case_d_a_single_two_parent_commit_whose_show_fails_never_reads_clean(self):
+        # THE T4 ARTEFACT'S CASE D. POSITIVE CONTROL (fixture-owned): change
+        # the show response's exit code from 1 to 0 with an empty listing
+        # and the reading becomes "clean" instead -- that mutation IS CR-4,
+        # proving this case is genuinely pinned on the show failure and not
+        # on some other property of the fixture.
+        table = {"case-d": {"rev_list": (0, "case-d p1 p2"), "show": (1, "")}}
+        with mock.patch.object(pr_merged, "_run", self._run_stub(table)):
+            summary = pr_merged.summarise_hand_resolved(["case-d"], pr_merged.git_combined_diff)
+            entry = {"source": "measured-this-run", **summary}
+            reading = pr_merged._render_hand_resolved_reading(entry)
+        self.assertEqual(
+            summary.get("commits_unread"), 1,
+            "a two-parent commit whose show fails is unread, not a clean merge (CR-3), and "
+            "must be counted as such. Summary read %r" % (summary,)
+        )
+        self.assertEqual(
+            reading, "not detectable (unread commits: 1)",
+            "case D must never render clean -- the whole point of this contract. Reading was %r"
+            % reading
+        )
+        self.assertNotEqual(reading, "clean")
+
+    def test_case_b_one_readable_clean_merge_plus_one_unread_commit_is_never_clean(self):
+        # Case B: a genuinely clean, readable merge commit sits BESIDE a
+        # commit whose rev-list itself fails. Even though something WAS
+        # measured and found clean, the presence of any unread commit must
+        # still withhold "clean" -- R-8 fires before R-10. POSITIVE CONTROL
+        # (fixture-owned): drop "unread-sha" from the commit list entirely
+        # and the reading becomes "clean", proving the unread commit alone
+        # is what withholds it.
+        table = {
+            "clean-sha": {"rev_list": (0, "clean-sha p1 p2"), "show": (0, "")},
+            "unread-sha": {"rev_list": (128, "")},
+        }
+        with mock.patch.object(pr_merged, "_run", self._run_stub(table)):
+            summary = pr_merged.summarise_hand_resolved(
+                ["clean-sha", "unread-sha"], pr_merged.git_combined_diff)
+            entry = {"source": "measured-this-run", **summary}
+            reading = pr_merged._render_hand_resolved_reading(entry)
+        self.assertEqual(summary.get("merge_commits"), 1, "fixture sanity: one clean merge was inspected")
+        self.assertEqual(summary.get("commits_unread"), 1, "fixture sanity: one commit could not be read")
+        self.assertEqual(
+            reading, "not detectable (unread commits: 1)",
+            "a genuinely clean merge beside an unread commit must still withhold clean -- one "
+            "unmeasured commit is enough to make the whole pull request's cleanliness "
+            "unknowable. Reading was %r" % reading
+        )
+
+
+# --------------------------------------------------------------------------
+# (c) The walk aims its single fetch at an absent unread commit -- W-1, W-2,
+# W-2a, W-3, W-5, W-6 (Data Shapes, Walk invariants). summarise_hand_resolved
+# is called DIRECTLY with ensure_local/commit_present as counting stubs, per
+# Extension Point 2's new keywords -- not yet built, so every case here
+# checks inspect.signature FIRST (the file's own convention, header comment
+# at line 98).
+# --------------------------------------------------------------------------
+class TestTheWalkAimsItsSingleFetchAtAnAbsentUnreadCommit(unittest.TestCase):
+
+    def _require_walk_parameters(self):
+        sig = inspect.signature(pr_merged.summarise_hand_resolved)
+        self.assertIn(
+            "ensure_local", sig.parameters,
+            "summarise_hand_resolved must accept ensure_local=None -- Extension Point 2, W-2"
+        )
+        self.assertIn(
+            "commit_present", sig.parameters,
+            "summarise_hand_resolved must accept commit_present=None -- Extension Point 2, W-2"
+        )
+
+    def test_two_absent_unread_commits_the_single_fetch_targets_only_the_first(self):
+        self._require_walk_parameters()
+        readings = {
+            "m1": [([], 2)],
+            "u1": [([], None), (["a.txt"], 2)],
+            "u2": [([], None), ([], 1)],
+        }
+        git_combined_diff = _staged_git_combined_diff(readings)
+        commit_present_calls = []
+
+        def commit_present(sha):
+            commit_present_calls.append(sha)
+            return False
+
+        ensure_local_calls = []
+
+        def ensure_local(sha):
+            ensure_local_calls.append(sha)
+            return True
+
+        summary = pr_merged.summarise_hand_resolved(
+            ["m1", "u1", "u2"], git_combined_diff,
+            ensure_local=ensure_local, commit_present=commit_present)
+
+        self.assertEqual(
+            commit_present_calls, ["u1"],
+            "W-2: commit_present must be asked about the unread commits in reported order, "
+            "stopping at the first that answers absent -- got %r" % commit_present_calls
+        )
+        self.assertEqual(
+            ensure_local_calls, ["u1"],
+            "W-2: the single fetch must be aimed at the first unread commit commit_present "
+            "reports absent, called exactly once for the whole walk -- got %r" % ensure_local_calls
+        )
+        self.assertEqual(git_combined_diff.calls.get("m1"), 1, "a readable commit is read exactly once")
+        self.assertEqual(
+            git_combined_diff.calls.get("u1"), 2,
+            "an unread commit gets a second, final read after the fetch attempt")
+        self.assertEqual(
+            git_combined_diff.calls.get("u2"), 2,
+            "every unread commit is re-read once more, not only the one the fetch targeted")
+        self.assertEqual(
+            summary.get("commits_unread"), 0,
+            "both unread commits resolved on their second read, so nothing stays unread")
+        self.assertEqual(summary.get("merge_commits"), 2, "m1 and u1's final reads are both merge commits")
+        self.assertEqual(summary.get("commits_inspected"), 3)
+
+    def test_ensure_local_answering_false_still_gives_one_re_read_and_a_final_unread(self):
+        self._require_walk_parameters()
+        readings = {"u1": [([], None), ([], None)]}
+        git_combined_diff = _staged_git_combined_diff(readings)
+
+        def commit_present(sha):
+            return False
+
+        ensure_local_calls = []
+
+        def ensure_local(sha):
+            ensure_local_calls.append(sha)
+            return False
+
+        summary = pr_merged.summarise_hand_resolved(
+            ["u1"], git_combined_diff, ensure_local=ensure_local, commit_present=commit_present)
+
+        self.assertEqual(ensure_local_calls, ["u1"], "the fetch attempt still runs once even though it will fail")
+        self.assertEqual(
+            git_combined_diff.calls.get("u1"), 2,
+            "the commit is still re-read once more even though ensure_local reported failure -- "
+            "the re-read is unconditional on the fetch's own answer")
+        self.assertEqual(
+            summary.get("commits_unread"), 1,
+            "a commit still unread after the failed fetch attempt counts as unread")
+
+    def test_present_before_absent_the_fetch_skips_the_present_commit_whichever_order_they_are_reported(self):
+        self._require_walk_parameters()
+        presence = {"present-sha": True, "absent-sha": False}
+
+        def make_commit_present(calls):
+            def commit_present(sha):
+                calls.append(sha)
+                return presence[sha]
+            return commit_present
+
+        for order, expected_commit_present_calls in (
+                (["present-sha", "absent-sha"], ["present-sha", "absent-sha"]),
+                (["absent-sha", "present-sha"], ["absent-sha"]),
+        ):
+            with self.subTest(order=order):
+                readings = {
+                    "present-sha": [([], None), ([], 1)],
+                    "absent-sha": [([], None), ([], 1)],
+                }
+                git_combined_diff = _staged_git_combined_diff(readings)
+                commit_present_calls = []
+                ensure_local_calls = []
+
+                def ensure_local(sha, _calls=ensure_local_calls):
+                    _calls.append(sha)
+                    return True
+
+                pr_merged.summarise_hand_resolved(
+                    order, git_combined_diff, ensure_local=ensure_local,
+                    commit_present=make_commit_present(commit_present_calls))
+
+                self.assertEqual(
+                    ensure_local_calls, ["absent-sha"],
+                    "the single fetch must be aimed at the absent commit, never the "
+                    "present-but-unshowable one, whichever order they are reported in -- got %r "
+                    "for order %r" % (ensure_local_calls, order)
+                )
+                self.assertEqual(
+                    commit_present_calls, expected_commit_present_calls,
+                    "commit_present must be asked in reported order, stopping at the first "
+                    "absent answer -- got %r for order %r" % (commit_present_calls, order)
+                )
+
+    def test_all_present_unread_commits_are_never_fetched_or_reread(self):
+        self._require_walk_parameters()
+        readings = {"u1": [([], None)], "u2": [([], None)]}
+
+        def commit_present_all_yes(sha):
+            return True
+
+        ensure_local_calls = []
+
+        def ensure_local(sha):
+            ensure_local_calls.append(sha)
+            return True
+
+        git_combined_diff = _staged_git_combined_diff(readings)
+        summary = pr_merged.summarise_hand_resolved(
+            ["u1", "u2"], git_combined_diff,
+            ensure_local=ensure_local, commit_present=commit_present_all_yes)
+
+        self.assertEqual(
+            ensure_local_calls, [],
+            "when every unread commit is already present, a fetch cannot help any of them, so "
+            "ensure_local must never be called -- got %r" % ensure_local_calls
+        )
+        self.assertEqual(git_combined_diff.calls.get("u1"), 1, "a present-but-unread commit is never re-read when nothing was fetched")
+        self.assertEqual(git_combined_diff.calls.get("u2"), 1)
+        self.assertEqual(
+            summary.get("commits_unread"), 2,
+            "both commits stay unread -- present but unshowable, case D and its kin")
+
+        # POSITIVE CONTROL, same fixture: one commit now answers absent, and
+        # the fetch must run exactly once -- proving the zero-calls assertion
+        # above is measuring a real guard, not a stub wired to nothing.
+        readings2 = {"u1": [([], None)], "u2": [([], None), ([], 1)]}
+
+        def commit_present_one_no(sha):
+            return sha != "u2"
+
+        ensure_local_calls2 = []
+
+        def ensure_local2(sha):
+            ensure_local_calls2.append(sha)
+            return True
+
+        git_combined_diff2 = _staged_git_combined_diff(readings2)
+        pr_merged.summarise_hand_resolved(
+            ["u1", "u2"], git_combined_diff2,
+            ensure_local=ensure_local2, commit_present=commit_present_one_no)
+        self.assertEqual(
+            ensure_local_calls2, ["u2"],
+            "positive control: with one commit answering absent, ensure_local must be called "
+            "once, proving the all-present case above is not merely a fake that never wires "
+            "ensure_local at all -- got %r" % ensure_local_calls2
+        )
+
+    def test_w2a_commit_present_is_never_asked_about_a_readable_commit(self):
+        self._require_walk_parameters()
+        readings = {"m1": [([], 2)]}
+        commit_present_calls = []
+
+        def commit_present(sha):
+            commit_present_calls.append(sha)
+            return True
+
+        def ensure_local(sha):
+            raise AssertionError("ensure_local must never be called when nothing is unread")
+
+        git_combined_diff = _staged_git_combined_diff(readings)
+        pr_merged.summarise_hand_resolved(
+            ["m1"], git_combined_diff, ensure_local=ensure_local, commit_present=commit_present)
+        self.assertEqual(
+            commit_present_calls, [],
+            "W-2a: commit_present must never be asked about a commit whose first read already "
+            "succeeded -- got %r" % commit_present_calls
+        )
+
+    def test_w5_missing_either_callable_disables_the_fetch_entirely(self):
+        self._require_walk_parameters()
+        for kwargs_label, kwargs in (
+                ("neither supplied", {}),
+                ("only ensure_local supplied", {"ensure_local": lambda sha: True}),
+                ("only commit_present supplied", {"commit_present": lambda sha: False}),
+        ):
+            with self.subTest(case=kwargs_label):
+                readings = {"u1": [([], None)]}
+                git_combined_diff = _staged_git_combined_diff(readings)
+                try:
+                    summary = pr_merged.summarise_hand_resolved(["u1"], git_combined_diff, **kwargs)
+                except Exception as exc:  # noqa: BLE001 -- the raise IS the finding
+                    self.fail(
+                        "W-5: with %s, the walk must simply read the one unread commit once "
+                        "and move on, with no presence check, no fetch and no re-read -- it "
+                        "raised %s: %s instead. This is W-3's own guard: an unknown parent "
+                        "count must never be compared with an integer directly"
+                        % (kwargs_label, type(exc).__name__, exc)
+                    )
+                    continue
+                self.assertEqual(
+                    git_combined_diff.calls.get("u1"), 1,
+                    "W-5: with %s, no presence check, fetch or re-read may ever be attempted -- "
+                    "got %d reads" % (kwargs_label, git_combined_diff.calls.get("u1", 0))
+                )
+                self.assertEqual(summary.get("commits_unread"), 1)
+
+    def test_w6_the_summary_always_carries_commits_unread_zero_when_nothing_is_unread(self):
+        self._require_walk_parameters()
+        readings = {"m1": [([], 2)]}
+        summary = pr_merged.summarise_hand_resolved(["m1"], _staged_git_combined_diff(readings))
+        self.assertIn(
+            "commits_unread", summary,
+            "W-6: the summary must always carry commits_unread, even when it is zero -- an "
+            "absent key is a different claim, 'nobody counted'"
+        )
+        self.assertEqual(summary.get("commits_unread"), 0)
+        self.assertEqual(
+            set(summary), {"files", "merge_commits", "commits_inspected", "commits_unread"},
+            "W-6: the summary is exactly four facts, no more, no fewer -- got %r" % (sorted(summary),)
+        )
+
+
+# --------------------------------------------------------------------------
+# (d) The render, R-1 to R-10 (Data Shapes, Reading invariants), one case per
+# rule plus the ordering pairs named in Failure Modes.
+# --------------------------------------------------------------------------
+class TestHandResolvedReadingFiveReadingsInOrder(unittest.TestCase):
+
+    def _reading(self, entry):
+        return pr_merged._render_hand_resolved_reading(entry)
+
+    def test_r1_source_not_recorded_reads_not_recorded_unchanged(self):
+        reading = self._reading({"source": "not-recorded"})
+        self.assertEqual(reading, "not-recorded", "R-1: unchanged by this contract")
+
+    def test_r2_a_stored_record_without_the_unread_count_reads_not_recorded(self):
+        entry = {"source": "stored-record", "files": ["src/Hand.cs"], "merge_commits": 1,
+                 "commits_inspected": 3}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "not-recorded",
+            "R-2: a stored record written before commits_unread existed cannot tell 'no commit "
+            "was unread' apart from 'nobody counted', and must render not-recorded -- its clean "
+            "may be the very W1 overclaim this contract fixes. Read %r" % reading
+        )
+
+    def test_r2_positive_control_the_same_stored_record_with_a_zero_unread_count_reads_clean(self):
+        entry = {"source": "stored-record", "files": [], "merge_commits": 1,
+                 "commits_inspected": 3, "commits_unread": 0}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "clean",
+            "positive control: the same source with a measured zero unread count reads clean, "
+            "proving R-2 is triggered by the missing key, not merely by the stored-record "
+            "source. Read %r" % reading
+        )
+
+    def test_r3_malformed_unread_counts_read_not_detectable_unread_count_unreadable(self):
+        for bad_value, label in ((True, "bool True"), (False, "bool False"),
+                                 (-1, "negative int"), ("2", "string")):
+            with self.subTest(value=label):
+                entry = {"source": "measured-this-run", "files": [], "merge_commits": 1,
+                         "commits_inspected": 1, "commits_unread": bad_value}
+                reading = self._reading(entry)
+                self.assertEqual(
+                    reading, "not detectable (unread count unreadable)",
+                    "R-3: commits_unread=%r (%s) is not a genuine non-negative, non-bool "
+                    "integer count and must fail closed -- a caller cannot trust a count it "
+                    "cannot recognise. Read %r" % (bad_value, label, reading)
+                )
+
+    def test_r4_malformed_or_nonpositive_merge_commits_with_unread_commits_present_names_the_count(self):
+        for merge_commits_value, label in ((0, "zero"), (None, "explicit None"),
+                                           (-1, "negative"), ("x", "string")):
+            with self.subTest(merge_commits=label):
+                entry = {"source": "measured-this-run", "files": [],
+                         "merge_commits": merge_commits_value, "commits_inspected": 2,
+                         "commits_unread": 1}
+                reading = self._reading(entry)
+                self.assertEqual(
+                    reading, "not detectable (unread commits: 1)",
+                    "R-4: a malformed or non-positive merge_commits beside a positive unread "
+                    "count must name the unread count, never fall through to R-5's uncounted "
+                    "wording -- merge_commits=%r (%s) read %r" % (merge_commits_value, label, reading)
+                )
+
+    def test_r5_malformed_merge_commits_with_no_unread_commits_reads_no_merge_commits_inspected(self):
+        # May already pass today, unchanged rule; commits_unread present as a
+        # measured zero rather than absent.
+        entry = {"source": "measured-this-run", "files": [], "merge_commits": 0,
+                 "commits_inspected": 2, "commits_unread": 0}
+        reading = self._reading(entry)
+        self.assertEqual(reading, "not detectable (no merge commits inspected)")
+
+    def test_r6_malformed_files_reads_files_unreadable(self):
+        # May already pass today, unchanged rule.
+        entry = {"source": "measured-this-run", "files": "not-a-list", "merge_commits": 2,
+                 "commits_inspected": 2, "commits_unread": 0}
+        reading = self._reading(entry)
+        self.assertEqual(reading, "not detectable (files unreadable)")
+
+    def test_r7_a_non_empty_file_list_with_nothing_unread_has_no_suffix(self):
+        entry = {"source": "measured-this-run", "files": ["a.md", "b.md"], "merge_commits": 2,
+                 "commits_inspected": 2, "commits_unread": 0}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "a.md, b.md",
+            "R-7: a genuinely inspected file list with nothing unread must read as the plain "
+            "comma-joined list, with no suffix. Read %r" % reading
+        )
+
+    def test_r7_a_non_empty_file_list_gains_the_unread_suffix_when_something_was_unread(self):
+        entry = {"source": "measured-this-run", "files": ["a.md"], "merge_commits": 1,
+                 "commits_inspected": 2, "commits_unread": 1}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "a.md (unread commits: 1)",
+            "R-7: a file list found beside an unread commit must carry the unread-commits "
+            "suffix, so a reader is never told a pull request's hand-resolved files are the "
+            "whole picture when one commit could not be inspected at all. Read %r" % reading
+        )
+
+    def test_r8_files_empty_with_valid_merge_commits_and_unread_commits_present_names_the_count(self):
+        # NAMED PROBE (Failure Modes, first entry): delete R-8 and this exact
+        # input -- source "measured-this-run", merge_commits 1, files [],
+        # commits_unread 1 -- falls through to R-10 and reads "clean" instead,
+        # because the key is present so R-9 does not catch it either. This
+        # pinned input is what makes that probe reach the assertion it is
+        # meant to break.
+        entry = {"source": "measured-this-run", "merge_commits": 1, "files": [],
+                 "commits_unread": 1}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "not detectable (unread commits: 1)",
+            "R-8: a genuinely inspected merge (merge_commits > 0) beside an unread commit must "
+            "still withhold clean -- a fetch attempt failing on one commit must not be masked "
+            "by another commit's clean reading. Read %r" % reading
+        )
+
+    def test_r9_a_measured_entry_without_the_unread_key_fails_closed(self):
+        entry = {"source": "measured-this-run", "files": [], "merge_commits": 1}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "not detectable (unread count unreadable)",
+            "R-9: a measured entry that carries no commits_unread key at all must never fall "
+            "through to clean -- an absent key is never read as zero. Read %r" % reading
+        )
+
+    def test_r10_a_present_well_formed_zero_unread_count_reads_clean(self):
+        # May already pass today by coincidence (no commits_unread concept
+        # exists yet), but this is the acceptance-criterion control that
+        # clean stays reachable at all once R-3/R-4/R-8/R-9 exist.
+        entry = {"source": "measured-this-run", "files": [], "merge_commits": 1,
+                 "commits_inspected": 1, "commits_unread": 0}
+        reading = self._reading(entry)
+        self.assertEqual(reading, "clean", "R-10: clean is reachable only through a present, well-formed zero unread count")
+
+    def test_ordering_r4_before_r5_a_malformed_count_with_unread_commits_never_loses_the_count(self):
+        entry = {"source": "measured-this-run", "files": [], "merge_commits": 0, "commits_unread": 1}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "not detectable (unread commits: 1)",
+            "if R-5 fired before R-4, the unread count would be silently dropped. Read %r" % reading
+        )
+
+    def test_ordering_r7_before_r8_a_found_file_beside_an_unread_commit_still_lists_the_file(self):
+        entry = {"source": "measured-this-run", "files": ["a.md"], "merge_commits": 1, "commits_unread": 1}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "a.md (unread commits: 1)",
+            "if R-8 fired before R-7, a found file would be replaced by the bare not-detectable "
+            "wording. Read %r" % reading
+        )
+
+    def test_ordering_r8_before_r10_the_named_probe_input(self):
+        entry = {"source": "measured-this-run", "merge_commits": 1, "files": [], "commits_unread": 1}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "not detectable (unread commits: 1)",
+            "if R-10 fired before R-8, this exact input would read clean -- the probe Failure "
+            "Modes names. Read %r" % reading
+        )
+
+    def test_ordering_r9_before_r10_an_absent_key_never_falls_through_to_clean(self):
+        entry = {"source": "measured-this-run", "files": [], "merge_commits": 1}
+        reading = self._reading(entry)
+        self.assertEqual(
+            reading, "not detectable (unread count unreadable)",
+            "if R-10 fired before R-9, an absent key would read clean. Read %r" % reading
+        )
+
+
+# --------------------------------------------------------------------------
+# (e) main, X-8: a local pull request's walk fetches only through its own
+# ref, "pull/<number>/head" -- distinct from the review-verdict fetch
+# (TestMainFetchesAnAbsentMergeCommitBeforeNamingUnreadable above), which
+# uses the pull request's baseRefName. CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK
+# declares no review artefact, so any ensure_commit_local call here can only
+# come from the walk.
+# --------------------------------------------------------------------------
+def _drive_main_over_a_pull_request_walking_commits(contract_text, commits, diff_table,
+                                                     commit_present_fn,
+                                                     filename="acme-walk-fetch-fixture.md"):
+    """Drive pr_merged.main() with --pr, injecting commit_present and a
+    MagicMock ensure_commit_local so the walk's own fetch edge (W-2, X-8) is
+    observable. No review artefact is declared by this fixture's sub-task.
+    """
+    pull_request = {
+        "number": 7, "state": "MERGED", "mergedAt": "2026-09-22T00:00:00Z",
+        "mergeCommit": {"oid": "merge-sha"}, "baseRefName": "master",
+        "headRefName": "task/acme-walk-fetch-fixture/t1-backend", "title": "t1-backend",
+        "url": "https://example.invalid/pr/7",
+        "commits": [{"oid": sha} for sha in commits], "statusCheckRollup": None,
+    }
+    ensure_commit_local_mock = mock.MagicMock(return_value=True)
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(contract_text, encoding="utf-8")
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "7", "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state", return_value=None), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", return_value=None), \
+             mock.patch.object(pr_merged, "write_record", return_value=None), \
+             mock.patch.object(pr_merged, "gh_pr", lambda number: pull_request), \
+             mock.patch.object(pr_merged, "git_combined_diff", _staged_git_combined_diff(diff_table)), \
+             mock.patch.object(pr_merged, "file_at_commit", lambda sha, path: None), \
+             mock.patch.object(pr_merged, "commit_present", commit_present_fn, create=True), \
+             mock.patch.object(pr_merged, "ensure_commit_local", ensure_commit_local_mock), \
+             mock.patch.object(pr_merged, "_run", _no_subprocess_reached), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        report = json.loads(out.getvalue())
+    return report, ensure_commit_local_mock
+
+
+class TestMainWalksLocalPullRequestsWithTheirOwnFetch(unittest.TestCase):
+
+    def test_an_absent_unread_commit_is_fetched_at_the_pull_requests_own_ref(self):
+        # The second read stays unreadable (the fetch did not help).
+        diff_table = {"u1": [([], None), ([], None)]}
+
+        def commit_present_absent(sha):
+            return False
+
+        try:
+            report, ensure_commit_local_mock = _drive_main_over_a_pull_request_walking_commits(
+                CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["u1"], diff_table, commit_present_absent)
+        except Exception as exc:  # noqa: BLE001 -- the raise IS the finding
+            self.fail(
+                "main() must handle an unread commit without crashing -- it raised %s: %s. "
+                "Today's summarise_hand_resolved compares an unknown parent count with >= 2 "
+                "directly, which raises TypeError in Python 3 -- exactly the crash W-3 exists "
+                "to prevent, and main() does not yet pass ensure_local/commit_present into the "
+                "walk at all (X-8)" % (type(exc).__name__, exc)
+            )
+            return
+        self.assertEqual(
+            ensure_commit_local_mock.call_count, 1,
+            "X-8: a local pull request's walk must fetch the single absent unread commit "
+            "exactly once -- got %d call(s)" % ensure_commit_local_mock.call_count
+        )
+        ensure_commit_local_mock.assert_called_with("u1", "pull/7/head")
+        entries = [e for e in report.get("hand_resolved", []) if e.get("pr") == 7]
+        self.assertEqual(len(entries), 1, "fixture sanity: one pull request must produce one entry")
+        self.assertIn(
+            "unread commits: 1", entries[0].get("reading", ""),
+            "the report entry's rendered reading must carry the unread count. Read %r" % entries[0]
+        )
+
+    def test_positive_control_a_present_unread_commit_is_never_fetched_by_the_walk(self):
+        diff_table = {"u1": [([], None)]}
+
+        def commit_present_present(sha):
+            return True
+
+        try:
+            _report, ensure_commit_local_mock = _drive_main_over_a_pull_request_walking_commits(
+                CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["u1"], diff_table, commit_present_present)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(
+                "main() must handle a present-but-unread commit without crashing -- it raised "
+                "%s: %s" % (type(exc).__name__, exc)
+            )
+            return
+        self.assertEqual(
+            ensure_commit_local_mock.call_count, 0,
+            "a fetch cannot help a commit that is already present but still unshowable -- the "
+            "walk must never call ensure_commit_local for it. Got %d call(s)"
+            % ensure_commit_local_mock.call_count
+        )
+
+
+# --------------------------------------------------------------------------
+# (f) main, --pr parsing -- Extension Point 8: the Pull-request reference
+# parser. Today --pr is type=int, so any https link is rejected by argparse
+# itself, before gh_pr is ever reached.
+# --------------------------------------------------------------------------
+class TestPullRequestReferenceParsing(unittest.TestCase):
+
+    def _drive(self, pr_value, filename="acme-pr-parse-fixture.md"):
+        gh_pr_mock = mock.MagicMock(return_value=None)
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / filename
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            out = io.StringIO()
+            err = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", pr_value, "--json"]
+            exit_code = None
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=None), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "write_record", return_value=None), \
+                 mock.patch.object(pr_merged, "gh_pr", gh_pr_mock), \
+                 mock.patch.object(pr_merged, "_run", _no_subprocess_reached), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    pr_merged.main()
+                except SystemExit as exc:
+                    exit_code = exc.code
+            return exit_code, gh_pr_mock, out.getvalue()
+
+    def test_an_https_link_is_accepted_by_argparse_and_reaches_gh_pr_verbatim(self):
+        link = "https://github.com/lneninger/claude-agentic-auto-improve/pull/11"
+        exit_code, gh_pr_mock, _out = self._drive(link)
+        self.assertIsNone(
+            exit_code,
+            "a pull-request link must be accepted by argparse, not rejected as an invalid "
+            "integer -- today's --pr is type=int, so this exits 2 before gh_pr is ever called"
+        )
+        gh_pr_mock.assert_called_with(link)
+
+    def test_zero_and_negative_numbers_still_reach_gh_pr_and_skip_not_found(self):
+        # POSITIVE CONTROL for the parser rule itself: today's type=int already
+        # accepts 0 and negatives, and the new parser must keep doing so. May
+        # already pass today by design.
+        for value in ("0", "-3"):
+            with self.subTest(value=value):
+                exit_code, gh_pr_mock, out = self._drive(value)
+                self.assertIsNone(exit_code, "a numeric --pr value, zero or negative, must still parse")
+                gh_pr_mock.assert_called_with(int(value))
+                report = json.loads(out)
+                skipped = [s for s in report.get("skipped", []) if s.get("pr") == int(value)]
+                self.assertTrue(skipped, "a number gh_pr cannot resolve (None) must still be skipped not-found")
+                self.assertEqual(skipped[0].get("verdict"), "not-found")
+
+    def test_a_non_numeric_non_link_value_is_still_rejected_with_exit_2(self):
+        # May already pass today by design -- unchanged rejection rule.
+        exit_code, gh_pr_mock, _out = self._drive("abc")
+        self.assertEqual(
+            exit_code, 2,
+            "a value that is neither an integer nor an https link must still be rejected by "
+            "argparse"
+        )
+        self.assertFalse(gh_pr_mock.called)
+
+    def test_a_link_gh_cannot_resolve_is_skipped_not_found_with_pr_equal_to_the_link(self):
+        link = "https://github.com/lneninger/claude-agentic-auto-improve/pull/999999"
+        exit_code, _gh_pr_mock, out = self._drive(link)
+        self.assertIsNone(exit_code)
+        report = json.loads(out)
+        skipped = [s for s in report.get("skipped", []) if s.get("pr") == link]
+        self.assertTrue(
+            skipped,
+            "a link gh cannot resolve must be skipped not-found, with pr equal to the link "
+            "itself, never coerced to a number"
+        )
+        self.assertEqual(skipped[0].get("verdict"), "not-found")
+
+
+# --------------------------------------------------------------------------
+# (g), (h), (i) The cross-repository loop -- X-1 to X-8, Extension Point 6's
+# new edge repo_view(name=None). repo_view does not exist in this checkout
+# yet, so it is always patched with create=True. Every driver below reuses
+# CONTRACT_CLI_VERDICT_BEARING (test_pr_merged.py:1145): one verdict-bearing
+# sub-task, "t1-review".
+# --------------------------------------------------------------------------
+_PLUGIN_NAME = "lneninger/claude-agentic-auto-improve"
+_THIS_REPO_NAME = "lneninger/StockToolScalpingMachine"
+
+
+def _drive_main_over_a_pull_request_that_must_never_touch_git_or_github_objects(
+        link, repo_view_fn, base_ref_name="master",
+        head_ref_name="task/t3-plugin-mirror/t1-review",
+        title="t1-review (plugin mirror)", commits=("plugin-c1", "plugin-c2"),
+        task_issue=555, filename="acme-cross-repo-fixture.md"):
+    """X-3/X-6: drives pr_merged.main() with --pr <link>. git_combined_diff,
+    commit_present, ensure_commit_local and file_at_commit are all spies
+    that raise if called at all -- this fixture must never legitimately
+    reach any of them. close_sub_issue is the REAL function; only
+    pr_merged._run is patched, capturing every argv.
+    """
+    pull_request = {
+        "number": None, "state": "MERGED", "mergedAt": "2026-09-27T00:00:00Z",
+        "mergeCommit": {"oid": "plugin-merge-sha"}, "headRefName": head_ref_name,
+        "baseRefName": base_ref_name, "title": title, "url": link,
+        "commits": [{"oid": sha} for sha in commits], "statusCheckRollup": None,
+    }
+    slug = Path(filename).stem
+    state = {
+        "contract": slug, "started_at": "2026-09-27T00:00:00+00:00",
+        "sub_tasks": {"t1-review": {"status": "awaiting-merge",
+                                    "branch": "task/%s/t1-review" % slug,
+                                    "pull_request": None, "issue": task_issue,
+                                    "base": base_ref_name, "brief": None}},
+    }
+    argv_log = []
+    issue_view_calls = [0]
+
+    def fake_run(cmd):
+        argv_log.append(list(cmd))
+        if cmd[:3] == ["gh", "issue", "view"]:
+            issue_view_calls[0] += 1
+            state_word = "OPEN" if issue_view_calls[0] == 1 else "CLOSED"
+            return 0, json.dumps({"state": state_word})
+        if cmd[:3] == ["gh", "issue", "close"]:
+            return 0, ""
+        raise AssertionError("this fixture must reach no other process; got %r" % (cmd,))
+
+    def raising_spy(label):
+        def _raise(*a, **kw):
+            raise AssertionError("%s must never be called for a cross-repository pull request" % label)
+        return mock.MagicMock(side_effect=_raise)
+
+    spies = {
+        "git_combined_diff": raising_spy("git_combined_diff"),
+        "commit_present": raising_spy("commit_present"),
+        "ensure_commit_local": raising_spy("ensure_commit_local"),
+        "file_at_commit": raising_spy("file_at_commit"),
+    }
+
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(CONTRACT_CLI_VERDICT_BEARING, encoding="utf-8")
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", link, "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state", return_value=state), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", return_value=None), \
+             mock.patch.object(pr_merged, "write_record", return_value=None), \
+             mock.patch.object(pr_merged, "gh_pr", lambda ref: pull_request if ref == link else None), \
+             mock.patch.object(pr_merged, "repo_view", repo_view_fn, create=True), \
+             mock.patch.object(pr_merged, "git_combined_diff", spies["git_combined_diff"]), \
+             mock.patch.object(pr_merged, "commit_present", spies["commit_present"], create=True), \
+             mock.patch.object(pr_merged, "ensure_commit_local", spies["ensure_commit_local"]), \
+             mock.patch.object(pr_merged, "file_at_commit", spies["file_at_commit"]), \
+             mock.patch.object(pr_merged, "_run", fake_run), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        report = json.loads(out.getvalue())
+    return report, argv_log, spies
+
+
+def _drive_main_over_a_link_naming_this_repository(link, repo_view_fn, commits,
+                                                    git_combined_diff_table,
+                                                    filename="acme-link-local-fixture.md"):
+    """X-4: a link whose owner/name matches this checkout must walk its
+    commits exactly like a number -- driven over
+    CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK (no review artefact), so nothing
+    here touches close_sub_issue or file_at_commit at all. git_combined_diff
+    is a genuine counting stub, never a raising spy, because this case
+    exists to prove the walk DOES run.
+    """
+    reads = []
+
+    def counting_git_combined_diff(sha):
+        reads.append(sha)
+        return git_combined_diff_table[sha]
+
+    pull_request = {
+        "state": "MERGED", "mergedAt": "2026-09-27T00:00:00Z",
+        "mergeCommit": {"oid": "local-merge-sha"},
+        "headRefName": "task/acme-link-local-fixture/t1-backend",
+        "baseRefName": "master", "title": "t1-backend", "url": link,
+        "commits": [{"oid": sha} for sha in commits], "statusCheckRollup": None,
+    }
+    with tempfile.TemporaryDirectory() as d:
+        contract_path = Path(d) / filename
+        contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+        out = io.StringIO()
+        argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", link, "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pr_merged, "load_records", return_value={}), \
+             mock.patch.object(pr_merged, "load_state", return_value=None), \
+             mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+             mock.patch.object(pr_merged, "write_state", return_value=None), \
+             mock.patch.object(pr_merged, "write_record", return_value=None), \
+             mock.patch.object(pr_merged, "gh_pr", lambda ref: pull_request if ref == link else None), \
+             mock.patch.object(pr_merged, "repo_view", repo_view_fn, create=True), \
+             mock.patch.object(pr_merged, "git_combined_diff", counting_git_combined_diff), \
+             mock.patch.object(pr_merged, "_run", _no_subprocess_reached), \
+             mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+             mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+             contextlib.redirect_stdout(out):
+            pr_merged.main()
+        report = json.loads(out.getvalue())
+    return report, reads
+
+
+class TestMainNeverReadsGitOrGithubForACrossRepositoryPullRequest(unittest.TestCase):
+    """(g): repo_view stubbed so this repo answers _THIS_REPO_NAME and the
+    plugin answers its own identity with default branch master.
+    """
+
+    def test_a_cross_repository_link_reads_no_git_or_github_object_and_records_the_reading(self):
+        def fake_repo_view(name=None):
+            if name is None:
+                return {"nameWithOwner": _THIS_REPO_NAME, "defaultBranchRef": "master"}
+            if name == _PLUGIN_NAME:
+                return {"nameWithOwner": _PLUGIN_NAME, "defaultBranchRef": "master"}
+            return None
+
+        link = "https://github.com/%s/pull/11" % _PLUGIN_NAME
+        try:
+            report, argv_log, spies = _drive_main_over_a_pull_request_that_must_never_touch_git_or_github_objects(
+                link, fake_repo_view)
+        except SystemExit as exc:
+            self.fail(
+                "a cross-repository pull-request link must be accepted by argparse and reach "
+                "main()'s own loop -- it exited instead with code %r (Extension Point 8's link "
+                "parser has not landed yet)" % (exc.code,)
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 -- the raise IS the finding
+            self.fail(
+                "driving a cross-repository pull request must never reach a real git or "
+                "GitHub read for its commits -- it raised %s: %s" % (type(exc).__name__, exc)
+            )
+            return
+
+        # POSITIVE CONTROL, sibling local-path run of a similarly-shaped
+        # fixture: it DOES reach git_combined_diff and writes a record,
+        # proving the zero-call assertions below measure a real guard.
+        local_recorded, local_write_record_mock, _local_report = _drive_main_over_a_pull_request(
+            CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, ["m1"], {"m1": ([], 2)})
+        self.assertTrue(
+            local_write_record_mock.called,
+            "fixture sanity: the sibling local-path control must itself reach the "
+            "pull-request loop and write a record, or it proves nothing"
+        )
+        self.assertIn("hand_resolved", local_recorded, "fixture sanity: the local control's build_record call must carry a summary")
+
+        closed = report.get("closed", [])
+        self.assertTrue(closed, "fixture sanity: the cross-repository pull request must close t1-review")
+        record = closed[0]["record"]
+        self.assertEqual(
+            record.get("hand_resolved"), {
+                "files": [], "merge_commits": 0, "commits_inspected": 2, "commits_unread": 2,
+            },
+            "X-6: a cross-repository pull request's summary must count every reported commit "
+            "as unread, without reading any of them. Record read %r" % record
+        )
+        self.assertEqual(
+            record.get("review_verdict"), "cross-repository",
+            "X-6: a verdict-bearing sub-task whose pull request merged in another repository "
+            "must be stamped cross-repository, never unfetched -- that reading's remedy is a "
+            "fetch, and no fetch in this clone can ever reach another repository's merge "
+            "commit. Record read %r" % record
+        )
+        self.assertNotEqual(record.get("review_verdict"), "unfetched")
+
+        for name, spy in spies.items():
+            self.assertFalse(
+                spy.called,
+                "X-6: %s must never be called for a cross-repository pull request -- got %d "
+                "call(s)" % (name, spy.call_count)
+            )
+
+        close_argvs = [a for a in argv_log if a[:3] == ["gh", "issue", "close"]]
+        self.assertTrue(
+            close_argvs,
+            "fixture sanity / positive control: the real close_sub_issue must actually run and "
+            "close the recorded sub-issue -- an empty argv list here would let every 'none of' "
+            "check below pass on a close that never happened"
+        )
+        self.assertTrue(
+            any("555" in a for a in close_argvs[0]),
+            "X-7: the close argv must name the recorded sub-issue -- got %r" % close_argvs[0]
+        )
+        for a in argv_log:
+            if a[:2] == ["gh", "issue"]:
+                self.assertNotIn("--repo", a, "X-7: the sub-issue close must never carry --repo")
+                self.assertFalse(
+                    any(_PLUGIN_NAME in part or link in part for part in a),
+                    "X-7: the sub-issue close must never name the plugin repository or the "
+                    "pull-request link -- got %r" % a
+                )
+        self.assertNotIn(
+            "GH_REPO", os.environ,
+            "the script must never leave GH_REPO set in the process environment after this run"
+        )
+
+
+class TestXThreeFailsClosedAndXFourWalksALocalLink(unittest.TestCase):
+    """(h): X-3's fail-closed clause, and X-4's local-link parity with a number."""
+
+    def test_x3_repo_view_of_none_failing_makes_any_link_cross_repository(self):
+        # The link names THIS repository, but repo_view(None) itself answers
+        # nothing -- X-3's fail-closed clause must still make it
+        # cross-repository, because an unreadable identity cannot be
+        # compared at all.
+        def fake_repo_view(name=None):
+            return None if name is None else {"nameWithOwner": _THIS_REPO_NAME, "defaultBranchRef": "master"}
+
+        link = "https://github.com/%s/pull/11" % _THIS_REPO_NAME
+        try:
+            report, _argv_log, spies = _drive_main_over_a_pull_request_that_must_never_touch_git_or_github_objects(
+                link, fake_repo_view, head_ref_name="task/acme-cross-repo-fixture/t1-review",
+                title="t1-review")
+        except SystemExit as exc:
+            self.fail("argparse must accept a pull-request link -- exited with code %r" % (exc.code,))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.fail(
+                "X-3: an unreadable repo_view(None) must make the link cross-repository, never "
+                "reach a git read -- it raised %s: %s" % (type(exc).__name__, exc)
+            )
+            return
+        for name, spy in spies.items():
+            self.assertFalse(spy.called, "X-3 (fail-closed): %s must never be called -- got %d call(s)" % (name, spy.call_count))
+        closed = report.get("closed", [])
+        self.assertTrue(closed, "fixture sanity: this pull request must close t1-review")
+        self.assertEqual(closed[0]["record"].get("review_verdict"), "cross-repository")
+
+    def test_x4_a_link_naming_this_repository_walks_its_commits_like_a_number(self):
+        def fake_repo_view(name=None):
+            return {"nameWithOwner": _THIS_REPO_NAME, "defaultBranchRef": "master"}
+
+        link = "https://github.com/%s/pull/321" % _THIS_REPO_NAME
+        try:
+            report, reads = _drive_main_over_a_link_naming_this_repository(
+                link, fake_repo_view, commits=("m1",), git_combined_diff_table={"m1": ([], 2)})
+        except SystemExit as exc:
+            self.fail("argparse must accept a link naming this repository -- exited with code %r" % (exc.code,))
+            return
+        self.assertEqual(
+            reads, ["m1"],
+            "X-4: a link naming this repository must reach git_combined_diff exactly like a "
+            "number would -- got %r" % reads
+        )
+        closed = report.get("closed", [])
+        self.assertTrue(closed, "fixture sanity: this local-repository link must close its sub-task")
+
+
+class TestBareNumberNeverCallsRepoView(unittest.TestCase):
+    """(i): X-1 -- a number reference never calls repo_view at all."""
+
+    def test_a_bare_number_run_never_calls_repo_view(self):
+        repo_view_spy = mock.MagicMock(return_value={"nameWithOwner": "x/y", "defaultBranchRef": "master"})
+        with mock.patch.object(pr_merged, "repo_view", repo_view_spy, create=True):
+            _recorded, _mock, _report = _drive_main_over_a_pull_request(
+                CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2])
+        self.assertFalse(
+            repo_view_spy.called,
+            "X-1: a bare-number pull request must never call repo_view -- repo_view exists "
+            "only to classify a link. Got %d call(s)" % repo_view_spy.call_count
+        )
+
+    def test_positive_control_the_same_spy_is_called_on_a_link_run(self):
+        def fake_repo_view(name=None):
+            return {"nameWithOwner": _THIS_REPO_NAME, "defaultBranchRef": "master"}
+        repo_view_spy = mock.MagicMock(side_effect=fake_repo_view)
+        link = "https://github.com/%s/pull/321" % _THIS_REPO_NAME
+        try:
+            _report, _reads = _drive_main_over_a_link_naming_this_repository(
+                link, repo_view_spy, commits=("m1",), git_combined_diff_table={"m1": ([], 1)})
+        except SystemExit as exc:
+            self.fail("argparse must accept a link so this control can even run -- exited with code %r" % (exc.code,))
+            return
+        self.assertTrue(
+            repo_view_spy.called,
+            "positive control: the same spy must be called at least once on a link run, "
+            "proving the zero-call assertion above measures a real distinction between a "
+            "number and a link, not a spy wired to nothing"
+        )
+
+
+# --------------------------------------------------------------------------
+# (j) G-1: the GH_REPO environment guard -- exit 8 on --pr or --dispatch,
+# printing {"error": "gh-repo-set", ...}, before touching the contract, git
+# or gh. GH_REPO absent or empty changes nothing.
+# --------------------------------------------------------------------------
+class TestGhRepoEnvironmentGuardRefusesWithExit8(unittest.TestCase):
+
+    def _drive(self, extra_args, gh_repo=None):
+        gh_pr_mock = mock.MagicMock(return_value=None)
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / "acme-gh-repo-guard-fixture.md"
+            contract_path.write_text(CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, encoding="utf-8")
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path)] + list(extra_args)
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.dict(os.environ, {}, clear=False), \
+                 mock.patch.object(pr_merged, "load_records", return_value={}), \
+                 mock.patch.object(pr_merged, "load_state", return_value=None), \
+                 mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                 mock.patch.object(pr_merged, "write_state", return_value=None), \
+                 mock.patch.object(pr_merged, "write_record", return_value=None), \
+                 mock.patch.object(pr_merged, "gh_pr", gh_pr_mock), \
+                 mock.patch.object(pr_merged, "create_branch",
+                                   mock.MagicMock(return_value=(True, "created it"))), \
+                 mock.patch.object(pr_merged, "_run", _no_subprocess_reached), \
+                 mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                 mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                 contextlib.redirect_stdout(out):
+                if gh_repo is None:
+                    os.environ.pop("GH_REPO", None)
+                else:
+                    os.environ["GH_REPO"] = gh_repo
+                exit_code = None
+                try:
+                    exit_code = pr_merged.main()
+                except SystemExit as exc:
+                    exit_code = exc.code
+            return exit_code, out.getvalue(), gh_pr_mock
+
+    def test_pr_with_gh_repo_set_refuses_with_exit_8_and_prints_the_error(self):
+        exit_code, out, gh_pr_mock = self._drive(["--pr", "7", "--json"], gh_repo=_PLUGIN_NAME)
+        self.assertEqual(
+            exit_code, 8,
+            "G-1: a --pr run with a non-empty GH_REPO in the environment must refuse before "
+            "touching the contract, git or gh, with exit code 8 -- got %r. Printed: %s"
+            % (exit_code, out)
+        )
+        self.assertIn("gh-repo-set", out, "the refusal must print the gh-repo-set error -- printed: %s" % out)
+        self.assertFalse(gh_pr_mock.called, "nothing may be read once the guard refuses")
+
+    def test_dispatch_with_gh_repo_set_refuses_with_exit_8_and_prints_the_error(self):
+        exit_code, out, gh_pr_mock = self._drive(
+            ["--dispatch", "t1-backend", "--json"], gh_repo=_PLUGIN_NAME)
+        self.assertEqual(exit_code, 8, "G-1 must also cover --dispatch -- got %r. Printed: %s" % (exit_code, out))
+        self.assertIn("gh-repo-set", out)
+        self.assertFalse(gh_pr_mock.called)
+
+    def test_positive_control_an_absent_gh_repo_changes_nothing(self):
+        exit_code, _out, _gh_pr_mock = self._drive(["--status", "--json"], gh_repo=None)
+        self.assertNotEqual(
+            exit_code, 8,
+            "with GH_REPO absent, the guard must never fire -- this run must behave exactly as "
+            "it does today"
+        )
+
+    def test_positive_control_an_empty_gh_repo_changes_nothing(self):
+        exit_code, _out, _gh_pr_mock = self._drive(["--pr", "7", "--json"], gh_repo="")
+        self.assertNotEqual(
+            exit_code, 8,
+            "an empty GH_REPO must be treated the same as absent -- a non-empty check must not "
+            "fire on an empty string"
+        )
+
+
+# --------------------------------------------------------------------------
+# (k) compute_released withholds release for a "cross-repository" review
+# verdict. Expected to PASS TODAY, unchanged: compute_released already
+# withholds any review_verdict outside pass/pass-with-findings
+# (pr_merged.py:556-558), with no code change needed here -- this is a
+# control that pins the new closed-set member, not a new RED.
+# --------------------------------------------------------------------------
+class TestComputeReleasedWithholdsOnACrossRepositoryVerdict(unittest.TestCase):
+
+    def test_a_cross_repository_review_verdict_withholds_the_dependent(self):
+        recs = {"t1-a": {"status": "completed", "verified": "github",
+                        "review_verdict": "cross-repository"}}
+        rel, blocked = compute_released(_tasks(), recs)
+        self.assertNotIn(
+            "t2-b", [t.id for t in rel],
+            "a cross-repository review verdict must not release what depends on it"
+        )
+        self.assertIn(
+            "t1-a (review verdict: cross-repository)", blocked["t2-b"],
+            "the blocked reason must name the cross-repository reading -- got %r" % blocked.get("t2-b")
+        )
 
 
 if __name__ == "__main__":

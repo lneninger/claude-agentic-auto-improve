@@ -15,14 +15,20 @@ What it does:
   6. Hand the sets back. Iteration belongs to the caller, never to this phase.
 
 Usage:
-  py -3 .claude/scripts/pr_merged.py --contract <slug|path> --pr <n> [--pr <n>...] [--json]
+  py -3 .claude/scripts/pr_merged.py --contract <slug|path> --pr <n|link> [--pr <n|link>...] [--json]
   py -3 .claude/scripts/pr_merged.py --contract <slug|path> --status [--json]
+
+A `--pr` reference is either a number, in this repository, or an `https://` link, which may
+name another repository -- resolved by `gh` per call, never through a process-wide `--repo` flag
+or a `GH_REPO` environment variable. With `GH_REPO` set, `--pr` and `--dispatch` both refuse
+(exit 8) before touching the contract, git or `gh` at all.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -444,6 +450,25 @@ def map_pr_to_subtask(head_branch: str, title: str, tasks: List[SubTask],
         if t.id in (title or "") or t.id in (head_branch or ""):
             return t
     return None
+
+
+#: A GitHub pull-request URL, as ``gh_pr`` reports it back in ``url`` --
+#: never as the caller supplied it, since a caller may pass a link with a
+#: trailing slash or query string this pattern does not need to accept.
+_PR_URL_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/\d+/?$")
+
+
+def _owner_and_name_from_url(url: Optional[str]) -> Optional[Tuple[str, str]]:
+    """``owner`` and ``name`` out of a pull request's own GitHub URL, or ``None``.
+
+    Used only to decide whether a link-named pull request is Cross-Repository
+    (X-3) -- an unparseable ``url`` returns ``None``, which the caller must
+    read as "unreadable", never as "matches this repository" (fail-closed).
+    """
+    if not url:
+        return None
+    m = _PR_URL_RE.match(url)
+    return (m.group(1), m.group(2)) if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -1086,9 +1111,11 @@ def next_command_for(
 # Hand-resolved files
 # ---------------------------------------------------------------------------
 def summarise_hand_resolved(commit_shas: List[str],
-                            git_combined_diff: Callable[[str], Tuple[List[str], int]]
+                            git_combined_diff: Callable[[str], Tuple[List[str], Optional[int]]],
+                            ensure_local: Optional[Callable[[str], bool]] = None,
+                            commit_present: Optional[Callable[[str], bool]] = None,
                             ) -> Dict[str, Any]:
-    """The Hand-Resolved Summary -- three facts, never one list.
+    """The Hand-Resolved Summary -- four facts, never one list.
 
     ``files``: paths differing from BOTH parents of a merge commit -- resolved
     by hand, or changed during the merge in a way neither side contained.
@@ -1106,13 +1133,63 @@ def summarise_hand_resolved(commit_shas: List[str],
     its parent count. An empty ``commit_shas`` asks git nothing at all and
     returns all zeroes -- a pull request nobody could inspect.
 
-    Each reported commit is read exactly once. ``detect_resolved_files`` is a
-    projection of this function's ``files`` rather than a second walk.
+    ``commits_unread``: how many reported commits ``git_combined_diff``
+    answered ``unknown`` for, even after the one fetch attempt below --
+    Extension Point 2, W-3. Never compared with an integer directly: an
+    ``unknown`` parent count is Python ``None``, and ``None >= 2`` raises.
+
+    Each reported commit is read once, in reported order (W-1) -- twice only
+    for a commit re-read after the fetch below. ``ensure_local`` and
+    ``commit_present`` are both optional and both default to ``None``;
+    ``detect_resolved_files`` passes neither, so its own callers keep the
+    original one-read-per-commit walk exactly (W-5).
+
+    With BOTH supplied, and at least one commit unread after its first read:
+    ``commit_present`` is asked about each unread commit in reported order,
+    stopping at the first one it reports absent (W-2, W-2a) -- a commit that
+    is present but simply unshowable (case D, or a timed-out ``rev-list``)
+    can never be helped by a fetch, so the single fetch this walk ever makes
+    must never be spent on one. If one is found absent, ``ensure_local`` is
+    called exactly once for the whole walk, aimed at that commit, whatever
+    it answers -- and every commit whose first read was unknown (not only
+    the fetched one) is re-read exactly once more, since one fetch can bring
+    down more than the one commit it targeted. If every unread commit
+    answers present, no fetch runs and no commit is re-read: nothing here
+    could ever change what an already-present, unshowable commit reads.
+
+    A final ``unknown`` (whether from the first read or the one re-read)
+    adds one to ``commits_unread`` and nothing else.
     """
-    files_out: List[str] = []
-    merge_commits = 0
+    first_reads: List[Tuple[str, List[str], Optional[int]]] = []
+    unread_shas: List[str] = []
     for sha in commit_shas:
         files, parents = git_combined_diff(sha)
+        first_reads.append((sha, files, parents))
+        if parents is None:
+            unread_shas.append(sha)
+
+    reads = first_reads
+    if unread_shas and ensure_local is not None and commit_present is not None:
+        first_absent: Optional[str] = None
+        for sha in unread_shas:
+            if not commit_present(sha):
+                first_absent = sha
+                break
+        if first_absent is not None:
+            ensure_local(first_absent)
+            reread = {sha: git_combined_diff(sha) for sha in unread_shas}
+            reads = [
+                (sha, reread[sha][0], reread[sha][1]) if sha in reread else (sha, files, parents)
+                for sha, files, parents in first_reads
+            ]
+
+    files_out: List[str] = []
+    merge_commits = 0
+    commits_unread = 0
+    for _sha, files, parents in reads:
+        if parents is None:
+            commits_unread += 1
+            continue
         if parents >= 2:
             merge_commits += 1
             files_out.extend(files)
@@ -1122,6 +1199,7 @@ def summarise_hand_resolved(commit_shas: List[str],
         "files": deduped,
         "merge_commits": merge_commits,
         "commits_inspected": len(commit_shas),
+        "commits_unread": commits_unread,
     }
 
 
@@ -1172,8 +1250,15 @@ def _run(cmd: List[str]) -> Tuple[int, str]:
         return 1, ""
 
 
-def gh_pr(number: int) -> Optional[Dict[str, Any]]:
-    code, out = _run(["gh", "pr", "view", str(number), "--json",
+def gh_pr(ref: "int | str") -> Optional[Dict[str, Any]]:
+    """Ask GitHub about one pull request -- Extension Point 5.
+
+    ``ref`` is a Pull-request reference: either a number, in this repository,
+    or an ``https://`` link, resolved by ``gh`` itself per call -- no
+    ``--repo`` flag, and nothing written to the process environment. Either
+    form is passed to ``gh pr view`` as its one positional argument.
+    """
+    code, out = _run(["gh", "pr", "view", str(ref), "--json",
                       "number,title,state,mergedAt,mergeCommit,headRefName,baseRefName,url,commits,statusCheckRollup"])
     if code != 0 or not out:
         return None
@@ -1183,12 +1268,73 @@ def gh_pr(number: int) -> Optional[Dict[str, Any]]:
         return None
 
 
-def git_combined_diff(sha: str) -> Tuple[List[str], int]:
-    _, parents = _run(["git", "rev-list", "--parents", "-n", "1", sha])
+def repo_view(name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """A repository's identity -- Extension Point 6, the new edge X-3/X-5 need.
+
+    Runs ``gh repo view [<name>] --json nameWithOwner,defaultBranchRef``.
+    ``name`` absent (``None``) asks about the checkout's own repository;
+    given an ``owner/name``, asks about that one instead -- never with
+    ``--repo``, since this is a read of a DIFFERENT repository's identity,
+    not a redirection of this run's own GitHub calls. Returns
+    ``{"nameWithOwner": <str>, "defaultBranchRef": <str>}`` or ``None`` when
+    ``gh`` fails or answers non-JSON; never raises.
+
+    Measured (t2's own probe, since this was ASSUMED, not verified, at
+    contract time): ``gh``'s own JSON answers ``defaultBranchRef`` as a
+    nested ref object, ``{"name": "master"}``, never a bare string --
+    flattened to its ``name`` here, so every consumer of this edge (X-5's
+    accepted-base set, and every test double that stubs this edge with a
+    flat string) reads one shape, never gh's own GraphQL nesting.
+    """
+    cmd = ["gh", "repo", "view"]
+    if name:
+        cmd.append(name)
+    cmd += ["--json", "nameWithOwner,defaultBranchRef"]
+    code, out = _run(cmd)
+    if code != 0 or not out:
+        return None
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    default_branch = payload.get("defaultBranchRef")
+    if isinstance(default_branch, dict):
+        default_branch = default_branch.get("name")
+    return {"nameWithOwner": payload.get("nameWithOwner"), "defaultBranchRef": default_branch}
+
+
+def git_combined_diff(sha: str) -> Tuple[List[str], Optional[int]]:
+    """A commit's Commit reading -- files, and a parent count, or ``unknown``.
+
+    First match wins (Data Shapes, CR-1 to CR-4):
+
+    - CR-1: ``git rev-list --parents -n 1 <sha>`` exits non-zero, or exits
+      zero but prints nothing -- the commit could not be read at all, and
+      this returns ``([], None)``. ``None`` (Python's ``unknown``) is never
+      compared with an integer directly by a caller; it must be checked for
+      first, since ``None >= 2`` raises in Python 3.
+    - CR-2: fewer than two parents -- ``git show`` never runs, because a
+      non-merge commit has no combined diff to read.
+    - CR-3: two or more parents and ``git show --cc --name-only --format=
+      <sha>`` itself exits non-zero -- the merge could not be read either,
+      so this returns ``([], None)`` too. This is the t4 artefact's case D,
+      which the old code reported as a clean merge by discarding the exit
+      code entirely.
+    - CR-4: two or more parents and ``git show`` exits zero -- an empty
+      listing here is a genuinely clean merge, reported with its true parent
+      count.
+    """
+    code, parents = _run(["git", "rev-list", "--parents", "-n", "1", sha])
+    if code != 0 or not parents.strip():
+        return [], None
     parent_count = max(len(parents.split()) - 1, 0)
     if parent_count < 2:
         return [], parent_count
-    _, out = _run(["git", "show", "--cc", "--name-only", "--format=", sha])
+    show_code, out = _run(["git", "show", "--cc", "--name-only", "--format=", sha])
+    if show_code != 0:
+        return [], None
     return [l for l in out.splitlines() if l.strip()], parent_count
 
 
@@ -1204,6 +1350,20 @@ def file_at_commit(sha: str, path: str) -> Optional[str]:
     return out if code == 0 else None
 
 
+def commit_present(sha: str) -> bool:
+    """Whether ``sha`` is already in the local clone -- Extension Point 3a.
+
+    Runs the same ``git cat-file -e <sha>^{commit}`` presence check
+    ``ensure_commit_local`` runs first, answering yes only on exit 0. Never
+    raises, never fetches -- it exists so the walk can decide WHICH unread
+    commit its one fetch attempt is worth aiming at (W-2), without spending
+    that attempt on a commit that is already present but simply unshowable
+    (case D, or a timed-out ``rev-list``), which a fetch could never help.
+    """
+    code, _out = _run(["git", "cat-file", "-e", f"{sha}^{{commit}}"])
+    return code == 0
+
+
 def ensure_commit_local(sha: str, ref: str) -> bool:
     """Confirm the merge commit is in the local clone -- Defect One's edge.
 
@@ -1211,9 +1371,11 @@ def ensure_commit_local(sha: str, ref: str) -> bool:
     commit already present costs one presence check here, and never a
     fetch. Runs
     ``git cat-file -e <sha>^{commit}``; only on failure does it run ONE
-    ``git fetch origin <ref>`` -- ``ref`` is the pull request's own
-    ``baseRefName``, where the merge commit lives, never the repository
-    default branch -- and checks presence again, whatever the fetch's own
+    ``git fetch origin <ref>`` -- ``ref`` is the ref where this commit lives,
+    never the repository default branch: the merge-commit-verdict caller
+    passes the pull request's own ``baseRefName``, and the Hand-Resolved
+    walk (W-2/X-8) passes ``pull/<n>/head``, the pull request's own ref --
+    and checks presence again, whatever the fetch's own
     exit code reports. A fetch that itself succeeds is not proof the commit
     is now present; only the re-check answers that. Every call goes through
     ``_run``, so no real git process starts under a patched module, and no
@@ -1361,52 +1523,105 @@ def write_record(contract_slug: str, subtask_id: str, record: Dict[str, Any]) ->
 
 
 def _render_hand_resolved_reading(entry: Dict[str, Any]) -> str:
-    """One of the Hand-Resolved Summary's four readings, as prose for a person.
+    """One of the Hand-Resolved Summary's five readings, as prose for a person.
 
-    Mirrors the four-state reading in Data Shapes: ``not-recorded`` for a
-    record written before this field existed; ``not detectable`` when
-    ``merge_commits`` is zero, whatever ``files`` says -- the pull request's
-    own commits contained no merge commit, so there was nothing to inspect,
-    and that is never rendered as clean; the file list itself when something
-    entered without a reviewable diff; and ``clean`` only when at least one
-    merge commit was genuinely inspected and none was conflicted.
+    Ordered, first match wins (Data Shapes, R-1 to R-10). ``U`` is
+    ``commits_unread``:
 
-    Fails closed on a malformed ``merge_commits``: anything that is not a
-    genuine, non-negative count -- absent, ``None``, a string, a bool, or a
-    negative number -- reads the same as the literal ``0`` case. A caller
-    cannot trust a count it cannot recognise, and reading it as though the
-    merge were clean would be the overclaim this reading exists to prevent.
-
-    Fails closed on a malformed ``files`` the same way: ``clean`` and the
-    file listing are the only two readings a genuinely inspected merge can
-    produce, so both require ``files`` to be a list whose every element is a
-    string -- absent, ``None``, a dict, an int, a bare string, or a list
-    holding a non-string element all read as unreadable instead. This never
-    raises: a hand-edited or partially-migrated completion record must be
-    reported as unreadable, never allowed to crash an otherwise read-only
-    render (join() over a bare string iterates its characters, and join()
-    over a list holding a non-string element raises TypeError -- both are
-    guarded against here rather than left to the caller).
+    - R-1: ``source == "not-recorded"`` -> ``not-recorded`` (unchanged).
+    - R-2: a ``stored-record`` entry with no ``commits_unread`` key ->
+      ``not-recorded``. A record written before this contract cannot tell
+      "no commit was unread" apart from "nobody counted", and its ``clean``
+      may be the very W1 overclaim this contract fixes.
+    - R-3: ``commits_unread`` present but not a genuine, non-negative,
+      non-bool integer -> ``not detectable (unread count unreadable)``. A
+      caller cannot trust a count it cannot recognise.
+    - R-4: ``merge_commits`` malformed or non-positive, and ``U > 0`` ->
+      ``not detectable (unread commits: U)`` -- the unread count is never
+      silently dropped behind the uncounted wording below.
+    - R-5: ``merge_commits`` malformed or non-positive (``U`` zero or
+      absent) -> ``not detectable (no merge commits inspected)`` (unchanged).
+    - R-6: ``files`` malformed -> ``not detectable (files unreadable)``
+      (unchanged). Never raises: a hand-edited or partially-migrated record
+      must be reported as unreadable, never allowed to crash an otherwise
+      read-only render.
+    - R-7: ``files`` non-empty -> the comma-joined list, with an
+      ``" (unread commits: U)"`` suffix when ``U > 0``.
+    - R-8: ``U > 0`` (an inspected merge, empty file list, some commit still
+      unread) -> ``not detectable (unread commits: U)``. A genuinely
+      inspected merge does not mask a fetch failure on a different commit.
+    - R-9: no ``commits_unread`` key at all (a hand-built or otherwise
+      unmeasured entry) -> ``not detectable (unread count unreadable)``. An
+      absent key is never read as zero.
+    - R-10: otherwise -- a present, well-formed zero unread count -- ->
+      ``clean``. This is the only rule that can ever answer ``clean``.
     """
     if entry.get("source") == "not-recorded":
-        return "not-recorded"
+        return "not-recorded"  # R-1
+
+    has_unread_key = "commits_unread" in entry
+    commits_unread = entry.get("commits_unread")
+    unread_ok = (has_unread_key and isinstance(commits_unread, int)
+                and not isinstance(commits_unread, bool) and commits_unread >= 0)
+
+    if entry.get("source") == "stored-record" and not has_unread_key:
+        return "not-recorded"  # R-2
+
+    if has_unread_key and not unread_ok:
+        return "not detectable (unread count unreadable)"  # R-3
+
     merge_commits = entry.get("merge_commits")
-    if (not isinstance(merge_commits, int) or isinstance(merge_commits, bool)
-            or merge_commits <= 0):
-        return "not detectable (no merge commits inspected)"
+    merge_ok = (isinstance(merge_commits, int) and not isinstance(merge_commits, bool)
+               and merge_commits > 0)
+    if not merge_ok:
+        if unread_ok and commits_unread > 0:
+            return "not detectable (unread commits: %d)" % commits_unread  # R-4
+        return "not detectable (no merge commits inspected)"  # R-5
+
     files = entry.get("files")
     if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
-        return "not detectable (files unreadable)"
+        return "not detectable (files unreadable)"  # R-6
+
     if files:
-        return ", ".join(files)
-    return "clean"
+        joined = ", ".join(files)
+        if unread_ok and commits_unread > 0:
+            return "%s (unread commits: %d)" % (joined, commits_unread)
+        return joined  # R-7
+
+    if unread_ok and commits_unread > 0:
+        return "not detectable (unread commits: %d)" % commits_unread  # R-8
+
+    if not has_unread_key:
+        return "not detectable (unread count unreadable)"  # R-9
+
+    return "clean"  # R-10
+
+
+def _parse_pr_reference(value: str) -> "int | str":
+    """A ``--pr`` argument -- a Pull-request reference (Data Shapes, Extension Point 8).
+
+    ``int(value)`` first, exactly today's rule -- so ``0`` and negatives keep
+    parsing and reach ``gh_pr``, which answers them ``not-found``, the same
+    skip every other unresolvable number gets. Otherwise, a value starting
+    ``https://`` is a link, carried verbatim. Anything else is neither, and
+    argparse reports it as an invalid value (exit 2), unchanged from today.
+    """
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    if value.startswith("https://"):
+        return value
+    raise argparse.ArgumentTypeError(
+        "must be a pull-request number or an https:// link, got %r" % value)
 
 
 # ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description="Close a sub-task whose pull request merged.")
     ap.add_argument("--contract", required=True, help="contract slug or path")
-    ap.add_argument("--pr", action="append", type=int, default=[], help="pull request number (repeatable)")
+    ap.add_argument("--pr", action="append", type=_parse_pr_reference, default=[],
+                    help="pull request number or https:// link (repeatable)")
     ap.add_argument("--status", action="store_true", help="report the plan without writing anything")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--dry-run", action="store_true", help="compute everything, write nothing")
@@ -1419,6 +1634,22 @@ def main() -> int:
                     help="the sub-task's declared base branch, with --record-subtask")
     ap.add_argument("--brief", metavar="PATH", help="the sub-task's brief path, with --record-subtask")
     args = ap.parse_args()
+
+    # G-1 (Open Question 1, answered yes): a non-empty GH_REPO retargets every
+    # `gh` call this process makes, including `gh issue close` -- so refuse
+    # before touching the contract, git or gh at all, rather than let a
+    # --pr or --dispatch run silently mutate another repository. The script
+    # never sets GH_REPO itself; this only ever reads it to refuse.
+    if os.environ.get("GH_REPO") and (args.pr or args.dispatch):
+        print(json.dumps({
+            "error": "gh-repo-set",
+            "detail": "GH_REPO is set in the environment; refusing to run --pr or --dispatch, "
+                      "which would let every gh call this process makes -- including "
+                      "gh issue close -- silently retarget at another repository. Unset "
+                      "GH_REPO in this shell and run again; a pull request in another "
+                      "repository is passed as its https:// link instead.",
+        }))
+        return 8
 
     contract = find_contract(args.contract)
     if not contract:
@@ -1513,25 +1744,94 @@ def main() -> int:
             entry = {"sub_task": tid, "source": "not-recorded"}
         report["hand_resolved"].append(entry)
 
-    for number in args.pr:
-        pr = gh_pr(number)
-        verdict = classify_pr(pr, base, accepted_bases=declared_bases)
+    # X-1/X-3, memoised per run: once for None (this checkout's own identity)
+    # and once per distinct cross-repository name -- never for a bare number,
+    # which never reaches this cache at all.
+    _repo_view_cache: Dict[Optional[str], Optional[Dict[str, Any]]] = {}
+
+    def _cached_repo_view(name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        if name not in _repo_view_cache:
+            _repo_view_cache[name] = repo_view(name)
+        return _repo_view_cache[name]
+
+    for ref in args.pr:
+        pr = gh_pr(ref)
+
+        # X-1: a bare number never calls repo_view and is never
+        # Cross-Repository. X-3: a link is Cross-Repository unless BOTH this
+        # checkout's own identity (repo_view(None)) answers, and the owner
+        # and name parsed from the payload's own `url` equal it, compared
+        # case-insensitively -- any unreadable part fails closed to
+        # cross-repository. X-4: a link naming this repository takes exactly
+        # the number path from here on.
+        is_link = isinstance(ref, str)
+        cross_repository = False
+        cross_default_branch: Optional[str] = None
+        if is_link and pr:
+            owner_name = _owner_and_name_from_url(pr.get("url"))
+            this_repo = _cached_repo_view(None)
+            this_name = (this_repo.get("nameWithOwner") or "") if this_repo else ""
+            if owner_name is None or this_repo is None:
+                cross_repository = True
+            elif ("%s/%s" % owner_name).lower() != this_name.lower():
+                cross_repository = True
+            if cross_repository:
+                # X-5: the accepted base set is this OTHER repository's own
+                # default branch alone -- this checkout's declared bases are
+                # branches of THIS repository and are never added. The set
+                # is empty when the remote identity cannot be read, which
+                # yields merged-elsewhere, a halt.
+                remote_name = ("%s/%s" % owner_name) if owner_name else None
+                remote = _cached_repo_view(remote_name) if remote_name else None
+                cross_default_branch = remote.get("defaultBranchRef") if remote else None
+
+        if cross_repository:
+            accepted = {cross_default_branch} if cross_default_branch else set()
+            verdict = classify_pr(pr, accepted_bases=accepted)
+        else:
+            verdict = classify_pr(pr, base, accepted_bases=declared_bases)
+
         if verdict in ("not-found", "not-merged", "merged-elsewhere"):
-            report["skipped"].append({"pr": number, "verdict": verdict})
+            report["skipped"].append({"pr": ref, "verdict": verdict})
             continue
 
         task = map_pr_to_subtask(pr.get("headRefName", ""), pr.get("title", ""), tasks, slug)
         if task is None:
-            report["unmapped"].append({"pr": number, "branch": pr.get("headRefName")})
+            report["unmapped"].append({"pr": ref, "branch": pr.get("headRefName")})
             continue
 
         shas = [c.get("oid") for c in (pr.get("commits") or []) if c.get("oid")]
-        # Extension Point 1/4: one walk, via summarise_hand_resolved -- never
-        # detect_resolved_files beside it, which would ask git about every
-        # commit twice. Always appended, including an empty file list (I-1):
-        # a walk that inspected commits and found nothing conflicted is a
-        # measurement, not an absence.
-        hand_resolved_summary = summarise_hand_resolved(shas, git_combined_diff)
+        if cross_repository:
+            # X-6: none of git_combined_diff, commit_present,
+            # ensure_commit_local or file_at_commit is ever called for a
+            # Cross-Repository Pull Request -- none of its commits exist in
+            # this clone, so every reported commit is unread, without a read.
+            n = len(shas)
+            hand_resolved_summary = {
+                "files": [], "merge_commits": 0, "commits_inspected": n, "commits_unread": n,
+            }
+        else:
+            # Extension Point 1/4: one walk, via summarise_hand_resolved --
+            # never detect_resolved_files beside it, which would ask git
+            # about every commit twice. X-8: a local pull request's walk
+            # gets its own ensure_local closure, aimed at
+            # pull/<number>/head -- the payload's own number, never the
+            # repository default branch or the review-verdict fetch's base
+            # branch -- and commit_present, so at most one fetch is ever
+            # spent on the first commit reported absent. With no number in
+            # the payload, neither is passed (W-5).
+            number_val = pr.get("number")
+            if number_val is not None:
+                def _walk_ensure_local(sha: str, _n=number_val) -> bool:
+                    return ensure_commit_local(sha, "pull/%s/head" % _n)
+                hand_resolved_summary = summarise_hand_resolved(
+                    shas, git_combined_diff,
+                    ensure_local=_walk_ensure_local, commit_present=commit_present)
+            else:
+                hand_resolved_summary = summarise_hand_resolved(shas, git_combined_diff)
+        # Always appended, including an empty file list (I-1): a walk that
+        # inspected commits and found nothing conflicted is a measurement,
+        # not an absence.
         # A sub-task this run's pull request maps to may already carry a
         # seeded entry from a previous run's stored record (the loop above).
         # This run just watched the pull request resolve -- merged, or
@@ -1543,7 +1843,7 @@ def main() -> int:
             if not (entry.get("sub_task") == task.id and entry.get("source") != "measured-this-run")
         ]
         report["hand_resolved"].append({
-            "pr": number,
+            "pr": ref,
             "sub_task": task.id,
             "source": "measured-this-run",
             **hand_resolved_summary,
@@ -1563,39 +1863,60 @@ def main() -> int:
         # closed-unmerged pull request, and advance() short-circuits on any
         # failed record before the release check is ever reached.
         if verdict_file and merge_sha:
-            artefact_text = file_at_commit(merge_sha, verdict_file)
-            # parse_review_verdict stays pure: it reports what the artefact
-            # says, or nothing. Two readings are this loop's own judgement,
-            # never something a gate writes, so both are named here rather
-            # than by the parser. "unreadable" means the commit is in the
-            # local clone but the artefact still can't be parsed -- absent,
-            # malformed, or out of the closed set. "unfetched" means the
-            # commit itself never made it into the local clone even after
-            # one fetch attempt -- a different failure with a different
-            # remedy (fetch it, don't rewrite it), so Defect One's fetch
-            # (ensure_commit_local) runs only on a first empty read, and
-            # only that outcome decides between the two.
-            if artefact_text is None:
-                if ensure_commit_local(merge_sha, pr.get("baseRefName") or base):
-                    artefact_text = file_at_commit(merge_sha, verdict_file)
-                    reading = parse_review_verdict(artefact_text) if artefact_text is not None else None
-                    review_verdict = reading or "unreadable"
-                else:
-                    review_verdict = "unfetched"
+            if cross_repository:
+                # X-6: the merge commit lives in ANOTHER repository, so no
+                # read is ever attempted here -- this is the loop's third
+                # review reading, distinct from both `unreadable` (the
+                # commit is local but the artefact can't be parsed) and
+                # `unfetched` (the commit is local-repository but absent
+                # from this clone, whose remedy is a fetch). No fetch in
+                # this clone can ever reach another repository's merge
+                # commit, so reusing `unfetched` here would send the
+                # operator to a remedy that can never work.
+                review_verdict = "cross-repository"
             else:
-                reading = parse_review_verdict(artefact_text)
-                review_verdict = reading or "unreadable"
+                artefact_text = file_at_commit(merge_sha, verdict_file)
+                # parse_review_verdict stays pure: it reports what the
+                # artefact says, or nothing. "unreadable" means the commit
+                # is in the local clone but the artefact still can't be
+                # parsed -- absent, malformed, or out of the closed set.
+                # "unfetched" means the commit itself never made it into
+                # the local clone even after one fetch attempt -- a
+                # different failure with a different remedy (fetch it,
+                # don't rewrite it), so Defect One's fetch
+                # (ensure_commit_local) runs only on a first empty read,
+                # and only that outcome decides between the two.
+                if artefact_text is None:
+                    if ensure_commit_local(merge_sha, pr.get("baseRefName") or base):
+                        artefact_text = file_at_commit(merge_sha, verdict_file)
+                        reading = parse_review_verdict(artefact_text) if artefact_text is not None else None
+                        review_verdict = reading or "unreadable"
+                    else:
+                        review_verdict = "unfetched"
+                else:
+                    reading = parse_review_verdict(artefact_text)
+                    review_verdict = reading or "unreadable"
 
         # I-10: close the sub-issue only once a merge into an accepted base
         # is confirmed, and only when this sub-task actually has one --
         # never on a dry run or a status report, since gh issue close is a
-        # real mutation, not a local write.
+        # real mutation, not a local write. X-7: this runs through the
+        # UNCHANGED close_sub_issue, whose issue number comes from THIS
+        # repository's own state store and whose gh calls carry no --repo,
+        # so a cross-repository merge still closes only this repository's
+        # sub-issue, never the other repository's.
         sub_issue_closed = None
         task_state_entry = state.get("sub_tasks", {}).get(task.id, {})
         task_issue = task_state_entry.get("issue")
         if (verdict == "merged" and task_issue is not None and not args.dry_run
                 and not args.status and not args.resume):
-            sub_issue_closed = close_sub_issue(task_issue, pr.get("url", ""))
+            # The close comment never carries the other repository's link or
+            # name (X-7): a cross-repository pull request's own url points
+            # at a different repository, and naming it here would be the
+            # one place that link could leak into a gh call this repository
+            # issues.
+            close_comment = "merged in another repository" if cross_repository else pr.get("url", "")
+            sub_issue_closed = close_sub_issue(task_issue, close_comment)
 
         rec = build_record(verdict, merge_sha, pr.get("url", ""), pr.get("mergedAt"), checks,
                            review_verdict=review_verdict, sub_issue_closed=sub_issue_closed,
@@ -1604,7 +1925,7 @@ def main() -> int:
             write_record(slug, task.id, rec)
         records[task.id] = rec
         (report["failed"] if rec["status"] == "failed" else report["closed"]).append(
-            {"pr": number, "sub_task": task.id, "record": rec})
+            {"pr": ref, "sub_task": task.id, "record": rec})
 
     report["review_verdicts"] = {
         tid: rec["review_verdict"] for tid, rec in records.items() if "review_verdict" in rec
@@ -1747,7 +2068,7 @@ def main() -> int:
     # stored-record entries, not-recorded placeholders, and entries measured
     # this run alike -- with its own rendered reading, once the list is
     # final and before either output branch reads it. A caller of --json
-    # output must never have to reimplement the four-state reading the
+    # output must never have to reimplement the five-state reading the
     # human-readable branch below already computes; both branches now read
     # the same stamped value instead of two independent renderings that
     # could drift apart.
@@ -1768,8 +2089,16 @@ def main() -> int:
                 who = h.get("sub_task", "?")
                 # N-4: name the pull request too when this entry carries one
                 # -- a seeded or not-recorded entry has none, and stays
-                # identified by sub-task alone.
-                pr_suffix = f" #{h['pr']}" if h.get("pr") is not None else ""
+                # identified by sub-task alone. Extension Point 11: a
+                # link-valued pr prints bare (never "#<link>"); a number
+                # still prints "#<n>".
+                pr_value = h.get("pr")
+                if pr_value is None:
+                    pr_suffix = ""
+                elif isinstance(pr_value, str):
+                    pr_suffix = f" {pr_value}"
+                else:
+                    pr_suffix = f" #{pr_value}"
                 print(f"  hand-resolved {who}{pr_suffix}: {h['reading']}")
         print(f"  next move: {move['action']}" + (f" - {move.get('detail')}" if move.get("detail") else ""))
         for d in report.get("dispatch", []):
