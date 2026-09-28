@@ -55,8 +55,8 @@ py -3 "$PRM" --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
-by 226 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
-`unittest` summary line reads `Ran 226 tests ... OK` — and has been mutation-probed. **Read its
+by 313 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
+`unittest` summary line reads `Ran 313 tests ... OK` — and has been mutation-probed. **Read its
 answer. Do not recompute it from the contract**, or there are two implementations of the same
 rules and they will disagree.
 
@@ -110,6 +110,12 @@ first (`--record-subtask <sub-task-id> --issue <n> --base <parent> --brief <path
 `/task` in Parent-aware mode first if it has no brief yet), then dispatching again. Add
 `--dry-run` to see the packet without cutting anything — both refusals hold under `--dry-run`
 too, so a dry run always previews what the real run would do.
+
+It also refuses with exit code **8**, `gh-repo-set`, when `GH_REPO` is set in the environment —
+`--dispatch` can call `gh issue develop` to cut the sub-task's branch against its sub-issue, and
+a non-empty `GH_REPO` would retarget that call at another repository entirely. This refusal cuts
+no branch and writes nothing either, and it holds under `--dry-run` too. The remedy is unsetting
+`GH_REPO` in that shell and dispatching again.
 
 
 Each packet names the sub-task, its branch, its agent, its file scope, the pre-written TASK
@@ -191,8 +197,9 @@ py -3 "$PRM" --contract <slug> --record-subtask <sub-task-id> --issue <n> --base
 ```
 
 (Run `/task` in Parent-aware mode first if this sub-task has no brief yet — `--record-subtask`
-requires one.) Then continue on the branch `--dispatch` already cut: run `/tdd-first` and `/ship`
-as normal. Do not re-dispatch; the branch and its `awaiting-merge` state already exist, and
+requires one.) Then continue on the branch `--dispatch` already cut: dispatch the packet's
+`cycle` stages as fresh subagents (Step 2, item 2), then run `/ship`. Do not re-dispatch; the
+branch and its `awaiting-merge` state already exist, and
 dispatching again would cut a second branch for the same sub-task. Never link the pull request at
 the parent issue, and never retarget it at the default branch — both are forbidden by name in the
 work item: the sub-issue is this task's own, and the base is the parent branch, not a substitute
@@ -333,7 +340,7 @@ that would start work the script did not release.
 ## Skill integrations
 
 - **Reads** `.claude/scripts/pr_merged.py`, which owns the rules and the tests.
-- **Runs** `/tdd-first` for a dispatched sub-task, then `/ship` for its pull request.
+- **Dispatches** each stage of the packet's `cycle` as a fresh subagent, then runs `/ship` for its pull request.
 - **Paired with** `/pr-merged`, which closes a sub-task and wakes this skill.
 - **Called by** `/flow`, which owns the work item around the contract.
 - **Escalates to** `/design-first` on a failure, and to `/verify-before-done` on completion.

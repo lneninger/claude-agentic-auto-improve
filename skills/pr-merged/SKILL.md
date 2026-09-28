@@ -42,20 +42,26 @@ script instead, and both therefore behave identically. Two implementations of th
 would drift the moment either changed.
 
 ```bash
-py -3 "$PRM" --contract <slug|path> --pr <n> [--pr <n> ...] --json
+py -3 "$PRM" --contract <slug|path> --pr <n|link> [--pr <n|link> ...] --json
 py -3 "$PRM" --contract <slug|path> --status --json   # read-only
 ```
+
+`--pr` takes either a bare number, in this repository, or an `https://` link, which may name
+**another** repository — the sibling plugin, for instance. A link is resolved by `gh` per call,
+never through a process-wide `--repo` flag or a `GH_REPO` environment variable.
 
 This follows the pattern already used here: `/ship` shells out to `verify_issue_link.py`, and
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 267 cases over
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 313 cases over
 identity, parsing, block classification, verdicts, records, releases, conflict detection, the
-Hand-Resolved Summary, the Next Command and the Sub-Task Cycle. Measured by running
-`py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own `unittest` summary line:
-`Ran 267 tests ... OK`. They were mutation-probed: disabling the verification check, reading a
-missing dependency line as none, and counting scope notes as sub-tasks each turn the suite red.
+Hand-Resolved Summary (including the unread-commit count and its single-fetch walk), the
+cross-repository pull-request path, the `GH_REPO` refusal, the Next Command and the Sub-Task
+Cycle. Measured by running `py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own
+`unittest` summary line: `Ran 313 tests ... OK`. They were mutation-probed: disabling the
+verification check, reading a missing dependency line as none, and counting scope notes as
+sub-tasks each turn the suite red.
 
 **Read the script's output rather than re-deriving it.** Everything below describes what the
 script does and how to act on what it returns. Where this file and the script disagree, the
@@ -124,6 +130,11 @@ request. Skip the discovery below; the caller already knows which sub-task this 
 | `https://github.com/<owner>/<repo>/pull/40` | May be another repository; respect the owner and name in the link |
 | *(nothing)* | Discover candidates and let the user pick |
 
+**Pass a link to the script exactly as given, as its own `--pr` argument** — never split into a
+bare number, never routed through a process-wide `--repo` flag or a `GH_REPO` environment
+variable. `gh` resolves the owner and name in the link per call; the script decides for itself
+whether that repository is this one or another (Step 1 below).
+
 With no argument:
 
 ```bash
@@ -155,6 +166,14 @@ request merges into a parent branch rather than the default branch, so a merge l
 `merged`, not `merged-elsewhere` — the measured PR #173 defect this rule exists to close.
 `merged-elsewhere` stays reachable for a base that is genuinely undeclared: nobody said the
 dependents could build on that branch.
+
+**A link naming another repository is checked differently.** The script asks GitHub for that
+repository's own identity and compares it against the checkout's own — never against this
+repository's declared base set. Its accepted base is that OTHER repository's own default branch
+alone; landing anywhere else is still `merged-elsewhere`, a halt. Its sub-issue is still closed
+**here**, in this checkout's own repository — `close_sub_issue` never takes `--repo`, and the
+sub-issue number comes from this checkout's own state store, never from the other repository. A
+link naming THIS repository is checked exactly like a bare number.
 
 **On `unverifiable`, stop everything.** Without GitHub there is no way to tell a merged pull
 request from a closed one, and guessing writes a lie into the completion store. Tell the user:
@@ -197,10 +216,24 @@ Releasing dependents on top is the caller's decision, and it should be an inform
 detectable. Say that plainly rather than reporting a clean result. This repository merges with
 merge commits, so the check applies here.
 
+**A commit that could not be read is never rendered clean.** When `git show --cc` itself fails
+on a merge commit, or `git rev-list` cannot read a commit at all, that commit's own contents are
+unknown — not a clean merge, and not the same as "no merge commit was found". The script counts
+these separately as **unread commits**, and a summary with one or more unread commits never
+reads `clean`, whatever its file list says: it reads `not detectable (unread commits: N)`
+instead, with the file list's own suffix when files were also found. When the commit is simply
+absent from this clone (never fetched here), the script tries **one** fetch, aimed at that
+commit's own pull-request ref, before giving up and counting it unread — so a single absent
+commit costs at most one fetch per run, never one per commit.
+
 **What conflicts here in practice.** The files that collide most are the append-heavy shared
 ones — the registries, the journal, and agent memories — not source code. A conflict in those
 usually means a lost entry rather than broken behaviour, which is worth saying in the report so
 the reader calibrates.
+
+**A cross-repository pull request is never walked at all.** None of its commits exist in this
+clone, so the script never spends a read (or a fetch) on any of them — every one of its reported
+commits is counted unread, without exception, and its Hand-Resolved Summary reads accordingly.
 
 ## Step 2: Map each merged pull request to a sub-task
 
@@ -429,16 +462,22 @@ the same reading here would be a second implementation of the same rule, which i
 drift Alternatives Considered rejects; it also risks disagreeing with the script's own wording,
 which is the overclaim the Hand-Resolved Summary exists to prevent.
 
-For reference only, never as a decision rule to re-derive, `reading` is always one of four
+For reference only, never as a decision rule to re-derive, `reading` is always one of five
 shapes:
 
-- `not-recorded` — a completion record written before this field existed, or a stored
-  `hand_resolved` value the script could not read (hand-edited or partially-migrated)
+- `not-recorded` — a completion record written before the unread-commit count existed, a
+  stored `hand_resolved` value with no `commits_unread` key at all (the record predates it and
+  cannot tell "nothing was unread" apart from "nobody counted"), or a stored value the script
+  could not read at all (hand-edited or partially-migrated)
 - `not detectable (...)` — nothing was genuinely inspectable: zero, missing or otherwise
-  malformed `merge_commits`, or a `files` value the script could not read as a list of strings
-- `clean` — at least one merge commit was inspected and none was conflicted
+  malformed `merge_commits`; a `files` value the script could not read as a list of strings; a
+  malformed unread-commit count; or one or more commits the script could not read even after its
+  one fetch attempt — named as `not detectable (unread commits: N)`
+- `clean` — at least one merge commit was inspected, none was conflicted, and every reported
+  commit was read (a present, well-formed `commits_unread` of exactly zero)
 - the comma-separated file list — files differing from both parents of an inspected merge
-  commit, resolved by hand or changed during the merge
+  commit, resolved by hand or changed during the merge; gains an ` (unread commits: N)` suffix
+  when some other reported commit could not be read
 
 Print each entry as `<sub-task>[ #<pr>]: <reading>` (`h.get("reading")`), naming the pull
 request only when the entry carries one — a seeded or not-recorded entry does not.
@@ -455,7 +494,7 @@ empty, `"none — " + report["next_command"]["reason"]`.
 - Contract defects: <block id — reason (files-but-no-recognised-agent | no-files-but-names-an-agent), one line each | none>
 - Hand-resolved: <sub-task[ #pr] — <entry's own `reading` field, printed verbatim>, one line each | none>
 - Completion records written: <paths>
-- Review verdicts: <sub-task — pass | pass-with-findings | blocked | unreadable | unfetched, one line each | none read this run>
+- Review verdicts: <sub-task — pass | pass-with-findings | blocked | unreadable | unfetched | cross-repository, one line each | none read this run>
 - Released: <sub-tasks now unblocked, and what released them>
 - Still blocked: <sub-task — waiting on X>
 - Failed: <sub-task — severity, one-line reason, and what it now blocks | none>
@@ -464,7 +503,7 @@ empty, `"none — " + report["next_command"]["reason"]`.
 - Next command: <report["next_command"], rendered exactly as the rule above says>
 ```
 
-**The two loop-owned review readings.** `unreadable` means the merge commit is in the local
+**The three loop-owned review readings.** `unreadable` means the merge commit is in the local
 clone but the declared artefact is absent, malformed or outside the closed set. `unfetched` means
 the merge commit itself is not in the local clone, even after this run's one fetch of the pull
 request's base branch. It is not a bad artefact; it is a commit the clone does not hold. To clear
@@ -474,7 +513,28 @@ can never bring the commit down, and the reading will not clear on its own. The 
 the commit into the local clone by hand before rerunning. No command for that case is verified
 here, so none is suggested.
 
+`cross-repository` means the merge commit lives in a **different** repository from this
+checkout's own — the sub-task's pull request was a `Cross-Repository Pull Request`, resolved by
+its `https://` link. Its own remedy is **not** a fetch: no fetch this clone can ever run reaches
+another repository's merge commit, so telling the operator to fetch would send them at a remedy
+that can never work. Instead, open the declared artefact in the pull request's **own**
+repository, at its own merge commit, and read its `**Verdict:**` line there by hand. The
+dependent stays withheld until that reading is brought over some other way; no command that
+does this automatically is verified by this contract, so none is suggested here — see the
+follow-up stub this contract cites for an automated read.
+
 State what was skipped as plainly as what succeeded.
+
+## Refusal: `GH_REPO` is set in the environment
+
+The script reads `GH_REPO` exactly once, before touching the contract, git or `gh` at all, and
+only to refuse: with a non-empty `GH_REPO` set and the invocation naming `--pr` or `--dispatch`,
+it prints `{"error": "gh-repo-set", ...}` and exits **8**. Nothing is read, written or closed.
+
+`GH_REPO` retargets every `gh` call a process makes, including `gh issue close` — the exact
+hazard this whole contract closes for a link. The script never sets it itself. The remedy is to
+unset `GH_REPO` in that shell and run the command again; a pull request in **another** repository
+is passed as its `https://` link, never through `GH_REPO`.
 
 ## The stores, and the design that defined them
 
@@ -542,10 +602,18 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
   comment posted twice.
 - **Rendering a zero `merge_commits` count as "none detected" or "clean".** It means nothing
   was inspectable, not that nothing was found — the exact overclaim the Hand-Resolved Summary's
-  three-field shape exists to prevent.
-- **Collapsing the four hand-resolved readings into a bare file list.** An empty list from a
+  four-field shape exists to prevent.
+- **Collapsing the five hand-resolved readings into a bare file list.** An empty list from a
   genuinely clean merge and an empty list from an uninspectable one are different claims; render
   both distinctly.
+- **Rendering `clean` for any pull request that reported an unread commit.** A genuinely clean
+  merge inspected beside a commit the script could never read is still not detectable as a whole
+  — the unread count withholds `clean` whatever the file list says.
+- **Sending the operator to fetch for a `cross-repository` review verdict.** No fetch this clone
+  runs can ever reach another repository's merge commit; that remedy belongs to `unfetched` alone.
+- **Setting `GH_REPO` to read a pull request in another repository.** Pass its link instead —
+  `GH_REPO` retargets every `gh` call the script makes, including the sub-issue close, and the
+  script refuses outright (exit 8) rather than risk it.
 - **Composing the closing "next command" line as prose.** Print `report["next_command"]`
   verbatim — a second implementation of a rule the script owns is how the two drift.
 
