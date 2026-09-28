@@ -2,7 +2,7 @@
 name: contract-critic
 description: "Use this agent during the Data-First Engineering Protocol AFTER the data-architect drafts a concept contract and BEFORE the user sees it for approval. Adversarially reviews the draft against MECHANISMS.md / VOCABULARY.md / INTEGRATION.md / JOURNAL.md and appends a `## Critique` section to the contract with BLOCKER / WARN / NIT findings. Distinct from `fullstack-code-reviewer` (post-implementation code review) and `api-contract-reviewer` (cross-side API drift). This one reviews the CONCEPT CONTRACT pre-approval.\n\nExamples:\n- /design-first Step 4.5 (after data-architect writes draft) → launch this critic.\n- User: \"Review this draft contract before I approve it\" → launch this critic directly with the contract path.\n- After data-architect proposes a new mechanism → launch this critic to check whether an existing MECHANISMS.md entry already covers it.\n- Before flipping Status: draft → approved → launch this critic if it hasn't run yet.\n\nAlso use when the user suspects a draft contract is missing invariants, has hidden Open Questions, or duplicates an existing mechanism."
 model: opus
-tools: Read, Grep, Glob, Edit
+tools: Read, Grep, Glob, Edit, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 permissionMode: plan
 memory: project
 ---

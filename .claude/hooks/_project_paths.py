@@ -319,3 +319,178 @@ def project_matches(root: Path, requested: str | None) -> bool:
     if not requested:
         return True
     return requested.casefold() in project_aliases(root)
+
+
+# ---------------------------------------------------------------------------
+# Guard path helpers (issue #222 -- "worktree source is judged like
+# main-checkout source by every path guard").
+#
+# ``/task`` places every worktree at ``<repo>/.claude/worktrees/<name>/``, so
+# every path inside a worktree contains the substring ``/.claude/`` and was
+# therefore bypassed outright by every guard's ".claude is always config"
+# allow-list rule. The two functions below let a guard test its allow-list
+# against the path a file would have in the MAIN checkout -- the
+# "checkout-equivalent path" -- instead of the raw one, so worktree source is
+# judged exactly like main-checkout source while a worktree's OWN
+# ``.claude/`` configuration (which the checkout-equivalent path turns back
+# into a plain ``.claude/`` path) stays allowed.
+#
+# Both functions are PURE (INV-4): one path string in, a string (or ``None``)
+# out. No filesystem read, no environment variable, no working directory --
+# a worktree segment is recognised from the text alone, so the verdict does
+# not depend on which root ``CLAUDE_PROJECT_DIR`` or the working directory
+# names.
+# ---------------------------------------------------------------------------
+
+#: The literal directory name ``/task`` creates worktrees under, i.e. the
+#: middle component of a worktree segment ``.claude/worktrees/<name>/``.
+WORKTREES_DIRNAME = "worktrees"
+
+
+def _split_leading_marker(s: str) -> tuple[str, str]:
+    """Split a forward-slashed path into its leading marker and the rest.
+
+    The marker is ``"//"`` for a network path (a leading pair of separators,
+    kept verbatim -- INV-8), ``"/"`` for an ordinary absolute path, or ``""``
+    for a relative one. The remainder is returned unmodified.
+    """
+    if s.startswith("//"):
+        return "//", s[2:]
+    if s.startswith("/"):
+        return "/", s[1:]
+    return "", s
+
+
+def _normalized_components(raw_fs: str) -> tuple[str, list[str]]:
+    """Return ``(leading_marker, components)`` for a forward-slashed path.
+
+    Runs of separators collapse to one (empty components from a doubled
+    separator are dropped) and ``.`` components are dropped, EXCEPT a
+    genuine leading ``.`` (a relative-path marker at position 0 of a
+    non-absolute path), which is kept -- both per INV-8. This is used only
+    to SEARCH for a worktree segment; when none is found the caller must
+    fall back to the raw text (INV-3 / the Checkout-equivalent path
+    invariant), never to this normalized form.
+    """
+    leading, rest = _split_leading_marker(raw_fs)
+    components: list[str] = []
+    for idx, part in enumerate(rest.split("/")):
+        if part == "":
+            continue  # doubled separator
+        if part == ".":
+            if leading == "" and idx == 0:
+                components.append(part)  # genuine leading "./" marker
+            continue  # "." elsewhere is dropped
+        components.append(part)
+    return leading, components
+
+
+def _windows_alias_normalize(component: str) -> str:
+    """Fold a Windows alias spelling of a path component onto the plain one.
+
+    Windows treats a trailing ``.`` / space run, and an NTFS
+    alternate-data-stream suffix (``name::$INDEX_ALLOCATION``), as naming the
+    SAME directory as the plain spelling -- ``worktrees.``, ``worktrees ``
+    and ``worktrees::$INDEX_ALLOCATION`` all resolve to ``worktrees`` on
+    disk. Cuts at the first ``:`` (dropping any ADS suffix) and strips
+    trailing dots/spaces from what remains. Does not otherwise change what
+    counts as a match: ``worktreesX`` and ``foo.claude`` are unaffected
+    (round 3 task F). Casefold is applied by the caller.
+    """
+    head = component.split(":", 1)[0]
+    return head.rstrip(". ")
+
+
+def _worktree_segment_spans(components: list[str]) -> list[tuple[int, int]]:
+    """Non-overlapping ``[start, end)`` index spans of every worktree segment.
+
+    A worktree segment is three consecutive components: ``.claude``
+    (case-insensitive whole component, compared LITERALLY -- no alias
+    normalization), ``worktrees`` (``WORKTREES_DIRNAME``, case-insensitive,
+    compared after :func:`_windows_alias_normalize`), and exactly one more
+    component (any name) -- matched even when that third component is the
+    last one in the path (the worktree root itself, INV-8). Nested worktrees
+    produce two adjacent spans and both are found by this single
+    left-to-right scan.
+
+    Only the ``worktrees`` component is alias-folded (round 3 task F).
+    ``.claude`` is deliberately compared without :func:`_windows_alias_normalize`
+    (round 4 item 3 / security BLOCKER B1, code BLOCKER B1): the real
+    project-layout allow-list entries this segment strip feeds into are
+    themselves TWO-COMPONENT paths (``src/<project>.api/``,
+    ``tools/db-protection/``, ``assets/wiki/``), and master never granted an
+    aliased ``.claude`` spelling (``.claude.``, ``.claude::$INDEX_ALLOCATION``)
+    the worktree-segment bypass. Folding it would let a component like
+    ``.claude.`` sitting between ``src/`` and an allow-listed tail get
+    stripped as though it were a genuine worktree segment, JOINING the two
+    unrelated halves into a recognised two-component entry that was never
+    actually there.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(components)
+    while i < n:
+        if (
+            i + 2 < n
+            and components[i].casefold() == ".claude"
+            and _windows_alias_normalize(components[i + 1]).casefold() == WORKTREES_DIRNAME
+        ):
+            spans.append((i, i + 3))
+            i += 3
+            continue
+        i += 1
+    return spans
+
+
+def checkout_equivalent_path(path_str: str) -> str:
+    """The path a file would have in the main checkout (INV-2, INV-3).
+
+    Every worktree segment (``.claude/worktrees/<name>/``, matched
+    case-insensitively with either separator, possibly repeated when
+    worktrees nest) is removed. This is the ONLY input each guard's
+    segment/substring bypass test should read -- filename and extension
+    tests, and "Files to touch" matching, keep reading the raw path.
+
+    When the path contains no worktree segment, the raw path is returned
+    with backslashes turned to forward slashes and NOTHING else changed --
+    not even the doubled-separator/``.``-component normalization used to
+    search for a segment -- so no main-checkout verdict can move (INV-3).
+
+    Pure (INV-4): no filesystem, environment or cwd access.
+    """
+    if not isinstance(path_str, str) or not path_str:
+        return path_str
+    raw_fs = path_str.replace("\\", "/")
+    leading, components = _normalized_components(raw_fs)
+    spans = _worktree_segment_spans(components)
+    if not spans:
+        return raw_fs
+    kept: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        kept.extend(components[cursor:start])
+        cursor = end
+    kept.extend(components[cursor:])
+    return leading + "/".join(kept)
+
+
+def enclosing_worktree_root(path_str: str) -> str | None:
+    """The directory ending at the INNERMOST worktree segment, or ``None``.
+
+    Used to add ``<result>/.claude/concepts`` to a target's contract search
+    (INV-7 / A3) so a worktree's own approved contract is still found once
+    its source is no longer bypassed by the whole-``.claude`` allow-list
+    entry. Never a sibling worktree's root, and never derived from anything
+    but the target path itself (INV-4).
+
+    Returns ``None`` exactly when ``path_str`` holds no worktree segment.
+    """
+    if not isinstance(path_str, str) or not path_str:
+        return None
+    raw_fs = path_str.replace("\\", "/")
+    leading, components = _normalized_components(raw_fs)
+    spans = _worktree_segment_spans(components)
+    if not spans:
+        return None
+    _, last_end = spans[-1]
+    return leading + "/".join(components[:last_end])

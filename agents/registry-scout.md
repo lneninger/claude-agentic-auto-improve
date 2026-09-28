@@ -2,7 +2,7 @@
 name: registry-scout
 description: "Use this agent when an expensive agent needs to know which registry entries are relevant to a task, without reading the registries in full. It reads the generated digest at .claude/.scout-cache/registry-digest.md — a complete index of every mechanism, vocabulary term, journal lesson and integration surface, with a file and line reference for each — then opens only the entries that bear on the task and returns their text.\n\nIt does NOT generate the digest. The digest is built deterministically by .claude/scripts/generate_registry_digest.py, which verifies every reference it emits. A model summarising a registry can silently omit an entry, and the omitted entry is exactly the one an architect would have extended, so index construction is never delegated to judgement.\n\nExamples:\n- data-architect is about to design a caching change → launch registry-scout with the task description; it returns the caching-related mechanisms verbatim plus the vocabulary terms they use, instead of the architect reading 229K tokens of registry.\n- contract-critic needs the journal lessons that apply to a draft → launch registry-scout with the draft's subject; it returns the matching Apply-when entries.\n- A reviewer asks whether a pattern already exists → launch registry-scout; it answers from the index, which is complete, so absence from its answer is meaningful."
 model: haiku
-tools: Read, Grep, Glob
+tools: Read, Grep, Glob, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 ---
 
 # registry-scout

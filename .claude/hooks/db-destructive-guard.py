@@ -70,11 +70,58 @@ try:  # project-local logs when available
     import _project_paths as _pp_log
 except Exception:  # pragma: no cover
     _pp_log = None
+
+#: Round 3 task D: bound at import time via ``getattr`` (see concept-gate.py's
+#: identical comment). A missing function is treated EXACTLY like ``_pp_log``
+#: being ``None`` everywhere below, including the fallback-mode banner text.
+_pp_checkout_equivalent_path = (
+    getattr(_pp_log, "checkout_equivalent_path", None) if _pp_log is not None else None
+)
+
 AUDIT_LOG = (
     (_pp_log.logs_dir() / "db-guard.log") if _pp_log
     else Path.home() / ".claude" / "logs" / "db-guard.log"
 )
 AUDIT_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB rotation threshold
+
+#: The full path this hook's copy of ``_project_paths.py`` would live at, used
+#: only to name the missing helper in a fallback-mode block banner (INV-5).
+_PROJECT_PATHS_EXPECTED_PATH = str(Path(__file__).resolve().parent / "_project_paths.py")
+
+#: Case-insensitive via the flag, never a ``.lower()`` copy (see
+#: concept-gate.py's identical comment). The optional trailing group after
+#: ``worktrees`` folds the Windows aliases the helper recognises (round 3
+#: task F).
+_FALLBACK_WORKTREE_MARKER_RE = re.compile(
+    r"/\.claude/worktrees(?:[.\ ]*|:[^/]*)/[^/]+", re.IGNORECASE
+)
+
+
+def _fallback_checkout_equivalent(path_str: str) -> str:
+    """INV-5 fallback: crude stand-in for ``_project_paths.checkout_equivalent_path``.
+
+    Used ONLY when ``import _project_paths`` failed. Strips the segment
+    test's input down to the text after the LAST worktree-segment marker, so
+    worktree source still gets no bypass while the helper is missing. A path
+    with no marker is returned unchanged (today's behaviour).
+
+    "." components are dropped BEFORE doubled separators are collapsed (round
+    3 task E) -- see concept-gate.py's identical comment.
+    """
+    norm = path_str.replace("\\", "/")
+    no_dots = re.sub(r"(^|/)\.(?=/|$)", r"\1", norm)
+    collapsed = re.sub(r"/{2,}", "/", no_dots)
+    matches = list(_FALLBACK_WORKTREE_MARKER_RE.finditer(collapsed))
+    if not matches:
+        return norm
+    return collapsed[matches[-1].end():]
+
+
+def _segment_test_path(path_str: str) -> str:
+    """The text this guard's allow-list substring test should read (INV-2)."""
+    if _pp_checkout_equivalent_path is not None:
+        return _pp_checkout_equivalent_path(path_str)
+    return _fallback_checkout_equivalent(path_str)
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +383,11 @@ WRITE_KEYWORD_PATTERN = r"\b(?:" + "|".join(_DML_WRITES) + "|" + _DDL_ALTS + r")
 # approved action. The Layer 1 SQL Server DDL trigger is the catch-all that
 # protects against any path-allow-list false-negative.
 #
+# Every worktree segment (.claude/worktrees/<name>/) is removed from the
+# file_path before this list is matched (issue #222) -- so this entry still
+# exempts a worktree's OWN .claude/ file, but no longer exempts worktree
+# SOURCE, which is judged exactly like the same file in the main checkout.
+#
 # Normalized to forward slashes; matched case-insensitively against the same
 # normalization of file_path.
 # Read from the rules file. With no rules file the list narrows to the two
@@ -444,8 +496,21 @@ def _file_in_production_allowlist(file_path: str) -> bool:
     match "d:/dev/.../src/<backend-project>/program.cs"."""
     if not file_path:
         return False
+    # INV-2: the substring test reads the checkout-equivalent path (every
+    # worktree segment removed) of the already-normalised file_path.
+    #
+    # Fail CLOSED on any exception (round 3 task D): this function feeds
+    # `in_allowlist`, which only ever WIDENS what main() allows -- an
+    # exception here must never be allowed to propagate up to main()'s
+    # bare `except Exception` (which fails OPEN, exit 0, skipping the
+    # destructive-command scan entirely). Returning False keeps the scan
+    # running as if the target were NOT in the allow-list.
+    try:
+        checkout_equivalent = _segment_test_path(file_path)
+    except Exception:  # noqa: BLE001
+        return False
     for prefix in PRODUCTION_PATH_ALLOWLIST:
-        if prefix in file_path:
+        if prefix in checkout_equivalent:
             return True
     return False
 
@@ -615,6 +680,13 @@ def main() -> int:
         lines.append("")
         lines.append("If this is a test, use a disposable connection string built from a guid,")
         lines.append("not the dev DB name. Pattern: Database=<AnyName>_Test_<guid>")
+        if _pp_checkout_equivalent_path is None:
+            lines.append("")
+            lines.append(
+                f"NOTE: _project_paths.py could not be imported (looked for "
+                f"{_PROJECT_PATHS_EXPECTED_PATH}). Fallback mode is in effect: "
+                "worktree source gets no bypass until this helper is restored."
+            )
     else:
         lines.append("this tool call would run a destructive DB operation against")
         lines.append("what appears to be a working/dev/prod database.")

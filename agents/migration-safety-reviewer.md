@@ -2,7 +2,7 @@
 name: migration-safety-reviewer
 description: "Use this agent after every `dotnet ef migrations add` and before any migration lands in a commit. Reviews the generated Up/Down against existing prod data shape — backfill strategy, NOT NULL adds, type compatibility, rename vs drop+add, online index adds, transaction safety, and reversibility. Distinct from schema-design work (handled via `/sql-server-patterns` skill + `dotnet-backend-architect`) — this one asks 'will this run cleanly on the current DB without locking, breaking, or losing data?'\n\nExamples:\n- After `dotnet ef migrations add <Name>` → launch this reviewer before committing.\n- Before applying a migration to a shared staging or prod database → launch this reviewer.\n- User: \"I added a NOT NULL column to StockFundamentals\" → launch this reviewer directly.\n- After dotnet-backend-architect or ingestion-data-architect generates a migration → launch this reviewer automatically.\n\nAlso use when you need a safety verdict + dry-run procedure for an upcoming deploy."
 model: opus
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 permissionMode: plan
 memory: project
 ---

@@ -2,7 +2,7 @@
 name: fullstack-code-reviewer
 description: "Use this agent after any meaningful Angular or C# code has been written, modified, or refactored. This includes new features, bug fixes, refactors, and API changes. It performs adversarial review focused on correctness, security, performance, and alignment with project conventions.\n\nExamples:\n- After angular-senior-dev writes a new component → launch this reviewer\n- After dotnet-backend-architect adds an endpoint → launch this reviewer\n- User: \"Review the strategy execution changes\" → launch this reviewer directly\n- After senior-test-engineer writes tests → optionally launch to verify test quality\n\nAlso use when the user explicitly asks for a code review, PR review, or sanity check."
 model: opus
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 permissionMode: plan
 memory: project
 ---

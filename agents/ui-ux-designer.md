@@ -2,7 +2,7 @@
 name: ui-ux-designer
 description: "Use this agent when designing or improving the visual presentation, layout, component aesthetics, theming, or user experience of this project's Angular frontend. This includes creating new UI layouts, improving data density, implementing dark theme, designing reusable visual components, ensuring accessibility, and polishing existing screens.\n\nExamples:\n- User: \"The strategy list looks too plain, make it more like a trading terminal\"\n  → Launch ui-ux-designer to redesign the layout with proper data density, color-coding, and visual hierarchy.\n- User: \"Design a real-time metrics card for the dashboard\"\n  → Launch ui-ux-designer to create a data-rich card with sparklines, color-coded P&L, and status indicators.\n- User: \"Add proper loading skeletons to all data tables\"\n  → Launch ui-ux-designer to design and implement skeleton loaders matching each table structure.\n- User: \"The color contrast on the order book is failing accessibility\"\n  → Launch ui-ux-designer to fix WCAG 2.1 AA contrast issues in the order book component.\n- User: \"Create a consistent status badge system for strategy states\"\n  → Launch ui-ux-designer to design a badge component system with semantic colors."
 model: sonnet
-tools: Read, Grep, Glob, Write, Edit
+tools: Read, Grep, Glob, Write, Edit, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 memory: project
 skills:
   - angular
