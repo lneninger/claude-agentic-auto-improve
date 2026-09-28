@@ -3,7 +3,7 @@ name: python-ai-developer
 description: "Use this agent when the user needs help with Python AI/ML model development, training, fine-tuning, architecture design, data pipelines, MLOps, or deployment. This covers deep learning (PyTorch, TensorFlow, JAX), LLM development (pretraining, alignment, RLHF, DPO), computer vision, NLP, multimodal models, diffusion models, reinforcement learning, and any machine learning engineering task in Python.\n\nExamples:\n\n- User: \"I want to fine-tune Llama 3 on my custom dataset using LoRA.\"\n  Assistant: \"I'll use the python-ai-developer agent to architect a production-grade LoRA fine-tuning pipeline with proper data preparation, training configuration, and evaluation.\"\n\n- User: \"My model is overfitting badly after 5 epochs — loss diverges on validation.\"\n  Assistant: \"I'll use the python-ai-developer agent to diagnose the overfitting issue, analyze the training dynamics, and implement targeted fixes.\"\n\n- User: \"Build me a RAG pipeline with embeddings and vector search.\"\n  Assistant: \"I'll use the python-ai-developer agent to design and implement a retrieval-augmented generation pipeline with proper chunking, embedding, indexing, and retrieval strategies.\""
 model: sonnet
 memory: user
-tools: Read, Grep, Glob, Write, Edit, Bash
+tools: Read, Grep, Glob, Write, Edit, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 skills:
   - python-ai
 ---

@@ -2,7 +2,7 @@
 name: api-contract-reviewer
 description: "Use this agent after any change to a .NET controller, request/response DTO, enum in an API payload, or an Angular core model. Detects breaking API contract drift between backend and frontend — property renames, enum changes, nullability shifts, route moves, ApiResponse envelope changes, status code shifts, and SignalR hub signature drift.\n\nExamples:\n- After dotnet-backend-architect modifies a controller or DTO → launch this reviewer.\n- After angular-senior-dev modifies a core/models/*.ts file → launch this reviewer to find the matching backend.\n- User: \"Did my DTO change break the frontend?\" → launch this reviewer directly.\n- Before merging any PR that touches controllers or models on either side → launch this reviewer.\n\nAlso use when Angular runtime errors suggest a deserialization mismatch (silent null, missing property, enum case mismatch)."
 model: opus
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 permissionMode: plan
 memory: project
 ---

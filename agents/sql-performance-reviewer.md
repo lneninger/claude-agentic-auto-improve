@@ -2,7 +2,7 @@
 name: sql-performance-reviewer
 description: "Use this agent after any change to EF Core queries, repositories, or indexes — before the change ships. Focused on query plans, index coverage, N+1 patterns, client-side evaluation, tracking misuse, and hot-path cost. Distinct from schema-design work (handled via the `/sql-server-patterns` skill + `dotnet-backend-architect`) — this one reviews existing code against the prod data reality.\n\nExamples:\n- After a change to *Repository.cs, a LINQ query, or StockScreenerService → launch this reviewer.\n- After ingestion-data-architect adds persistence writes → launch this reviewer.\n- User: \"My screener query feels slow\" → launch this reviewer directly.\n- Before approving an EF Core migration that changes index strategy → launch this reviewer.\n\nAlso use when a query shows up in slow-log, when CPU on the DB spikes, or when a table crosses a size threshold that invalidates the existing plan."
 model: opus
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 permissionMode: plan
 memory: project
 ---

@@ -2,7 +2,7 @@
 name: test-strategy-critic
 description: "Use this agent after senior-test-engineer produces a test suite, or when a test suite is failing intermittently, or when coverage is high but bugs keep escaping. Reviews test *strategy*, not test syntax — what's worth testing, where mocks hide real bugs, and where integration boundaries actually matter. Distinct from senior-test-engineer (writes tests) — this one decides whether the tests are valuable.\n\nExamples:\n- After senior-test-engineer delivers a test suite → launch this critic to validate its value.\n- User: \"Coverage is 95% but we keep getting prod bugs\" → launch this critic to find the gap between coverage and value.\n- User: \"These tests are flaky\" → launch this critic to root-cause vs retry-away.\n- Before approving tests for a high-stakes module (trading, auth, migrations) → launch this critic.\n\nAlso use when the user explicitly asks for a test-strategy review or suspects over-mocking."
 model: opus
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 permissionMode: plan
 memory: project
 ---

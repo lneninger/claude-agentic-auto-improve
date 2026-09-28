@@ -63,12 +63,90 @@ try:  # project-local .claude first, global second
 except Exception:  # pragma: no cover - hooks must never crash a tool call
     _pp = None
 
+#: Round 3 task D: bound at import time via ``getattr`` rather than read off
+#: ``_pp`` at each call site. A STALE ``_project_paths.py`` imports cleanly
+#: (so the ``except Exception: _pp = None`` above never fires) but can
+#: predate these two functions -- an unguarded ``_pp.checkout_equivalent_path``
+#: call then raises ``AttributeError`` instead of falling back to INV-5's
+#: fallback mode. A missing function is treated EXACTLY like ``_pp`` being
+#: ``None`` everywhere below, including the fallback-mode banner text.
+_pp_checkout_equivalent_path = (
+    getattr(_pp, "checkout_equivalent_path", None) if _pp is not None else None
+)
+_pp_enclosing_worktree_root = (
+    getattr(_pp, "enclosing_worktree_root", None) if _pp is not None else None
+)
+
 CONCEPTS_ROOTS = (
     _pp.concepts_roots() if _pp else [HOME / ".claude" / "concepts"]
 )
 CONCEPTS_ROOT = next(
     (r for r in CONCEPTS_ROOTS if r.exists()), CONCEPTS_ROOTS[0]
 )
+
+#: The full path this hook's copy of ``_project_paths.py`` would live at, used
+#: only to name the missing helper in a fallback-mode block banner (INV-5).
+_PROJECT_PATHS_EXPECTED_PATH = str(Path(__file__).resolve().parent / "_project_paths.py")
+
+#: Matches a worktree-segment marker (WITHOUT its trailing separator, so the
+#: slice below keeps that separator as the leading "/" of whatever follows --
+#: e.g. the worktree's own "/.claude/hooks/x.py" -- in an already
+#: forward-slashed, separator-collapsed, dot-stripped path. The crude INV-5
+#: fallback used only when ``_project_paths`` cannot be imported at all.
+#: Case-insensitive via the flag (never a ``.lower()`` copy -- slicing a
+#: lower-cased copy at indices found in it assumes case-folding never
+#: changes string length, which is not true for every script). The optional
+#: trailing group after ``worktrees`` folds the same Windows aliases the
+#: helper's ``_windows_alias_normalize`` recognises: a run of dots/spaces, or
+#: an NTFS alternate-data-stream suffix (round 3 task F).
+_FALLBACK_WORKTREE_MARKER_RE = re.compile(
+    r"/\.claude/worktrees(?:[.\ ]*|:[^/]*)/[^/]+", re.IGNORECASE
+)
+
+
+def _fallback_checkout_equivalent(path_str: str) -> str:
+    """INV-5 fallback: crude stand-in for ``_project_paths.checkout_equivalent_path``.
+
+    Used ONLY when ``import _project_paths`` failed, so the real helper is
+    unavailable. Never a full port of the real rule -- it strips the segment
+    test's input down to the text after the LAST worktree-segment marker, so
+    worktree source still gets no bypass while the helper is missing. A path
+    with no marker is returned unchanged (today's behaviour), and this never
+    falls back to the old whole-``.claude`` bypass.
+
+    "." components are dropped BEFORE doubled separators are collapsed (round
+    3 task E): dropping a "." leaves behind a fresh doubled separator (e.g.
+    ``/.claude/./worktrees/`` -> ``/.claude//worktrees/``) that a collapse
+    pass already run cannot clean up.
+    """
+    norm = path_str.replace("\\", "/")
+    no_dots = re.sub(r"(^|/)\.(?=/|$)", r"\1", norm)
+    collapsed = re.sub(r"/{2,}", "/", no_dots)
+    matches = list(_FALLBACK_WORKTREE_MARKER_RE.finditer(collapsed))
+    if not matches:
+        return norm
+    return collapsed[matches[-1].end():]
+
+
+def _segment_test_path(path_str: str) -> str:
+    """The text a guard's segment/substring bypass test should read (INV-2)."""
+    if _pp_checkout_equivalent_path is not None:
+        return _pp_checkout_equivalent_path(path_str)
+    return _fallback_checkout_equivalent(path_str)
+
+
+def _extra_concepts_roots_for_target(target_str: str) -> list[Path]:
+    """A worktree target's own ``.claude/concepts`` (INV-7 / A3).
+
+    Not a new rank in ``claude_roots()`` -- computed from the target path
+    alone, and added only when the target sits inside a worktree.
+    """
+    if _pp_enclosing_worktree_root is None:
+        return []
+    root = _pp_enclosing_worktree_root(target_str)
+    if not root:
+        return []
+    return [Path(root) / ".claude" / "concepts"]
 
 # Statuses that honor the contract (allow matching edits).
 HONORED_STATUSES = {"approved", "implemented"}
@@ -181,7 +259,10 @@ def is_trivial_target(path: Path) -> bool:
         return True
     if path.suffix.lower() in TRIVIAL_EXTENSIONS:
         return True
-    path_str = str(path)
+    # INV-2: only the segment bypass test reads the checkout-equivalent path
+    # (with every worktree segment removed) -- name/suffix tests above keep
+    # reading the raw path.
+    path_str = _segment_test_path(str(path))
     for segment in BYPASS_PATH_SEGMENTS:
         if segment in path_str:
             return True
@@ -213,16 +294,22 @@ def detect_project_name(target: Path) -> str | None:
     return None
 
 
-def iter_contracts(project_name: str | None) -> Iterable[Path]:
+def iter_contracts(project_name: str | None, extra_roots: list[Path] | None = None) -> Iterable[Path]:
     """
     Yield every candidate concept contract file, newest first.
     Project-specific folder takes precedence over the global fallback.
+
+    ``extra_roots`` (INV-7 / A3) is the enclosing worktree root's own
+    ``.claude/concepts``, added for a worktree target only -- never a new
+    rank in ``claude_roots()``, and never added for a main-checkout target.
     """
     roots: list[Path] = []
     for _base in CONCEPTS_ROOTS:
         if project_name:
             roots.append(_base / project_name)
         roots.append(_base)
+    for extra in extra_roots or []:
+        roots.append(extra)
     seen: set[Path] = set()
     for root in roots:
         if not root.exists():
@@ -360,7 +447,8 @@ def resolve_target(
 
     # 3. Scan the concepts folder for an honored contract that covers this file.
     project_name = detect_project_name(target)
-    for contract in iter_contracts(project_name):
+    extra_roots = _extra_concepts_roots_for_target(str(target))
+    for contract in iter_contracts(project_name, extra_roots):
         status = contract_status(contract)
         if status in IGNORED_STATUSES:
             continue
@@ -479,6 +567,12 @@ def main() -> None:
     # At least one target was blocked -- block the entire tool call.
     first_target, first_reason = blocked_targets[0]
     extras: list[str] = []
+    if _pp_checkout_equivalent_path is None:
+        extras.append(
+            f"NOTE: _project_paths.py could not be imported (looked for "
+            f"{_PROJECT_PATHS_EXPECTED_PATH}). Fallback mode is in effect: "
+            "worktree source gets no bypass until this helper is restored."
+        )
     if len(target_strs) > 1:
         extras.append(f"{tool_name} payload had {len(target_strs)} target(s):")
         for t, reason in blocked_targets:

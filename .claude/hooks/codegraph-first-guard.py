@@ -42,6 +42,61 @@ except Exception:
     def log_event(*args, **kwargs):  # type: ignore[no-redef]
         return
 
+# Project-local .claude first, global second (fail-soft import). This hook
+# had no dependency on _project_paths before issue #222 -- has_bypass_segment
+# now needs the checkout-equivalent path (INV-2).
+try:
+    import _project_paths as _pp
+except Exception:  # pragma: no cover - hooks must never crash a tool call
+    _pp = None
+
+#: Round 3 task D: bound at import time via ``getattr`` (see concept-gate.py's
+#: identical comment). A missing function is treated EXACTLY like ``_pp``
+#: being ``None`` everywhere below, including the fallback-mode banner text.
+_pp_checkout_equivalent_path = (
+    getattr(_pp, "checkout_equivalent_path", None) if _pp is not None else None
+)
+
+#: The full path this hook's copy of ``_project_paths.py`` would live at, used
+#: only to name the missing helper in a fallback-mode block banner (INV-5).
+_PROJECT_PATHS_EXPECTED_PATH = str(Path(__file__).resolve().parent / "_project_paths.py")
+
+#: Case-insensitive via the flag, never a ``.lower()`` copy (see
+#: concept-gate.py's identical comment). The optional trailing group after
+#: ``worktrees`` folds the Windows aliases the helper recognises (round 3
+#: task F).
+_FALLBACK_WORKTREE_MARKER_RE = re.compile(
+    r"/\.claude/worktrees(?:[.\ ]*|:[^/]*)/[^/]+", re.IGNORECASE
+)
+
+
+def _fallback_checkout_equivalent(path_str: str) -> str:
+    """INV-5 fallback: crude stand-in for ``_project_paths.checkout_equivalent_path``.
+
+    Used ONLY when ``import _project_paths`` failed. Strips the segment
+    test's input down to the text after the LAST worktree-segment marker, so
+    worktree source still gets no bypass while the helper is missing. A path
+    with no marker is returned unchanged (today's behaviour).
+
+    "." components are dropped BEFORE doubled separators are collapsed (round
+    3 task E) -- see concept-gate.py's identical comment.
+    """
+    norm = path_str.replace("\\", "/")
+    no_dots = re.sub(r"(^|/)\.(?=/|$)", r"\1", norm)
+    collapsed = re.sub(r"/{2,}", "/", no_dots)
+    matches = list(_FALLBACK_WORKTREE_MARKER_RE.finditer(collapsed))
+    if not matches:
+        return norm
+    return collapsed[matches[-1].end():]
+
+
+def _segment_test_path(path_str: str) -> str:
+    """The text this guard's segment bypass test should read (INV-2)."""
+    if _pp_checkout_equivalent_path is not None:
+        return _pp_checkout_equivalent_path(path_str)
+    return _fallback_checkout_equivalent(path_str)
+
+
 SENTINEL_NAME = ".codegraph-used-this-turn"
 
 # File extensions that bypass the gate unconditionally (non-code).
@@ -139,7 +194,9 @@ def normalize(s: str) -> str:
 
 
 def has_bypass_segment(path_str: str) -> bool:
-    norm = normalize(path_str)
+    # INV-2: the segment test reads the checkout-equivalent path (every
+    # worktree segment removed) instead of the raw one.
+    norm = normalize(_segment_test_path(path_str))
     return any(normalize(seg) in norm for seg in BYPASS_PATH_SEGMENTS)
 
 
@@ -334,6 +391,15 @@ def block(reason: str, tool_name: str, tool_input: dict) -> None:
         f"Reason:   {reason}",
         f"Sentinel: {cwd_sentinel} (not present)",
         "",
+    ]
+    if _pp_checkout_equivalent_path is None:
+        message.append(
+            f"NOTE: _project_paths.py could not be imported (looked for "
+            f"{_PROJECT_PATHS_EXPECTED_PATH}). Fallback mode is in effect: "
+            "worktree source gets no bypass until this helper is restored."
+        )
+        message.append("")
+    message.extend([
         "CodeGraph is the primary investigation tool. Every codebase",
         "question starts with a CodeGraph call -- only after that does",
         "the gate open for Read / Grep / Glob in the same turn.",
@@ -347,7 +413,7 @@ def block(reason: str, tool_name: str, tool_input: dict) -> None:
         "  * Index dead/stale: run `codegraph sync` or `codegraph init -i`",
         bar,
         "",
-    ]
+    ])
     try:
         sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except Exception:

@@ -2,7 +2,7 @@
 name: security-auditor
 description: "Use this agent after any change to auth, credentials, encryption, or user-data boundaries. Performs focused adversarial security review — JWT config, PBKDF2, encrypted third-party credentials, password reset flow, user-ownership enforcement, SignalR hub auth, CORS, rate limiting, and OWASP Top 10. Distinct from fullstack-code-reviewer — this one specializes.\n\nExamples:\n- After a change to Domain/Auth/*, Services/Auth/*, AuthController, UserAccountService, or EncryptionService → launch this reviewer.\n- After adding any endpoint that touches user-scoped data → launch this reviewer.\n- User: \"I added a password change endpoint\" → launch this reviewer directly.\n- After a crypto/auth dependency version bump → launch this reviewer.\n\nAlso use when the user explicitly asks for a security audit, penetration review, or pre-production hardening pass."
 model: opus
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 permissionMode: plan
 memory: project
 ---
