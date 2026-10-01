@@ -137,7 +137,55 @@ DESTRUCTIVE_PATTERNS: list[tuple[str, str]] = [
     ("sql-drop-schema", r"\bDROP\s+SCHEMA\b"),
     ("sql-drop-table", r"\bDROP\s+TABLE\b"),
     ("sql-truncate", r"\bTRUNCATE\s+TABLE\b"),
-    ("sql-shutdown", r"\bSHUTDOWN\s+(WITH|NOWAIT)?"),
+    # Issue #272: the server-stop keyword. One label, three alternatives, so a
+    # command or prose that merely mentions the keyword is not blocked. The
+    # old rule blocked the keyword whenever whitespace followed it, which
+    # blocked `dotnet build-server` stops, greps and prose.
+    #
+    # P1 (statement position, uppercase only) catches the keyword when it
+    # starts a statement (line start, after `;` or `(`, or after BEGIN or
+    # ELSE) and ends one (line end, `\r`, `;`, a quote, `)`, a `--` or `/*`
+    # comment, GO or END). THEN is not in the left anchor because it does not
+    # introduce a T-SQL statement. The left anchor deliberately has no quote
+    # characters: quotes there made quoted literals, such as grep arguments
+    # and commit messages, block. `\r` is accepted as a statement end so
+    # Windows line endings still match. P1 is case-sensitive (the inline
+    # `(?-i:...)` group): an Edit whose old_string is the lowercase identifier
+    # sits alone on its own line of the scanned text, which is the same shape
+    # as a bare statement, and that rename must be allowed.
+    #
+    # P2 (SQL-client context, case-insensitive) catches the keyword as a
+    # standalone token anywhere, but only when the same scanned text also
+    # names a SQL client or API: sqlcmd, osql, isql, mssql-cli, usql,
+    # mysqladmin, mysql, Invoke-DbaQuery, SqlCommand, ExecuteSql*, a
+    # `.execute*(` call, or a `.sql` path. Some clients are covered by the
+    # broader markers rather than listed: Invoke-Sqlcmd by `sqlcmd`,
+    # ExecuteNonQuery by `.execute*(`, and migrationBuilder.Sql by `.sql`.
+    # P2 depends on a client list, so it is incomplete by nature.
+    #
+    # P3 (unconditional, case-insensitive) catches the keyword followed by
+    # WITH NOWAIT anywhere, in any case, through any client. It only matches
+    # text the old rule matched, so it adds no false positive against it. It
+    # exists because P2's list can never name every client. P3 makes a
+    # WITH NOWAIT group inside P1 redundant, so P1 has none.
+    #
+    # Known limits, each a gap or a false block that this rule accepts:
+    # - a bare keyword (no WITH NOWAIT) sent through a client not on P2's
+    #   list is not caught;
+    # - a statement with no separator before it, outside a SQL context (a
+    #   SELECT followed by the keyword on one line), is not caught;
+    # - IF or TRY before the keyword, outside a SQL context, is not caught;
+    # - whitespace other than space or tab around P1's keyword (for example a
+    #   form feed or vertical tab) defeats P1;
+    # - a lowercase bare keyword alone in a non-SQL file is not caught;
+    # - a keyword built by string concatenation is not caught;
+    # - a grep of a `.sql` file for the keyword blocks;
+    # - a prose sentence that mentions the keyword alongside a client name
+    #   blocks.
+    ("sql-shutdown",
+     r"""(?m)(?-i:(?:^|[;(]|\bBEGIN\b|\bELSE\b)[ \t]*SHUTDOWN[ \t]*(?:$|\r|[;"')]|--|/\*|\bGO\b|\bEND\b))"""
+     r"""|\A(?=[\s\S]*?(?:\b(?:sqlcmd|osql|isql|mssql-cli|usql|mysqladmin|mysql|Invoke-DbaQuery|SqlCommand|ExecuteSql\w*)\b|\.execute\w*\(|\.sql\b))[\s\S]*?(?<![-\w.$])SHUTDOWN\b(?![-\w.(])"""
+     r"""|\bSHUTDOWN\s+WITH\s+NOWAIT\b"""),
     ("sql-detach", r"\bDETACH\s+DATABASE\b"),
 
     # EF Core runtime drops (writes that introduce them)
