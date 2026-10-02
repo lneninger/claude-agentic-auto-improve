@@ -293,8 +293,21 @@ Run this step IFF all of the following are true:
 
 Without this step, every shippable change requires the user to type "commit" twice (once to ask, once to confirm). With this step, the path is one tap (`yes`) once the verification has already proven the change is safe. The ASK-before-commit caveat preserves human review of scope creep — the protocol's purpose is to remove typing, not human judgment.
 
+## Step 11: Tree clean after commit
+
+Run this after Step 10 commits, and also when Step 10 was skipped or declined. A verified change can still leave files behind: journal entries, reviewer memory notes, result records, generated output, and files written by agents during the run.
+
+Run `git status --short` in every tree the work touched and sort each remaining file, using the rules in Step 8 of `/flow`:
+
+- **History needs it:** stage it explicitly and offer it for the commit, or name it as pending if the user declined the commit.
+- **History does not need it** (regenerated output, line-ending-only changes, duplicates of committed files): say it can be deleted or restored, and why. Do not delete it without the user's go-ahead.
+- **Another session's file:** name it and leave it.
+
+Report the result as one line: `tree clean`, or the list of files still pending with what each needs. Do not report the work as done while files this work wrote are still uncommitted.
+
 ## Anti-patterns (halt immediately)
 
+- **Reporting done with this work's files still uncommitted** — Step 11 is the check. A green verdict does not make the tree clean.
 - **"All green" without running the commands** — the skill requires actual command output, not a summary of what the output would have been.
 - **Skipping Step 4 because "I didn't touch generated files"** — if a sentinel `.cs` file changed, the `.ts` drift check is mandatory.
 - **Partial verification** — don't run 3 of 8 applicable steps and call it verified. Run them all or report which ones were skipped and why.

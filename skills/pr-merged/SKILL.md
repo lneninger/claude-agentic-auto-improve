@@ -309,6 +309,8 @@ person.
 Then update the state store to mark that sub-task completed, so the live position agrees with
 the evidence.
 
+**Commit what you just wrote.** Completion records, state store changes and the brief's final status are written after the merge, so no earlier commit contains them. Stage exactly those files and commit them to a small follow-up branch cut from freshly fetched `origin/master`, named `docs/<contract-slug>-records`. Do not use a `task/...` name: the loop maps a merged pull request to its sub-task by that exact branch pattern, and a records branch must not be mapped to one. Push it and open a draft pull request. When `/flow` is running this phase, pass the list of files to Step 8 of `/flow` instead of committing here. Pushing is outward-facing, so name the branch and the files in your report and confirm once. Never leave the records uncommitted in the starting tree.
+
 ## Step 4: Recompute which sub-tasks are released
 
 For every sub-task with no completion record, work out what it depends on.
