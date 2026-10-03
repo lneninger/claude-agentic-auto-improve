@@ -376,6 +376,8 @@ confirmation.
 belonging to somebody else can appear mid-run. Verify that what you stage is what this run
 produced.
 
+**Stage this run's own files too.** Staging narrowly protects other sessions' files. It must never strand this run's own. They are the brief's status and pull request edits, journal entries, reviewer memory notes under `.claude/agent-memory/`, orchestrator result records and review reports. Include each one in this commit when it exists, or leave it for Step 8, which commits it. A file this run wrote that ends up in neither is a defect.
+
 If the target was `--to-commit`, report and stop here.
 
 ## Step 7: Ship
@@ -431,6 +433,23 @@ Pushing and opening a pull request are outward-facing. `/ship` confirms before i
 `/flow` does not waive that confirmation.
 
 Set the brief's `status: shipped` and write the pull request link into its `pr:` field.
+
+**That edit is made after the push, so it is uncommitted by construction.** Commit it on the same branch and push again before reporting done. When `/ship` asks for its confirmation, tell the operator this second commit follows, so one confirmation covers both pushes. Then run Step 8.
+
+## Step 8: Close out, leaving nothing behind
+
+A run is not finished while any file it wrote is uncommitted. Every file this run, or an agent it dispatched, wrote ends in one of two states: pushed, because history needs it, or deleted, because it does not. Run this step after Step 7, and again whenever a run is resumed at `shipped`.
+
+1. **Find the files.** Run `git status --short` in every tree the run touched: the worktree, and the tree the run started from. Agents write into whichever checkout they run in, so the starting tree is the one that collects strays.
+2. **Sort each file.**
+   - **History needs it** (the brief, journal entries, reviewer memory notes, orchestrator result records, review reports, contracts): commit and push. If the run's branch has already merged, use a small follow-up branch from freshly fetched `origin/master` and open a draft pull request.
+   - **History does not need it** (machine-regenerated files such as the contract accuracy log, changes that differ only in line endings, copies of files already on master or in this run's commit, scratch files): delete it, or restore the tracked file, and state why.
+   - **Another session's file:** leave it and name it in the report.
+3. **Prove before deleting.** Delete a file only after showing it is preserved or worthless: compare it with the committed or master copy, ignoring line endings, and report the result. A file that exists nowhere else is never "not needed".
+4. **A move is copy, verify, delete.** Copying a file into another worktree leaves the original behind, which is the defect this step exists to remove.
+5. **Report one line per file:** its path, what happened to it, and why. The run is finished only when `git status` in every touched tree shows nothing but another session's files.
+
+Pushing is outward-facing, so confirm once with the full list of what will be pushed and what will be deleted.
 
 ## Where the run stops, and where it does not
 
@@ -496,6 +515,8 @@ one sub-task often waits for another to land in the default branch. Nothing watc
 Tell the session with `/pr-merged <numbers>`. It confirms the merge with GitHub, records the
 finished sub-task, works out which sub-tasks that releases, and continues them.
 
+**`shipped` means the work is delivered, not that the tree is clean.** The merge and `/pr-merged` write files after the push: the brief's final status, completion records and state store changes. Before reporting the pull request link, run Step 8 of `SKILL.md`, the closing check. Anything it finds is pushed or deleted, with a reason, before the run counts as finished.
+
 **Re-read the brief on resume rather than trusting the conversation.** A resumed run is
 usually a new session, and the tree has moved since. Check the branch, check the worktree
 path, and confirm the file list the brief names still exists before acting on it.
@@ -541,6 +562,8 @@ isolated session per sub-task.
   option. See the section above.
 - **Widening scope mid-run** because a stage surfaced something adjacent. Finish the item,
   record the adjacency in the brief, and let the operator decide whether it becomes work.
+
+- **Ending a run with uncommitted files from that run.** Each file is pushed, because history needs it, or deleted with a stated reason, because it does not. Step 8 is the check, and a report of "done" before it passes is wrong.
 
 ## When NOT to use this skill
 
