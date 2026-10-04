@@ -83,43 +83,6 @@ copy. The version is declared in five places, and all five must change together:
 `.cursor-plugin/plugin.json`. Start a new session afterwards, because hooks are read when a
 session starts. To check which copy is live, search the cache and not the marketplace clone.
 
-### What each provider actually gets
-
-Support is tiered, because the three mechanisms do not carry the same component types.
-This table is the honest version — an install that silently loads nothing is the failure
-this repository has already been bitten by once, so the gaps are stated rather than implied.
-
-| Component | Claude Code | Cursor | OpenAI Codex |
-|---|---|---|---|
-| 22 skills | yes | yes | yes |
-| 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
-| 16 hooks | yes | no | no |
-| scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
-
-**Corrected 2026-09-13.** This row used to read `vendoring only`, and that was wrong. An
-install copies the whole repository into the provider's cache, script files included — the
-`superpowers` plugin ships Python the same way and its files sit in that cache today.
-
-What was actually missing was a way for a skill to *find* them. A skill citing
-`.claude/scripts/<name>.py` is naming a path inside **your** repository, which exists when you
-vendor and does not when you install.
-
-Skills that call a script now resolve it first, trying the vendored path, then
-`$CLAUDE_PLUGIN_ROOT`, then the provider's cache. `/advance` and `/pr-merged` do this, and any
-skill added later should copy the pattern rather than assume a vendored layout.
-`/auto-improve-finish-install` does it with an explicit ordered test, because `ls` on several
-paths sorts them and so loses the order.
-
-The templates still need copying by hand under an install, because a concept contract is a
-file **in** your repository rather than one read from the plugin.
-
-Cursor and OpenAI both read the **Agent Plugins** open standard
-(`https://agent-plugins.org`), which is why one root `plugin.json` serves both. Claude Code
-uses its own format at `.claude-plugin/plugin.json`. Hooks are Claude-only in this release:
-Claude's event names, its `${CLAUDE_PLUGIN_ROOT}` substitution and its blocking-exit-code
-contract have no tested equivalent in the other two runtimes, and shipping an untested
-translation would be worse than shipping none.
-
 ### Installing the hooks turns on enforcement
 
 These are gates, not suggestions, and they are active the moment the plugin is enabled:
@@ -163,6 +126,97 @@ one-shot approval. This table lists exactly the variables the hooks read, and a 
 An `off` switch also accepts `0`, `false` and `no`. To take the assets without the
 enforcement, vendor the repository instead of installing it and register only the hooks you
 want.
+
+### Running a hook through an HTTP host (optional)
+
+Every hook this plugin ships is a **command hook**: Claude Code starts a Python process for
+each event, reads its exit code and goes on. Nothing here uses `type: "http"` and the plugin
+does not install a host, so out of the box there is nothing to switch on. An HTTP hook is
+something you add yourself, in your own settings, when starting Python on every tool call is
+too slow for a hook you are willing to see fail open.
+
+**Fail open is the rule that decides what may use it.** An HTTP hook blocks only when the
+host answers with a 2xx status and a JSON body that says to block. A connection that cannot
+be made, a non-2xx status and a timeout are all treated as non-blocking errors, so the tool
+call goes ahead. A host that is down therefore removes the gate it was running. For that
+reason the gates in the list above (`concept-gate`, `bash-gate`, both database guards and
+`codegraph-first-guard`) stay command hooks. Put only advisory hooks behind a host, such as
+the plain-language guard, the plan-question advisor or the memory pager. For a hard allow or
+deny, use a `permissions.deny` rule, which Claude Code enforces without any process.
+
+**How to turn one on.**
+
+1. Write a small local HTTP host that accepts `POST`, reads the event JSON from the request
+   body, and replies `200` with a JSON body. An empty object `{}` means "no objection". To
+   block a `PreToolUse` call, return the same decision shape a command hook prints, with
+   `hookSpecificOutput.permissionDecision` set to `deny` and a `permissionDecisionReason`.
+   Bind it to `127.0.0.1` only, on a fixed port such as `8765`, and answer fast, because
+   Claude Code waits for it.
+2. Register it in your own `.claude/settings.json` (or `settings.local.json`), not in the
+   plugin:
+
+   ```json
+   {
+     "hooks": {
+       "PreToolUse": [
+         {
+           "matcher": "Edit|Write|MultiEdit",
+           "hooks": [
+             { "type": "http", "url": "http://127.0.0.1:8765/pre-tool-use", "timeout": 5 }
+           ]
+         }
+       ]
+     }
+   }
+   ```
+
+3. Start the host before the session. Edits to a settings file are picked up while a session
+   runs, but the host is your own process, so Claude Code does not start or restart it.
+4. Check it from a request, not from the config: make one tool call that should reach the
+   host and look at the host's own log. A silent miss looks exactly like success, because
+   failing open is quiet.
+
+Hooks from every settings file, and from the plugin, are merged and all of them run. If you
+move a plugin hook behind a host, also turn the plugin's copy off with its kill switch from
+the table above, or the event is handled twice. To get out of a hook that blocks everything,
+start Claude Code with `claude --settings '{"disableAllHooks": true}'`.
+
+### What each provider actually gets
+
+Support is tiered, because the three mechanisms do not carry the same component types.
+This table is the honest version — an install that silently loads nothing is the failure
+this repository has already been bitten by once, so the gaps are stated rather than implied.
+
+| Component | Claude Code | Cursor | OpenAI Codex |
+|---|---|---|---|
+| 22 skills | yes | yes | yes |
+| 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
+| 16 hooks | yes | no | no |
+| scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
+
+**Corrected 2026-09-13.** This row used to read `vendoring only`, and that was wrong. An
+install copies the whole repository into the provider's cache, script files included — the
+`superpowers` plugin ships Python the same way and its files sit in that cache today.
+
+What was actually missing was a way for a skill to *find* them. A skill citing
+`.claude/scripts/<name>.py` is naming a path inside **your** repository, which exists when you
+vendor and does not when you install.
+
+Skills that call a script now resolve it first, trying the vendored path, then
+`$CLAUDE_PLUGIN_ROOT`, then the provider's cache. `/advance` and `/pr-merged` do this, and any
+skill added later should copy the pattern rather than assume a vendored layout.
+`/auto-improve-finish-install` does it with an explicit ordered test, because `ls` on several
+paths sorts them and so loses the order.
+
+The templates still need copying by hand under an install, because a concept contract is a
+file **in** your repository rather than one read from the plugin.
+
+Cursor and OpenAI both read the **Agent Plugins** open standard
+(`https://agent-plugins.org`), which is why one root `plugin.json` serves both. Claude Code
+uses its own format at `.claude-plugin/plugin.json`. Hooks are Claude-only in this release:
+Claude's event names, its `${CLAUDE_PLUGIN_ROOT}` substitution and its blocking-exit-code
+contract have no tested equivalent in the other two runtimes, and shipping an untested
+translation would be worse than shipping none.
 
 ### Known limitations
 
