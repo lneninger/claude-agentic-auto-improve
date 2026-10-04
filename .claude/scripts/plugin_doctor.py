@@ -69,7 +69,7 @@ REQUIREMENTS: List[Requirement] = [
                 "lessons the design agent and the critic read on every run",
                 source=".claude/registries/JOURNAL.md"),
     Requirement(".claude/project-profile.md", "scaffold",
-                "the only file you must author; the loop reads its implementers and review-gates slots",
+                "the only file you must author; the loop reads its implementers and review-gates slots; /auto-improve-finish-install fills the slots it can",
                 source=".claude/project-profile.md", authored=True),
     Requirement(".claude/area-mapping.json", "scaffold",
                 "maps changed paths to areas, for the contract-critic accuracy system",
@@ -78,7 +78,7 @@ REQUIREMENTS: List[Requirement] = [
                 "issue and pull request title conventions, shared by /task and /ship",
                 authored=True),
     Requirement(".claude/settings.json", "manual",
-                "registering the hooks turns enforcement on; that is your decision, not this script's"),
+                "registering the hooks turns enforcement on; that is your decision, not this script's; /auto-improve-finish-install registers them once you agree"),
 ]
 
 SCAFFOLDS: Dict[str, str] = {
@@ -248,7 +248,7 @@ def main() -> int:
         for p in report["needs_authoring"]:
             print(f"  NEEDS YOU      {p}  - it describes your repository; nothing can guess it")
         for p in report["left_to_you"]:
-            print(f"  left alone     {p}  - writing it would change behaviour without asking")
+            print(f"  left alone     {p}  - writing it would change behaviour without asking; run /auto-improve-finish-install to register the hooks")
         for p in report["unresolved"]:
             print(f"  UNRESOLVED     {p}")
         if not any(report[k] for k in ("created", "needs_authoring", "left_to_you", "unresolved")):

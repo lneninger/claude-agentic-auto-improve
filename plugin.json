@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agentic-auto-improve",
-  "version": "0.2.2",
-  "description": "The Data-First Engineering Protocol as an installable asset set: 16 skills that put design before implementation and tests before code.",
+  "version": "0.3.0",
+  "description": "The Data-First Engineering Protocol as an installable asset set: 22 skills that put design before implementation and tests before code.",
   "author": {
     "name": "lneninger",
     "url": "https://github.com/lneninger"

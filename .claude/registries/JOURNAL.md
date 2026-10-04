@@ -37,7 +37,40 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 
 ## Universal lessons (apply to every project)
 
-<!-- empty on day 1 — populated as lessons are discovered -->
+### 2026-10-04 — Do not rely on a host expanding a variable in a form nobody has seen work
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-04-auto-improve-finish-install-skill.md`
+- **Lesson:** Write configuration in the form a real consumer already runs, and prove it with one harmless invocation before the code depends on it.
+- **Apply when:** a contract writes hook commands or other host-read configuration that depends on a variable being expanded in a particular syntax
+- **Tags:** `hooks, settings-json, env-expansion, assumption`
+
+### 2026-10-04 — A VERIFIED parser claim must be tested on the unfilled and the missing case
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-04-auto-improve-finish-install-skill.md`
+- **Lesson:** Before marking a reused parser VERIFIED, feed it a template with placeholders and a file with the row missing, not only a filled file.
+- **Apply when:** a contract reuses an existing parser for a template-fed file and claims placeholder handling is verified
+- **Tags:** `reuse, parser, load_slot, placeholder, verified`
+
+### 2026-10-04 — A root locator can return the consumer itself under vendoring
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-04-auto-improve-finish-install-skill.md`
+- **Lesson:** A helper that finds the plugin by checking for a file the plugin ships also matches a vendored project that copied that file; never use it as the template source without excluding the project itself.
+- **Apply when:** a contract reuses a lookup that is satisfied by a file present in both the plugin and a vendored consumer
+- **Tags:** `plugin-root, vendored, find_plugin_root, reuse`
+
+### 2026-10-04 — Detect an install mode by what the sync actually delivers
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-04-auto-improve-finish-install-skill.md`
+- **Lesson:** Check the sync configuration's plugin-only list before requiring a file for a mode; a mode that demands an undelivered file never matches the real consumer.
+- **Apply when:** a contract detects how assets reached a project by the presence of a particular file
+- **Tags:** `install-mode, sync-config, plugin_only, detection`
+
+### 2026-10-04 — Check a documented guard behaviour against the guard's code
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-04-auto-improve-finish-install-skill.md`
+- **Lesson:** A README statement about a guard's fail direction or bypass must be verified in the hook source; a guard without a bypass blocks new users, and a report must say so.
+- **Apply when:** a contract documents or reports what a blocking guard does when its input is missing or unconfigured
+- **Tags:** `guard, fail-closed, codegraph-first, readme-drift, hooks`
 
 ---
 

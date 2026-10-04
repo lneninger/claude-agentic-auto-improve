@@ -8286,5 +8286,88 @@ class TestComputeReleasedWithholdsOnACrossRepositoryVerdict(unittest.TestCase):
         )
 
 
+# --------------------------------------------------------------------------
+# load_slot against the REAL template text. Contract
+# 2026-10-04-auto-improve-finish-install-skill, second blocker: an unfilled
+# row whose placeholder prose carries backticks read as filled, and a missing
+# row fell through to the "Worked shape" example and returned made-up values.
+# --------------------------------------------------------------------------
+_REAL_TEMPLATE = Path(__file__).resolve().parents[2] / "project-profile.md"
+
+
+class TestLoadSlotAgainstTheRealTemplate(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.copy = Path(self._tmp.name) / "project-profile.md"
+        self.copy.write_bytes(_REAL_TEMPLATE.read_bytes())
+
+    def _text(self):
+        return self.copy.read_text(encoding="utf-8")
+
+    def _replace_row(self, slot, new_row):
+        """Replace the slots-table row for `slot` (the FIRST matching row, which is the
+        table; the 'Worked shape' block repeats some rows later and is left intact).
+        None deletes the row."""
+        lines = self._text().splitlines(keepends=True)
+        marker = "| `%s` |" % slot
+        out, hit = [], 0
+        for line in lines:
+            if line.startswith(marker):
+                hit += 1
+                if hit == 1:
+                    if new_row is not None:
+                        out.append(new_row + "\n")
+                    continue
+            out.append(line)
+        self.assertGreaterEqual(hit, 1, "fixture setup: the real template must hold a "
+                                        "table row for %r" % slot)
+        self.copy.write_text("".join(out), encoding="utf-8")
+
+    def test_an_unfilled_theme_polarity_row_with_backticks_reads_as_unfilled(self):
+        self.assertIn("`light`", self._text(),
+                      "fixture setup: the real template row must contain backticks inside "
+                      "its placeholder prose, or this test measures nothing")
+        self.assertEqual(
+            load_slot(self._text(), "frontend.theme-polarity"), (),
+            "the template's italic placeholder describes the slot; backticks inside it "
+            "must not be read as the values light, dark, both")
+
+    def test_a_missing_slot_row_does_not_fall_through_to_the_worked_example(self):
+        self._replace_row("migration.root", None)
+        self.assertEqual(
+            load_slot(self._text(), "migration.root"), (),
+            "a slot with no table row is unfilled; the 'Worked shape' block is an "
+            "illustration, never the project's value")
+
+    def test_a_missing_role_slot_does_not_return_the_worked_example_agents(self):
+        self._replace_row("implementers", None)
+        self.assertEqual(
+            load_slot(self._text(), "implementers"), (),
+            "the made-up acme-* agents in the worked example must never be read as "
+            "the project's implementers")
+
+    def test_a_missing_row_for_a_slot_absent_from_the_table_and_example_stays_empty(self):
+        self._replace_row("project.name", None)
+        self.assertEqual(load_slot(self._text(), "project.name"), (),
+                         "positive control: a missing row with no example row reads as empty")
+
+    def test_a_genuinely_filled_backticked_row_still_reads_as_its_values(self):
+        self._replace_row("frontend.theme-polarity",
+                          "| `frontend.theme-polarity` | `web=dark`, `admin=both` |")
+        self.assertEqual(
+            load_slot(self._text(), "frontend.theme-polarity"), ("web=dark", "admin=both"),
+            "positive control: a filled backticked row must keep reading as its values")
+
+    def test_a_none_row_still_reads_as_none(self):
+        self._replace_row("migration.root", "| `migration.root` | `none` |")
+        self.assertEqual(load_slot(self._text(), "migration.root"), (),
+                         "positive control: a `none` row reads as empty")
+        self._replace_row("test.roots", "| `test.roots` | none |")
+        self.assertEqual(load_slot(self._text(), "test.roots"), (),
+                         "positive control: a bare none row reads as empty")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -80,19 +80,22 @@ def load_slot(profile_text: Optional[str], slot: str) -> Tuple[str, ...]:
     """
     if not profile_text:
         return ()
+    # Search only the slots table: the template's "Worked shape" block repeats some
+    # rows with made-up values, and a missing row must not fall through to it.
+    table = re.search(r"^##\s+Slots\s*\n(.*?)(?=^##\s|\Z)", profile_text, re.M | re.S | re.I)
+    scope = table.group(1) if table else profile_text
     pattern = r"^\|\s*`?" + re.escape(slot) + r"`?\s*\|(.+?)\|\s*$"
-    m = re.search(pattern, profile_text, re.M | re.I)
+    m = re.search(pattern, scope, re.M | re.I)
     if not m:
         return ()
     raw = m.group(1).strip()
+    if raw.startswith("*(") or raw.lower() in ("none", ""):
+        # An unfilled template slot: its italic prose describes the slot and may
+        # itself contain backticks, so it is tested BEFORE backticked values are taken.
+        return ()
     if "`" in raw:
         # A list slot: the values are backticked, so take exactly those.
         return tuple(v for v in re.findall(r"`([^`]+)`", raw) if v.lower() != "none")
-    if raw.startswith("*(") or raw.lower() in ("none", ""):
-        # An unfilled template slot. Its italic prose is a description of the
-        # slot, never a value, and reading it as one is how a fresh project
-        # inherits a dozen nonsense entries.
-        return ()
     return (raw,)
 
 
