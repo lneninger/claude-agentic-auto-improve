@@ -64,6 +64,25 @@ does not load a plugin's skills into the session that installed it.
 Run `/add-plugin` and give it this repository. Cursor reads the root `plugin.json`
 (the vendor-neutral Agent Plugins manifest) and `.cursor-plugin/plugin.json` beside it.
 
+### Updating an installed plugin
+
+A merged change reaches a running Claude Code session only when the plugin's version number
+changes. Sessions run the hooks from the versioned install cache, at
+`~/.claude/plugins/cache/auto-improve/agentic-auto-improve/<version>/`, and not from the
+marketplace clone. These two commands refresh them:
+
+```
+claude plugin marketplace update auto-improve
+claude plugin update agentic-auto-improve@auto-improve
+```
+
+The second command answers "already at the latest version" and leaves the cache alone when
+the version is unchanged. So a fix merged without a version bump never reaches an installed
+copy. The version is declared in five places, and all five must change together:
+`plugin.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (twice) and
+`.cursor-plugin/plugin.json`. Start a new session afterwards, because hooks are read when a
+session starts. To check which copy is live, search the cache and not the marketplace clone.
+
 ### What each provider actually gets
 
 Support is tiered, because the three mechanisms do not carry the same component types.
