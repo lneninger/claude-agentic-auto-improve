@@ -62,6 +62,18 @@ rules and they will disagree.
 
 The answer carries `next_move.action`, plus `dispatch` packets when there is something to start.
 
+### Where this runs, and what a surprising answer usually means
+
+**Run it from a checkout of the contract's parent branch.** The contract, its sub-task briefs and every completion record live on that branch. Until the parent pull request merges, no other branch carries them. The work item brief's `branch:` field names it.
+
+**`contract-not-found` is almost always the wrong branch, not a missing contract.** Before anything else, ask which branch holds the file: `git log --all --oneline -- .claude/concepts/<slug>.md`. Then say which branch to switch to and stop. Do not create a worktree to get around it unless the operator says to.
+
+**A released sub-task whose branch or pull request already exists on GitHub means a completion record is missing from this checkout.** A record written on a separate records branch is invisible here until that branch reaches the parent. Dispatching on that answer redoes finished work. Stop, name the sub-task, and say which pull request carries the record.
+
+**Check the packet's `base` against the sub-task brief's `base:` before dispatching for real.** A packet that says the default branch while the brief says the parent branch means the sub-task's identity was never recorded in this checkout's state. Record it first with `--record-subtask`, then dispatch. Otherwise the new branch is cut from the wrong place and misses what earlier sub-tasks built.
+
+**If a separate checkout is genuinely needed, create it flat.** Use an absolute path directly under `<repo>/.claude/worktrees/`, never a relative path from inside another worktree. A nested worktree makes paths so long that the host smoke tests fail with a SqlClient `SNI.dll` load error (`The filename or extension is too long`), which reads like a code defect and is not one.
+
 ## Step 2: Take the move the script names
 
 The action set is closed. Each one has exactly one response.
