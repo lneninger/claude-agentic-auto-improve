@@ -52,6 +52,8 @@ THE INVARIANTS
          The repository is public; without this it is legally unreusable and
          Cursor's marketplace will not review it.
   INV-10 README.md does not still claim the repository is not installable.
+  INV-14 every --flag skills/auto-improve-finish-install/SKILL.md names exists in the
+         script's argparse parser, and the skill mentions plan-sha256.
 """
 
 from __future__ import annotations
@@ -199,6 +201,193 @@ for needle, provider in (("/plugin marketplace add", "Claude Code"),
                          ("codex plugin marketplace add", "OpenAI Codex"),
                          ("/add-plugin", "Cursor")):
     check("README documents how to install on %s" % provider, needle in readme)
+
+print("\nINV-11  one version, declared five times, identical everywhere")
+VERSION_FILES = ("plugin.json", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json",
+                 ".cursor-plugin/plugin.json")
+
+
+def collect_versions(root: pathlib.Path) -> dict:
+    """Every "version" value under `root`, keyed by 'file#path', so a marketplace file
+    that declares it twice contributes two entries."""
+    found: dict = {}
+
+    def walk(node, rel, trail):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "version" and isinstance(value, str):
+                    found["%s#%s" % (rel, trail or "root")] = value
+                walk(value, rel, "%s.%s" % (trail, key) if trail else key)
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, rel, "%s[%d]" % (trail, i))
+
+    for rel in VERSION_FILES:
+        walk(json.loads((root / rel).read_text(encoding="utf-8")), rel, "")
+    return found
+
+
+def versions_agree(found: dict) -> bool:
+    return len(found) == 5 and len(set(found.values())) == 1
+
+
+declared_versions = collect_versions(ROOT)
+check("the version is declared in exactly five places", len(declared_versions) == 5,
+      "found %d: %r" % (len(declared_versions), declared_versions))
+check("all five version declarations are identical", versions_agree(declared_versions),
+      repr(declared_versions))
+
+# Positive control: a copy of the tree where ONE declaration differs must be caught,
+# or the check above would pass against any five values.
+import shutil
+import tempfile
+
+with tempfile.TemporaryDirectory() as tmp_name:
+    tmp = pathlib.Path(tmp_name)
+    for rel in VERSION_FILES:
+        (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / rel, tmp / rel)
+    check("control: the untouched copy agrees", versions_agree(collect_versions(tmp)))
+    victim = tmp / ".cursor-plugin/plugin.json"
+    data = json.loads(victim.read_text(encoding="utf-8"))
+    data["version"] = data["version"] + ".drift"
+    victim.write_text(json.dumps(data), encoding="utf-8")
+    check("control: one differing declaration is detected",
+          not versions_agree(collect_versions(tmp)))
+
+print("\nINV-11b  the declared version has reached 0.3.0 (the finish-install skill is a feature)")
+
+
+def version_tuple(text: str):
+    parts = text.split("-")[0].split(".")
+    return tuple(int(x) for x in parts)
+
+
+try:
+    current = version_tuple(next(iter(declared_versions.values())))
+except (StopIteration, ValueError):
+    current = ()
+check("the declared version is at least 0.3.0 (compared as integer tuples)",
+      bool(current) and current >= (0, 3, 0),
+      "declared %s" % ".".join(str(x) for x in current))
+
+print("\nINV-12  the README's environment-variable table matches what the hooks read")
+EXCLUDED_ENV = {"CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT"}
+env_read = re.compile(
+    r"""(?:environ\.get\(\s*|environ\[\s*|getenv\(\s*)["'](CLAUDE_[A-Z0-9_]+)["']""")
+read_by_hooks = set()
+for hook in sorted((ROOT / ".claude" / "hooks").glob("*.py")):
+    read_by_hooks.update(env_read.findall(hook.read_text(encoding="utf-8", errors="replace")))
+read_by_hooks -= EXCLUDED_ENV
+
+documented = set()
+for line in readme.splitlines():
+    cell = re.match(r"^\|\s*`(CLAUDE_[A-Z0-9_]+)(?:[=`])", line)
+    if cell:
+        documented.add(cell.group(1))
+documented -= EXCLUDED_ENV
+
+check("the hook sources read at least one CLAUDE_* variable (the scan found something)",
+      len(read_by_hooks) > 0)
+check("every variable a hook reads is in the README table", read_by_hooks <= documented,
+      "missing from the README: %s" % sorted(read_by_hooks - documented))
+check("the README table lists no variable a hook does not read", documented <= read_by_hooks,
+      "documented but never read: %s" % sorted(documented - read_by_hooks))
+
+print("\nINV-13  the finish-install skill ships with valid frontmatter")
+skill_file = ROOT / "skills" / "auto-improve-finish-install" / "SKILL.md"
+check("skills/auto-improve-finish-install/SKILL.md exists", skill_file.is_file())
+
+
+def read_frontmatter(path: pathlib.Path) -> dict:
+    """The key: value pairs of a leading --- block; {} when there is none."""
+    text = path.read_text(encoding="utf-8").lstrip("﻿").replace("\r\n", "\n")
+    match = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    if not match:
+        return {}
+    out = {}
+    for line in match.group(1).splitlines():
+        kv = re.match(r"^([A-Za-z_-]+):\s*(.*)$", line)
+        if kv:
+            out[kv.group(1)] = kv.group(2).strip().strip('"').strip("'")
+    return out
+
+
+front = read_frontmatter(skill_file) if skill_file.is_file() else {}
+check("it opens with a YAML frontmatter block", bool(front),
+      "no frontmatter found" if skill_file.is_file() else "file missing")
+check("frontmatter name is 'auto-improve-finish-install'",
+      front.get("name") == "auto-improve-finish-install", "name=%r" % front.get("name"))
+check("frontmatter description is non-empty", bool(front.get("description")),
+      "description=%r" % front.get("description"))
+
+print("\nINV-14  every flag the finish-install skill names exists in the script's parser")
+sys.path.insert(0, str(ROOT / ".claude" / "scripts"))
+import argparse  # noqa: E402
+import auto_improve_finish_install as finish_install  # noqa: E402
+
+
+def parser_flags(parser: argparse.ArgumentParser) -> set:
+    """Every --long option the parser and its subparsers accept."""
+    flags = set()
+    for action in parser._actions:  # noqa: SLF001 - the only way to enumerate a parser's options
+        flags.update(o for o in action.option_strings if o.startswith("--"))
+        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+            for sub in action.choices.values():
+                flags |= parser_flags(sub)
+    return flags
+
+
+def flags_named_by(text: str) -> set:
+    """--flags the skill text names, leaving out lines that run a different script (the doctor)."""
+    found = set()
+    for line in text.splitlines():
+        if "plugin_doctor" in line:
+            continue
+        found.update(re.findall(r"(?<![\w-])(--[a-z][a-z0-9-]*)", line))
+    return found
+
+
+script_flags = parser_flags(finish_install.build_parser())
+skill_text = skill_file.read_text(encoding="utf-8") if skill_file.is_file() else ""
+named = flags_named_by(skill_text)
+check("the parser exposes the contract flags (the scan of the parser found something)",
+      {"--project", "--json", "--apply", "--expect-sha256", "--set", "--skip", "--platform",
+       "--provider", "--claude-home"} <= script_flags, "found %s" % sorted(script_flags))
+check("the skill names at least the flags of both steps", {"--apply", "--expect-sha256", "--set"} <= named,
+      "named %s" % sorted(named))
+check("every --flag the skill names exists in the script's parser", named <= script_flags,
+      "named by the skill but not accepted: %s" % sorted(named - script_flags))
+check("control: the flag scan sees a flag that is not in the parser",
+      flags_named_by("run it with --no-such-flag") - script_flags == {"--no-such-flag"})
+check("control: the flag scan ignores a line that runs the doctor",
+      flags_named_by("py plugin_doctor.py --fix") == set())
+check("the skill tells the operator the hash a hooks apply needs: it mentions plan-sha256",
+      "plan-sha256" in skill_text)
+
+print("\nINV-15  the README states the real case count of the finish-install suite")
+_suite_file = ROOT / ".claude" / "scripts" / "tests" / "test_auto_improve_finish_install.py"
+_real_cases = (len(re.findall(r"^\s*def test_\w+", _suite_file.read_text(encoding="utf-8"), re.M))
+               if _suite_file.is_file() else 0)
+_readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def stated_case_count(text: str):
+    """The N in a phrase like "test_auto_improve_finish_install.py` holds its N cases"; None when absent."""
+    m = re.search(r"test_auto_improve_finish_install\.py`?\s+(?:holds|has|contains|carries)\s+(?:its\s+)?"
+                  r"(\d+)\s+(?:cases|tests)", text)
+    return int(m.group(1)) if m else None
+
+
+check("the suite file exists and holds test methods (the count scan found something)", _real_cases > 0,
+      "found %d" % _real_cases)
+check("README does not state a case count for test_auto_improve_finish_install.py that differs from the suite's",
+      stated_case_count(_readme_text) in (None, _real_cases),
+      "README says %r, the suite has %d `def test_` methods" % (stated_case_count(_readme_text), _real_cases))
+check("control: the count scan reads a stated number",
+      stated_case_count("and `test_auto_improve_finish_install.py` holds its 7 cases.") == 7)
+check("control: the count scan treats a README without a count as nothing stated",
+      stated_case_count("no count is given here") is None)
 
 print("\n%s\n %d passed, %d failed\n%s"
       % ("-" * 60, _passes, len(_failures), "-" * 60))

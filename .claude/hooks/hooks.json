@@ -17,10 +17,12 @@
     "BLAST RADIUS: these are enforcement gates, not suggestions. Installing this",
     "plugin turns them on. concept-gate blocks Edit/Write on non-trivial files until",
     "an approved concept contract exists, and the database guards fail CLOSED, which",
-    "means an unconfigured install treats every database as protected. That is the",
-    "intended posture of the Data-First Engineering Protocol, but it is a real change",
-    "to how the session behaves. README.md lists the per-hook environment-variable",
-    "kill switches."
+    "means a database is treated as protected when the guard's rules file is absent",
+    "or empty. The shipped rules file names only the fictional databases AcmeApp and",
+    "AcmeApp_Testing, so per-name write protection under a plugin install covers only",
+    "those until the project supplies its own rules. That is the intended posture of",
+    "the Data-First Engineering Protocol, but it is a real change to how the session",
+    "behaves. README.md lists the per-hook environment-variable kill switches."
   ],
   "hooks": {
     "PreToolUse": [

@@ -249,5 +249,75 @@ class TestTheRealPluginTree(unittest.TestCase):
                                  f"every consuming project would inherit it")
         self.assertGreater(checked, 0, "the scan must have read at least one real source file")
 
+
+# --------------------------------------------------------------------------
+SKILL = "/auto-improve-finish-install"
+
+
+def _run_doctor_fix(project: Path, plugin: Path) -> str:
+    """Run the real command line with --fix and return what it printed."""
+    import contextlib
+    import io
+    from unittest import mock
+
+    import plugin_doctor
+
+    argv = ["plugin_doctor.py", "--fix", "--project", str(project), "--plugin", str(plugin)]
+    buf = io.StringIO()
+    with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+        plugin_doctor.main()
+    return buf.getvalue()
+
+
+def _lines_starting(output: str, label: str):
+    return [l for l in output.splitlines() if l.strip().startswith(label)]
+
+
+class TestFinishInstallSkillIsNamed(DoctorCase):
+    """Contract 2026-10-04-auto-improve-finish-install-skill: the doctor points the
+    operator at the skill that finishes the two steps it will not do itself."""
+
+    def _why(self, path):
+        matches = [r.why for r in REQUIREMENTS if r.path == path]
+        self.assertEqual(len(matches), 1, "fixture: exactly one requirement for %s" % path)
+        return matches[0]
+
+    def test_the_settings_requirement_names_the_skill(self):
+        self.assertIn(SKILL, self._why(".claude/settings.json"),
+                      "the operator who cannot have settings written for them must be told "
+                      "which command registers the hooks")
+
+    def test_the_profile_requirement_names_the_skill(self):
+        self.assertIn(SKILL, self._why(".claude/project-profile.md"),
+                      "the operator must be told which command fills the profile slots")
+
+    def test_the_left_alone_line_names_the_skill(self):
+        out = _run_doctor_fix(self.project, self.plugin)
+        lines = [l for l in _lines_starting(out, "left alone") if ".claude/settings.json" in l]
+        self.assertEqual(len(lines), 1, "the settings file must be reported as left alone; got: " + repr(out))
+        self.assertIn(SKILL, lines[0],
+                      "the left-alone line is where the operator learns what to do next")
+
+    def test_the_needs_you_line_is_still_printed_for_the_authored_files(self):
+        out = _run_doctor_fix(self.project, self.plugin)
+        text = " | ".join(_lines_starting(out, "NEEDS YOU"))
+        for path in (".claude/project-profile.md", ".claude/area-mapping.json",
+                     ".claude/work-item-conventions.json"):
+            self.assertIn(path, text, "NEEDS YOU must still be printed for %s" % path)
+
+    def test_the_needs_you_line_does_not_name_the_skill(self):
+        # The line is shared by three files and the skill fills only one of them, so
+        # repointing it would send the operator to a command that cannot help with the
+        # other two. A guard against a later repoint.
+        out = _run_doctor_fix(self.project, self.plugin)
+        offenders = [l for l in _lines_starting(out, "NEEDS YOU") if SKILL in l]
+        self.assertEqual(offenders, [],
+                         "NEEDS YOU is shared by three files and must not name %s" % SKILL)
+
+    def test_the_needs_you_guard_would_catch_a_repointed_line(self):
+        repointed = "  NEEDS YOU      .claude/area-mapping.json  - run /auto-improve-finish-install"
+        offenders = [l for l in _lines_starting(repointed, "NEEDS YOU") if SKILL in l]
+        self.assertEqual(len(offenders), 1, "positive control: the guard must detect a repointed line")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

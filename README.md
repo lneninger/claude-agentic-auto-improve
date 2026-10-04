@@ -72,7 +72,7 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 21 skills | yes | yes | yes |
+| 22 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
 | 16 hooks | yes | no | no |
 | scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
@@ -88,6 +88,8 @@ vendor and does not when you install.
 Skills that call a script now resolve it first, trying the vendored path, then
 `$CLAUDE_PLUGIN_ROOT`, then the provider's cache. `/advance` and `/pr-merged` do this, and any
 skill added later should copy the pattern rather than assume a vendored layout.
+`/auto-improve-finish-install` does it with an explicit ordered test, because `ls` on several
+paths sorts them and so loses the order.
 
 The templates still need copying by hand under an install, because a concept contract is a
 file **in** your repository rather than one read from the plugin.
@@ -107,24 +109,41 @@ These are gates, not suggestions, and they are active the moment the plugin is e
   approved concept contract names them. Run `/design-first` to produce one.
 - **`bash-gate`** blocks shell redirection, `sed -i` and `tee` that would write source and
   dodge the gate above.
-- **`db-destructive-guard`** and **`db-research-readonly-guard`** **fail closed**. With no
-  `db-destructive-guard.rules.json` of your own, every database is treated as protected.
+- **`db-destructive-guard`** and **`db-research-readonly-guard`** block database operations
+  that could destroy data. The destructive guard **fails closed** only when its
+  `db-destructive-guard.rules.json` is missing or names no database, and then every database
+  is treated as protected. The file this plugin ships is not empty. It names two fictional
+  databases, `AcmeApp` and `AcmeApp_Testing`, so until your project supplies its own rules the
+  per-name protection covers only those two. The general drop and truncate checks still
+  apply to any database without a disposable suffix. Giving an installed plugin your own
+  database names needs a change to the hook itself; it is tracked as follow-up issue #21.
 - **`codegraph-first-guard`** blocks `Read` / `Grep` / `Glob` on source paths until a
-  CodeGraph tool has run in the same turn. It auto-bypasses when no CodeGraph index exists.
+  CodeGraph tool has run in the same turn. It does **not** bypass itself when no CodeGraph
+  index exists. A project without an index is blocked until you set `CLAUDE_SKIP_CG=1`.
 
-Each has an environment-variable kill switch, set by you and never by an agent:
+Ten of the twelve variables below are kill switches, set by you and never by an agent. Two
+are not: `CLAUDE_ACTIVE_CONTRACT` is an approval pin and `CLAUDE_DESTRUCTIVE_DB_OK` is a
+one-shot approval. This table lists exactly the variables the hooks read, and a test
+(INV-12 in `test_plugin_manifests.py`) fails when the two disagree.
 
 | Variable | Effect |
 |---|---|
 | `CLAUDE_CONCEPT_GATE=off` | disable the concept gate |
-| `CLAUDE_ACTIVE_CONTRACT=<path>` | pin one approved contract |
+| `CLAUDE_ARCH_GUARD=off` | disable the architecture guard |
+| `CLAUDE_BASH_GATE=off` | disable the bash gate |
 | `CLAUDE_SKIP_CG=1` | disable the CodeGraph-first gate for a session |
-| `CLAUDE_DESTRUCTIVE_DB_OK=1` | one-shot approval for a destructive database operation |
 | `CLAUDE_ARCH_ADVISOR=off` | silence the architecture advisor |
+| `CLAUDE_PLAIN_LANGUAGE_GUARD=off` | disable the plain-language guard |
+| `CLAUDE_PLAN_QUESTION_ADVISOR=off` | silence the plan-question advisor |
+| `CLAUDE_INTEGRATION_CHECK=off` | disable the integration check |
+| `CLAUDE_MEMORY_PAGER=off` | disable the memory pager |
 | `CLAUDE_ACCURACY_TRACKER=off` | stop the contract-accuracy trackers |
+| `CLAUDE_ACTIVE_CONTRACT=<path>` | approval pin: pin one approved contract |
+| `CLAUDE_DESTRUCTIVE_DB_OK=1` | one-shot approval for a destructive database operation |
 
-To take the assets without the enforcement, vendor the repository instead of installing it
-and register only the hooks you want.
+An `off` switch also accepts `0`, `false` and `no`. To take the assets without the
+enforcement, vendor the repository instead of installing it and register only the hooks you
+want.
 
 ### Known limitations
 
@@ -157,14 +176,14 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          21 generic skills          (plugin root -- all three providers)
+skills/          22 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   hooks/         16 generic hooks, 3 shared helper modules, 4 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
-    tests/       3 hook test suites
-  scripts/       12 workflow scripts, 2 shared helper modules
-    tests/       7 suites, including the path-resolution suite
+    tests/       4 hook test suites
+  scripts/       14 workflow scripts, 2 shared helper modules
+    tests/       9 suites, including the path-resolution suite
   templates/     6 document templates
   references/    2 reference documents
   registries/    MECHANISMS.md, VOCABULARY.md, JOURNAL.md (Universal tier only)
@@ -203,9 +222,13 @@ dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scou
 flow, task, design-first, tdd-first, advance, pr-merged, verify-before-done,
 git-commit, ship, debug, north-star, north-star-review, list-contracts,
 contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
-validate-registries, promote-ui-rule, sql-server-patterns.
+validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install.
 
-They form one chain, and each stage hands the next a written artefact rather than a memory
+`auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
+skill, run once per project after the plugin is installed. Its name carries the plugin's name
+because you may have several plugins installed.
+
+The rest form one chain, and each stage hands the next a written artefact rather than a memory
 of the conversation:
 
 ```
@@ -244,9 +267,10 @@ memory-pager, plus the shared helpers `_error_log.py`, `_memory_common.py` and
 `architecture-guard.exceptions.json`, `plain-language-guard.rules.json` and
 `db-destructive-guard.rules.json`.
 
-All sixteen are registered in `.claude/hooks/hooks.json`, which the Claude manifest
-references. That file is the single registration point: adding a hook without adding it
-there ships a file nothing runs.
+All sixteen hook files are registered in `.claude/hooks/hooks.json`, which the Claude
+manifest references. That makes seventeen registrations, because `plain-language-guard.py`
+is registered on two events. The file is the single registration point: adding a hook
+without adding it there ships a file nothing runs.
 
 **A guard hook keeps its per-project settings in a `<hook-name>.rules.json` file beside
 it**, so the hook body names no project. Those rules files ship as templates carrying
@@ -255,19 +279,23 @@ as correct as the file you replace them with. `integration-check.rules.json` hol
 project's own constants and is not shipped here.
 
 **The fail direction is per hook and is stated in each rules file.** A hook that BLOCKS
-fails **closed** when its rules file is missing: `db-destructive-guard.py` with no
-configuration treats every database as protected. A hook that only WARNS may fail soft.
+fails **closed** when its rules file is missing or empty: `db-destructive-guard.py` with no
+protected database names treats every database as protected. The rules file this plugin
+ships is neither: it names the fictional `AcmeApp` and `AcmeApp_Testing`. A hook that only
+WARNS may fail soft.
 Never copy the soft choice to a guard that blocks.
 
 ### Scripts and templates are not optional
 
-The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, eleven skills
+The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, thirteen skills
 cite scripts in `.claude/scripts/`, and every concept contract is a copy of
 `templates/concept-contract.md`. The contract sub-task loop is the newest of these:
 `pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
 both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
-`scripts/tests/test_pr_merged.py`, sixty-eight cases including the placeholder trap that an
-unfilled `implementers` slot would otherwise walk into. `scripts/tests/test_script_path_resolution.py` is the
+`scripts/tests/test_pr_merged.py`, 319 cases including the placeholder trap that an
+unfilled `implementers` slot would otherwise walk into. The finish-install script,
+`auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 199 cases. `scripts/tests/test_script_path_resolution.py` is the
 177-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
@@ -275,6 +303,9 @@ would ship the part that can be wrong and leave behind the part that would say s
 
 > Vendoring, not installing. To install instead, see [Installing](#installing) — you can
 > skip to step 4, since a plugin install delivers steps 1 to 3 for you.
+>
+> You may have several plugins installed. The skill that finishes this one is named
+> `auto-improve-finish-install`, so its name says which plugin it belongs to.
 
 1. **Copy the trees.** Copy the root-level `skills` and `agents` directories, and
    `.claude/hooks`, `scripts`, `templates` and `references`, into your project's
@@ -296,12 +327,24 @@ would ship the part that can be wrong and leave behind the part that would say s
    `.project-tokens.json` is the one to fill in first: an unguarded outbound sync is how
    contamination spreads.
 
-4. **Write `.claude/project-profile.md`.** It is the only file you must author to make the
+4. **Write `.claude/project-profile.md`: run `/auto-improve-finish-install`.** It looks at
+   your repository, shows each proposed value next to the file that suggested it, and writes
+   the slots that are still placeholders after one confirmation. It never overwrites a slot
+   you wrote.
+
+   *By hand instead:* the profile is the only file you must author to make the
    fourteen agents correct, and it is required under a plugin install too. A generic agent
    cites a slot by name rather than a literal path, so every slot must be present, and an
    empty slot reads `none`.
 
-5. **Register the hooks** in your `.claude/settings.json`, pathing every command through
+5. **Register the hooks: the same `/auto-improve-finish-install` command does this as its
+   second stage.** Under a plugin install it checks that the hooks are ready to load and
+   writes nothing. Under a vendored copy it shows the exact `settings.json` change as a diff,
+   asks, and writes it with a backup. The file is re-serialised, so the diff can show reflowed
+   lines; the meaning is kept, and the diff is exactly what will be written. Either way, the
+   hooks apply only in a session started afterwards.
+
+   *By hand instead:* register the hooks in your `.claude/settings.json`, pathing every command through
    `$CLAUDE_PROJECT_DIR/.claude/hooks/`. `.claude/hooks/hooks.json` in this repository is
    the worked example: it registers all sixteen against the right events and matchers, so
    copy its entries and swap `${CLAUDE_PLUGIN_ROOT}` for `$CLAUDE_PROJECT_DIR`. A plugin
@@ -316,7 +359,12 @@ would ship the part that can be wrong and leave behind the part that would say s
 
 ## Where to start once it is installed
 
-**Type `/flow`.** That is the front door, and everything else is reached through it.
+**Once per project, type `/auto-improve-finish-install`.** It finishes the two Quick start
+steps that nobody can finish by copying files: the project profile, and the hooks. Run it
+again whenever you like. A second run changes nothing. Under Cursor and Codex it fills in the
+profile and says that hooks are Claude-only in this release.
+
+**Then type `/flow`.** That is the front door, and everything else is reached through it.
 
 ```
 /flow <an issue number, a link, or a sentence describing the work>
@@ -343,7 +391,7 @@ Three things drive that, and none of them loops on its own:
 Then `/advance` again. Between those, that is the loop.
 
 The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
-neither can drift from the other. It carries sixty-eight tests.
+neither can drift from the other. It carries 319 tests.
 
 ### What it will refuse to do
 
@@ -375,7 +423,10 @@ a wrong answer. A confidently wrong profile is worse than an obviously empty one
 lists those files under `NEEDS YOU`.
 
 It also leaves `.claude/settings.json` alone and says so. Registering the hooks turns
-enforcement on, and that is your decision rather than a script's.
+enforcement on, and that is your decision rather than a script's. When you are ready,
+run `/auto-improve-finish-install`: it shows the exact change, asks, and only then writes
+it, with a backup. That skill also fills in the profile slots the doctor left as
+placeholders.
 
 ## Documentation
 
@@ -393,5 +444,8 @@ Code, Cursor and OpenAI Codex plugin mechanisms on 2026-09-13. The contract sub-
 loop — `/flow`, `/advance`, `/pr-merged` and `pr_merged.py` — landed the same day, with
 `plugin_doctor.py` to bootstrap a consuming project. The stated inventory was
 reconciled against the tree again on 2026-09-14, after the orchestrator scripts were
-withdrawn and five test suites were added without the counts following either move. See
-[Known limitations](#known-limitations) for what that release does not yet cover.
+withdrawn and five test suites were added without the counts following either move. On
+2026-10-04 the `/auto-improve-finish-install` skill landed, with its script
+`auto_improve_finish_install.py`, and every inventory count in this file was recounted from
+the tree rather than incremented. See [Known limitations](#known-limitations) for what that
+release does not yet cover.
