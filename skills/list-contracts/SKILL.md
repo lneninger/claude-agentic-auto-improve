@@ -57,7 +57,7 @@ If every contract is `implemented`, `archived`, `superseded`, or `rejected`, tel
 
 ## Follow-up stubs section
 
-Stubs surface under their parent project's group with a `[STUB]` icon. The action column shows:
+Stubs surface under their parent project's group with a `[STUB]` icon, followed by the stub's `**Issue:**` value (`#<n>`) so the register points at the tracker. A stub whose issue is `pending` or missing is flagged `[NO ISSUE: open one via /design-first Step 3.4]`. The action column shows:
 - `[follow-up stub, Nd old]` when fresh (< 7 days)
 - `[NEEDS TRIAGE: Nd old; promote via /design-first or let archive_stale_stubs.py reap]` when >= 7 days
 
