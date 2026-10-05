@@ -1,0 +1,9 @@
+contract: 2026-10-04-auto-improve-finish-install-skill
+sub_tasks:
+  t1-the-auto-improve-finish-install-skill-script-and-docs:
+    status: completed
+    branch: feature/auto-improve-finish-install-skill
+    pull_request: null
+    issue: null
+    base: master
+    brief: null
