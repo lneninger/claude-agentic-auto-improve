@@ -5,6 +5,7 @@
 **Date:** YYYY-MM-DD
 **Status:** stub
 **Estimated scope:** trivial | small | medium | large
+**Issue:** pending | #<n> | unavailable (the GitHub tracking issue; `data-architect` writes `pending`, `/design-first` Step 3.4 fills in the number)
 
 ## What was noticed
 
@@ -37,6 +38,7 @@
 
 > **Lifecycle:**
 > - Created by `data-architect` at Step 4.5 when an Adjacent Areas row is decided as `follow-up handle`.
+> - Tracked by one GitHub issue per contract, opened by the main session at `/design-first` Step 3.4; the stub is the detail and the issue is what the user sees. A stub whose `Issue:` is still `pending` after approval is a defect.
 > - Discovered by `/list-contracts` under the "Stubs / follow-ups" section.
 > - Auto-archived to `<slug>.followup.archived.md` by `.claude/scripts/archive_stale_stubs.py` if older than 30 days and never promoted.
 > - Promoted by running `/design-first` against the stub's `## What was noticed` paragraph — the resulting full contract should `superseded` this stub (rename the stub to `.followup.superseded.md` and add a `Superseded by:` line at the top).
