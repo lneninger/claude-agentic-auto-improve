@@ -244,6 +244,34 @@ class TestMapping(unittest.TestCase):
     def test_no_match_returns_none_rather_than_guessing(self):
         self.assertIsNone(map_pr_to_subtask("feature/unrelated", "nothing", self.tasks, "c-slug"))
 
+    # --- the state-store branch step: a branch recorded against a sub-task counts ---
+    def test_a_branch_recorded_in_the_state_store_maps_a_foreign_branch(self):
+        t = map_pr_to_subtask("feature/foreign-name", "no identity in this title", self.tasks, "c-slug",
+                              recorded_branches={"t2-backend": "feature/foreign-name"})
+        self.assertIsNotNone(
+            t, "a head branch the state store records against a sub-task must map to that sub-task; "
+               "both loop skills document this as the third way to place a pull request")
+        self.assertEqual(t.id, "t2-backend")
+
+    def test_two_sub_tasks_recording_the_same_branch_is_not_guessed(self):
+        t = map_pr_to_subtask("feature/shared", "nothing", self.tasks, "c-slug",
+                              recorded_branches={"t1-test-author": "feature/shared",
+                                                 "t2-backend": "feature/shared"})
+        self.assertIsNone(
+            t, "two sub-tasks claiming one branch is ambiguous; the mapper must report it unmapped, "
+               "never pick the first")
+
+    def test_an_empty_or_missing_recorded_branch_never_matches_an_empty_head_branch(self):
+        self.assertIsNone(map_pr_to_subtask("", "nothing", self.tasks, "c-slug",
+                                            recorded_branches={"t1-test-author": None, "t2-backend": ""}),
+                          "a null or empty recorded branch is 'no branch recorded', never a match for ''")
+
+    def test_the_exact_task_branch_still_wins_over_a_recorded_branch(self):
+        t = map_pr_to_subtask("task/c-slug/t2-backend", "nothing", self.tasks, "c-slug",
+                              recorded_branches={"t1-test-author": "task/c-slug/t2-backend"})
+        self.assertEqual(t.id, "t2-backend",
+                         "positive control: the derived task branch is exact and outranks the state store")
+
 
 # --------------------------------------------------------------------------
 # The record written for a sub-task
@@ -8367,6 +8395,47 @@ class TestLoadSlotAgainstTheRealTemplate(unittest.TestCase):
         self._replace_row("test.roots", "| `test.roots` | none |")
         self.assertEqual(load_slot(self._text(), "test.roots"), (),
                          "positive control: a bare none row reads as empty")
+
+
+class TestMainMapsAPullRequestThroughTheStateStore(unittest.TestCase):
+    """The caller must hand the state store's branches to the mapper.
+
+    Unit-testing ``map_pr_to_subtask`` proves nothing about whether ``main()`` passes it anything.
+    This drives ``main()`` with a branch recorded in the loaded state and a merged pull request
+    whose head branch and title name no sub-task identity.
+    """
+
+    def _report(self, recorded_branch):
+        with tempfile.TemporaryDirectory() as d:
+            contract_path = Path(d) / "acme-red-fixture.md"
+            contract_path.write_text(CONTRACT_CLI_VERDICT_BEARING_WITH_DEPENDENT, encoding="utf-8")
+            slug = contract_path.stem
+            pr = {"number": 42, "state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z",
+                  "mergeCommit": {"oid": "deadbeef"}, "headRefName": "feature/foreign-name",
+                  "baseRefName": "master", "title": "a title naming no sub-task",
+                  "url": "https://example.invalid/pull/42", "commits": [{"oid": "deadbeef"}],
+                  "statusCheckRollup": None}
+            state = {"contract": slug, "sub_tasks": {
+                "t2-backend": {"status": "pending", "branch": recorded_branch, "pull_request": None,
+                               "issue": None, "base": "master", "brief": None}}}
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "42", "--dry-run", "--json"]
+            with mock.patch.object(sys, "argv", argv),                  mock.patch.object(pr_merged, "load_records", return_value={}),                  mock.patch.object(pr_merged, "load_state", return_value=state),                  mock.patch.object(pr_merged, "default_branch", return_value="master"),                  mock.patch.object(pr_merged, "write_state", return_value=None),                  mock.patch.object(pr_merged, "write_record", return_value=None),                  mock.patch.object(pr_merged, "gh_pr", side_effect=lambda n: pr if n == 42 else None),                  mock.patch.object(pr_merged, "git_combined_diff", return_value=([], 1)),                  mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)),                  mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)),                  mock.patch.object(pr_merged, "file_at_commit", mock.MagicMock(return_value=None), create=True),                  mock.patch.object(pr_merged, "ensure_commit_local", return_value=True, create=True),                  contextlib.redirect_stdout(out):
+                pr_merged.main()
+            return json.loads(out.getvalue())
+
+    def test_a_branch_recorded_in_the_state_store_closes_that_sub_task(self):
+        report = self._report("feature/foreign-name")
+        self.assertEqual([c["sub_task"] for c in report["closed"]], ["t2-backend"],
+                         "the merged pull request's head branch is recorded against t2-backend in the "
+                         "state store, so main() must place it there, not report it unmapped")
+        self.assertEqual(report["unmapped"], [])
+
+    def test_positive_control_an_unrecorded_branch_stays_unmapped(self):
+        report = self._report("feature/some-other-branch")
+        self.assertEqual(report["closed"], [], "a branch the state store does not record maps nowhere")
+        self.assertEqual(len(report["unmapped"]), 1, "the pull request is reported unmapped, never guessed")
+        self.assertEqual(report["unmapped"][0]["branch"], "feature/foreign-name")
 
 
 if __name__ == "__main__":

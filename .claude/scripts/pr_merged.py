@@ -444,14 +444,28 @@ def classify_pr(pr: Optional[Dict[str, Any]], default_branch: str = "master",
 
 
 def map_pr_to_subtask(head_branch: str, title: str, tasks: List[SubTask],
-                      contract_slug: str) -> Optional[SubTask]:
-    """Match by derived identity. No heuristic over file lists."""
+                      contract_slug: str,
+                      recorded_branches: Optional[Dict[str, Optional[str]]] = None) -> Optional[SubTask]:
+    """Match by derived identity, then by a branch the state store recorded.
+
+    No heuristic over file lists. The third step is the state-store branch
+    rule both loop skills document: a head branch recorded against a sub-task
+    places the pull request on that sub-task, which is how work merged from a
+    branch that is not ``task/<contract>/<id>`` is still closed. Two sub-tasks
+    recording the same branch is ambiguous, so it maps nowhere rather than to
+    the first. A null or empty recorded branch is "no branch recorded" and
+    never matches.
+    """
     for t in tasks:
         if head_branch == branch_for(contract_slug, t.id):
             return t
     for t in tasks:
         if t.id in (title or "") or t.id in (head_branch or ""):
             return t
+    if head_branch and recorded_branches:
+        claimed = [t for t in tasks if recorded_branches.get(t.id) == head_branch]
+        if len(claimed) == 1:
+            return claimed[0]
     return None
 
 
@@ -1798,7 +1812,10 @@ def main() -> int:
             report["skipped"].append({"pr": ref, "verdict": verdict})
             continue
 
-        task = map_pr_to_subtask(pr.get("headRefName", ""), pr.get("title", ""), tasks, slug)
+        recorded_branches = {tid: entry.get("branch")
+                             for tid, entry in (state.get("sub_tasks") or {}).items()}
+        task = map_pr_to_subtask(pr.get("headRefName", ""), pr.get("title", ""), tasks, slug,
+                                 recorded_branches=recorded_branches)
         if task is None:
             report["unmapped"].append({"pr": ref, "branch": pr.get("headRefName")})
             continue
