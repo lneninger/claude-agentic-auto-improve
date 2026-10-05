@@ -196,6 +196,19 @@ Once all Open Questions are answered AND all critique findings have explicit use
 - Append `→ Addressed by: <one line>` / `→ Deferred: <reason>` / `→ Rejected: <reason>` directly under each `[BLOCKER]` and `[WARN]` finding in the `## Critique` section
 - Flip `Status: draft` → `Status: approved`
 
+## Step 3.4: Open one GitHub issue for the follow-ups
+
+A follow-up stub under `.claude/concepts/followups/` is only visible through `/list-contracts`. The user's working view is GitHub issues, so a stub alone leaves deferred work invisible. This step makes the issue the tracked item and the stub its detail.
+
+Run it once the contract is approved, and only when the contract cites at least one stub (an Adjacent Areas row decided `follow-up handle`, or a `.followup.md` path anywhere in the contract) whose `**Issue:**` field is still `pending`. `data-architect` has no shell, so it cannot open the issue itself; this step belongs to the main session.
+
+1. Search for an existing issue first: `gh issue list --search "Follow-ups from <contract slug>" --state open`. If one exists, add the stubs to it as checklist items instead of opening a second.
+2. Otherwise open **one** issue titled `[CHORE] Follow-ups from <contract title> (<contract slug>)`. Put any decision the user must make first, then one checklist item per stub, each with the files involved, and link every stub path as detail. Quote the exact title and body in the Step 3 summary, and open it unless the user declines.
+3. Write the issue number into every stub's `**Issue:**` field (`#<n>`) and say it in the final report.
+4. If `gh` is missing or unauthenticated, write `**Issue:** unavailable` in each stub and say so plainly. Never leave `pending` behind silently.
+
+A contract that cites no stub skips this step.
+
 ## Step 3.5: Route the approved contract
 
 With the contract approved, decide how the implementation runs.

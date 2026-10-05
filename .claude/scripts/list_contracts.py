@@ -97,6 +97,7 @@ def parse_contract(path: Path, project_override: str | None = None) -> dict[str,
     unresolved_questions = 0
     file_count = 0
     supersedes: str | None = None
+    issue: str | None = None
 
     lines = text.splitlines()
     in_open_questions = False
@@ -116,6 +117,13 @@ def parse_contract(path: Path, project_override: str | None = None) -> dict[str,
                 status = m.group(1).lower().strip()
                 if status.startswith("superseded"):
                     status = "superseded"
+
+        # Issue line (follow-up stubs): the GitHub tracking issue, `#<n>`, `pending` or `unavailable`.
+        if issue is None:
+            m = re.match(r"\*\*Issue:\*\*\s*(\S+)", stripped)
+            if m:
+                value = m.group(1).strip().rstrip(".,;")
+                issue = value if value.startswith("#") else value.lower()
 
         # Supersedes line
         if supersedes is None:
@@ -184,6 +192,7 @@ def parse_contract(path: Path, project_override: str | None = None) -> dict[str,
         "unresolved_questions": unresolved_questions,
         "files_to_touch_count": file_count,
         "supersedes": supersedes,
+        "issue": issue,
         "mtime": path.stat().st_mtime,
         "is_followup": is_followup,
     }
@@ -261,6 +270,12 @@ def print_human(contracts: list[dict[str, Any]]) -> None:
                     action = f"  [NEEDS TRIAGE: {age_days}d old; promote via /design-first or let archive_stale_stubs.py reap]"
                 else:
                     action = f"  [follow-up stub, {age_days}d old]"
+                # The tracker is what the user sees: show the stub's GitHub issue, or flag its absence.
+                issue = c.get("issue")
+                if issue and re.fullmatch(r"#\d+", issue):
+                    action += f"  [issue {issue}]"
+                else:
+                    action += "  [NO ISSUE: open one via /design-first Step 3.4]"
 
             print(f"  {icon} {short_path}")
             print(f"             {c['title']}{action}")
