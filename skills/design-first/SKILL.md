@@ -276,7 +276,7 @@ This Step 5 invocation produces the HANDOFF that `/verify-before-done` Step 5.5 
 
 ## Step 6: Flip contract status to implemented
 
-After review passes, edit the contract file and change `Status: approved` → `Status: implemented`. Fill in the Review Checklist at the bottom of the contract.
+After review passes and the merge is recorded, the flip is automatic: `pr_merged.py` changes `Status: approved` → `Status: implemented`, fills the Review Checklist from the review reports' Gate Outputs, and appends a line to the brief's run log, once nothing is pending. `/pr-merged` reports it and offers the small records pull request. A manual flip stays allowed only on request, for a contract delivered before 2026-10-05, and never for one the script reports `pending`.
 
 ## Escape hatches
 

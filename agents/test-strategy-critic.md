@@ -145,6 +145,12 @@ You run as part of the Data-First Engineering Protocol (see `~/.claude/CLAUDE.md
 
 If `PRIOR_FINDINGS.contract_path` is missing on a non-trivial change, still perform your specialty review, but flag the gap in `Warnings:` and recommend the caller run `/design-first` before shipping.
 
+## Review artefact and Gate Output (when the TASK block names one)
+
+When the TASK block names a review artefact, a path under `.claude/reviews/`, write the report AND its Gate Output yourself, in the same diff. The Gate Output is `<artefact stem>.gate.json` beside the report. It holds `supersedes` (the report file names a re-run replaces, empty otherwise) and a `checklist` of `{item, outcome}` covering every Review checklist item of the contract, with `item` copied verbatim and `outcome` one of `met`, `partly-met`, `not-met`, `not-applicable`. It restates no verdict. A contract approved before Gate Outputs existed has none, and its checklist reads "no structured evidence" by design; a gate that reviews such a contract still writes one.
+
+**Write capability is checked, not assumed.** The `tools:` line above lists no `Write`, and the tools a session really binds can differ from this file, because they are fixed when the session starts. Read your own tool list, then create the artefact's first lines as your first act, before reviewing anything. If that write fails, stop and report; never hand the text to the calling session to write for you.
+
 ## Agent Communication Protocol
 
 > **``.claude/AGENT_STANDARDS.md`` is authoritative.** This section contains role-specific extensions only; AGENT_STANDARDS.md supersedes on any conflict. The global HANDOFF schema lives at ``.claude/HANDOFF_SCHEMA.md`` and every HANDOFF block below must conform to it (with role-specific field additions where noted). Read both before editing this agent file.

@@ -316,7 +316,13 @@ Path must be the absolute contract path (matches what `derive_area.py` consumes)
 
 Flag mismatches as **[CRITICAL]** — DTO/model drift causes silent runtime failures.
 
-**Contract status flip:** after review passes, edit the contract file at `PRIOR_FINDINGS.contract_path` and flip `Status: approved` → `Status: implemented`. Fill in the Review Checklist at the bottom of the contract.
+**Contract status:** the reviewer never flips `Status` and never fills the Review Checklist. The flip is automatic after the merge, by `/pr-merged` (see `design-first` Step 6), which fills the checklist from the review reports' Gate Outputs. Report the verdict and leave the contract file untouched.
+
+## Review artefact and Gate Output (when the TASK block names one)
+
+When the TASK block names a review artefact, a path under `.claude/reviews/`, write the report AND its Gate Output yourself, in the same diff. The Gate Output is `<artefact stem>.gate.json` beside the report. It holds `supersedes` (the report file names a re-run replaces, empty otherwise) and a `checklist` of `{item, outcome}` covering every Review checklist item of the contract, with `item` copied verbatim and `outcome` one of `met`, `partly-met`, `not-met`, `not-applicable`. It restates no verdict. A contract approved before Gate Outputs existed has none, and its checklist reads "no structured evidence" by design; a gate that reviews such a contract still writes one.
+
+**Write capability is checked, not assumed.** The `tools:` line above lists no `Write`, and the tools a session really binds can differ from this file, because they are fixed when the session starts. Read your own tool list, then create the artefact's first lines as your first act, before reviewing anything. If that write fails, stop and report; never hand the text to the calling session to write for you.
 
 ## Agent Communication Protocol
 

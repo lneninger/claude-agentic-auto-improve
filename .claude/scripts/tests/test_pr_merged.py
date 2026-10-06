@@ -72,7 +72,31 @@ _FORBIDDEN_GH_MUTATIONS = (
     ("gh", "issue", "close"),
     ("gh", "issue", "develop"),
     ("gh", "pr", "merge"),
+    # The auto-implemented contract's skills post a Disclosure comment, open a
+    # records pull request and push its branch. None may ever reach a real
+    # process from this suite (contract Extension Point 5).
+    ("gh", "issue", "comment"),
+    ("gh", "pr", "create"),
+    ("git", "push"),
+    # The preflight edge (I-12). setUpModule stubs it; if that stub is ever
+    # dropped, 25 older --pr tests would reach a real `gh api user`, and their
+    # outcome would depend on the machine. The guard raises RuntimeError, but
+    # gh_authenticated catches every Exception and answers False, so the 25 tests
+    # fail on an exit-10 assertion rather than on the RuntimeError itself. They
+    # still go red on every machine; the error is just not what they report.
+    ("gh", "api", "user"),
 )
+
+#: The real ``gh_authenticated`` edge, captured at import time -- before
+#: ``setUpModule`` replaces it with a stub that answers True -- so its own edge
+#: test can still reach the function that ships. ``None`` until the edge exists.
+_REAL_GH_AUTHENTICATED = getattr(pr_merged, "gh_authenticated", None)
+_HAD_GH_AUTHENTICATED = hasattr(pr_merged, "gh_authenticated")
+
+
+def _stub_gh_authenticated():
+    """Default for every test: GitHub is signed in, so no test reaches a real ``gh api user``."""
+    return True
 
 
 def _guarded_subprocess_run(cmd, *args, **kwargs):
@@ -90,10 +114,15 @@ def _guarded_subprocess_run(cmd, *args, **kwargs):
 
 def setUpModule():
     subprocess.run = _guarded_subprocess_run
+    pr_merged.gh_authenticated = _stub_gh_authenticated
 
 
 def tearDownModule():
     subprocess.run = _REAL_SUBPROCESS_RUN
+    if _HAD_GH_AUTHENTICATED:
+        pr_merged.gh_authenticated = _REAL_GH_AUTHENTICATED
+    elif hasattr(pr_merged, "gh_authenticated"):
+        delattr(pr_merged, "gh_authenticated")
 
 
 def _fn(name):
@@ -3110,7 +3139,8 @@ class TestReportSeedsHandResolvedFromStoredRecords(unittest.TestCase):
 # through the one path that writes a record to disk.
 # --------------------------------------------------------------------------
 def _drive_main_over_a_pull_request(contract_text, commits, diff_table,
-                                    filename="acme-red-fixture.md"):
+                                    filename="acme-red-fixture.md",
+                                    linked_brief_pr=None, gh_pr_calls=None):
     """Call pr_merged.main() with --pr so the pull-request loop actually runs.
 
     Every edge the loop has to the outside is replaced before main() is
@@ -3152,8 +3182,24 @@ def _drive_main_over_a_pull_request(contract_text, commits, diff_table,
         "commits": [{"oid": sha} for sha in commits], "statusCheckRollup": None,
     }
     write_record_mock = mock.MagicMock(return_value=None)
+
+    def answering_gh_pr(number):
+        if gh_pr_calls is not None:
+            gh_pr_calls.append(number)
+        return pull_request
+
     with tempfile.TemporaryDirectory() as d:
         contract_path = Path(d) / filename
+        if linked_brief_pr is not None:
+            # Amendment (2026-10-05 auto-implemented contract, block 1): the contract
+            # links a brief whose ``pr:`` is a merged pull request, so the run reaches
+            # the every-mode brief-link read (I-14) that X-1 must still survive.
+            brief_path = Path(d) / "acme-red-fixture-brief.md"
+            brief_path.write_text(
+                "---\nid: none\nbranch: feature/acme-red-fixture\npr: %s\n"
+                "contract: %s\n---\n\n# Brief\n\n## Run log\n- 2026-10-05: intake.\n"
+                % (linked_brief_pr, contract_path), encoding="utf-8")
+            contract_text = ("**Status:** approved\n**Work Item Brief:** %s\n" % brief_path) + contract_text
         contract_path.write_text(contract_text, encoding="utf-8")
         out = io.StringIO()
         argv = ["pr_merged.py", "--contract", str(contract_path), "--pr", "7", "--json"]
@@ -3164,7 +3210,7 @@ def _drive_main_over_a_pull_request(contract_text, commits, diff_table,
              mock.patch.object(pr_merged, "write_state", mock.MagicMock(return_value=None)), \
              mock.patch.object(pr_merged, "write_record", write_record_mock), \
              mock.patch.object(pr_merged, "build_record", recording_build_record), \
-             mock.patch.object(pr_merged, "gh_pr", lambda number: pull_request), \
+             mock.patch.object(pr_merged, "gh_pr", answering_gh_pr), \
              mock.patch.object(pr_merged, "git_combined_diff", lambda sha: diff_table[sha]), \
              mock.patch.object(pr_merged, "file_at_commit", lambda sha, path: None), \
              mock.patch.object(pr_merged, "_run", no_subprocess), \
@@ -3268,17 +3314,40 @@ class TestMainPassesTheSummaryIntoBuildRecord(unittest.TestCase):
 # The third Failure Mode: "A new move is added to advance later and ships with
 # no printed next step, so the loop silently regains the defect this contract
 # removes." The mitigation is this constant plus a test that drives advance()
-# into each of the seven REAL scenarios.
+# into each of the eight REAL scenarios (seven until the 2026-10-05
+# auto-implemented contract added delivery-unrecorded, I-19).
 # --------------------------------------------------------------------------
-#: Extension Point 6, verbatim.
+#: Extension Point 6, as I-19 of the 2026-10-05 auto-implemented contract
+#: grows it from seven to eight, in the order advance() asks its questions.
 _CONTRACT_ADVANCE_ACTIONS = (
-    "contract-defect", "nothing-planned", "escalate", "awaiting-merge",
-    "complete", "dispatch", "blocked",
+    "contract-defect", "nothing-planned", "escalate", "delivery-unrecorded",
+    "awaiting-merge", "complete", "dispatch", "blocked",
 )
 
+#: A Delivery Candidate (Data Shapes): a merged pull request that maps to no
+#: sub-task but belongs to the contract's brief. A plain mapping, the shape the
+#: report's ``delivery_candidates`` list carries.
+_SINGLE_BRANCH_CANDIDATE = {
+    "pr": 383, "branch": "feature/bar-formatter-chain", "merged_at": "2026-10-04T12:00:00Z",
+    "matched_by": "brief-branch", "known": True, "kind": "single-branch",
+}
 
-def _seven_real_moves():
-    """Drive advance() into each of its seven real scenarios.
+
+def _advance_with_candidates(tasks, records, candidates, **kwargs):
+    """Call advance() with the new ``candidates`` parameter, without a crash when it is absent.
+
+    A bare ``advance(..., candidates=...)`` raises TypeError before the parameter
+    exists, which is a broken fixture and not a RED test. The sentinel action
+    below is outside ADVANCE_ACTIONS, so every assertion about the move fails on
+    the value, naming the missing parameter.
+    """
+    if "candidates" not in inspect.signature(advance).parameters:
+        return {"action": "advance() has no candidates parameter yet"}
+    return advance(tasks, records, candidates=candidates, **kwargs)
+
+
+def _eight_real_moves():
+    """Drive advance() into each of its eight real scenarios.
 
     Nothing here hand-writes a move mapping: every value is what advance()
     itself returns, so a move that changed shape or stopped being reachable
@@ -3289,6 +3358,7 @@ def _seven_real_moves():
     dispatched = mark_dispatched(new_state("c-slug", _tasks()), "t1-a", "task/c-slug/t1-a")
     completed = {t.id: {"status": "completed", "verified": "github"} for t in _tasks()}
     return {
+        "delivery-unrecorded": _advance_with_candidates(_tasks(), {}, [_SINGLE_BRANCH_CANDIDATE]),
         "contract-defect": advance(_tasks(), {},
                                    defects=[{"id": "t9-x",
                                              "reason": "no-files-but-names-an-agent"}]),
@@ -3308,37 +3378,48 @@ class TestAdvanceActionsIsTheClosedSet(unittest.TestCase):
         self.assertIsNotNone(
             actions,
             "pr_merged.ADVANCE_ACTIONS must exist -- Extension Point 6 names it the module "
-            "constant holding the seven moves advance() can return, and the New Mechanisms "
+            "constant holding the eight moves advance() can return (I-19 of the 2026-10-05 "
+            "auto-implemented contract added delivery-unrecorded), and the New Mechanisms "
             "section makes it the seam a new move must pass through"
         )
         return actions
 
-    def test_the_constant_holds_exactly_the_seven_moves_the_contract_lists(self):
+    def test_the_constant_holds_exactly_the_eight_moves_the_contract_lists(self):
         # POSITIVE CONTROL (fixture-owned): drop "contract-defect" from
         # _CONTRACT_ADVANCE_ACTIONS and both assertions turn red -- the set
-        # comparison and the length. Open Question one answered that all seven
+        # comparison and the length. Open Question one answered that all eight
         # are covered, contract-defect included.
         actions = self._actions()
         self.assertEqual(
             set(actions), set(_CONTRACT_ADVANCE_ACTIONS),
-            "ADVANCE_ACTIONS must hold exactly the seven moves Extension Point 6 lists -- no "
+            "ADVANCE_ACTIONS must hold exactly the eight moves I-19 lists -- no "
             "more, so a member with no arm cannot hide; no fewer, so a move advance() can "
             "return cannot ship with no printed next step"
         )
         self.assertEqual(
-            len(actions), 7,
-            "seven moves, not six: advance() checks contract-defect BEFORE every other move, "
-            "so it is the one an operator meets when a contract is malformed"
+            len(actions), 8,
+            "eight moves, not seven: I-19 adds delivery-unrecorded, the move that withholds "
+            "/advance while a delivered pull request is unrecorded"
         )
 
-    def test_each_of_the_seven_real_scenarios_returns_a_member_of_the_set(self):
+    def test_the_constant_lists_the_moves_in_the_order_advance_asks_its_questions(self):
+        # I-19: "ordered contract-defect, nothing-planned, escalate,
+        # delivery-unrecorded, awaiting-merge, complete, dispatch, blocked".
+        actions = self._actions()
+        self.assertEqual(
+            tuple(actions), _CONTRACT_ADVANCE_ACTIONS,
+            "ADVANCE_ACTIONS is ordered by the question advance() asks first; "
+            "delivery-unrecorded sits after escalate and before awaiting-merge"
+        )
+
+    def test_each_of_the_eight_real_scenarios_returns_a_member_of_the_set(self):
         # This is the totality test the third Failure Mode names. It never
         # hand-writes an action string: every one comes out of advance().
         # POSITIVE CONTROL (fixture-owned): change the "blocked" scenario's
         # depends_on from [99] to [] and advance() answers "dispatch", so the
         # observed set loses "blocked" and the last assertion turns red.
         actions = self._actions()
-        moves = _seven_real_moves()
+        moves = _eight_real_moves()
         observed = set()
         for scenario, move in moves.items():
             with self.subTest(scenario=scenario):
@@ -3382,7 +3463,7 @@ class TestNextCommandFor(unittest.TestCase):
             "pr_merged.next_command_for must exist -- Extension Point 7 names it the pure "
             "function returning a Next Command, with one arm per member of ADVANCE_ACTIONS"
         )
-        self.moves = _seven_real_moves()
+        self.moves = _eight_real_moves()
 
     def _command_for(self, scenario):
         nc = self.next_command_for(self.moves[scenario], "c-slug")
@@ -3532,7 +3613,7 @@ class TestNextCommandFor(unittest.TestCase):
         # ADVANCE_ACTIONS and one arm to the mapping, in the same change. The
         # totality test goes red if only one of the two is done."
         # POSITIVE CONTROL (fixture-owned): delete the "complete" entry from
-        # _seven_real_moves()'s returned mapping and the first assertion names
+        # _eight_real_moves()'s returned mapping and the first assertion names
         # it as a member with no scenario -- red.
         actions = _fn("ADVANCE_ACTIONS")
         self.assertIsNotNone(actions, "ADVANCE_ACTIONS must exist for the totality test to run")
@@ -8188,10 +8269,27 @@ class TestBareNumberNeverCallsRepoView(unittest.TestCase):
     """(i): X-1 -- a number reference never calls repo_view at all."""
 
     def test_a_bare_number_run_never_calls_repo_view(self):
+        # AMENDED (block 1 of the 2026-10-05 auto-implemented contract, WARN 3 / M-8):
+        # the fixture now links a brief whose ``pr:`` is a merged pull request (number
+        # 50) that the run was NOT given. The old fixture had no linked brief, so it never
+        # reached the every-mode brief-link read of I-14 and stayed green whatever that
+        # read did. The run must now read pull request 50 by one bare-number gh_pr call
+        # and decide "same repository" from the answer's own url -- never repo_view.
+        # The original assertion is kept unchanged, last.
         repo_view_spy = mock.MagicMock(return_value={"nameWithOwner": "x/y", "defaultBranchRef": "master"})
+        gh_pr_calls = []
+        link = "https://github.com/example-owner/example-repo/pull/50"
         with mock.patch.object(pr_merged, "repo_view", repo_view_spy, create=True):
             _recorded, _mock, _report = _drive_main_over_a_pull_request(
-                CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2])
+                CONTRACT_CLI_ONE_MERGEABLE_BACKEND_TASK, *_PR_THAT_FOUND_A_FILE[:2],
+                linked_brief_pr=link, gh_pr_calls=gh_pr_calls)
+        self.assertIn(
+            "50", [str(c) for c in gh_pr_calls],
+            "I-14: with a linked brief whose pr: is a link and no delivery record, the run "
+            "must read that pull request by ONE bare-number gh_pr call even though --pr 7 "
+            "was given -- otherwise this fixture never reaches the read it exists to guard. "
+            "gh_pr was asked about %r only" % (gh_pr_calls,)
+        )
         self.assertFalse(
             repo_view_spy.called,
             "X-1: a bare-number pull request must never call repo_view -- repo_view exists "
@@ -8314,6 +8412,2754 @@ class TestComputeReleasedWithholdsOnACrossRepositoryVerdict(unittest.TestCase):
         )
 
 
+# ==========================================================================
+# 2026-10-05 contract-auto-implemented -- block 1, the RED suite.
+#
+# Contract: .claude/concepts/2026-10-05-contract-auto-implemented.md
+#
+# Every main()-level test below runs inside its own temporary directory that
+# holds a private ``.claude`` tree, with the working directory switched into it.
+# The folder constants the script already derives from the repository root
+# (CONCEPTS_DIR, RESULTS_DIR, STATE_DIR) are relative paths, so they resolve in
+# that tree, and so will every folder the implementation derives from the same
+# root (work items, follow-ups, reviews). Nothing ever reads or writes the real
+# repository. Only GitHub and git are stubbed: records, state, the contract and
+# the brief are real files, so "wrote nothing" and "changed exactly these bytes"
+# are measured on disk and not asserted on a mock.
+#
+# New symbols are reached through ``_fn`` / ``mock.patch.object(create=True)``
+# and a failing run is read back through ``_Result``, so a missing behaviour is
+# always an assertion about a value, never an ImportError, NameError or crash.
+#
+# Mutation names (M-1 ... M-26) are the contract's. A test whose name or
+# comment says CONTROL or GUARD pins behaviour that holds in the shipped
+# script; it earns its place by failing under the mutation named beside it, and
+# it passes on the unmutated script. Every other test pins a rule the script
+# must obey and fails on an assertion when the rule is broken.
+# ==========================================================================
+import copy  # noqa: E402
+import yaml  # noqa: E402
+
+_SLUG ="2026-10-05-acme-delivery"
+_REPO_URL = "https://github.com/example-owner/example-repo"
+_BRIEF_BRANCH = "feature/acme-delivery"
+_BRIEF_PR_NUMBER = 50
+_THIS_REPO_NEUTRAL = {"nameWithOwner": "example-owner/example-repo", "defaultBranchRef": "master"}
+
+
+def _pr_url(number):
+    return "%s/pull/%d" % (_REPO_URL, number)
+
+
+_CHECKLIST_LINES = (
+    "Implementation matches Data Shapes exactly",
+    "Reused Mechanisms are actually reused (no parallel implementations introduced)",
+    "New Mechanisms promoted to `MECHANISMS.md`",
+    "Integration surfaces reflected on both backend and frontend sides",
+    "Manual end-to-end step done (1-minute-only symbol, 15-minute backtest, result and chart)",
+    "`Status` flipped to `implemented`",
+)
+_MANUAL_LINE = _CHECKLIST_LINES[4]
+_STATUS_FLIP_LINE = _CHECKLIST_LINES[5]
+_CONTRACT_REL = ".claude/concepts/%s.md" % _SLUG
+_BRIEF_REL = ".claude/work-items/%s.md" % _SLUG
+_RUN_LOG_MARKER = "contract %s flipped to implemented by pr_merged.py" % _SLUG
+
+
+def _join_lines(lines, pattern=None, unterminated_last=False):
+    """Bytes of ``lines`` with a terminator per line: ``pattern(i, line)`` or LF; the last may be bare."""
+    out = []
+    for i, line in enumerate(lines):
+        term = pattern(i, line) if pattern else "\n"
+        if unterminated_last and i == len(lines) - 1:
+            term = ""
+        out.append(line + term)
+    return "".join(out).encode("utf-8")
+
+
+def _build_contract(slug=_SLUG, *, status_line="**Status:** approved", brief_header=True,
+                    tracking=None, review_block=False, extra_blocks=(),
+                    checklist=_CHECKLIST_LINES, checked=(), pattern=None,
+                    unterminated_last=False):
+    lines = ["# Concept Contract - Acme delivery", "", "**Project:** Acme", "**Date:** 2026-10-05"]
+    if status_line is not None:
+        lines.append(status_line)
+    if brief_header:
+        lines.append("**Work Item Brief:** .claude/work-items/%s.md" % slug)
+    if tracking:
+        lines.append("**Tracking issue:** #%d" % tracking)
+    lines += ["", "## Implementation Handoff", "",
+              "### 1. Backend (`acme-dev`)", "", "**Depends on:** none", "",
+              "**Files to touch:**", "- src/Foo.cs", "",
+              "### 2. Frontend (`acme-dev`)", "", "**Depends on:** none", "",
+              "**Files to touch:**", "- src/Bar.cs", ""]
+    if review_block:
+        lines += ["### 3. Review (`acme-reviewer`)", "", "**Depends on:** 1, 2", "",
+                  "**Files to touch:**", "- `.claude/reviews/%s/t3-review-acme-reviewer.md`" % slug, ""]
+    lines += list(extra_blocks)
+    lines += ["## Review checklist (filled in after implementation)", ""]
+    for i, text in enumerate(checklist):
+        lines.append("- [%s] %s" % ("x" if i in checked else " ", text))
+    return _join_lines(lines, pattern, unterminated_last)
+
+
+def _build_brief(slug=_SLUG, *, branch=_BRIEF_BRANCH, pr=None, ident="none", run_log=True,
+                 contract_field=True, pattern=None, unterminated_last=False):
+    pr = _pr_url(_BRIEF_PR_NUMBER) if pr is None else pr
+    lines = ["---", "id: %s" % ident, "title: Acme delivery", "branch: %s" % branch, "pr: %s" % pr]
+    if contract_field:
+        lines.append("contract: .claude/concepts/%s.md" % slug)
+    lines += ["status: shipped", "---", "", "# Acme delivery", "", "Body text.", ""]
+    if run_log:
+        lines += ["## Run log", "- 2026-10-05: intake.", "- 2026-10-05: shipped."]
+    return _join_lines(lines, pattern, unterminated_last)
+
+
+def _pr(number, head, *, base="master", state="MERGED", merged_at="2026-10-04T12:00:00Z",
+        url=None, title=None):
+    merged = state == "MERGED"
+    return {
+        "number": number, "state": state, "mergedAt": merged_at if merged else None,
+        "mergeCommit": {"oid": "merge-%d" % number} if merged else None,
+        "headRefName": head, "baseRefName": base, "title": title or head,
+        "url": url or _pr_url(number), "commits": [{"oid": "c%d" % number}],
+        "statusCheckRollup": None,
+    }
+
+
+def _gate(items, supersedes=()):
+    """A Gate Output mapping: ``items`` is a list of (checklist line text, outcome)."""
+    return {"supersedes": list(supersedes),
+            "checklist": [{"item": text, "outcome": outcome} for text, outcome in items]}
+
+
+def _fold_like_run(data):
+    """What ``file_at_commit`` would hand back: UTF-8 text, CRLF folded, ends stripped (``_run`` strips)."""
+    return data.decode("utf-8").replace("\r\n", "\n").strip()
+
+
+class _World(object):
+    """A private repository tree in a temporary directory, plus the 'origin/<default>' copies."""
+
+    def __init__(self, case, slug=_SLUG, *, contract=None, brief=None, with_brief=True):
+        tmp = tempfile.TemporaryDirectory()
+        case.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.slug = slug
+        self.contract_rel = ".claude/concepts/%s.md" % slug
+        self.brief_rel = ".claude/work-items/%s.md" % slug
+        self.results_rel = ".claude/orchestrator/results/%s" % slug
+        self.origin = {}
+        self.put(self.contract_rel, _build_contract(slug) if contract is None else contract)
+        self.publish(self.contract_rel)
+        if with_brief:
+            self.put(self.brief_rel, _build_brief(slug) if brief is None else brief)
+            self.publish(self.brief_rel)
+
+    def path(self, rel):
+        return self.root / rel
+
+    def put(self, rel, data):
+        p = self.path(rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+        return rel
+
+    def get(self, rel):
+        return self.path(rel).read_bytes()
+
+    def exists(self, rel):
+        return self.path(rel).exists()
+
+    def publish(self, rel):
+        self.origin[rel] = self.get(rel)
+
+    def record(self, task_id, pr_number, *, base_is_default=True, merged_at="2026-10-04T12:00:00Z",
+               **extra):
+        rec = {"status": "completed", "commit": "sha-%d" % pr_number, "tests_passed": "unknown",
+               "tests_verified_by": "none", "completed_by": "pr-merged",
+               "pull_request": _pr_url(pr_number), "merged_at": merged_at, "verified": "github"}
+        if base_is_default is not None:
+            rec["base_ref"] = "master" if base_is_default else "feature/parent"
+            rec["base_is_default"] = bool(base_is_default)
+        rec.update(extra)
+        rel = "%s/%s.yaml" % (self.results_rel, task_id)
+        self.put(rel, yaml.dump(rec, default_flow_style=False, sort_keys=False))
+        return rel
+
+    def delivery(self, pr_number=_BRIEF_PR_NUMBER, **extra):
+        rec = {"status": "delivered", "pull_request": _pr_url(pr_number), "number": pr_number,
+               "head_ref": _BRIEF_BRANCH, "base_ref": "master", "base_is_default": True,
+               "commit": "merge-%d" % pr_number, "merged_at": "2026-10-04T12:00:00Z",
+               "verified": "github", "recorded_by": "pr-merged --record-delivery",
+               "recorded_at": "2026-10-05T09:00:00Z", "blocks_recorded": [],
+               "blocks_already_recorded": []}
+        rec.update(extra)
+        rel = "%s/contract-delivery.yaml" % self.results_rel
+        self.put(rel, yaml.dump(rec, default_flow_style=False, sort_keys=False))
+        return rel
+
+    def ready(self):
+        """Both sub-tasks recorded, merged on the default branch: condition one holds."""
+        self.record("t1-backend", 61)
+        self.record("t2-frontend", 62)
+        return self
+
+    def review(self, name, verdict="pass", gate=None, publish=True, body="Findings."):
+        lines = ["# Review", "", "**Date:** 2026-10-05"]
+        if verdict is not None:
+            lines.append("**Verdict:** %s" % verdict)
+        rel = ".claude/reviews/%s/%s" % (self.slug, name)
+        self.put(rel, "\n".join(lines + ["", body]) + "\n")
+        if publish:
+            self.publish(rel)
+        if gate is not None:
+            grel = ".claude/reviews/%s/%s.gate.json" % (self.slug, name[:-3])
+            self.put(grel, gate if isinstance(gate, (str, bytes)) else json.dumps(gate))
+            if publish:
+                self.publish(grel)
+        return rel
+
+    def followup(self, name, issue, parent=None):
+        parent = parent or self.contract_rel
+        return self.put(".claude/concepts/followups/%s.followup.md" % name,
+                        "# Follow-up - something noticed\n\n**Parent contract:** `%s`\n"
+                        "**Date:** 2026-10-05\n**Status:** stub\n**Issue:** #%d\n" % (parent, issue))
+
+    def snapshot(self):
+        return {str(p.relative_to(self.root)).replace("\\", "/"): p.read_bytes()
+                for p in sorted(self.root.rglob("*")) if p.is_file()}
+
+    def under(self, rel_dir):
+        d = self.path(rel_dir)
+        return sorted(str(p.relative_to(self.root)).replace("\\", "/")
+                      for p in d.rglob("*") if p.is_file()) if d.is_dir() else []
+
+
+@contextlib.contextmanager
+def _chdir(path):
+    old = os.getcwd()
+    os.chdir(str(path))
+    try:
+        yield
+    finally:
+        os.chdir(old)
+
+
+def _no_process(cmd):  # pragma: no cover -- must never be reached
+    raise AssertionError("this fixture must reach no process at all; %r was attempted" % (cmd,))
+
+
+class _Result(object):
+    """What one main() run did: exit code, printed text, parsed report, and the spies."""
+
+    def __init__(self, exit_code, out, err, spies):
+        self.exit_code, self.out, self.err, self.spies = exit_code, out, err, spies
+        self.report = None
+        try:
+            parsed = json.loads(out)
+            self.report = parsed if isinstance(parsed, dict) else None
+        except ValueError:
+            pass
+
+    @property
+    def completion(self):
+        value = (self.report or {}).get("completion")
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def verdict(self):
+        return self.completion.get("verdict")
+
+    @property
+    def conditions(self):
+        value = self.completion.get("conditions")
+        return value if isinstance(value, dict) else {}
+
+    def says(self, text):
+        """True when ``text`` appears anywhere in what the run printed."""
+        return text in self.out
+
+    def commands(self):
+        return list(((self.report or {}).get("next_command") or {}).get("commands") or [])
+
+    def describe(self):
+        return "exit=%r stdout=%.600r stderr=%.200r" % (self.exit_code, self.out, self.err)
+
+
+def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_text=None,
+           sub_issues=(), records_prs=(), implementers=("acme-dev",), gates=("acme-reviewer",),
+           json_out=True, replace_hook=None, fetch_ok=True, listing_ok=True):
+    """Run pr_merged.main() inside ``world`` with GitHub and git stubbed, files real.
+
+    ``prs`` maps a pull request reference (number or link) to its gh payload. Every
+    new edge the contract names is patched with ``create=True``, so a missing
+    implementation is a missing behaviour and never an AttributeError. ``_run``
+    itself raises, so no process can start down a path this fixture did not expect.
+
+    ``sub_issues`` and ``records_prs`` are passed through exactly as given: the
+    default is an empty list (nothing open), a list is a list, and ``None`` is a
+    FAILED read -- the answer the real edges give when GitHub cannot be asked
+    (G-4, G-6). ``listing_ok=False`` and ``fetch_ok=False`` fail the review-set
+    listing and the fetch the same way.
+    """
+    prs = prs or {}
+    spies = type("Spies", (), {})()
+
+    def fake_gh_pr(ref):
+        spies.gh_pr.append(ref)
+        for key in (ref, str(ref), int(ref) if str(ref).isdigit() else None):
+            if key is not None and key in prs:
+                return copy.deepcopy(prs[key])
+        return None
+
+    def fake_file_at_commit(sha, path):
+        data = world.origin.get(path)
+        return None if data is None else _fold_like_run(data)
+
+    def fake_list_review_files(ref, slug):
+        if not listing_ok:
+            return None
+        prefix = ".claude/reviews/%s/" % slug
+        return sorted(p for p in world.origin if p.startswith(prefix))
+
+    def fake_issue_text(number):
+        return issue_text(number) if callable(issue_text) else issue_text
+
+    def fake_repo_view(name=None):
+        return copy.deepcopy(repo(name) if callable(repo) else (repo or _THIS_REPO_NEUTRAL))
+
+    spies.gh_pr = []
+    spies.gh_authenticated = mock.MagicMock(return_value=authenticated)
+    spies.fetch_default_branch = mock.MagicMock(return_value=fetch_ok)
+    spies.list_review_files = mock.MagicMock(side_effect=fake_list_review_files)
+    spies.gh_issue_text = mock.MagicMock(side_effect=fake_issue_text)
+    spies.gh_open_sub_issues = mock.MagicMock(
+        return_value=None if sub_issues is None else list(sub_issues))
+    spies.open_records_pull_requests = mock.MagicMock(
+        return_value=None if records_prs is None else list(records_prs))
+    spies.repo_view = mock.MagicMock(side_effect=fake_repo_view)
+    spies.create_branch = mock.MagicMock(return_value=(True, "created"))
+    spies.close_sub_issue = mock.MagicMock(return_value="closed")
+    spies.file_at_commit = mock.MagicMock(side_effect=fake_file_at_commit)
+
+    argv = ["pr_merged.py", "--contract", world.contract_rel] + list(flags) + (["--json"] if json_out else [])
+    out, err = io.StringIO(), io.StringIO()
+    real_replace = os.replace
+    patches = [
+        mock.patch.object(sys, "argv", argv),
+        mock.patch.dict(os.environ, {}, clear=False),
+        mock.patch.object(pr_merged, "default_branch", return_value="master"),
+        mock.patch.object(pr_merged, "gh_pr", fake_gh_pr),
+        mock.patch.object(pr_merged, "git_combined_diff", lambda sha: ([], 1)),
+        mock.patch.object(pr_merged, "commit_present", lambda sha: True, create=True),
+        mock.patch.object(pr_merged, "ensure_commit_local", lambda sha, ref: True),
+        mock.patch.object(pr_merged, "file_at_commit", spies.file_at_commit),
+        mock.patch.object(pr_merged, "create_branch", spies.create_branch),
+        mock.patch.object(pr_merged, "close_sub_issue", spies.close_sub_issue),
+        mock.patch.object(pr_merged, "repo_view", spies.repo_view, create=True),
+        mock.patch.object(pr_merged, "gh_authenticated", spies.gh_authenticated, create=True),
+        mock.patch.object(pr_merged, "fetch_default_branch", spies.fetch_default_branch, create=True),
+        mock.patch.object(pr_merged, "list_review_files", spies.list_review_files, create=True),
+        mock.patch.object(pr_merged, "gh_issue_text", spies.gh_issue_text, create=True),
+        mock.patch.object(pr_merged, "gh_open_sub_issues", spies.gh_open_sub_issues, create=True),
+        mock.patch.object(pr_merged, "open_records_pull_requests",
+                          spies.open_records_pull_requests, create=True),
+        mock.patch.object(pr_merged, "_run", _no_process),
+        mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", tuple(implementers)),
+        mock.patch.object(pr_merged, "REVIEW_GATES", tuple(gates)),
+    ]
+    if replace_hook is not None:
+        patches.append(mock.patch.object(
+            os, "replace", lambda src, dst: replace_hook(real_replace, src, dst)))
+    exit_code = None
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        os.environ.pop("GH_REPO", None)
+        stack.enter_context(_chdir(world.root))
+        stack.enter_context(contextlib.redirect_stdout(out))
+        stack.enter_context(contextlib.redirect_stderr(err))
+        try:
+            exit_code = pr_merged.main()
+        except SystemExit as exc:
+            exit_code = exc.code
+    return _Result(exit_code, out.getvalue(), err.getvalue(), spies)
+
+
+def _lines_of(data):
+    return data.decode("utf-8").splitlines(keepends=True)
+
+
+def _checklist_line(world_bytes, text):
+    """The contract line (without terminator) that carries checklist ``text``, or None."""
+    for line in world_bytes.decode("utf-8").splitlines():
+        if line.startswith("- [") and text in line:
+            return line
+    return None
+
+
+def _marker_count(brief_bytes):
+    return brief_bytes.decode("utf-8").count(_RUN_LOG_MARKER)
+
+
+# --------------------------------------------------------------------------
+# GUARD: the structural subprocess guard knows the new mutations and the
+# preflight read. It passes by construction (the tuple is amended above); it
+# is the harness's own guard, not a behaviour of the script. Catches: a later
+# edit that drops a tuple member, which would let a skill-path test reach a
+# real `gh issue comment`, `gh pr create`, `git push` or `gh api user`.
+# --------------------------------------------------------------------------
+class TestSubprocessGuardCoversTheRecordsPullRequestMutations(unittest.TestCase):
+
+    def test_guard_the_new_commands_are_forbidden_and_raise(self):
+        for command in (["gh", "issue", "comment", "372", "--body", "x"],
+                        ["gh", "pr", "create", "--draft"],
+                        ["git", "push", "origin", "docs/x-records"],
+                        ["gh", "api", "user", "--jq", ".login"]):
+            with self.subTest(command=command):
+                with self.assertRaises(
+                        RuntimeError,
+                        msg="Extension Point 5: %r must never reach a real process from this suite"
+                            % (command,)):
+                    pr_merged._run(command)
+
+
+# --------------------------------------------------------------------------
+# The six new edges (Extension Point 2): each one patches ONLY pr_merged._run
+# and asserts the argv and the parsed answer (journal 2026-09-28: an edge every
+# driver stubs is an edge no test runs). The answer shapes the contract leaves
+# open are fixed here: gh_issue_text answers one str (body then every comment);
+# open_records_pull_requests answers [{"headRefName","url"}]; list_review_files
+# answers the paths git printed; failure is None, never an exception.
+# Catches: M-6 / M-9 indirectly (the preflight reads what gh printed).
+# --------------------------------------------------------------------------
+class TestTheNewEdgesAssertArgvAndAnswer(unittest.TestCase):
+
+    def _edge(self, name):
+        fn = _fn(name)
+        self.assertIsNotNone(fn, "pr_merged.%s must exist -- Extension Point 2 names it a new edge" % name)
+        return fn
+
+    def _call(self, fn, args, answer):
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(list(cmd))
+            return answer
+
+        with mock.patch.object(pr_merged, "_run", fake_run):
+            value = fn(*args)
+        return value, calls
+
+    def test_gh_authenticated_true_only_on_exit_zero_with_a_login(self):
+        self.assertIsNotNone(
+            _REAL_GH_AUTHENTICATED,
+            "pr_merged.gh_authenticated must exist -- I-12's preflight edge. The module variable "
+            "keeps the REAL function; setUpModule's stub must not be what this test exercises")
+        self.assertIsNot(_REAL_GH_AUTHENTICATED, _stub_gh_authenticated,
+                         "the real edge must remain the one the module exports")
+        value, calls = self._call(_REAL_GH_AUTHENTICATED, (), (0, "octocat"))
+        self.assertEqual(calls, [["gh", "api", "user", "--jq", ".login"]],
+                         "I-12: the signed-in check is one `gh api user --jq .login` call")
+        self.assertIs(value, True, "exit 0 and a login on stdout means authenticated")
+        for answer in ((0, ""), (1, ""), (1, "octocat")):
+            with self.subTest(answer=answer):
+                value, _ = self._call(_REAL_GH_AUTHENTICATED, (), answer)
+                self.assertIs(
+                    value, False,
+                    "I-12: true only on exit 0 AND non-empty stdout; %r must be False" % (answer,))
+
+    def test_gh_issue_text_reads_the_body_and_every_comment(self):
+        fn = self._edge("gh_issue_text")
+        payload = json.dumps({"body": "BODY-TEXT",
+                              "comments": [{"body": "COMMENT-ONE"}, {"body": "COMMENT-TWO"}]})
+        value, calls = self._call(fn, (372,), (0, payload))
+        self.assertEqual(calls, [["gh", "issue", "view", "372", "--json", "body,comments"]],
+                         "Extension Point 2: gh issue view <n> --json body,comments")
+        self.assertIsInstance(value, str, "the edge answers one text, body then comments")
+        for piece in ("BODY-TEXT", "COMMENT-ONE", "COMMENT-TWO"):
+            self.assertIn(piece, value, "a Disclosure line may sit in the body or any comment")
+        for answer in ((1, ""), (0, "not json"), (0, "")):
+            with self.subTest(answer=answer):
+                self.assertIsNone(self._call(fn, (372,), answer)[0],
+                                  "an unreadable answer is None, never an exception")
+
+    def test_gh_open_sub_issues_lists_only_open_numbers(self):
+        # Extension Point 2 (amended, W-6): the read is paginated and the jq filter only
+        # projects {number, state}; the open/closed decision is made in Python, so a test
+        # can feed a recorded real answer.
+        fn = self._edge("gh_open_sub_issues")
+        page = json.dumps([{"number": 124, "state": "open"}, {"number": 125, "state": "closed"},
+                           {"number": 126, "state": "OPEN"}])
+        value, calls = self._call(fn, (123,), (0, page))
+        self.assertEqual(
+            calls,
+            [["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/123/sub_issues", "--jq",
+              "[.[] | {number, state}]"]],
+            "G-4: the exact paginated sub-issues read the contract names")
+        self.assertEqual(value, [124, 126],
+                         "an issue is open when its state, case-folded, is `open`; closed ones are dropped")
+        self.assertEqual(self._call(fn, (123,), (0, "[]"))[0], [], "no sub-issue at all is an empty list")
+        closed_only = json.dumps([{"number": 1, "state": "closed"}])
+        self.assertEqual(self._call(fn, (123,), (0, closed_only))[0], [],
+                         "only closed sub-issues is an empty list: nothing is left behind")
+        for answer in ((1, ""), (0, "garbage")):
+            with self.subTest(answer=answer):
+                self.assertIsNone(self._call(fn, (123,), answer)[0],
+                                  "a failed read is None (exit 10), never an empty list that would pass G-4")
+
+    def test_gh_open_sub_issues_reads_every_page_not_only_the_first_M16(self):
+        # With --paginate, --jq runs once per page, so stdout is one JSON array per page.
+        fn = self._edge("gh_open_sub_issues")
+        first = json.dumps([{"number": n, "state": "closed"} for n in range(1, 31)])
+        second = json.dumps([{"number": 31, "state": "open"}])
+        third = json.dumps([{"number": 32, "state": "closed"}, {"number": 33, "state": "open"}])
+        layouts = (
+            ("one page per line", "\n".join((first, second, third))),
+            ("pages run together", first + second + third),
+            ("pretty-printed pages", "\n".join(json.dumps(json.loads(p), indent=2)
+                                                for p in (first, second, third))),
+        )
+        for label, stdout in layouts:
+            with self.subTest(layout=label):
+                value, _ = self._call(fn, (123,), (0, stdout))
+                self.assertEqual(
+                    value, [31, 33],
+                    "W-6 / M-16: an open sub-issue past the first page must be found; the answer is "
+                    "the join of every page's array, whatever the line layout. Got %r" % (value,))
+
+    # The three lines `gh api --paginate .../issues/149/sub_issues?per_page=5 --jq
+    # '[.[] | {number, state}]'` printed on 2026-10-05: one compact array per page, all closed.
+    _RECORDED_149 = (
+        '[{"number":244,"state":"closed"},{"number":245,"state":"closed"},{"number":246,"state":"closed"},'
+        '{"number":247,"state":"closed"},{"number":248,"state":"closed"}]\n'
+        '[{"number":249,"state":"closed"},{"number":260,"state":"closed"},{"number":261,"state":"closed"},'
+        '{"number":262,"state":"closed"},{"number":263,"state":"closed"}]\n'
+        '[{"number":264,"state":"closed"}]\n'
+    )
+
+    def test_gh_open_sub_issues_reads_the_recorded_real_answer_for_issue_149(self):
+        # Row A2: a real GitHub answer, not one built with json.dumps. Passes today (a control
+        # for the layout the edge parses); fails if the parser stops reading compact per-page lines.
+        fn = self._edge("gh_open_sub_issues")
+        self.assertEqual(
+            self._call(fn, (149,), (0, self._RECORDED_149))[0], [],
+            "A2: every sub-issue of #149 is closed in GitHub's recorded answer, so nothing is open")
+        last_open = self._RECORDED_149.replace(
+            '{"number":264,"state":"closed"}', '{"number":264,"state":"open"}')
+        self.assertNotEqual(last_open, self._RECORDED_149, "fixture sanity: the variant really flips one issue")
+        self.assertEqual(
+            self._call(fn, (149,), (0, last_open))[0], [264],
+            "A2: the same recorded answer with #264 open on the last page yields exactly [264]")
+
+    def test_gh_open_sub_issues_an_unrecognised_state_or_a_malformed_page_makes_the_answer_none_M17(self):
+        # Fail closed: a filter or a state vocabulary that stops matching must refuse G-4
+        # (exit 10), never read as "closed" and let a delivery leave an open sub-issue behind.
+        fn = self._edge("gh_open_sub_issues")
+        good = json.dumps([{"number": 1, "state": "closed"}])
+        cases = (
+            ("an unrecognised state", json.dumps([{"number": 1, "state": "merged"}])),
+            ("a state that is not a string", json.dumps([{"number": 1, "state": None}])),
+            ("an unrecognised state on page two", good + "\n" + json.dumps([{"number": 2, "state": "draft"}])),
+            ("a second page that is not JSON", good + "\nnot json at all"),
+            ("a second page that is not an array", good + "\n" + json.dumps({"number": 2, "state": "open"})),
+            ("an element with no number", json.dumps([{"state": "open"}])),
+            ("a number that is a string", json.dumps([{"number": "7", "state": "open"}])),
+            ("a number that is a boolean", json.dumps([{"number": True, "state": "open"}])),
+            ("the old bare-number answer", "[124, 125]"),
+            ("an element that is not an object", json.dumps(["open"])),
+        )
+        for label, stdout in cases:
+            with self.subTest(case=label):
+                self.assertIsNone(
+                    self._call(fn, (123,), (0, stdout))[0],
+                    "W-6 / M-17: %s makes the WHOLE answer None, never a partial or empty list" % label)
+
+    def test_open_records_pull_requests_filters_by_the_records_branch_prefix(self):
+        fn = self._edge("open_records_pull_requests")
+        listing = json.dumps([
+            {"headRefName": "docs/%s-records" % _SLUG, "url": _pr_url(60)},
+            {"headRefName": "feature/other", "url": _pr_url(61)},
+            {"headRefName": "docs/some-other-contract-records", "url": _pr_url(62)},
+        ])
+        value, calls = self._call(fn, (_SLUG,), (0, listing))
+        self.assertEqual(
+            calls, [["gh", "pr", "list", "--state", "open", "--json", "headRefName,url",
+                     "--limit", "200"]],
+            "G-6: one open-pull-request listing")
+        self.assertEqual(
+            value, [{"headRefName": "docs/%s-records" % _SLUG, "url": _pr_url(60)}],
+            "only the head branches starting docs/<slug>-records are records pull requests")
+        self.assertIsNone(self._call(fn, (_SLUG,), (1, ""))[0], "a failed read is None")
+
+    def test_fetch_default_branch_is_one_git_fetch(self):
+        fn = self._edge("fetch_default_branch")
+        value, calls = self._call(fn, ("master",), (0, ""))
+        self.assertEqual(calls, [["git", "fetch", "origin", "master"]])
+        self.assertIs(value, True)
+        self.assertIs(self._call(fn, ("master",), (1, ""))[0], False,
+                      "a failed fetch is False; the run reports unverifiable")
+
+    def test_list_review_files_is_one_ls_tree_of_the_slugs_folder(self):
+        fn = self._edge("list_review_files")
+        printed = ".claude/reviews/%s/a.md\n.claude/reviews/%s/a.gate.json" % (_SLUG, _SLUG)
+        value, calls = self._call(fn, ("origin/master", _SLUG), (0, printed))
+        self.assertEqual(
+            calls, [["git", "ls-tree", "--name-only", "origin/master", ".claude/reviews/%s/" % _SLUG]],
+            "I-4: files are listed at origin/<default> with git ls-tree")
+        self.assertEqual(value, printed.splitlines())
+        self.assertEqual(self._call(fn, ("origin/master", _SLUG), (0, ""))[0], [],
+                         "a folder with no files is an empty list")
+        self.assertIsNone(self._call(fn, ("origin/master", _SLUG), (1, ""))[0],
+                          "a failed listing is None, never an empty list that would pass condition two")
+
+
+# --------------------------------------------------------------------------
+# advance() and the Next Command: the eighth move (I-19).
+# Catches: M-5 (the early kind), M-7 (indirectly, through the move).
+# --------------------------------------------------------------------------
+class TestAdvanceReturnsDeliveryUnrecordedForAnUnrecordedCandidate(unittest.TestCase):
+
+    def test_a_known_single_branch_candidate_withholds_dispatch(self):
+        move = _advance_with_candidates(_tasks(), {}, [_SINGLE_BRANCH_CANDIDATE])
+        self.assertEqual(
+            move["action"], "delivery-unrecorded",
+            "I-19: a merged delivery that maps to no sub-task, with no delivery record, must "
+            "answer delivery-unrecorded and not dispatch finished work. Got %r" % (move,))
+
+    def test_the_command_is_record_delivery_for_the_most_recent_known_candidate(self):
+        older = dict(_SINGLE_BRANCH_CANDIDATE, pr=381, merged_at="2026-10-02T12:00:00Z")
+        move = _advance_with_candidates(_tasks(), {}, [older, _SINGLE_BRANCH_CANDIDATE])
+        nc = pr_merged.next_command_for(move, "c-slug")
+        self.assertEqual(
+            nc["commands"], ["/pr-merged 383 --record-delivery"],
+            "I-19: the commands are exactly the record-delivery line for the MOST RECENTLY "
+            "merged known candidate. Got %r" % (nc,))
+        self.assertIn("383", nc["reason"], "the reason names every candidate")
+        self.assertIn("381", nc["reason"], "the reason names every candidate, the older one too")
+
+    def test_an_unknown_candidate_asks_for_a_plain_pr_merged_run_and_never_advance(self):
+        unknown = dict(_SINGLE_BRANCH_CANDIDATE, known=False)
+        move = _advance_with_candidates(_tasks(), {}, [unknown])
+        self.assertEqual(move["action"], "delivery-unrecorded",
+                         "I-19: GitHub could not be asked, so /advance is withheld. Got %r" % (move,))
+        nc = pr_merged.next_command_for(move, "c-slug")
+        self.assertEqual(nc["commands"], ["/pr-merged 383"],
+                         "I-19: with only an unknown candidate the command is a plain /pr-merged run")
+        self.assertFalse(any("/advance" in c for c in nc["commands"]),
+                         "I-19: delivery-unrecorded never offers /advance")
+
+    def test_an_early_candidate_leaves_advances_own_move_standing_M5(self):
+        early = dict(_SINGLE_BRANCH_CANDIDATE, kind="early")
+        move = _advance_with_candidates(_tasks(), {}, [early])
+        self.assertEqual(
+            move["action"], "dispatch",
+            "I-14 / M-5: a parent merged before its last sub-task landed is `early`; it never "
+            "fires delivery-unrecorded, so the sub-task still to do is dispatched. Got %r" % (move,))
+
+    def test_the_move_ranks_after_escalate_and_before_awaiting_merge(self):
+        failed = {"t1-a": {"status": "failed", "verified": "github"}}
+        escalate = _advance_with_candidates(_tasks(), failed, [_SINGLE_BRANCH_CANDIDATE])
+        self.assertEqual(escalate["action"], "escalate",
+                         "I-19: escalate is asked BEFORE delivery-unrecorded. Got %r" % (escalate,))
+        defect = _advance_with_candidates(
+            _tasks(), {}, [_SINGLE_BRANCH_CANDIDATE],
+            defects=[{"id": "t9-x", "reason": "no-files-but-names-an-agent"}])
+        self.assertEqual(defect["action"], "contract-defect",
+                         "I-19: contract-defect is asked first of all. Got %r" % (defect,))
+        waiting = mark_dispatched(new_state("c-slug", _tasks()), "t1-a", "task/c-slug/t1-a")
+        awaiting = _advance_with_candidates(_tasks(), {}, [_SINGLE_BRANCH_CANDIDATE], state=waiting)
+        self.assertEqual(awaiting["action"], "delivery-unrecorded",
+                         "I-19: delivery-unrecorded is asked BEFORE awaiting-merge. Got %r" % (awaiting,))
+
+    def test_complete_is_unchanged_when_every_record_is_on_the_default_branch(self):
+        recorded = {t.id: {"status": "completed", "verified": "github", "base_is_default": True}
+                    for t in _tasks()}
+        move = _advance_with_candidates(_tasks(), recorded, [_SINGLE_BRANCH_CANDIDATE])
+        self.assertEqual(
+            move["action"], "complete",
+            "I-19: delivery-unrecorded fires only while condition one does not hold; with every "
+            "sub-task recorded on the default branch the move is complete. Got %r" % (move,))
+        nc = pr_merged.next_command_for(move, "c-slug")
+        self.assertEqual(nc["commands"], ["/verify-before-done"],
+                         "I-19: the complete arm is untouched (the 2026-09-23 operator decision)")
+
+    def test_control_every_action_literal_advance_returns_is_in_the_closed_set(self):
+        # CONTROL (passes today): the structural half of the totality test. It reads the
+        # string literals advance() returns from its own source, so a ninth literal added
+        # without a member in ADVANCE_ACTIONS (and so without an arm) turns it red even
+        # when no scenario drives it.
+        literals = set(re.findall(r'"action":\s*"([a-z-]+)"', inspect.getsource(advance)))
+        self.assertTrue(literals, "fixture sanity: advance() must contain action literals")
+        self.assertTrue(
+            literals <= set(pr_merged.ADVANCE_ACTIONS),
+            "every action advance() can return must be a member of ADVANCE_ACTIONS; outside the "
+            "set: %r" % sorted(literals - set(pr_merged.ADVANCE_ACTIONS)))
+
+
+_NO_EVIDENCE = " — no structured evidence"
+
+
+def _split_term(line):
+    for term in ("\r\n", "\n"):
+        if line.endswith(term):
+            return line[:-len(term)], term
+    return line, ""
+
+
+def _checklist_states(res):
+    """text -> state from the report's completion.checklist."""
+    out = {}
+    for entry in res.completion.get("checklist") or []:
+        if isinstance(entry, dict):
+            out[entry.get("text")] = entry.get("state")
+    return out
+
+
+# --------------------------------------------------------------------------
+# Criterion 1: the flip, byte for byte (I-1, I-10).
+# Catches: M-10 (the repair path) in the half-done class below; this class
+# pins the four writes and that every other byte survives a mixed-ending file.
+# --------------------------------------------------------------------------
+class TestCompletionFlipsAnApprovedContractWhenNothingIsPending(unittest.TestCase):
+
+    def _mixed_world(self):
+        def contract_terms(i, line):
+            return "\r\n" if line.startswith("**Status:**") or i % 4 == 1 else "\n"
+
+        def brief_terms(i, line):
+            return "\r\n" if line == "- 2026-10-05: intake." or i % 5 == 0 else "\n"
+
+        world = _World(self,
+                       contract=_build_contract(pattern=contract_terms, unterminated_last=True),
+                       brief=_build_brief(pattern=brief_terms, unterminated_last=True))
+        return world.ready()
+
+    def test_the_flip_writes_exactly_the_four_i10_things_and_every_other_byte_survives(self):
+        world = self._mixed_world()
+        before = world.snapshot()
+        res = _drive(world, [])
+        after = world.snapshot()
+        self.assertEqual(
+            res.verdict, "flipped",
+            "I-10: every sub-task recorded on the default branch, no review, nothing declared: "
+            "the run must flip the contract. %s" % res.describe())
+
+        b_lines, a_lines = _lines_of(before[_CONTRACT_REL]), _lines_of(after[_CONTRACT_REL])
+        self.assertEqual(len(a_lines), len(b_lines) + 1,
+                         "I-10: the contract gains exactly ONE line, the Implemented line")
+        j = 0
+        for b in b_lines:
+            b_text, b_term = _split_term(b)
+            a = a_lines[j]
+            j += 1
+            if b_text.startswith("**Status:**"):
+                self.assertEqual(a, "**Status:** implemented" + b_term,
+                                 "I-10 write 1: only the Status value word changes, terminator kept")
+                implemented, impl_term = _split_term(a_lines[j])
+                j += 1
+                self.assertTrue(implemented.startswith("**Implemented:**"),
+                                "I-10 write 2: the Implemented line sits directly after the Status line")
+                self.assertEqual(impl_term, b_term,
+                                 "I-10: an inserted line takes the terminator of the line it follows (CRLF here)")
+                for piece in ("automatically, by pr_merged.py after", _pr_url(61), _pr_url(62),
+                              "owner confirmed resolved: none"):
+                    self.assertIn(piece, implemented, "I-10: the Implemented line carries %r" % piece)
+                self.assertRegex(implemented, r"\b5 with no structured evidence",
+                                 "I-10: <j> counts the lines left with no structured evidence")
+            elif b_text.startswith("- ["):
+                if _STATUS_FLIP_LINE in b_text:
+                    a_text, a_term = _split_term(a)
+                    self.assertTrue(a_text.startswith("- [x] `Status` flipped to `implemented`"),
+                                    "I-8: the line naming the Status flip is checked by the flip")
+                    self.assertEqual(a_term, b_term, "I-10 write 3 keeps each line's own terminator")
+                else:
+                    self.assertEqual(
+                        a, b_text + _NO_EVIDENCE + b_term,
+                        "I-8: a line no Gate Output supports is left unchecked and says "
+                        "'no structured evidence'; nothing else on the line or its terminator changes")
+            else:
+                self.assertEqual(a, b, "I-10: every untouched line keeps its own bytes and terminator: %r" % b)
+
+        b_brief, a_brief = before[_BRIEF_REL], after[_BRIEF_REL]
+        self.assertTrue(
+            a_brief.startswith(b_brief + b"\r\n"),
+            "I-10: the unterminated last line first gets the terminator of the line BEFORE it (CRLF "
+            "here, not the file's majority), and every earlier byte is untouched")
+        appended = a_brief[len(b_brief) + 2:].decode("utf-8").strip()
+        self.assertTrue(appended.startswith("- "), "I-10 write 4: one run-log bullet. Got %r" % appended)
+        self.assertIn(_RUN_LOG_MARKER, appended, "the run-log marker is how a re-run recognises its own line")
+        self.assertIn("owner confirmed resolved: none", appended)
+
+        self.assertEqual(
+            sorted((res.report or {}).get("written_files") or []), sorted([_CONTRACT_REL, _BRIEF_REL]),
+            "I-20: a flip lists exactly the two tracked files it wrote")
+        for rel, data in before.items():
+            if rel not in (_CONTRACT_REL, _BRIEF_REL):
+                self.assertEqual(after[rel], data, "nothing else may change: %s" % rel)
+
+    def test_dry_run_reports_would_flip_and_writes_nothing(self):
+        world = self._mixed_world()
+        before = world.snapshot()
+        res = _drive(world, ["--dry-run"])
+        self.assertEqual(res.verdict, "would-flip",
+                         "I-13: --dry-run evaluates everything and reports would-flip. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before, "I-13: a dry run writes nothing at all")
+        self.assertEqual((res.report or {}).get("written_files"), [],
+                         "I-20: a run that wrote nothing lists nothing")
+
+    def test_status_and_resume_report_not_evaluated_and_make_no_network_read(self):
+        for flag in ("--status", "--resume"):
+            with self.subTest(flag=flag):
+                world = self._mixed_world()
+                before = world.snapshot()
+                res = _drive(world, [flag])
+                self.assertEqual(
+                    res.verdict, "not-evaluated",
+                    "I-13: %s evaluates I-1 to I-3 only; with condition one met the verdict is "
+                    "not-evaluated. %s" % (flag, res.describe()))
+                nxt = res.completion.get("next") or {}
+                self.assertTrue(
+                    any("--dry-run" in c for c in nxt.get("commands") or []),
+                    "I-19: on not-evaluated the completion's own next is the --dry-run of the same "
+                    "contract. Got %r" % (nxt,))
+                self.assertEqual(world.snapshot(), before, "I-13: %s never writes" % flag)
+                for edge in ("fetch_default_branch", "list_review_files", "gh_issue_text"):
+                    self.assertFalse(getattr(res.spies, edge).called,
+                                     "I-13: %s reads nothing beyond I-1..I-3 and the I-14 reads (%s was called)"
+                                     % (flag, edge))
+
+    def test_human_output_prints_the_completion_line_before_the_final_next_command_line(self):
+        world = self._mixed_world()
+        res = _drive(world, ["--dry-run"], json_out=False)
+        lines = [l for l in res.out.splitlines() if l.strip()]
+        self.assertTrue(lines, "fixture sanity: the run must print something. %s" % res.describe())
+        indexes = [i for i, l in enumerate(lines) if l.startswith("completion: would-flip")]
+        self.assertEqual(
+            len(indexes), 1,
+            "I-19: the Completion Verdict is printed as its own line `completion: <verdict> - "
+            "<first reason>`. Printed: %r" % lines)
+        self.assertTrue(lines[-1].startswith("next command:"),
+                        "I-19: the Next Command line stays FINAL. Last line: %r" % lines[-1])
+        self.assertLess(indexes[0], len(lines) - 1,
+                        "I-19: the completion line comes BEFORE the Next Command line")
+
+
+# --------------------------------------------------------------------------
+# I-1: only `approved` flips (M-1: the gate accepts anything but `draft`).
+# --------------------------------------------------------------------------
+class TestOnlyApprovedFlips(unittest.TestCase):
+
+    def test_every_other_status_leaves_both_files_untouched_and_names_why(self):
+        cases = (
+            ("**Status:** draft", "not-eligible"),
+            ("**Status:** rejected", "not-eligible"),
+            ("**Status:** superseded by 2026-10-06-other", "not-eligible"),
+            ("**Status:** not approved yet", "not-eligible"),
+            (None, "not-eligible"),
+            ("**Status:** implemented", "already-implemented"),
+        )
+        for status_line, expected in cases:
+            with self.subTest(status=status_line):
+                world = _World(self, contract=_build_contract(status_line=status_line)).ready()
+                before = world.snapshot()
+                res = _drive(world, [])
+                self.assertEqual(
+                    res.verdict, expected,
+                    "I-1: Status %r must give %s and write nothing. %s"
+                    % (status_line, expected, res.describe()))
+                self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL],
+                                 "I-1: the contract is byte-identical")
+                self.assertEqual(world.get(_BRIEF_REL), before[_BRIEF_REL],
+                                 "I-1: the brief is byte-identical, no run-log line")
+                self.assertNotIn(_CONTRACT_REL, (res.report or {}).get("written_files") or [],
+                                 "I-20: nothing was written, so nothing is listed")
+
+
+class TestSecondRunIsANoOp(unittest.TestCase):
+
+    def test_a_flipped_contract_flips_nothing_the_second_time_and_the_log_gains_no_second_line(self):
+        world = _World(self).ready()
+        first = _drive(world, [])
+        self.assertEqual(first.verdict, "flipped", "fixture: the first run must flip. %s" % first.describe())
+        after_first = {rel: world.get(rel) for rel in (_CONTRACT_REL, _BRIEF_REL)}
+        second = _drive(world, [])
+        self.assertEqual(second.verdict, "already-implemented",
+                         "I-1: a second run on a flipped contract is a no-op. %s" % second.describe())
+        for rel, data in after_first.items():
+            self.assertEqual(world.get(rel), data, "I-1: the second run changes no byte of %s" % rel)
+        self.assertEqual(_marker_count(world.get(_BRIEF_REL)), 1,
+                         "I-10: exactly one run-log line carries the marker after two runs")
+
+
+# --------------------------------------------------------------------------
+# Criterion 2 and 8: each condition named, and nothing flips on a partial.
+# --------------------------------------------------------------------------
+class TestPartialMergeNeverFlips(unittest.TestCase):
+
+    def test_one_of_two_sub_tasks_recorded_is_pending_on_the_delivered_condition_with_no_network_read(self):
+        world = _World(self)
+        world.record("t1-backend", 61)
+        before = world.snapshot()
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "pending",
+                         "I-2: a sub-task with no record leaves condition one unmet. %s" % res.describe())
+        self.assertEqual(self._cond(res, "delivered"), "unmet")
+        reasons = res.completion.get("reasons") or []
+        self.assertTrue(
+            any(isinstance(r, dict) and r.get("condition") == "delivered" and "t2-frontend" in json.dumps(r)
+                for r in reasons),
+            "criterion 2: the reason names the condition AND the sub-task still to deliver. Got %r" % (reasons,))
+        self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL], "the contract stays approved")
+        for edge in ("fetch_default_branch", "list_review_files", "gh_issue_text"):
+            self.assertFalse(getattr(res.spies, edge).called,
+                             "I-3: condition one is decided from records alone; %s must not be called" % edge)
+
+    def _cond(self, res, name):
+        return res.conditions.get(name)
+
+
+class TestCompletionNamesTheFailedCondition(unittest.TestCase):
+
+    def _assert_pending(self, res, world, before, condition):
+        self.assertEqual(res.verdict, "pending", "criterion 2: %s unmet must leave it pending. %s"
+                         % (condition, res.describe()))
+        self.assertEqual(res.conditions.get(condition), "unmet",
+                         "criterion 2: the failed condition is named: %s" % condition)
+        self.assertTrue(
+            any(isinstance(r, dict) and r.get("condition") == condition
+                for r in res.completion.get("reasons") or []),
+            "criterion 2: reasons carries an entry for %s" % condition)
+        self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL],
+                         "a failed condition leaves the contract `approved`, byte for byte")
+
+    def test_condition_one_a_record_on_a_parent_branch_is_named_with_the_sub_task(self):
+        world = _World(self)
+        world.record("t1-backend", 61, base_is_default=False)
+        world.record("t2-frontend", 62)
+        before = world.snapshot()
+        res = _drive(world, [])
+        self._assert_pending(res, world, before, "delivered")
+        self.assertIn("t1-backend", json.dumps(res.completion.get("reasons")),
+                      "I-2: the reason names every record not on the default branch")
+        self.assertEqual(res.conditions.get("reviews"), "not-evaluated",
+                         "I-3: when condition one fails nothing further is read")
+        self.assertEqual(res.conditions.get("disclosures"), "not-evaluated")
+
+    def test_condition_one_a_record_with_no_base_flag_reads_as_base_unknown(self):
+        world = _World(self)
+        world.record("t1-backend", 61, base_is_default=None)
+        world.record("t2-frontend", 62)
+        before = world.snapshot()
+        res = _drive(world, [])
+        self._assert_pending(res, world, before, "delivered")
+        self.assertIn("t1-backend", json.dumps(res.completion.get("reasons")),
+                      "Data Shapes: a record that predates the base flag reads as 'base unknown', never as the default branch")
+
+    def test_condition_two_an_effective_blocked_report_names_the_report_to_confirm(self):
+        world = _World(self).ready()
+        world.review("t3-review-acme-reviewer.md", verdict="blocked")
+        before = world.snapshot()
+        res = _drive(world, [])
+        self._assert_pending(res, world, before, "reviews")
+        self.assertEqual(res.completion.get("owner_confirmation_needed"), ["t3-review-acme-reviewer.md"],
+                         "I-7: the confirmation list names the blocked report by file name")
+
+    def test_condition_two_a_declared_review_artefact_absent_at_the_default_branch_blocks(self):
+        world = _World(self, contract=_build_contract(review_block=True))
+        world.record("t1-backend", 61)
+        world.record("t2-frontend", 62)
+        world.record("t3-review", 63)
+        before = world.snapshot()
+        res = _drive(world, [], gates=("acme-reviewer",))
+        self._assert_pending(res, world, before, "reviews")
+        self.assertIn("t3-review-acme-reviewer.md", json.dumps(res.completion.get("reasons")),
+                      "I-7(b): the review never ran -- the reason names the missing declared artefact")
+
+    def test_condition_three_a_declared_skip_with_no_disclosure_line_lists_the_exact_line(self):
+        world = _World(self, contract=_build_contract(tracking=372)).ready()
+        before = world.snapshot()
+        res = _drive(world, ["--skipped", "full-suite rerun"], issue_text="nothing relevant here")
+        self._assert_pending(res, world, before, "disclosures")
+        self.assertEqual(
+            res.completion.get("disclosure_lines_missing"),
+            ["Not performed (%s): full-suite rerun" % _SLUG],
+            "I-9: the missing Disclosure line is listed word for word, ready to post")
+
+
+class TestParentPullRequestKinds(unittest.TestCase):
+    """I-14 kinds `parent` and `early`, and what each does to the move and to G-1. Catches: M-5."""
+
+    def _parent_world(self, last_subtask_merged_at):
+        world = _World(self)
+        world.record("t1-backend", 61, base_is_default=False, merged_at="2026-10-01T09:00:00Z")
+        if last_subtask_merged_at is not None:
+            world.record("t2-frontend", 62, base_is_default=False, merged_at=last_subtask_merged_at)
+        return world
+
+    def _parent_pr(self, merged_at):
+        return {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH, merged_at=merged_at)}
+
+    def test_a_parent_merged_before_its_last_sub_task_is_early_and_leaves_dispatch_standing(self):
+        world = self._parent_world(None)
+        res = _drive(world, ["--status"], prs=self._parent_pr("2026-10-03T12:00:00Z"))
+        kinds = [c.get("kind") for c in (res.report or {}).get("delivery_candidates") or []]
+        self.assertEqual(kinds, ["early"],
+                         "I-14: one sub-task has no record, so the merged parent is `early`. %s" % res.describe())
+        self.assertEqual(
+            ((res.report or {}).get("next_move") or {}).get("action"), "dispatch",
+            "I-14 / M-5: an early candidate never fires delivery-unrecorded; the sub-task still to "
+            "do is dispatched. %s" % res.describe())
+        reason_text = json.dumps(res.completion.get("reasons"))
+        self.assertIn(str(_BRIEF_PR_NUMBER), reason_text,
+                      "I-14: condition one's reason names the early candidate")
+
+    def test_record_delivery_refuses_an_early_candidate_at_g1_and_writes_nothing(self):
+        world = self._parent_world(None)
+        before = world.snapshot()
+        res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)],
+                     prs=self._parent_pr("2026-10-03T12:00:00Z"))
+        self.assertEqual(res.exit_code, 9, "I-15: a refusal is exit 9. %s" % res.describe())
+        self.assertEqual((res.report or {}).get("guard"), "G-1",
+                         "I-14: an `early` candidate never passes G-1. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before, "a refused delivery writes nothing")
+
+    def test_a_parent_merged_after_every_sub_task_is_kind_parent(self):
+        world = self._parent_world("2026-10-02T09:00:00Z")
+        res = _drive(world, ["--status"], prs=self._parent_pr("2026-10-03T12:00:00Z"))
+        kinds = [c.get("kind") for c in (res.report or {}).get("delivery_candidates") or []]
+        self.assertEqual(kinds, ["parent"],
+                         "I-14: every sub-task has a record and the parent merged after the last. %s"
+                         % res.describe())
+        self.assertEqual(
+            ((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded",
+            "I-19: a recordable parent withholds /advance until its delivery is recorded")
+
+    def test_a_parent_merged_before_the_last_recorded_sub_task_is_early(self):
+        world = self._parent_world("2026-10-04T09:00:00Z")
+        res = _drive(world, ["--status"], prs=self._parent_pr("2026-10-03T12:00:00Z"))
+        kinds = [c.get("kind") for c in (res.report or {}).get("delivery_candidates") or []]
+        self.assertEqual(kinds, ["early"],
+                         "I-14: the candidate's merged_at is earlier than a sub-task record that is not on "
+                         "the default branch, so it merged before that sub-task landed. %s" % res.describe())
+
+
+class TestUnreadableReportWarnsButNeverBlocks(unittest.TestCase):
+
+    def test_unreadable_reports_and_gate_outputs_are_warnings_and_the_flip_still_happens(self):
+        world = _World(self).ready()
+        world.review("t3-pass.md", verdict="pass", gate=_gate([]))
+        world.review("t3b-prose.md", verdict="pass-with-findings. In the reviewer scale this is FIX THEN SHIP")
+        world.review("t3c-none.md", verdict=None)
+        world.review("t3d-badgate.md", verdict="pass", gate="{ this is not json")
+        res = _drive(world, [])
+        self.assertEqual(
+            res.verdict, "flipped",
+            "I-7: an unreadable report and an unreadable Gate Output are listed and never block. %s"
+            % res.describe())
+        warned = {w.get("file") for w in res.completion.get("review_warnings") or [] if isinstance(w, dict)}
+        for name in ("t3b-prose.md", "t3c-none.md", "t3d-badgate"):
+            self.assertTrue(
+                any(name in (w or "") for w in warned),
+                "I-5 / I-7: %s must be listed in review_warnings. Warned about %r" % (name, sorted(warned)))
+        self.assertEqual(res.completion.get("owner_confirmation_needed") or [], [],
+                         "warnings are not blockers, so nothing needs the owner")
+
+
+class TestOwnerResolvedClearsOnlyAnEffectiveBlockedReport(unittest.TestCase):
+    """Catches: M-2 (a blocked report counts as resolved with no superseding Gate Output and no flag)."""
+
+    BLOCKED = "t4-test-review-acme-critic.md"
+
+    def _world(self):
+        world = _World(self).ready()
+        world.review(self.BLOCKED, verdict="blocked")
+        return world
+
+    def test_blocked_with_no_flag_stays_pending(self):
+        world = self._world()
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "pending", "I-7(a): an effective blocked report blocks. %s" % res.describe())
+        self.assertEqual(res.completion.get("owner_confirmation_needed"), [self.BLOCKED])
+
+    def test_the_owner_flag_clears_it_and_the_flip_records_the_confirmation(self):
+        world = self._world()
+        res = _drive(world, ["--owner-resolved", self.BLOCKED])
+        self.assertEqual(res.verdict, "flipped",
+                         "I-7: --owner-resolved names the blocked report and the run flips. %s" % res.describe())
+        contract = world.get(_CONTRACT_REL).decode("utf-8")
+        self.assertRegex(contract, r"\*\*Implemented:\*\*[^\n]*owner confirmed resolved: [^\n]*"
+                         + re.escape(self.BLOCKED),
+                         "I-10: the Implemented line records which report the owner confirmed")
+        self.assertIn("owner confirmed resolved: " + self.BLOCKED, world.get(_BRIEF_REL).decode("utf-8"),
+                      "I-10: the run-log line records the confirmation too")
+
+    def test_naming_a_report_that_is_not_an_effective_blocked_one_exits_2(self):
+        world = _World(self).ready()
+        world.review("t3-pass.md", verdict="pass")
+        before = world.snapshot()
+        res = _drive(world, ["--owner-resolved", "t3-pass.md"])
+        self.assertEqual(res.exit_code, 2, "I-7: a confirmation that matches nothing is refused. %s" % res.describe())
+        self.assertEqual((res.report or {}).get("error"), "owner-resolved-not-blocked", res.describe())
+        self.assertEqual(world.snapshot(), before, "a refused run writes nothing")
+
+    def test_a_blocked_report_superseded_by_a_later_gate_output_needs_no_flag(self):
+        world = self._world()
+        world.review("t4b-rerun-acme-critic.md", verdict="pass", gate=_gate([], supersedes=[self.BLOCKED]))
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped",
+                         "I-6: a Gate Output naming the blocked report in `supersedes` makes it not effective. %s"
+                         % res.describe())
+
+    def test_a_supersession_loop_or_a_name_matching_no_file_supersedes_nothing(self):
+        loop = self._world()
+        loop.review("t5-a.md", verdict="pass", gate=_gate([], supersedes=[self.BLOCKED, "t5-b.md"]))
+        loop.review("t5-b.md", verdict="pass", gate=_gate([], supersedes=["t5-a.md"]))
+        ghost = self._world()
+        ghost.review("t5-ghost.md", verdict="pass", gate=_gate([], supersedes=["no-such-report.md"]))
+        for label, world in (("loop", loop), ("ghost", ghost)):
+            with self.subTest(case=label):
+                res = _drive(world, [])
+                self.assertEqual(
+                    res.verdict, "pending",
+                    "I-6: a supersession loop or an unknown name is a warning and supersedes nothing, so "
+                    "the blocked report stays effective. %s" % res.describe())
+                self.assertTrue(res.completion.get("review_warnings"),
+                                "I-6: the anomaly is listed in review_warnings")
+
+
+class TestReviewsAreReadOnceAtTheDefaultBranch(unittest.TestCase):
+    """I-4: one source, read once, after one fetch. The working tree and the records' own verdicts never compete."""
+
+    def test_one_fetch_one_listing_at_origin_and_the_working_tree_is_not_consulted(self):
+        world = _World(self).ready()
+        world.review("t3-pass.md", verdict="pass")
+        # A blocked report that exists only in the working tree, never at origin, must not count.
+        world.review("t9-local-only.md", verdict="blocked", publish=False)
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped",
+                         "I-4: reviews are read at origin/<default>; a file absent there is not a report. %s"
+                         % res.describe())
+        self.assertEqual(res.spies.fetch_default_branch.call_args_list, [mock.call("master")],
+                         "I-4: exactly one `git fetch origin <default>` per evaluation")
+        self.assertEqual(res.spies.list_review_files.call_args_list, [mock.call("origin/master", _SLUG)],
+                         "I-4: one listing of the slug's folder at origin/<default>")
+
+    def test_a_stale_blocked_verdict_stamped_on_a_record_does_not_compete(self):
+        world = _World(self)
+        world.record("t1-backend", 61, review_verdict="blocked")
+        world.record("t2-frontend", 62)
+        world.review("t3-pass.md", verdict="pass")
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped",
+                         "I-4: the review_verdict a record carries governs release only and is never "
+                         "consulted by condition two. %s" % res.describe())
+
+
+# --------------------------------------------------------------------------
+# I-8: the checklist, filled from Gate Outputs only. Catches: M-3
+# (partly-met counted as evidence).
+# --------------------------------------------------------------------------
+class TestChecklistFillReadsOnlyGateOutputs(unittest.TestCase):
+
+    REPORT = "t3-review-acme-reviewer.md"
+
+    def _line(self, world, text):
+        return _checklist_line(world.get(_CONTRACT_REL), text)
+
+    def test_each_outcome_gives_its_own_state_and_suffix(self):
+        c = _CHECKLIST_LINES
+        world = _World(self, contract=_build_contract(checked=(3,))).ready()
+        world.review(self.REPORT, verdict="pass-with-findings", gate=_gate([
+            (c[0], "met"), (c[1], "partly-met"), (c[2], "not-applicable")]),
+            body="%s. Met, in prose only." % c[4])
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped", res.describe())
+        path = ".claude/reviews/%s/%s" % (_SLUG, self.REPORT)
+        line0 = self._line(world, c[0])
+        self.assertTrue(line0.startswith("- [x] "), "I-8: `met` in an effective report's Gate Output checks the line")
+        self.assertIn("evidence: " + path, line0, "I-8: the checked line names its evidence")
+        line1 = self._line(world, c[1])
+        self.assertTrue(line1.startswith("- [ ] "), "M-3: `partly-met` is NOT evidence; the line stays unchecked")
+        self.assertIn("partly-met (%s)" % path, line1, "I-8: reported-short names the outcome and the report")
+        line2 = self._line(world, c[2])
+        self.assertTrue(line2.startswith("- [ ] "))
+        self.assertIn("not applicable (%s)" % path, line2)
+        line3 = self._line(world, c[3])
+        self.assertTrue(line3.startswith("- [x] "), "I-8: a line already checked by hand is never unchecked")
+        self.assertNotIn("no structured evidence", line3, "a hand-checked line gets no suffix")
+        line4 = self._line(world, c[4])
+        self.assertTrue(line4.startswith("- [ ] "))
+        self.assertTrue(line4.endswith(_NO_EVIDENCE),
+                        "I-8 / criterion 4: a line the reports support only in prose reads 'no structured "
+                        "evidence', never 'not performed'. Got %r" % line4)
+        states = _checklist_states(res)
+        self.assertEqual(
+            [states.get(t) for t in c],
+            ["checked-by-evidence", "reported-short", "not-applicable", "checked-before",
+             "no-evidence", "checked-by-flip"],
+            "I-8: the six Checklist Line States, in checklist order")
+
+    def test_evidence_from_a_blocked_or_a_superseded_report_is_not_evidence(self):
+        c = _CHECKLIST_LINES
+        world = _World(self).ready()
+        world.review("t4-blocked.md", verdict="blocked", gate=_gate([(c[0], "met")]))
+        world.review("t4b-old.md", verdict="pass", gate=_gate([(c[1], "met")]))
+        world.review("t4c-new.md", verdict="pass", gate=_gate([], supersedes=["t4b-old.md"]))
+        res = _drive(world, ["--owner-resolved", "t4-blocked.md"])
+        self.assertEqual(res.verdict, "flipped", res.describe())
+        for text in (c[0], c[1]):
+            line = self._line(world, text)
+            self.assertTrue(line.startswith("- [ ] "),
+                            "I-8: only an EFFECTIVE pass / pass-with-findings report can check a line "
+                            "(blocked-but-owner-resolved and superseded sources cannot). Got %r" % line)
+            self.assertIn("no structured evidence", line)
+
+
+# --------------------------------------------------------------------------
+# Condition three and criterion 3 (I-9). Catches: M-11 (every no-evidence
+# line counted as undisclosed).
+# --------------------------------------------------------------------------
+class TestDisclosedCaveatDoesNotBlockTheFlip(unittest.TestCase):
+
+    def test_a_declared_and_disclosed_skip_flips_and_the_line_reads_not_performed(self):
+        world = _World(self, contract=_build_contract(tracking=372)).ready()
+        disclosure = "Not performed (%s): %s" % (_SLUG, _MANUAL_LINE)
+        res = _drive(world, ["--skipped", _MANUAL_LINE], issue_text="Posted by the owner:\n" + disclosure)
+        self.assertEqual(res.verdict, "flipped",
+                         "criterion 3: a disclosed caveat does not block. %s" % res.describe())
+        manual = _checklist_line(world.get(_CONTRACT_REL), _MANUAL_LINE)
+        self.assertTrue(manual.startswith("- [ ] "), "I-8: a not-performed line stays unchecked")
+        self.assertTrue(manual.endswith(" — not performed (disclosed on #372)"),
+                        "criterion 3: the line says it was not performed and where. Got %r" % manual)
+        others = [t for t in _CHECKLIST_LINES if t not in (_MANUAL_LINE, _STATUS_FLIP_LINE)]
+        for text in others:
+            self.assertTrue(_checklist_line(world.get(_CONTRACT_REL), text).endswith(_NO_EVIDENCE),
+                            "I-8: every other undeclared line says 'no structured evidence'")
+        self.assertEqual([str(c.args[0]) for c in res.spies.gh_issue_text.call_args_list], ["372"],
+                         "I-9: the Tracking Issue is read once")
+        self.assertIn("not performed (disclosed on #372): " + _MANUAL_LINE,
+                      world.get(_CONTRACT_REL).decode("utf-8"),
+                      "I-10: the Implemented line carries the declared text")
+
+    def test_a_declared_text_matching_no_checklist_line_is_still_disclosed_and_recorded(self):
+        world = _World(self, contract=_build_contract(tracking=372)).ready()
+        res = _drive(world, ["--skipped", "full-suite rerun"],
+                     issue_text="Not performed (%s): full-suite rerun" % _SLUG)
+        self.assertEqual(res.verdict, "flipped", res.describe())
+        contract = world.get(_CONTRACT_REL).decode("utf-8")
+        self.assertIn("full-suite rerun", contract.split("## Implementation Handoff")[0],
+                      "I-9: the text is recorded in the Implemented line")
+        self.assertNotIn("not performed (disclosed", contract.split("## Review checklist")[1],
+                         "I-9: it marks no checklist line")
+
+
+class TestUndeclaredLinesNeverBlockAndAreNeverCalledNotPerformed(unittest.TestCase):
+
+    def test_nothing_declared_means_no_issue_read_no_block_and_no_not_performed_wording(self):
+        world = _World(self).ready()
+        res = _drive(world, [])
+        self.assertEqual(
+            res.verdict, "flipped",
+            "I-9 / M-11: condition three counts only DECLARED skips; five lines with no evidence "
+            "must not block. %s" % res.describe())
+        self.assertFalse(res.spies.gh_issue_text.called,
+                         "I-9: nothing declared means condition three holds at once, with no network read")
+        checklist_part = world.get(_CONTRACT_REL).decode("utf-8").split("## Review checklist")[1]
+        self.assertNotIn("not performed", checklist_part.lower(),
+                         "I-8: a line nobody declared is never called 'not performed'")
+        self.assertEqual(checklist_part.count("no structured evidence"), 5)
+
+
+class TestNoTrackingIssueBlocksOnlyWhenSomethingIsNotPerformed(unittest.TestCase):
+
+    def test_the_tracking_issue_is_found_from_the_header_else_the_stubs(self):
+        header = _World(self, contract=_build_contract(tracking=372)).ready()
+        stubs = _World(self).ready()
+        stubs.followup("2026-10-05-one", 372)
+        stubs.followup("2026-10-05-two", 372)
+        for label, world, source in (("header", header, "header"), ("stubs", stubs, "stubs")):
+            with self.subTest(source=label):
+                res = _drive(world, ["--dry-run"])
+                self.assertEqual(res.completion.get("tracking_issue"), {"number": 372, "source": source},
+                                 "I-18: the Tracking Issue and where it came from. %s" % res.describe())
+
+    def test_two_numbers_or_a_disagreement_is_ambiguous_and_blocks_a_declared_skip_only(self):
+        both = _World(self, contract=_build_contract(tracking=372)).ready()
+        both.followup("2026-10-05-other", 373)
+        two_stubs = _World(self).ready()
+        two_stubs.followup("2026-10-05-a", 372)
+        two_stubs.followup("2026-10-05-b", 373)
+        none = _World(self).ready()
+        for label, world, source in (("header+stub", both, "ambiguous"), ("two stubs", two_stubs, "ambiguous"),
+                                     ("none", none, "none")):
+            with self.subTest(case=label):
+                res = _drive(world, ["--dry-run"])
+                self.assertEqual((res.completion.get("tracking_issue") or {}).get("source"), source,
+                                 "I-18. %s" % res.describe())
+                self.assertEqual(res.verdict, "would-flip",
+                                 "I-9: with nothing declared a missing or ambiguous Tracking Issue blocks nothing")
+                declared = _drive(world, ["--dry-run", "--skipped", "full-suite rerun"])
+                self.assertEqual(declared.verdict, "pending",
+                                 "I-9: a declared skip needs a Tracking Issue; none or ambiguous is pending. %s"
+                                 % declared.describe())
+                self.assertIn("tracking issue", json.dumps(declared.completion.get("reasons")).lower(),
+                              "the reason says why: no usable Tracking Issue")
+
+
+class TestNotApplicableNeedsNoDisclosure(unittest.TestCase):
+
+    def test_a_not_applicable_outcome_flips_with_nothing_declared_and_reads_not_applicable(self):
+        world = _World(self).ready()
+        world.review("t3-pass.md", verdict="pass", gate=_gate([(_MANUAL_LINE, "not-applicable")]))
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped", res.describe())
+        line = _checklist_line(world.get(_CONTRACT_REL), _MANUAL_LINE)
+        self.assertIn("not applicable (.claude/reviews/%s/t3-pass.md)" % _SLUG, line)
+        self.assertNotIn("not performed", line)
+        self.assertNotIn("no structured evidence", line)
+
+
+# --------------------------------------------------------------------------
+# Criterion 5: the run log (I-10), and linkage (I-17).
+# --------------------------------------------------------------------------
+class TestTheFlipAppendsOneRunLogEntry(unittest.TestCase):
+
+    def test_one_entry_under_run_log_and_a_second_run_appends_nothing(self):
+        world = _World(self).ready()
+        _drive(world, [])
+        brief = world.get(_BRIEF_REL).decode("utf-8")
+        self.assertEqual(brief.count(_RUN_LOG_MARKER), 1,
+                         "criterion 5: exactly one run-log line carries the marker")
+        self.assertTrue(brief.index("## Run log") < brief.index(_RUN_LOG_MARKER),
+                        "the entry sits under the existing ## Run log heading")
+        _drive(world, [])
+        self.assertEqual(_marker_count(world.get(_BRIEF_REL)), 1, "I-10: a second run appends nothing")
+
+    def test_a_brief_with_no_run_log_heading_gains_the_heading_and_the_line_at_the_end(self):
+        world = _World(self, brief=_build_brief(run_log=False)).ready()
+        original = world.get(_BRIEF_REL)
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped", res.describe())
+        brief = world.get(_BRIEF_REL)
+        self.assertTrue(brief.startswith(original.rstrip(b"\r\n")),
+                        "I-10: the original content is untouched; the heading and line are appended after it")
+        tail = brief[len(original.rstrip(b"\r\n")):].decode("utf-8")
+        self.assertEqual(tail.count("## Run log"), 1, "I-10: the heading is appended once")
+        self.assertEqual(tail.count(_RUN_LOG_MARKER), 1)
+        self.assertLess(tail.index("## Run log"), tail.index(_RUN_LOG_MARKER))
+
+    def test_no_linked_brief_still_flips_and_says_no_run_log_was_written(self):
+        world = _World(self, contract=_build_contract(brief_header=False), with_brief=False).ready()
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped",
+                         "I-10: with no brief linked the flip still happens. %s" % res.describe())
+        self.assertIn("no run log", json.dumps(res.report, default=str).lower(),
+                      "I-10: the report says no run log was written")
+        self.assertEqual((res.report or {}).get("written_files"), [_CONTRACT_REL],
+                         "I-20: only the contract was written")
+
+
+class TestTheBriefIsFoundByHeaderThenByFrontmatter(unittest.TestCase):
+
+    def test_a_contract_without_the_header_finds_the_one_brief_whose_frontmatter_names_it(self):
+        world = _World(self, contract=_build_contract(brief_header=False), with_brief=False).ready()
+        world.put(_BRIEF_REL, _build_brief())
+        world.publish(_BRIEF_REL)
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped", res.describe())
+        self.assertEqual(_marker_count(world.get(_BRIEF_REL)), 1,
+                         "I-17: the brief whose frontmatter `contract:` names this contract is the linked one")
+
+    def test_two_briefs_naming_the_contract_mean_no_linkage(self):
+        world = _World(self, contract=_build_contract(brief_header=False), with_brief=False).ready()
+        for name in ("one", "two"):
+            rel = ".claude/work-items/2026-10-05-%s.md" % name
+            world.put(rel, _build_brief())
+            world.publish(rel)
+        before = world.snapshot()
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped", res.describe())
+        for rel in ("2026-10-05-one", "2026-10-05-two"):
+            full = ".claude/work-items/%s.md" % rel
+            self.assertEqual(world.get(full), before[full],
+                             "I-17: more than one candidate brief means no linkage, so neither is written")
+
+
+# --------------------------------------------------------------------------
+# I-10 / I-11: the repairable half-done flip and the merged-copy rule.
+# Catches: M-10 (the marker exception dropped).
+# --------------------------------------------------------------------------
+class TestFlipHalfDoneIsRepairedByARerun(unittest.TestCase):
+
+    def test_a_failed_contract_write_leaves_a_marker_in_the_brief_and_the_rerun_finishes(self):
+        world = _World(self).ready()
+        original_contract = world.get(_CONTRACT_REL)
+        seen = {"raised": False}
+
+        def failing_replace(real, src, dst):
+            if str(dst).replace("\\", "/").endswith(_CONTRACT_REL) and not seen["raised"]:
+                seen["raised"] = True
+                raise OSError("simulated failure after the brief was written")
+            return real(src, dst)
+
+        first = _drive(world, [], replace_hook=failing_replace)
+        self.assertTrue(seen["raised"], "fixture sanity: the flip must replace the contract through os.replace")
+        self.assertEqual(first.verdict, "pending", first.describe())
+        self.assertTrue(first.says("write-failed"), "I-10: reason `write-failed`. %s" % first.describe())
+        self.assertEqual(world.get(_CONTRACT_REL), original_contract, "the contract is still `approved`")
+        self.assertEqual(world.under(".claude/concepts"), [_CONTRACT_REL],
+                         "N-1: a failed replace leaves no temporary file beside the contract")
+        self.assertEqual(_marker_count(world.get(_BRIEF_REL)), 1,
+                         "I-10: the brief was written first and holds exactly one marker line")
+
+        second = _drive(world, [])
+        self.assertEqual(
+            second.verdict, "flipped",
+            "I-11 / M-10: the brief differs from origin by exactly the marker line and its heading, "
+            "which the one exception allows, so the re-run finishes the flip. %s" % second.describe())
+        self.assertIn(b"**Status:** implemented", world.get(_CONTRACT_REL))
+        self.assertEqual(world.under(".claude/concepts"), [_CONTRACT_REL],
+                         "N-1: the concepts folder holds only the contract after the repair too")
+        self.assertEqual(_marker_count(world.get(_BRIEF_REL)), 1,
+                         "I-10: the re-run appends nothing, the brief still holds ONE marker line")
+
+    def test_a_brief_that_differs_by_a_marker_line_and_one_other_line_is_not_current(self):
+        world = _World(self).ready()
+        brief = world.get(_BRIEF_REL).decode("utf-8")
+        world.put(_BRIEF_REL, brief + "- 2026-10-05: %s\n- 2026-10-06: an unrelated hand edit\n" % _RUN_LOG_MARKER)
+        before = world.snapshot()
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "pending", res.describe())
+        self.assertTrue(res.says("brief-not-current"), "I-11: any other difference fails. %s" % res.describe())
+        self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL], "nothing is flipped")
+
+
+class TestFlipRunsOnlyOnTheMergedCopy(unittest.TestCase):
+
+    def test_a_working_contract_that_differs_from_origin_is_not_current(self):
+        world = _World(self).ready()
+        world.put(_CONTRACT_REL, world.get(_CONTRACT_REL) + b"A local edit nobody merged.\n")
+        before = world.snapshot()
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "pending", res.describe())
+        self.assertTrue(res.says("contract-not-current"), "I-11. %s" % res.describe())
+        self.assertIn("flat worktree", json.dumps(res.completion.get("reasons")),
+                      "I-20: the remedy says to run again in a flat worktree cut fresh from origin/<default>")
+        self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL])
+
+    def test_a_working_brief_that_differs_from_origin_is_not_current(self):
+        world = _World(self).ready()
+        world.put(_BRIEF_REL, world.get(_BRIEF_REL) + b"- 2026-10-06: edited after the merge\n")
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "pending", res.describe())
+        self.assertTrue(res.says("brief-not-current"), "I-11. %s" % res.describe())
+
+    def test_control_line_endings_and_trailing_terminators_are_ignored(self):
+        # POSITIVE CONTROL for the two tests above: the same files differing from origin ONLY
+        # by line endings and trailing terminators are current, so those two measure the real
+        # difference and not the folding.
+        world = _World(self).ready()
+        crlf = world.get(_CONTRACT_REL).replace(b"\n", b"\r\n").rstrip(b"\r\n")
+        world.put(_CONTRACT_REL, crlf)
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped",
+                         "I-11: line endings folded and trailing terminators ignored. %s" % res.describe())
+
+
+# --------------------------------------------------------------------------
+# I-20: written_files lists tracked files only.
+# --------------------------------------------------------------------------
+class TestWrittenFilesListsOnlyTrackedFiles(unittest.TestCase):
+
+    def test_the_state_file_is_written_in_the_tree_but_never_listed(self):
+        world = _World(self).ready()
+        res = _drive(world, [])
+        state_files = world.under(".claude/orchestrator/state")
+        self.assertTrue(state_files, "fixture sanity: a writing run still writes the state store in its own tree")
+        listed = (res.report or {}).get("written_files")
+        self.assertIsInstance(listed, list, "I-20: the report carries written_files. %s" % res.describe())
+        for rel in listed or []:
+            self.assertTrue(rel.startswith(".claude/"), "I-20: every entry sits under .claude/: %s" % rel)
+            self.assertNotIn("/orchestrator/state/", rel, "I-20: the state store is git-ignored and never listed")
+        self.assertEqual(sorted(listed or []), sorted([_CONTRACT_REL, _BRIEF_REL]))
+
+
+def _yaml(world, rel):
+    return yaml.safe_load(world.get(rel).decode("utf-8"))
+
+
+def _results(world, name):
+    return "%s/%s" % (world.results_rel, name)
+
+
+def _delivery_world(case, *, contract=None, brief=None):
+    """Two sub-tasks, a brief that names pull request 50, and a blocked review so a recording
+    run never also flips (the flip has its own tests)."""
+    world = _World(case, contract=contract, brief=brief)
+    world.review("t9-block.md", verdict="blocked")
+    return world
+
+
+def _brief_pr_map():
+    return {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH)}
+
+
+# --------------------------------------------------------------------------
+# I-12: exit 10 has one meaning -- GitHub could not be verified and the run
+# wrote nothing. Catches: M-6 (preflight after the writes), M-9 (preflight
+# extended to --dispatch).
+# --------------------------------------------------------------------------
+class TestGithubUnverifiableHaltsBeforeAnyWrite(unittest.TestCase):
+
+    def _prs(self):
+        return {7: _pr(7, "task/%s/t1-backend" % _SLUG)}
+
+    def test_control_with_the_preflight_true_a_record_is_written(self):
+        # POSITIVE CONTROL (passes today): the same fixture with GitHub signed in writes the
+        # record, so the zero-write assertion below measures a real guard (M-6).
+        world = _World(self, brief=_build_brief(pr="none"))
+        res = _drive(world, ["--pr", "7"], prs=self._prs(), authenticated=True)
+        self.assertIn(_results(world, "t1-backend.yaml"), world.under(world.results_rel),
+                      "fixture sanity: a mappable merged pull request must write its record. %s" % res.describe())
+
+    def test_unauthenticated_pr_run_exits_10_and_writes_nothing_at_all(self):
+        world = _World(self, brief=_build_brief(pr="none"))
+        before = world.snapshot()
+        res = _drive(world, ["--pr", "7"], prs=self._prs(), authenticated=False)
+        self.assertEqual(res.exit_code, 10,
+                         "I-12: a --pr run that cannot verify GitHub exits 10. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before,
+                         "I-12 / M-6: the preflight runs before the first write -- no record, no state, "
+                         "no contract or brief change")
+        self.assertTrue(res.says("github-unverifiable"), "the refusal names itself. %s" % res.describe())
+
+    def test_record_delivery_that_cannot_verify_github_exits_10_and_writes_nothing(self):
+        for label, authenticated, prs in (("unauthenticated", False, _brief_pr_map()),
+                                          ("the pull request read fails", True, {})):
+            with self.subTest(case=label):
+                world = _delivery_world(self)
+                before = world.snapshot()
+                res = _drive(world, ["--record-delivery", "--pr", "50"], prs=prs, authenticated=authenticated)
+                self.assertEqual(res.exit_code, 10,
+                                 "I-12 / I-15: a delivery whose GitHub reads fail exits 10. %s" % res.describe())
+                self.assertEqual(world.snapshot(), before, "nothing is written before the reads succeed")
+
+    def test_guard_read_only_runs_never_run_the_preflight(self):
+        # GUARD (passes today): --status, --resume, --dry-run and a plain run never call it.
+        for flags in (["--status"], ["--resume"], ["--dry-run"], []):
+            with self.subTest(flags=flags):
+                world = _World(self, brief=_build_brief(pr="none")).ready()
+                res = _drive(world, flags, authenticated=False)
+                self.assertFalse(res.spies.gh_authenticated.called,
+                                 "I-12: only a --pr run and --record-delivery (both without --dry-run) preflight")
+                self.assertNotEqual(res.exit_code, 10, res.describe())
+
+
+class TestALossOfGithubAfterTheWritesIsUnverifiableNotExit10(unittest.TestCase):
+    """I-12: a failure AFTER writes (the fetch, the listing, the issue read) never exits 10. The
+    verdict is `unverifiable`, nothing is flipped, and the next command names the re-run."""
+
+    def test_each_late_read_failure_reports_unverifiable_and_flips_nothing(self):
+        cases = (
+            ("the fetch fails", dict(fetch_ok=False), {}),
+            ("the review listing fails", dict(listing_ok=False), {}),
+            ("the issue read fails", dict(issue_text=None), {"tracking": 372, "flags": ["--skipped", "full-suite rerun"]}),
+        )
+        for label, kw, extra in cases:
+            with self.subTest(case=label):
+                world = _World(self, contract=_build_contract(tracking=extra.get("tracking"))).ready()
+                before = world.snapshot()
+                res = _drive(world, extra.get("flags", []), **kw)
+                self.assertEqual(res.verdict, "unverifiable",
+                                 "I-12: %s after records exist -> unverifiable. %s" % (label, res.describe()))
+                self.assertNotEqual(res.exit_code, 10, "I-12: exit 10 is only ever raised before the first write")
+                self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL], "nothing is flipped")
+                self.assertEqual(world.get(_BRIEF_REL), before[_BRIEF_REL], "no run-log line either")
+                self.assertTrue((res.completion.get("next") or {}).get("commands"),
+                                "I-19: on unverifiable the completion's next is the same run again")
+
+
+class TestDispatchNeverRunsThePreflight(unittest.TestCase):
+    """GUARD (passes today). Catches: M-9 -- the preflight extended to --dispatch."""
+
+    def test_dispatch_completes_without_calling_gh_authenticated_even_when_it_would_say_false(self):
+        for extra in (["--dry-run"], []):
+            with self.subTest(extra=extra):
+                world = _World(self, brief=_build_brief(pr="none"))
+                res = _drive(world, ["--dispatch", "t1-backend"] + extra, authenticated=False)
+                self.assertEqual(res.exit_code, 0,
+                                 "I-12: --dispatch never returns 10, so create_branch's git-switch "
+                                 "fallback stays reachable. %s" % res.describe())
+                self.assertFalse(res.spies.gh_authenticated.called,
+                                 "I-12 / M-9: --dispatch must not call the preflight")
+
+
+# --------------------------------------------------------------------------
+# Records carry the base they merged into (Data Shapes, Completion Record).
+# --------------------------------------------------------------------------
+class TestRecordCarriesBaseAndDefaultFlag(unittest.TestCase):
+
+    def _run(self, world, pr_ref, pr_payload, **kw):
+        return _drive(world, ["--pr", str(pr_ref)], prs={pr_ref: pr_payload}, **kw)
+
+    def test_a_merge_into_the_default_branch_records_base_is_default_true(self):
+        world = _World(self, brief=_build_brief(pr="none"))
+        res = self._run(world, 7, _pr(7, "task/%s/t1-backend" % _SLUG))
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual((rec.get("base_ref"), rec.get("base_is_default")), ("master", True),
+                         "Data Shapes: base_ref is the pull request's own baseRefName and base_is_default "
+                         "compares it with the default branch. %s" % res.describe())
+
+    def test_a_merge_into_a_declared_parent_branch_records_base_is_default_false(self):
+        world = _World(self, brief=_build_brief(pr="none"))
+        state = {"contract": _SLUG, "started_at": "2026-10-05T00:00:00+00:00", "sub_tasks": {
+            "t1-backend": {"status": "pending", "branch": None, "pull_request": None, "issue": None,
+                           "base": "feature/parent", "brief": None},
+            "t2-frontend": {"status": "pending", "branch": None, "pull_request": None, "issue": None,
+                            "base": "master", "brief": None}}}
+        world.put(".claude/orchestrator/state/%s/state.yaml" % _SLUG,
+                  yaml.dump(state, default_flow_style=False, sort_keys=False))
+        res = self._run(world, 7, _pr(7, "task/%s/t1-backend" % _SLUG, base="feature/parent"))
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual((rec.get("base_ref"), rec.get("base_is_default")), ("feature/parent", False),
+                         "Data Shapes: a merge into a parent branch is NOT a merge into the default "
+                         "branch; condition one needs that distinction. %s" % res.describe())
+
+    def test_a_cross_repository_merge_compares_with_that_repositorys_own_default_branch(self):
+        world = _World(self, brief=_build_brief(pr="none"))
+        link = "https://github.com/example-owner/plugin-repo/pull/11"
+
+        def repo(name=None):
+            if name is None:
+                return _THIS_REPO_NEUTRAL
+            return {"nameWithOwner": name, "defaultBranchRef": "main"}
+
+        res = _drive(world, ["--pr", link], prs={link: _pr(11, "task/%s/t1-backend" % _SLUG, base="main", url=link)},
+                     repo=repo)
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual((rec.get("base_ref"), rec.get("base_is_default")), ("main", True),
+                         "Data Shapes: for a Cross-Repository Pull Request base_is_default is read from the "
+                         "repo_view answer for ITS repository. %s" % res.describe())
+
+
+# --------------------------------------------------------------------------
+# I-14: Delivery Candidates, derived in every run mode.
+# Catches: M-4 (the brief identity match dropped), M-7, M-8.
+# --------------------------------------------------------------------------
+class TestDeliveryCandidatesNeedTheBriefIdentity(unittest.TestCase):
+
+    def _candidates(self, world, flags, prs, **kw):
+        res = _drive(world, flags, prs=prs, **kw)
+        return res, (res.report or {}).get("delivery_candidates")
+
+    def test_a_merged_pull_request_on_the_briefs_branch_or_link_is_a_candidate(self):
+        by_branch = _pr(50, _BRIEF_BRANCH)
+        by_link = _pr(50, "feature/renamed-after-the-fact")
+        for label, payload, matched in (("branch", by_branch, ("brief-branch", "brief-pr")),
+                                        ("link", by_link, ("brief-pr",))):
+            with self.subTest(match=label):
+                world = _World(self)
+                res, cands = self._candidates(world, ["--pr", "50"], {50: payload})
+                self.assertIsInstance(cands, list, "I-14: the report carries delivery_candidates. %s" % res.describe())
+                self.assertEqual(len(cands), 1, "exactly one candidate. %s" % res.describe())
+                cand = cands[0]
+                self.assertEqual((cand.get("pr"), cand.get("branch"), cand.get("known"), cand.get("kind")),
+                                 (50, payload["headRefName"], True, "single-branch"),
+                                 "Delivery Candidate shape. Got %r" % (cand,))
+                self.assertIn(cand.get("matched_by"), matched)
+                self.assertEqual(cand.get("merged_at"), payload["mergedAt"])
+                self.assertEqual([str(r) for r in res.spies.gh_pr], ["50"],
+                                 "I-14: a given --pr already answered for the brief link, so there is no second read")
+
+    def test_everything_without_the_brief_identity_is_not_a_candidate_M4(self):
+        # Every case answers the brief's own pull request 50 as OPEN, so the brief-link read
+        # (I-14) finds no candidate of its own and each case measures only the clause it
+        # names (amendment 1: a failed link read would otherwise make an unknown candidate).
+        # M-25 and M-26: the records-branch and default-base cases are decided by their own
+        # exclusion alone; nothing else rejects them.
+        slug_records = "docs/%s-records" % _SLUG
+        brief_pr_open = {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH, state="OPEN")}
+
+        def plain_world():
+            return _World(self)
+
+        def records_branch_world():
+            # The brief's `pr:` names the records pull request itself, so it matches the brief's
+            # identity; only the records-branch exclusion keeps it out (M-25).
+            return _World(self, brief=_build_brief(pr=_pr_url(51)))
+
+        def delivered_world():
+            world = _World(self)
+            world.delivery(50)
+            return world
+
+        def parent_base_world():
+            # A sub-task declares `feature/parent` as its base, so a pull request merged into it
+            # classifies as `merged` and reaches the candidate filter; only the default-base
+            # exclusion keeps it out (M-26).
+            world = _World(self)
+            state = {"contract": _SLUG, "started_at": "2026-10-05T00:00:00+00:00", "sub_tasks": {
+                "t1-backend": {"status": "pending", "branch": None, "pull_request": None, "issue": None,
+                               "base": "feature/parent", "brief": None},
+                "t2-frontend": {"status": "pending", "branch": None, "pull_request": None, "issue": None,
+                                "base": "master", "brief": None}}}
+            world.put(".claude/orchestrator/state/%s/state.yaml" % _SLUG,
+                      yaml.dump(state, default_flow_style=False, sort_keys=False))
+            return world
+
+        cases = (
+            ("an unrelated merged pull request", plain_world,
+             {**brief_pr_open, 52: _pr(52, "feature/unrelated")}, ["--pr", "52"]),
+            ("the records branch itself", records_branch_world,
+             {51: _pr(51, slug_records)}, ["--pr", "51"]),
+            ("a records branch with a suffix", records_branch_world,
+             {51: _pr(51, slug_records + "-2", url=_pr_url(51))}, ["--pr", "51"]),
+            ("a base that is a declared parent branch, not the default", parent_base_world,
+             {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH, base="feature/parent")},
+             ["--pr", str(_BRIEF_PR_NUMBER)]),
+            ("a delivery already recorded", delivered_world,
+             {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH)}, ["--pr", str(_BRIEF_PR_NUMBER)]),
+        )
+        for label, make_world, prs, flags in cases:
+            with self.subTest(case=label):
+                res, cands = self._candidates(make_world(), flags, prs)
+                self.assertEqual(cands, [],
+                                 "I-14 / M-4 / M-25 / M-26: %s must not be a Delivery Candidate. %s"
+                                 % (label, res.describe()))
+
+    def test_a_cross_repository_pull_request_is_never_a_candidate(self):
+        world = _World(self)
+        link = "https://github.com/example-owner/plugin-repo/pull/9"
+
+        def repo(name=None):
+            return _THIS_REPO_NEUTRAL if name is None else {"nameWithOwner": name, "defaultBranchRef": "master"}
+
+        # The brief's own pull request 50 is answered OPEN, so the brief-link read finds no
+        # candidate and this test measures only the cross-repository exclusion.
+        prs = {link: _pr(9, _BRIEF_BRANCH, url=link),
+               _BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH, state="OPEN")}
+        res, cands = self._candidates(world, ["--pr", link], prs, repo=repo)
+        self.assertEqual(cands, [], "I-14: not cross-repository. %s" % res.describe())
+
+
+class TestBriefLinkReadIsOneBareNumberCall(unittest.TestCase):
+    """I-14 / WARN 3. Catches: M-7 (the every-mode read dropped), M-8 (repo_view decides 'same repository')."""
+
+    def test_every_run_mode_reads_the_briefs_pr_once_by_number_and_finds_the_candidate(self):
+        for flags in (["--status"], ["--resume"], [], ["--dry-run"]):
+            with self.subTest(flags=flags):
+                world = _World(self)
+                res = _drive(world, flags, prs=_brief_pr_map())
+                self.assertEqual([str(r) for r in res.spies.gh_pr], ["50"],
+                                 "I-14: ONE gh_pr call with the bare number from the brief's link. %s" % res.describe())
+                self.assertFalse(res.spies.repo_view.called,
+                                 "X-1 / M-8: 'same repository' comes from the answer's own url, never repo_view")
+                cands = (res.report or {}).get("delivery_candidates")
+                self.assertTrue(cands and cands[0].get("known") is True and cands[0].get("pr") in (50, "50"),
+                                "I-14 / M-7: the brief's merged pr is a candidate in every mode. %s" % res.describe())
+                self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded")
+                self.assertNotIn("/advance", res.out, "I-19: /advance is withheld")
+
+    def test_an_answer_whose_url_is_not_the_link_is_no_candidate(self):
+        world = _World(self)
+        res = _drive(world, ["--status"], prs={50: _pr(50, _BRIEF_BRANCH, url=_pr_url(99))})
+        self.assertEqual((res.report or {}).get("delivery_candidates"), [],
+                         "I-14: the answer counts only when its own url equals the link. %s" % res.describe())
+
+    def test_a_failed_read_keeps_the_candidate_unknown_and_still_withholds_advance(self):
+        world = _World(self)
+        res = _drive(world, ["--status"], prs={})
+        cands = (res.report or {}).get("delivery_candidates")
+        self.assertTrue(cands and cands[0].get("known") is False,
+                        "I-14: GitHub could not be asked, so the candidate is kept with known: false. %s"
+                        % res.describe())
+        self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded")
+        commands = res.commands()
+        self.assertTrue(commands and commands[0].startswith("/pr-merged") and "--record-delivery" not in commands[0],
+                        "I-19: an unknown candidate asks for a plain /pr-merged run. Got %r" % (commands,))
+        self.assertNotIn("/advance", res.out)
+
+    def test_an_open_records_pull_request_redirects_the_command_after_exactly_one_read(self):
+        world = _World(self)
+        open_pr = {"headRefName": "docs/%s-records" % _SLUG, "url": _pr_url(60)}
+        res = _drive(world, ["--status"], prs=_brief_pr_map(), records_prs=[open_pr])
+        self.assertEqual(res.spies.open_records_pull_requests.call_count, 1,
+                         "I-14: ONE open_records_pull_requests call when a known, non-early candidate is found")
+        self.assertEqual(res.commands(), ["/pr-merged %s" % _pr_url(60)],
+                         "I-19: the move never offers a command G-6 refuses; it points at the open records "
+                         "pull request. %s" % res.describe())
+
+    def test_control_no_link_or_nothing_pending_means_no_read(self):
+        # CONTROL (passes today): the read happens only while a link exists, no delivery record
+        # exists and some sub-task is not recorded on the default branch.
+        cases = (
+            ("no link in the brief", _World(self, brief=_build_brief(pr="none"))),
+            ("every sub-task on the default branch", _World(self).ready()),
+        )
+        delivered = _World(self)
+        delivered.delivery(50)
+        for label, world in cases + (("a delivery record exists", delivered),):
+            with self.subTest(case=label):
+                res = _drive(world, ["--status"], prs=_brief_pr_map())
+                self.assertEqual(res.spies.gh_pr, [], "I-14: no read. %s" % res.describe())
+
+
+# --------------------------------------------------------------------------
+# I-19: --dispatch honours delivery-unrecorded (exit 3, nothing cut).
+# --------------------------------------------------------------------------
+class TestDispatchRefusesAnUnrecordedDelivery(unittest.TestCase):
+
+    def test_a_known_unrecorded_delivery_refuses_with_exit_3_and_cuts_nothing(self):
+        world = _World(self)
+        res = _drive(world, ["--dispatch", "t1-backend"], prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 3, "I-19: exit 3 already means 'not released'. %s" % res.describe())
+        self.assertEqual((res.report or {}).get("error"), "delivery-unrecorded", res.describe())
+        for key in ("sub_task", "candidates", "detail"):
+            self.assertIn(key, res.report or {}, "I-19: the refusal carries %s" % key)
+        self.assertFalse(res.spies.create_branch.called, "I-19: a refusal cuts no branch")
+
+    def test_an_unknown_candidate_also_refuses(self):
+        world = _World(self)
+        res = _drive(world, ["--dispatch", "t1-backend"], prs={})
+        self.assertEqual(res.exit_code, 3, "I-19 / I-14: known: false withholds dispatch too. %s" % res.describe())
+        self.assertEqual((res.report or {}).get("error"), "delivery-unrecorded")
+        self.assertFalse(res.spies.create_branch.called)
+
+    def test_control_without_a_brief_link_dispatch_proceeds(self):
+        # CONTROL (passes today): the refusal is not a blanket one.
+        world = _World(self, brief=_build_brief(pr="none"))
+        res = _drive(world, ["--dispatch", "t1-backend"])
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(res.spies.create_branch.call_count, 1, "the branch is cut")
+
+    def test_control_an_early_parent_does_not_refuse_the_sub_task_still_to_do_M5(self):
+        # CONTROL (passes today). Catches M-5: dropping the `early` kind would make this refuse.
+        world = _World(self)
+        world.record("t1-backend", 61, base_is_default=False, merged_at="2026-10-01T09:00:00Z")
+        res = _drive(world, ["--dispatch", "t2-frontend"],
+                     prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH, merged_at="2026-10-03T12:00:00Z")})
+        self.assertEqual(res.exit_code, 0,
+                         "I-14: a parent merged before its last sub-task landed is `early`; the sub-task "
+                         "still to do is dispatched. %s" % res.describe())
+        self.assertEqual(res.spies.create_branch.call_count, 1)
+
+
+# --------------------------------------------------------------------------
+# I-15: --record-delivery and its six guards (G-1 to G-6), and the I-13 usage refusals.
+# Catches: M-4, M-5.
+# --------------------------------------------------------------------------
+class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
+
+    FLAGS = ["--record-delivery", "--pr", "50"]
+
+    def test_it_writes_a_record_per_unrecorded_block_and_one_delivery_record(self):
+        world = _delivery_world(self)
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 0, "I-15: the guards pass. %s" % res.describe())
+        for tid in ("t1-backend", "t2-frontend"):
+            rec = _yaml(world, _results(world, tid + ".yaml"))
+            self.assertEqual(
+                (rec.get("status"), rec.get("verified"), rec.get("base_ref"), rec.get("base_is_default"),
+                 rec.get("delivered_by"), rec.get("pull_request")),
+                ("completed", "github", "master", True, "contract-delivery", _pr_url(50)),
+                "I-15: %s is recorded through build_record with the delivery keys. Got %r" % (tid, rec))
+        delivery = _yaml(world, _results(world, "contract-delivery.yaml"))
+        self.assertEqual(
+            {k: delivery.get(k) for k in ("status", "pull_request", "number", "head_ref", "base_ref",
+                                          "base_is_default", "commit", "verified", "recorded_by",
+                                          "blocks_recorded", "blocks_already_recorded")},
+            {"status": "delivered", "pull_request": _pr_url(50), "number": 50, "head_ref": _BRIEF_BRANCH,
+             "base_ref": "master", "base_is_default": True, "commit": "merge-50", "verified": "github",
+             "recorded_by": "pr-merged --record-delivery",
+             "blocks_recorded": ["t1-backend", "t2-frontend"], "blocks_already_recorded": []},
+            "Data Shapes: the Contract Delivery Record")
+        self.assertEqual(str(delivery.get("merged_at")), "2026-10-04T12:00:00Z")
+        self.assertTrue(delivery.get("recorded_at"), "recorded_at is stamped")
+        self.assertIsNotNone((res.report or {}).get("delivery"), "I-15: the report carries `delivery`")
+        self.assertEqual(sorted((res.report or {}).get("written_files") or []),
+                         sorted([_results(world, "t1-backend.yaml"), _results(world, "t2-frontend.yaml"),
+                                 _results(world, "contract-delivery.yaml")]),
+                         "I-20: the three tracked files this run wrote")
+        self.assertFalse(res.spies.close_sub_issue.called, "I-15: it never closes an issue")
+        self.assertFalse(res.spies.create_branch.called, "I-15: it never cuts a branch")
+        self.assertFalse(res.spies.gh_open_sub_issues.called,
+                         "G-4: a brief with id none has no parent issue, so no sub-issue can exist and no read is made")
+
+    def test_it_never_overwrites_a_record_and_names_the_ones_already_there(self):
+        world = _delivery_world(self)
+        existing = world.record("t1-backend", 61)
+        before = world.get(existing)
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(world.get(existing), before, "I-15: an existing record is never overwritten")
+        delivery = _yaml(world, _results(world, "contract-delivery.yaml"))
+        self.assertEqual((delivery.get("blocks_recorded"), delivery.get("blocks_already_recorded")),
+                         (["t2-frontend"], ["t1-backend"]))
+
+    def test_a_second_run_for_the_same_pull_request_is_a_no_op(self):
+        world = _delivery_world(self)
+        first = _drive(world, self.FLAGS, prs=_brief_pr_map())
+        self.assertEqual(first.exit_code, 0, first.describe())
+        files = {rel: world.get(rel) for rel in world.under(world.results_rel)}
+        second = _drive(world, self.FLAGS, prs=_brief_pr_map())
+        self.assertEqual(second.exit_code, 0, "G-5: the same pull request again is a no-op. %s" % second.describe())
+        self.assertEqual({rel: world.get(rel) for rel in world.under(world.results_rel)}, files,
+                         "G-5: nothing is rewritten")
+
+    def test_dry_run_writes_nothing(self):
+        world = _delivery_world(self)
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS + ["--dry-run"], prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(world.snapshot(), before, "I-15: --dry-run writes nothing")
+
+
+class TestRecordDeliveryGuards(unittest.TestCase):
+
+    FLAGS = ["--record-delivery", "--pr", "50"]
+
+    def _refused(self, world, guard, prs=None, accept=None, **kw):
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map() if prs is None else prs, **kw)
+        self.assertEqual(res.exit_code, 9, "I-15: %s refuses with exit 9. %s" % (guard, res.describe()))
+        self.assertEqual((res.report or {}).get("error"), "delivery-refused", res.describe())
+        self.assertIn((res.report or {}).get("guard"), accept or (guard,),
+                      "I-15: the refusal names its guard. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before, "a refusal writes nothing")
+        return res
+
+    def test_g1_a_pull_request_that_is_not_the_briefs_own_is_refused_M4(self):
+        world = _delivery_world(self)
+        self._refused(world, "G-1", prs={50: _pr(50, "docs/some-other-branch", url=_pr_url(51))})
+
+    def test_g1_a_pull_request_that_is_not_merged_into_the_default_branch_is_refused(self):
+        world = _delivery_world(self)
+        self._refused(world, "G-1", prs={50: _pr(50, _BRIEF_BRANCH, state="OPEN")})
+
+    def test_g2_a_contract_with_a_defect_is_refused(self):
+        defect = ["### 4. Mystery (`mystery-agent`)", "", "**Depends on:** none", "",
+                  "**Files to touch:**", "- src/M.cs", ""]
+        world = _delivery_world(self, contract=_build_contract(extra_blocks=defect))
+        self._refused(world, "G-2")
+
+    def test_g3_a_failed_record_is_refused(self):
+        world = _delivery_world(self)
+        world.record("t1-backend", 61, status="failed")
+        self._refused(world, "G-3")
+
+    def test_g4_an_open_sub_issue_is_refused_and_named_when_the_brief_has_a_parent_issue(self):
+        world = _delivery_world(self, brief=_build_brief(ident="123"))
+        res = self._refused(world, "G-4", sub_issues=[124])
+        self.assertIn("124", res.out, "G-4: each open sub-issue is named")
+        self.assertIn("open-sub-issue", res.out, "G-4: the refusal reason")
+        self.assertEqual([str(c.args[0]) for c in res.spies.gh_open_sub_issues.call_args_list], ["123"],
+                         "G-4: ONE read, of the brief's parent issue")
+
+    def test_g4_passes_when_the_parent_issue_has_no_open_sub_issue(self):
+        world = _delivery_world(self, brief=_build_brief(ident="123"))
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map(), sub_issues=[])
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(res.spies.gh_open_sub_issues.call_count, 1)
+
+    def test_g5_a_delivery_recorded_for_a_different_pull_request_is_refused(self):
+        world = _delivery_world(self)
+        world.delivery(77)
+        # G-1 would also refuse (nothing is a candidate once a delivery record exists), so the
+        # guard named is what tells the two apart: G-5 is checked on its own branch and must
+        # name itself. Deleting G-5's branch would still exit 9, but as G-1 (M-24).
+        res = self._refused(world, "G-5")
+        self.assertEqual((res.report or {}).get("guard"), "G-5",
+                         "M-24: the refusal names G-5 alone, not G-1. %s" % res.describe())
+
+    def test_g6_an_open_records_pull_request_is_refused_with_its_url_and_the_fresh_worktree_remedy(self):
+        world = _delivery_world(self)
+        open_pr = {"headRefName": "docs/%s-records" % _SLUG, "url": _pr_url(60)}
+        res = self._refused(world, "G-6", records_prs=[open_pr])
+        self.assertIn(_pr_url(60), res.out, "G-6: the remedy names the open pull request")
+        self.assertIn("flat worktree", res.out, "I-20: the remedy is a fresh flat worktree, never 'update this tree'")
+
+
+class TestRecordDeliveryUsageRefusals(unittest.TestCase):
+
+    def test_a_valid_form_is_accepted_and_every_invalid_combination_exits_2_with_an_error(self):
+        world = _delivery_world(self)
+        valid = _drive(world, ["--record-delivery", "--pr", "50"], prs=_brief_pr_map())
+        self.assertNotEqual(valid.exit_code, 2,
+                            "POSITIVE CONTROL: --record-delivery with exactly one --pr is a valid form, "
+                            "so the refusals below measure the combination and not an unknown flag. %s"
+                            % valid.describe())
+        invalid = (
+            ["--record-delivery"],
+            ["--record-delivery", "--pr", "50", "--pr", "51"],
+            ["--record-delivery", "--pr", "50", "--status"],
+            ["--record-delivery", "--pr", "50", "--resume"],
+            ["--record-delivery", "--pr", "50", "--dispatch", "t1-backend"],
+            ["--record-delivery", "--pr", "50", "--record-subtask", "t1-backend", "--issue", "5",
+             "--base", "master", "--brief", _BRIEF_REL],
+            ["--owner-resolved", "t3-x.md", "--status"],
+            ["--owner-resolved", "t3-x.md", "--resume"],
+            ["--skipped", "full-suite rerun", "--status"],
+            ["--skipped", "full-suite rerun", "--resume"],
+        )
+        for flags in invalid:
+            with self.subTest(flags=flags):
+                fresh = _delivery_world(self)
+                before = fresh.snapshot()
+                res = _drive(fresh, flags, prs=_brief_pr_map())
+                self.assertEqual(res.exit_code, 2, "I-13: %r is a usage refusal. %s" % (flags, res.describe()))
+                self.assertTrue((res.report or {}).get("error"),
+                                "I-13: the refusal prints a JSON error, like every other refusal in this script "
+                                "(an argparse 'unrecognized arguments' exit is not it). %s" % res.describe())
+                self.assertEqual(fresh.snapshot(), before)
+
+
+# --------------------------------------------------------------------------
+# Criterion 6 behaviour proven by the formatter chain (criterion 7): the
+# replay of pull request 383 on feature/bar-formatter-chain, four blocks.
+# Six runs, each its own test with its own preconditions written as files.
+# --------------------------------------------------------------------------
+_FC_SLUG = "2026-10-03-bar-formatter-chain"
+_FC_BRANCH = "feature/bar-formatter-chain"
+_FC_T4 = "t4-test-review-test-strategy-critic.md"
+_FC_CHECKLIST = (
+    "Implementation matches Data Shapes exactly",
+    "Reused Mechanisms are actually reused (no parallel implementations introduced)",
+    "New Mechanisms promoted to `MECHANISMS.md`",
+    "New vocabulary terms promoted to `VOCABULARY.md`",
+    "Integration surfaces reflected on both backend and frontend sides",
+    "`INTEGRATION.md` updated",
+    "No orphaned DTO/model mismatches",
+    _MANUAL_LINE,
+    "`Status` flipped to `implemented`",
+)
+_FC_TASKS = ("t1-red-tests-and-scaffold", "t2-backend", "t3-review", "t4-test-review")
+
+
+def _fc_contract():
+    lines = [
+        "# Concept Contract - Formatter chain", "", "**Project:** Acme", "**Date:** 2026-10-03",
+        "**Status:** approved",
+        "**Work Item Brief:** `.claude/work-items/%s.md`" % _FC_SLUG, "",
+        "## Implementation Handoff", "",
+        "### 1. Red tests and scaffold (`senior-test-engineer`)", "", "**Depends on:** none", "",
+        "**Files to touch:**", "- `tests/Acme.Tests/FormatterChainTests.cs`", "",
+        "### 2. Backend (`dotnet-backend-architect`)", "", "**Depends on:** 1", "",
+        "**Files to touch:**", "- `src/Acme/FormatterChain.cs`", "",
+        "### 3. Review (`fullstack-code-reviewer`)", "", "**Depends on:** 2", "",
+        "**Files to touch:**", "- `.claude/reviews/%s/t3-review-fullstack-code-reviewer.md`" % _FC_SLUG, "",
+        "### 4. Test review (`test-strategy-critic`)", "", "**Depends on:** 1, 2", "",
+        "**Files to touch:**", "- `.claude/reviews/%s/%s`" % (_FC_SLUG, _FC_T4), "",
+        "## Review checklist (filled in after implementation)", "",
+    ] + ["- [ ] %s" % t for t in _FC_CHECKLIST]
+    return _join_lines(lines)
+
+
+def _fc_world(case, *, recorded=False):
+    world = _World(case, slug=_FC_SLUG, contract=_fc_contract(),
+                   brief=_build_brief(_FC_SLUG, branch=_FC_BRANCH, pr=_pr_url(383)))
+    reviews = (
+        ("api-contract-review.md", None, "**Counts: BLOCKER 0, WARN 2, NIT 2.** Verdict: **CONTRACT IN SYNC** on the wire."),
+        ("llm-contract-review.md", None, "### Verdict\n\nNo training data needed."),
+        ("t3-review-fullstack-code-reviewer.md", "pass-with-findings", "Findings."),
+        ("t3b-fix-cycle-review-fullstack-code-reviewer.md",
+         "pass-with-findings. In the reviewer scale this is FIX THEN SHIP.", "Findings."),
+        ("t3c-last-fixes-review-fullstack-code-reviewer.md",
+         "FIX THEN SHIP. The production code is correct for every shape the brief names.", "Findings."),
+        (_FC_T4, "blocked", "Findings."),
+    )
+    for name, verdict, body in reviews:
+        world.review(name, verdict=verdict, body=body)
+    world.followup("2026-10-03-live-bar-path", 372)
+    if recorded:
+        for tid in _FC_TASKS:
+            world.record(tid, 383)
+        world.delivery(383, head_ref=_FC_BRANCH)
+    return world
+
+
+def _fc_prs():
+    return {383: _pr(383, _FC_BRANCH), 384: _pr(384, "docs/2026-10-05-north-star-release-gate")}
+
+
+def _fc_drive(world, flags, **kw):
+    return _drive(world, flags, implementers=pr_merged.DEFAULT_IMPLEMENTERS,
+                  gates=pr_merged.DEFAULT_REVIEW_GATES, **kw)
+
+
+class TestFormatterChainReplay(unittest.TestCase):
+
+    def test_run_1_two_pull_requests_one_candidate_and_no_advance(self):
+        world = _fc_world(self)
+        res = _fc_drive(world, ["--pr", "383", "--pr", "384"], prs=_fc_prs())
+        cands = (res.report or {}).get("delivery_candidates")
+        self.assertEqual([c.get("pr") for c in cands or []], [383],
+                         "I-14: 383 is the brief's own branch; 384 (docs/...) is not a candidate. %s" % res.describe())
+        self.assertEqual((cands or [{}])[0].get("kind"), "single-branch", "no records at all: single-branch")
+        self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded", res.describe())
+        self.assertEqual(res.commands(), ["/pr-merged 383 --record-delivery"],
+                         "I-19: exactly the record-delivery line for 383. %s" % res.describe())
+        self.assertNotIn("/advance", res.out, "criterion 7: /advance is no longer offered")
+
+    def test_run_2_status_sees_the_same_candidate_through_one_bare_number_read(self):
+        world = _fc_world(self)
+        res = _fc_drive(world, ["--status"], prs=_fc_prs())
+        self.assertEqual([str(r) for r in res.spies.gh_pr], ["383"],
+                         "I-14: one gh_pr(383), a bare number. %s" % res.describe())
+        self.assertFalse(res.spies.repo_view.called, "X-1: no repo_view call")
+        self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded", res.describe())
+        self.assertNotIn("/advance", res.out)
+
+    def test_run_3_dispatch_is_refused_with_exit_3_and_cuts_no_branch(self):
+        world = _fc_world(self)
+        res = _fc_drive(world, ["--dispatch", "t1-red-tests-and-scaffold"], prs=_fc_prs())
+        self.assertEqual(res.exit_code, 3, res.describe())
+        self.assertEqual((res.report or {}).get("error"), "delivery-unrecorded", res.describe())
+        self.assertFalse(res.spies.create_branch.called, "no branch cut")
+
+    def test_run_4_record_delivery_writes_four_records_and_leaves_only_t4_for_the_owner(self):
+        world = _fc_world(self)
+        res = _fc_drive(world, ["--pr", "383", "--record-delivery"], prs=_fc_prs())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        for tid in _FC_TASKS:
+            rec = _yaml(world, _results(world, tid + ".yaml"))
+            self.assertEqual((rec.get("base_is_default"), rec.get("delivered_by")), (True, "contract-delivery"),
+                             "Data Shapes: %s is recorded by the delivery. Got %r" % (tid, rec))
+        self.assertTrue(world.exists(_results(world, "contract-delivery.yaml")), "one delivery record")
+        self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "complete", res.describe())
+        comp = res.completion
+        self.assertEqual(comp.get("verdict"), "pending", "t4 is an effective blocked report. %s" % res.describe())
+        self.assertEqual(comp.get("owner_confirmation_needed"), [_FC_T4])
+        self.assertEqual(len(comp.get("review_warnings") or []), 4,
+                         "the four unreadable reports are warnings, not blockers")
+        self.assertEqual(res.conditions.get("disclosures"), "met", "condition three: nothing declared")
+        states = list(_checklist_states(res).values())
+        self.assertEqual(states.count("no-evidence"), 8, "eight lines with no structured evidence. Got %r" % states)
+        self.assertEqual(comp.get("disclosure_lines_missing"), [])
+        self.assertNotIn("/advance", res.out)
+
+    def test_run_5_status_after_the_delivery_is_recorded_is_complete(self):
+        world = _fc_world(self, recorded=True)
+        res = _fc_drive(world, ["--status"], prs=_fc_prs())
+        self.assertTrue((res.report or {}).get("complete"), res.describe())
+        self.assertEqual((res.report or {}).get("delivery_candidates"), [],
+                         "I-14: nothing is a candidate once a delivery record exists. %s" % res.describe())
+        self.assertNotIn("/advance", res.out)
+
+    def test_run_6_the_owner_confirmation_and_two_declared_skips_flip_the_contract(self):
+        world = _fc_world(self, recorded=True)
+        flags = ["--owner-resolved", _FC_T4, "--skipped", _MANUAL_LINE, "--skipped", "full-suite rerun"]
+        lines = ["Not performed (%s): %s" % (_FC_SLUG, _MANUAL_LINE),
+                 "Not performed (%s): full-suite rerun" % _FC_SLUG]
+        before = world.get(world.contract_rel)
+        pending = _fc_drive(world, flags, prs=_fc_prs(), issue_text="Some earlier discussion.")
+        self.assertEqual(pending.verdict, "pending", pending.describe())
+        self.assertEqual(pending.completion.get("disclosure_lines_missing"), lines,
+                         "I-9: exactly the two Disclosure lines still to post")
+        self.assertEqual(world.get(world.contract_rel), before, "Status stays approved until the lines exist")
+
+        flipped = _fc_drive(world, flags, prs=_fc_prs(), issue_text="\n".join(lines))
+        self.assertEqual(flipped.verdict, "flipped", flipped.describe())
+        text = world.get(world.contract_rel).decode("utf-8")
+        checklist = text.split("## Review checklist")[1]
+        self.assertEqual(checklist.count("not performed (disclosed on #372)"), 1)
+        self.assertEqual(checklist.count("no structured evidence"), 7)
+        self.assertEqual(checklist.lower().count("not performed"), 1, "no other line says not performed")
+        implemented = next(l for l in text.splitlines() if l.startswith("**Implemented:**"))
+        for piece in (_FC_T4, _MANUAL_LINE, "full-suite rerun"):
+            self.assertIn(piece, implemented, "I-10: the Implemented line names %r" % piece)
+        self.assertNotIn("/advance", flipped.out)
+
+
+class TestNoCommandOfAnyDeliveryRunContainsAdvanceWhileDeliveryIsUnrecorded(unittest.TestCase):
+    """Criterion 7 stated once more as a property over every read-only mode of the same fixture."""
+
+    def test_status_resume_and_dry_run_never_print_advance(self):
+        for flags in (["--status"], ["--resume"], ["--dry-run"], []):
+            with self.subTest(flags=flags):
+                world = _fc_world(self)
+                res = _fc_drive(world, flags, prs=_fc_prs())
+                self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded",
+                                 res.describe())
+                self.assertNotIn("/advance", res.out)
+
+
+class TestLoadRecordsSkipsTheReservedDeliveryFile(unittest.TestCase):
+
+    def test_the_delivery_record_is_never_read_as_a_sub_tasks_completion_record(self):
+        world = _World(self)
+        world.record("t1-backend", 61)
+        world.delivery()
+        with _chdir(world.root):
+            records = pr_merged.load_records(_SLUG)
+        self.assertEqual(
+            sorted(records), ["t1-backend"],
+            "Data Shapes: load_records skips the reserved file contract-delivery.yaml, so it "
+            "cannot be mistaken for a record that unlocks a sub-task. Loaded %r" % (sorted(records),))
+
+
+# ==========================================================================
+# AMENDMENT FIX CYCLE (2026-10-05): the tests the contract's "Amendment after
+# the implementation reviews" asks for. Mutations M-12 ... M-26 are the
+# contract's. Each class says which of its tests fail on an assertion when the
+# rule is broken (RED) and which are CONTROL / GUARD tests that hold in the
+# shipped script and earn their place by dying under the named mutation.
+# ==========================================================================
+
+
+# --------------------------------------------------------------------------
+# I-15 G-1, amended (B-1): "maps to no sub-task" holds on EVERY path, so
+# --record-delivery of a sub-task's own pull request refuses and writes nothing.
+# Catches: M-13 (`_candidate_from` loses its sub-task mapping check).
+# --------------------------------------------------------------------------
+class TestRecordDeliveryRefusesASubTasksOwnPullRequest(unittest.TestCase):
+
+    def test_a_pull_request_that_maps_to_a_sub_task_is_refused_at_g1_and_nothing_is_written(self):
+        sub_task_branch = "task/%s/t1-backend" % _SLUG
+        cases = (
+            # The brief's `pr:` names a sub-task's own pull request.
+            ("the brief's pr names a sub-task's own pull request",
+             _build_brief(pr=_pr_url(61)), {61: _pr(61, sub_task_branch)}, "61"),
+            # The brief's `branch:` is the sub-task's branch.
+            ("the brief's branch is a sub-task's branch",
+             _build_brief(branch=sub_task_branch, pr="none"), {61: _pr(61, sub_task_branch)}, "61"),
+            # The head is the brief's branch, but the title names a sub-task.
+            ("the title names a sub-task",
+             _build_brief(), {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH,
+                                                    title="t2-frontend: the frontend block")},
+             str(_BRIEF_PR_NUMBER)),
+        )
+        for label, brief, prs, ref in cases:
+            with self.subTest(case=label):
+                world = _delivery_world(self, brief=brief)
+                before = world.snapshot()
+                res = _drive(world, ["--record-delivery", "--pr", ref], prs=prs)
+                self.assertEqual(
+                    res.exit_code, 9,
+                    "I-15 G-1 / M-13: a pull request that maps to a sub-task is not a Delivery Candidate on "
+                    "ANY path, so recording it as the delivery of every block is refused with exit 9. %s"
+                    % res.describe())
+                self.assertEqual((res.report or {}).get("guard"), "G-1",
+                                 "the refusal names G-1. %s" % res.describe())
+                self.assertEqual(world.snapshot(), before,
+                                 "a refused delivery writes nothing: no record for any block, no "
+                                 "delivery record")
+                self.assertFalse(world.exists(_results(world, "contract-delivery.yaml")),
+                                 "no delivery record was written")
+
+
+# --------------------------------------------------------------------------
+# Interplay of I-15 G-1 with the recorded-branch rule of map_pr_to_subtask: a pull
+# request whose head branch is RECORDED against a sub-task in the state store maps
+# there, so --record-delivery refuses it exactly like a sub-task's own pull request.
+# Catches: M-RB (drop the recorded_branches argument from the `_candidate_from` call).
+# --------------------------------------------------------------------------
+class TestRecordDeliveryRefusesAPullRequestWhoseBranchIsRecordedAgainstASubTask(unittest.TestCase):
+
+    _FOREIGN = "feature/foreign-name"
+
+    def _world(self, recorded_branch):
+        world = _delivery_world(self, brief=_build_brief(branch=self._FOREIGN, pr="none"))
+        state = {"contract": _SLUG, "sub_tasks": {
+            "t1-backend": {"status": "pending", "branch": recorded_branch, "pull_request": None,
+                           "issue": None, "base": "master", "brief": None}}}
+        world.put(".claude/orchestrator/state/%s/state.yaml" % _SLUG,
+                  yaml.dump(state, default_flow_style=False, sort_keys=False))
+        return world
+
+    def test_a_pull_request_whose_head_branch_is_recorded_against_a_sub_task_is_refused_at_g1(self):
+        world = self._world(self._FOREIGN)
+        before = world.snapshot()
+        res = _drive(world, ["--record-delivery", "--pr", "61"], prs={61: _pr(61, self._FOREIGN)})
+        self.assertEqual(
+            res.exit_code, 9,
+            "I-15 G-1 with the recorded-branch rule: the head branch is recorded against t1-backend, "
+            "so the pull request maps to a sub-task and is not a Delivery Candidate. %s" % res.describe())
+        self.assertEqual((res.report or {}).get("guard"), "G-1",
+                         "the refusal names G-1. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before, "a refused delivery writes nothing")
+        self.assertFalse(world.exists(_results(world, "contract-delivery.yaml")),
+                         "no delivery record was written")
+
+    def test_control_a_branch_recorded_for_nobody_here_is_not_refused_at_g1(self):
+        # CONTROL: the state records some OTHER branch, so the same pull request maps to no
+        # sub-task and the delivery is not refused at G-1 (proves the refusal above is the rule).
+        world = self._world("feature/some-other-branch")
+        res = _drive(world, ["--record-delivery", "--pr", "61"], prs={61: _pr(61, self._FOREIGN)})
+        self.assertNotEqual((res.report or {}).get("guard"), "G-1",
+                            "an unrecorded branch maps nowhere. %s" % res.describe())
+        self.assertEqual(res.exit_code, 0,
+                         "the delivery is recorded when nothing maps it to a sub-task. %s" % res.describe())
+
+
+# --------------------------------------------------------------------------
+# I-6, amended (B-2): a supersession loop supersedes nothing, whatever its
+# members' names sort to. Members are found on the untouched edges first.
+# Catches: M-14 (loop edges cleared while iterating in name order).
+# --------------------------------------------------------------------------
+class TestASupersessionLoopNeverClearsABlockedReport(unittest.TestCase):
+
+    def _pair(self, blocked_name, other_name):
+        """Two reports whose Gate Outputs supersede each other; ``blocked_name`` is blocked."""
+        world = _World(self).ready()
+        world.review(blocked_name, verdict="blocked", gate=_gate([], supersedes=[other_name]))
+        world.review(other_name, verdict="pass", gate=_gate([], supersedes=[blocked_name]))
+        return world
+
+    def _assert_stays_blocked(self, res, world, before, blocked_name):
+        self.assertEqual(res.verdict, "pending",
+                         "I-6 / M-14: a loop supersedes nothing, so the blocked report stays effective and "
+                         "the contract does not flip without the owner. %s" % res.describe())
+        self.assertEqual(res.completion.get("owner_confirmation_needed"), [blocked_name],
+                         "I-7: the blocked loop member is named for the owner's confirmation")
+        self.assertIn("loop", json.dumps(res.completion.get("review_warnings")).lower(),
+                      "I-6: the loop is listed in review_warnings")
+        self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL], "the contract stays approved")
+        self.assertEqual(world.get(_BRIEF_REL), before[_BRIEF_REL], "no run-log line either")
+
+    def test_a_blocked_member_that_sorts_first_stays_blocked_and_the_contract_does_not_flip(self):
+        blocked = "t4-a-blocked.md"
+        world = self._pair(blocked, "t4-b-pass.md")
+        before = world.snapshot()
+        res = _drive(world, [])
+        self._assert_stays_blocked(res, world, before, blocked)
+
+    def test_a_blocked_member_of_a_three_report_loop_that_sorts_first_stays_blocked(self):
+        blocked = "t4-a-blocked.md"
+        world = _World(self).ready()
+        world.review(blocked, verdict="blocked", gate=_gate([], supersedes=["t4-b-pass.md"]))
+        world.review("t4-b-pass.md", verdict="pass", gate=_gate([], supersedes=["t4-c-pass.md"]))
+        world.review("t4-c-pass.md", verdict="pass", gate=_gate([], supersedes=[blocked]))
+        before = world.snapshot()
+        res = _drive(world, [])
+        self._assert_stays_blocked(res, world, before, blocked)
+
+    def test_control_a_blocked_member_that_sorts_last_stays_blocked(self):
+        # CONTROL: the shipped defect hid when the blocked report sorted second, so this order
+        # alone proves nothing about M-14. It pins the symmetric half of the same rule.
+        blocked = "t4-b-blocked.md"
+        world = self._pair(blocked, "t4-a-pass.md")
+        before = world.snapshot()
+        res = _drive(world, [])
+        self._assert_stays_blocked(res, world, before, blocked)
+
+    def test_the_owner_can_confirm_a_blocked_loop_member_and_the_run_flips(self):
+        blocked = "t4-a-blocked.md"
+        world = self._pair(blocked, "t4-b-pass.md")
+        res = _drive(world, ["--owner-resolved", blocked])
+        self.assertEqual(res.exit_code, 0,
+                         "I-7 / I-6: the blocked loop member is an effective blocked report, so naming it "
+                         "is valid. %s" % res.describe())
+        self.assertEqual(res.verdict, "flipped",
+                         "the owner's one confirmation clears it, and the flip records it. %s" % res.describe())
+        self.assertIn("owner confirmed resolved: " + blocked, world.get(_BRIEF_REL).decode("utf-8"))
+
+    def test_control_an_edge_from_a_report_outside_the_loop_still_supersedes_a_member(self):
+        # CONTROL: I-6 drops the edges that START at a loop member only. A report outside the
+        # loop that names the blocked member still supersedes it (killed by a variant that drops
+        # every edge that touches a loop member).
+        blocked = "t4-a-blocked.md"
+        world = self._pair(blocked, "t4-b-pass.md")
+        world.review("t4-c-outside.md", verdict="pass", gate=_gate([], supersedes=[blocked]))
+        res = _drive(world, [])
+        self.assertEqual(res.verdict, "flipped",
+                         "I-6: an edge from outside the loop still supersedes the member it names, so no "
+                         "effective blocked report is left. %s" % res.describe())
+        self.assertEqual(res.completion.get("owner_confirmation_needed") or [], [])
+
+
+# --------------------------------------------------------------------------
+# I-7 and I-13, amended (W-2): the owner-resolved name is checked, and the
+# review set read, before the run's first write; --dispatch refuses the flags.
+# Catches: M-15 (checked only in the completion evaluation, after the writes).
+# --------------------------------------------------------------------------
+class TestWrongOwnerResolvedRefusesBeforeAnyWrite(unittest.TestCase):
+
+    BLOCKED = "t4-blocked.md"
+
+    def _last_block_world(self):
+        """t2-frontend is recorded, so `--pr 7` records the LAST block: condition one holds after
+        the run and the owner-resolved name is judged on any reading of I-3."""
+        world = _World(self, brief=_build_brief(pr="none"))
+        world.record("t2-frontend", 62)
+        world.review(self.BLOCKED, verdict="blocked")
+        return world
+
+    def _prs(self):
+        return {7: _pr(7, "task/%s/t1-backend" % _SLUG)}
+
+    def test_a_wrong_name_on_a_pr_run_exits_2_and_writes_nothing_at_all(self):
+        world = self._last_block_world()
+        before = world.snapshot()
+        res = _drive(world, ["--pr", "7", "--owner-resolved", "nope.md"], prs=self._prs())
+        self.assertEqual(res.exit_code, 2, "I-7: a name that matches no blocked report exits 2. %s" % res.describe())
+        self.assertEqual((res.report or {}).get("error"), "owner-resolved-not-blocked", res.describe())
+        self.assertEqual(
+            world.snapshot(), before,
+            "I-7 / M-15: the refusal comes before the run's first write -- no completion record, no state "
+            "file, no contract or brief change")
+
+    def test_a_wrong_name_on_record_delivery_exits_2_and_writes_nothing_at_all(self):
+        world = _delivery_world(self)
+        before = world.snapshot()
+        res = _drive(world, ["--record-delivery", "--pr", "50", "--owner-resolved", "nope.md"],
+                     prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 2, "I-7: a wrong name exits 2. %s" % res.describe())
+        self.assertEqual((res.report or {}).get("error"), "owner-resolved-not-blocked", res.describe())
+        self.assertEqual(world.snapshot(), before,
+                         "I-7 / M-15: no completion record and no delivery record were written")
+
+    def test_control_the_right_name_still_lets_both_writing_runs_write(self):
+        # CONTROL: the same fixtures with the real blocked report named. The wrong-name tests
+        # above would pass vacuously if these runs never wrote anything.
+        pr_world = self._last_block_world()
+        res = _drive(pr_world, ["--pr", "7", "--owner-resolved", self.BLOCKED], prs=self._prs())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertTrue(pr_world.exists(_results(pr_world, "t1-backend.yaml")),
+                        "fixture sanity: the --pr run writes its record when the name is right")
+        delivery = _delivery_world(self)
+        res = _drive(delivery, ["--record-delivery", "--pr", "50", "--owner-resolved", "t9-block.md"],
+                     prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertTrue(delivery.exists(_results(delivery, "contract-delivery.yaml")),
+                        "fixture sanity: --record-delivery writes its delivery record when the name is right")
+
+    def test_a_failed_fetch_in_a_run_given_owner_resolved_exits_10_having_written_nothing(self):
+        world = self._last_block_world()
+        before = world.snapshot()
+        res = _drive(world, ["--pr", "7", "--owner-resolved", self.BLOCKED], prs=self._prs(), fetch_ok=False)
+        self.assertEqual(res.exit_code, 10,
+                         "I-7: the early review-set reading of a recording run given --owner-resolved "
+                         "exits 10 when it fails. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before, "I-12: exit 10 means nothing was written")
+
+    def test_a_failed_review_listing_in_a_run_given_owner_resolved_exits_10_having_written_nothing(self):
+        world = self._last_block_world()
+        before = world.snapshot()
+        res = _drive(world, ["--pr", "7", "--owner-resolved", self.BLOCKED], prs=self._prs(), listing_ok=False)
+        self.assertEqual(res.exit_code, 10,
+                         "I-7: a failed review-set listing before the writes exits 10. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before, "I-12: exit 10 means nothing was written")
+
+    def test_owner_resolved_or_skipped_with_dispatch_exits_2_and_cuts_nothing(self):
+        for flags in (["--dispatch", "t1-backend", "--owner-resolved", "t4-blocked.md"],
+                      ["--dispatch", "t1-backend", "--skipped", "full-suite rerun"]):
+            with self.subTest(flags=flags):
+                world = _World(self, brief=_build_brief(pr="none"))
+                before = world.snapshot()
+                res = _drive(world, flags)
+                self.assertEqual(res.exit_code, 2,
+                                 "I-13 (amended): no flag can be refused after --dispatch has cut a "
+                                 "branch, so the combination is a usage refusal. %s" % res.describe())
+                self.assertTrue((res.report or {}).get("error"), "the refusal prints a JSON error")
+                self.assertFalse(res.spies.create_branch.called, "no branch was cut")
+                self.assertEqual(world.snapshot(), before, "nothing was written")
+
+
+# --------------------------------------------------------------------------
+# I-14, amendment 1 (W-1): ANY None from the brief-link read is an unknown
+# candidate in EVERY run mode, --pr and --dry-run included.
+# Catches: M-12 (the withdrawn rule restored: keep it only when no --pr was given).
+# --------------------------------------------------------------------------
+class TestAFailedBriefLinkReadWithholdsInEveryMode(unittest.TestCase):
+
+    def _assert_withheld(self, res):
+        cands = (res.report or {}).get("delivery_candidates")
+        self.assertTrue(
+            cands and cands[0].get("known") is False,
+            "I-14: GitHub could not be asked about the brief's pull request, so it is an unknown "
+            "candidate (known: false). %s" % res.describe())
+        self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded",
+                         "I-19: an unknown candidate withholds the move. %s" % res.describe())
+        self.assertNotIn("/advance", res.out, "I-19: /advance is withheld")
+
+    def test_a_pr_run_on_an_unrelated_pull_request_whose_link_read_fails_withholds(self):
+        world = _World(self)
+        res = _drive(world, ["--pr", "52"], prs={52: _pr(52, "feature/unrelated")})
+        self._assert_withheld(res)
+
+    def test_a_pr_run_whose_own_read_of_the_briefs_number_fails_withholds(self):
+        # When a given --pr IS the brief's link, that run's own read of it counts as the
+        # brief-link read, so its None counts too.
+        world = _World(self)
+        res = _drive(world, ["--pr", str(_BRIEF_PR_NUMBER)], prs={})
+        self._assert_withheld(res)
+
+    def test_a_pr_run_whose_own_read_of_the_briefs_link_fails_withholds(self):
+        world = _World(self)
+        res = _drive(world, ["--pr", _pr_url(_BRIEF_PR_NUMBER)], prs={})
+        self._assert_withheld(res)
+
+    def test_a_dry_run_with_a_pr_whose_link_read_fails_withholds(self):
+        world = _World(self)
+        res = _drive(world, ["--dry-run", "--pr", "52"], prs={52: _pr(52, "feature/unrelated")})
+        self._assert_withheld(res)
+
+    def test_control_the_modes_without_a_pr_withhold_on_a_failed_read(self):
+        # CONTROL (holds in the shipped script): --status, --resume, --dry-run and a plain run.
+        # The rule is "every mode", so the --pr tests above and these share one assertion.
+        for flags in (["--status"], ["--resume"], ["--dry-run"], []):
+            with self.subTest(flags=flags):
+                res = _drive(_World(self), flags, prs={})
+                self._assert_withheld(res)
+
+    def test_dispatch_refuses_with_exit_3_even_when_pr_was_given_and_the_link_read_failed(self):
+        world = _World(self)
+        res = _drive(world, ["--dispatch", "t1-backend", "--pr", "52"], prs={52: _pr(52, "feature/unrelated")})
+        self.assertEqual(res.exit_code, 3,
+                         "I-14 / I-19: --dispatch refuses an unknown candidate whether or not --pr was "
+                         "given. %s" % res.describe())
+        self.assertEqual((res.report or {}).get("error"), "delivery-unrecorded", res.describe())
+        self.assertFalse(res.spies.create_branch.called, "I-19: a refusal cuts no branch")
+
+    def test_control_a_known_answer_replaces_the_unknown_candidate(self):
+        # CONTROL: "a known answer replaces it". The brief's pull request answered OPEN is no
+        # candidate at all, so a --pr run on an unrelated pull request is not withheld.
+        world = _World(self)
+        prs = {52: _pr(52, "feature/unrelated"),
+               _BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH, state="OPEN")}
+        res = _drive(world, ["--pr", "52"], prs=prs)
+        self.assertEqual((res.report or {}).get("delivery_candidates"), [],
+                         "I-14: a known OPEN answer is no candidate. %s" % res.describe())
+        self.assertNotEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded")
+
+
+# --------------------------------------------------------------------------
+# Fail-closed reads at the main() level (gate 5, W-1): the harness can now say
+# "GitHub did not answer" for G-4, G-6 and the flip's records listing.
+# Catches: M-18 (a None G-4 read passes), M-19 (a None G-6 read passes in
+# --record-delivery), M-20 (the flip goes ahead on a None records listing).
+# These hold in the shipped script; each dies under its mutation.
+# --------------------------------------------------------------------------
+class TestAFailedGuardReadFailsClosedAtTheMainLevel(unittest.TestCase):
+
+    FLAGS = ["--record-delivery", "--pr", "50"]
+
+    def test_guard_g4_a_failed_sub_issues_read_exits_10_and_writes_nothing_M18(self):
+        world = _delivery_world(self, brief=_build_brief(ident="123"))
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map(), sub_issues=None)
+        self.assertEqual(res.spies.gh_open_sub_issues.call_count, 1,
+                         "fixture sanity: G-4 asked GitHub about the parent issue")
+        self.assertEqual(res.exit_code, 10,
+                         "I-15 / M-18: a failed G-4 read exits 10, never passes the guard. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before, "nothing was written before the read succeeded")
+
+    def test_guard_g6_a_failed_records_listing_exits_10_in_record_delivery_and_writes_nothing_M19(self):
+        world = _delivery_world(self)
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map(), records_prs=None)
+        self.assertEqual(res.spies.open_records_pull_requests.call_count, 1,
+                         "fixture sanity: G-6 asked GitHub for the open records pull requests")
+        self.assertEqual(res.exit_code, 10,
+                         "I-15 / M-19: a failed G-6 read exits 10, never passes the guard. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before, "nothing was written before the read succeeded")
+
+    def test_guard_a_failed_records_listing_during_the_flip_is_unverifiable_and_flips_nothing_M20(self):
+        world = _World(self).ready()
+        before = world.snapshot()
+        res = _drive(world, [], records_prs=None)
+        self.assertEqual(res.spies.open_records_pull_requests.call_count, 1,
+                         "fixture sanity: the flip asked for the open records pull requests")
+        self.assertEqual(res.verdict, "unverifiable",
+                         "I-12 / M-20: the flip needs the G-6 read; without it nothing is flipped. %s"
+                         % res.describe())
+        self.assertNotEqual(res.exit_code, 10, "I-12: a failure after the writes never exits 10")
+        self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL], "the contract stays approved")
+        self.assertEqual(world.get(_BRIEF_REL), before[_BRIEF_REL], "no run-log line either")
+
+
+# --------------------------------------------------------------------------
+# I-11 and G-6 on the flip (gate 5, W-3): two clauses of the merged-copy rule
+# and the open records pull request hold. They hold in the shipped script.
+# Catches: M-21 (the heading clause dropped), M-22 (a second marker accepted),
+# M-23 (the flip ignores an open records pull request).
+# --------------------------------------------------------------------------
+class TestTheMergedCopyRuleAndTheOpenRecordsPullRequestHoldTheFlip(unittest.TestCase):
+
+    def _marker_line(self, day):
+        return "- 2026-10-%02d: merged and recorded; %s; owner confirmed resolved: none" % (day, _RUN_LOG_MARKER)
+
+    def test_guard_a_half_done_flip_on_a_brief_with_no_run_log_heading_is_repaired_by_a_rerun_M21(self):
+        world = _World(self, brief=_build_brief(run_log=False)).ready()
+        original_contract = world.get(_CONTRACT_REL)
+        seen = {"raised": False}
+
+        def failing_replace(real, src, dst):
+            if str(dst).replace("\\", "/").endswith(_CONTRACT_REL) and not seen["raised"]:
+                seen["raised"] = True
+                raise OSError("simulated failure after the brief was written")
+            return real(src, dst)
+
+        first = _drive(world, [], replace_hook=failing_replace)
+        self.assertTrue(seen["raised"], "fixture sanity: the flip replaced the contract through os.replace")
+        self.assertEqual(first.verdict, "pending", first.describe())
+        self.assertEqual(world.get(_CONTRACT_REL), original_contract, "the contract is still `approved`")
+        self.assertEqual(world.under(".claude/concepts"), [_CONTRACT_REL],
+                         "N-1: a failed replace leaves no temporary file beside the contract")
+        brief_after_first =world.get(_BRIEF_REL).decode("utf-8")
+        self.assertEqual(brief_after_first.count("## Run log"), 1,
+                         "fixture sanity: the first run appended the heading and the marker line")
+        self.assertEqual(brief_after_first.count(_RUN_LOG_MARKER), 1)
+
+        second = _drive(world, [])
+        self.assertEqual(
+            second.verdict, "flipped",
+            "I-11 / M-21: the brief differs from origin by exactly one marker line and the `## Run log` "
+            "heading above it that origin lacks, which the one exception allows. %s" % second.describe())
+        brief_after_second = world.get(_BRIEF_REL).decode("utf-8")
+        self.assertEqual(brief_after_second.count(_RUN_LOG_MARKER), 1, "the re-run appends nothing")
+        self.assertEqual(brief_after_second.count("## Run log"), 1, "the re-run adds no second heading")
+        self.assertIn(b"**Status:** implemented", world.get(_CONTRACT_REL))
+
+    def test_guard_a_second_marker_line_makes_the_brief_not_current_M22(self):
+        one = _World(self).ready()
+        one.put(_BRIEF_REL, one.get(_BRIEF_REL).decode("utf-8") + self._marker_line(5) + "\n")
+        res_one = _drive(one, [])
+        self.assertEqual(res_one.verdict, "flipped",
+                         "positive control: exactly ONE marker line is the allowed exception. %s"
+                         % res_one.describe())
+
+        two = _World(self).ready()
+        two.put(_BRIEF_REL, two.get(_BRIEF_REL).decode("utf-8")
+                + self._marker_line(5) + "\n" + self._marker_line(6) + "\n")
+        before = two.snapshot()
+        res_two = _drive(two, [])
+        self.assertEqual(res_two.verdict, "pending", res_two.describe())
+        self.assertTrue(res_two.says("brief-not-current"),
+                        "I-11 / M-22: a second marker line fails the exception. %s" % res_two.describe())
+        self.assertEqual(two.get(_CONTRACT_REL), before[_CONTRACT_REL], "nothing is flipped")
+        self.assertEqual(two.get(_BRIEF_REL), before[_BRIEF_REL], "the brief is left as it was")
+
+    def test_guard_an_open_records_pull_request_makes_the_flip_pending_M23(self):
+        open_pr = {"headRefName": "docs/%s-records" % _SLUG, "url": _pr_url(60)}
+        for flags in ([], ["--dry-run"]):
+            with self.subTest(flags=flags):
+                world = _World(self).ready()
+                before = world.snapshot()
+                res = _drive(world, flags, records_prs=[open_pr])
+                self.assertEqual(res.verdict, "pending",
+                                 "I-15 / M-23: the same check as G-6 holds the flip, in a dry run too. %s"
+                                 % res.describe())
+                self.assertIn("records-pull-request-open", json.dumps(res.completion.get("reasons")),
+                              "the reason is named records-pull-request-open")
+                self.assertIn(_pr_url(60), json.dumps(res.completion.get("next")),
+                              "the next command points at the open records pull request")
+                self.assertEqual(world.get(_CONTRACT_REL), before[_CONTRACT_REL], "the contract stays approved")
+                self.assertEqual(world.get(_BRIEF_REL), before[_BRIEF_REL], "no run-log line either")
+
+
+# --------------------------------------------------------------------------
+# I-19 (amendment 3), round 2: a dry run's completion.next. Mutations (new):
+#   M-27: _rerun drops --pr and --record-delivery in a dry run, so the printed
+#         command does not clear the reason the dry run previewed (W-3).
+#   M-28: the `writing run:` label on a dry run's completion.next is deleted.
+# --------------------------------------------------------------------------
+def _printed_flags(res):
+    """The flags after `pr_merged.py` in the single command printed in completion.next, as a list.
+
+    `--contract <slug>` is dropped: `_drive` supplies the contract itself.
+    """
+    import shlex
+    commands = (res.completion.get("next") or {}).get("commands") or []
+    if len(commands) != 1:
+        return None
+    parts = shlex.split(commands[0])
+    flags = parts[[i for i, p in enumerate(parts) if p.endswith("pr_merged.py")][0] + 1:]
+    out, i = [], 0
+    while i < len(flags):
+        if flags[i] == "--contract":
+            i += 2
+            continue
+        out.append(flags[i])
+        i += 1
+    return out
+
+
+class TestADryRunsNextCommandClearsTheReasonItPreviewed(unittest.TestCase):
+    """M-27: the printed command keeps the --pr / --record-delivery the dry run was given."""
+
+    BLOCKED = "t4-blocked.md"
+
+    def _pr_world(self):
+        # t2 is recorded; t1 is delivered only by pull request 7, which the dry run records in memory.
+        world = _World(self, brief=_build_brief(pr="none"))
+        world.record("t2-frontend", 62)
+        world.review(self.BLOCKED, verdict="blocked")
+        return world, {7: _pr(7, "task/%s/t1-backend" % _SLUG)}
+
+    def test_control_the_bare_pr_run_clears_the_blocked_report_and_flips(self):
+        # CONTROL (passes today): the very command W-3 wants printed does what it should, so the
+        # advance asserted below is reachable and not a fixture accident.
+        world, prs = self._pr_world()
+        res = _drive(world, ["--pr", "7", "--owner-resolved", self.BLOCKED], prs=prs)
+        self.assertEqual(res.verdict, "flipped",
+                         "fixture sanity: --pr 7 records t1 and the owner flag clears the report. %s" % res.describe())
+
+    def test_a_pr_dry_run_prints_a_command_that_keeps_pr_and_runs_to_the_next_reason_M27(self):
+        world, prs = self._pr_world()
+        before = world.snapshot()
+        dry = _drive(world, ["--pr", "7", "--dry-run"], prs=prs)
+        self.assertEqual(world.snapshot(), before, "fixture sanity: a dry run writes nothing")
+        flags = _printed_flags(dry)
+        self.assertIsNotNone(flags, "fixture sanity: the dry run prints exactly one command. %s" % dry.describe())
+        self.assertIn("--pr", flags,
+                      "W-3 / M-27: the printed completion.next must keep the --pr the dry run was given, or "
+                      "running it never records t1. Printed flags: %r" % (flags,))
+        self.assertEqual(flags[flags.index("--pr") + 1] if "--pr" in flags else None, "7",
+                         "W-3: the same pull request number")
+        self.assertNotIn("--dry-run", flags, "I-19: the printed command is the writing run")
+
+        follow = _drive(world, flags, prs=prs)
+        self.assertNotIn("has no completion record", follow.out,
+                         "W-3 / M-27: running the printed command clears the dry run's reason. %s"
+                         % follow.describe())
+        self.assertEqual(follow.verdict, "flipped",
+                         "W-3: the printed command advances the verdict. %s" % follow.describe())
+
+    def test_a_record_delivery_dry_run_prints_a_command_that_keeps_both_flags_M27(self):
+        world = _delivery_world(self)
+        before = world.snapshot()
+        dry = _drive(world, ["--record-delivery", "--pr", "50", "--dry-run"], prs=_brief_pr_map())
+        self.assertEqual(world.snapshot(), before, "fixture sanity: a dry run writes nothing")
+        flags = _printed_flags(dry)
+        self.assertIsNotNone(flags, "fixture sanity: the dry run prints exactly one command. %s" % dry.describe())
+        self.assertIn("--record-delivery", flags,
+                      "W-3 / M-27: the printed command keeps --record-delivery, or the delivery is lost. "
+                      "Printed flags: %r" % (flags,))
+        self.assertIn("--pr", flags, "W-3 / M-27: and keeps --pr. Printed flags: %r" % (flags,))
+        follow = _drive(world, flags, prs=_brief_pr_map())
+        self.assertNotIn("has no completion record", follow.out,
+                         "W-3 / M-27: the printed command records the delivery. %s" % follow.describe())
+        self.assertEqual(follow.verdict, "flipped", follow.describe())
+
+
+class TestADryRunsNextReasonSaysItIsAWritingRun(unittest.TestCase):
+    """M-28: the `writing run:` label."""
+
+    BLOCKED = "t4-blocked.md"
+
+    def _world(self):
+        world = _World(self).ready()
+        world.review(self.BLOCKED, verdict="blocked")
+        return world
+
+    def test_a_dry_run_with_an_unresolved_blocked_report_labels_its_next_reason_M28(self):
+        res = _drive(self._world(), ["--dry-run"])
+        nxt = res.completion.get("next") or {}
+        self.assertTrue(nxt.get("commands"), "fixture sanity: the dry run prints a command. %s" % res.describe())
+        self.assertTrue(str(nxt.get("reason")).startswith("writing run:"),
+                        "I-19 / M-28: every command of a dry run's next is a writing run and its reason "
+                        "says so. Got %r" % (nxt.get("reason"),))
+
+    def test_control_the_same_world_without_dry_run_has_no_such_label_M28(self):
+        # CONTROL (passes today): the label belongs to the dry run alone.
+        res = _drive(self._world(), [])
+        nxt = res.completion.get("next") or {}
+        self.assertTrue(nxt.get("commands"), "fixture sanity: the run prints a command. %s" % res.describe())
+        self.assertFalse(str(nxt.get("reason")).startswith("writing run:"),
+                         "I-19: a writing run's reason is not labelled. Got %r" % (nxt.get("reason"),))
 # --------------------------------------------------------------------------
 # load_slot against the REAL template text. Contract
 # 2026-10-04-auto-improve-finish-install-skill, second blocker: an unfilled
@@ -8323,6 +11169,24 @@ class TestComputeReleasedWithholdsOnACrossRepositoryVerdict(unittest.TestCase):
 _REAL_TEMPLATE = Path(__file__).resolve().parents[2] / "project-profile.md"
 
 
+def _path_holds_the_template(path):
+    """True only when ``path`` is the plugin's TEMPLATE: it has the 'Worked shape' heading AND an
+    italic placeholder row (``| `slot` | *(...`` ). In a project that has filled its profile
+    in, the same path holds the project's own profile, which is not what these tests measure."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    has_worked_shape = re.search(r"^#+\s*Worked shape", text, re.M | re.I) is not None
+    has_placeholder = re.search(r"^\|[^|\n]*\|\s*\*\(", text, re.M) is not None
+    return has_worked_shape and has_placeholder
+
+
+@unittest.skipUnless(
+    _path_holds_the_template(_REAL_TEMPLATE),
+    "the file at .claude/project-profile.md is this project's own filled profile, not the plugin's "
+    "template (no 'Worked shape' heading and no italic placeholder row); the same slot-reader "
+    "assertions run in TestLoadSlotAgainstASyntheticTemplate")
 class TestLoadSlotAgainstTheRealTemplate(unittest.TestCase):
 
     def setUp(self):
@@ -8395,6 +11259,78 @@ class TestLoadSlotAgainstTheRealTemplate(unittest.TestCase):
         self._replace_row("test.roots", "| `test.roots` | none |")
         self.assertEqual(load_slot(self._text(), "test.roots"), (),
                          "positive control: a bare none row reads as empty")
+
+
+_SYNTHETIC_TEMPLATE = """# Project profile (synthetic template)
+
+## Slots
+
+| Slot | Value |
+|---|---|
+| `project.name` | *(the project's name, for example `Acme`)* |
+| `frontend.theme-polarity` | *(one per app, for example `web=dark`, `admin=light`, or `both`)* |
+| `test.roots` | `tests/Acme.Tests`, `ui/tests` |
+| `migration.root` | none |
+
+## Worked shape
+
+| Slot | Value |
+|---|---|
+| `project.name` | Made-Up Project |
+| `frontend.theme-polarity` | `web=dark`, `admin=both` |
+| `migration.root` | `made/up/migrations` |
+| `implementers` | `acme-backend`, `acme-frontend` |
+"""
+
+
+class TestLoadSlotAgainstASyntheticTemplate(unittest.TestCase):
+    """The vendored-repository coverage of the slot-table fix: the same assertions as
+    TestLoadSlotAgainstTheRealTemplate, against a small template embedded here, so they run
+    where the file at project-profile.md is a filled profile and not the template."""
+
+    def _text(self, drop=None):
+        if drop is None:
+            return _SYNTHETIC_TEMPLATE
+        marker = "| `%s` |" % drop
+        out, hit = [], 0
+        for line in _SYNTHETIC_TEMPLATE.splitlines(keepends=True):
+            if line.startswith(marker):
+                hit += 1
+                if hit == 1:
+                    continue
+            out.append(line)
+        self.assertGreaterEqual(hit, 1, "fixture setup: the synthetic template must hold a row for %r" % drop)
+        return "".join(out)
+
+    def test_an_unfilled_row_whose_placeholder_prose_has_backticks_reads_as_unfilled(self):
+        self.assertIn("`web=dark`", _SYNTHETIC_TEMPLATE.split("## Worked shape")[0],
+                      "fixture setup: the placeholder prose must contain backticks")
+        self.assertEqual(
+            load_slot(self._text(), "frontend.theme-polarity"), (),
+            "the italic placeholder describes the slot; backticks inside it must not be read as values")
+
+    def test_a_missing_row_does_not_fall_through_to_the_worked_example(self):
+        self.assertEqual(
+            load_slot(self._text(drop="migration.root"), "migration.root"), (),
+            "a slot with no table row is unfilled; the 'Worked shape' block is an illustration")
+
+    def test_a_missing_role_row_does_not_return_the_worked_example_agents(self):
+        # `implementers` has no row in the table at all, only in the worked example.
+        self.assertEqual(
+            load_slot(self._text(), "implementers"), (),
+            "the made-up acme-* agents in the worked example must never be read as the implementers")
+
+    def test_control_a_row_absent_from_table_and_example_stays_empty(self):
+        self.assertEqual(load_slot(self._text(), "no.such-slot"), (),
+                         "positive control: a slot named nowhere reads as empty")
+
+    def test_control_a_filled_backticked_row_reads_as_its_values(self):
+        self.assertEqual(load_slot(self._text(), "test.roots"), ("tests/Acme.Tests", "ui/tests"),
+                         "positive control: a filled backticked row keeps reading as its values")
+
+    def test_control_a_none_row_reads_as_empty(self):
+        self.assertEqual(load_slot(self._text(), "migration.root"), (),
+                         "positive control: a none row reads as empty")
 
 
 class TestMainMapsAPullRequestThroughTheStateStore(unittest.TestCase):

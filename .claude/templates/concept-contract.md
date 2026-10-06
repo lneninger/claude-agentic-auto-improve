@@ -5,6 +5,8 @@
 **Requested by:** user
 **Status:** draft
 **Supersedes:** <optional — path to a prior contract this replaces>
+**Work Item Brief:** <optional — path to the brief under .claude/work-items/ this contract serves; pr_merged.py links the contract to it>
+**Tracking issue:** <optional — #<n>, the one issue that tracks this contract's follow-ups and its Not-performed disclosures>
 
 > **Protocol:** filled in by `data-architect`. Implementer agents (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`, `senior-test-engineer`, `ui-ux-designer`) refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
 >
@@ -396,6 +398,8 @@ Two further rows are defects even though the block is mergeable: files present w
 
 Anything else — prose such as `Verdict: everything looks good`, a missing line, or a value outside that set — reads as **unreadable**, and an unreadable verdict releases nothing: every block depending on the gate stays blocked until the artefact is fixed and the loop is re-run. `unreadable` is the loop's own reading, never a value a gate writes, so it never appears in an artefact. A `blocked` verdict also releases nothing; that is deliberate, and it clears by amending and re-running the gate on a new pull request.
 
+**The Gate Output is the gate's second file, and a derived companion.** Beside its report the gate writes `<artefact stem>.gate.json` in the same folder and the same diff. It holds `supersedes` (the report file names this re-run replaces, empty otherwise) and a `checklist` of `{item, outcome}` with `item` copied verbatim from a Review checklist line and `outcome` one of `met`, `partly-met`, `not-met`, `not-applicable`. It restates no verdict, because the verdict line stays the one fact in the markdown. It is named by this rule and is not listed in `Files to touch`, which keeps naming exactly one path; the off-list check counts it as part of the declared artefact. A report with no Gate Output is normal for every report written before this existed.
+
 ### 1. Backend (`dotnet-backend-architect`)
 
 **Depends on:** none
@@ -483,6 +487,11 @@ CONSTRAINTS:
   - End the header with the verdict line, alone on its line, exactly one of:
     "**Verdict:** pass", "**Verdict:** pass-with-findings", "**Verdict:** blocked".
     The loop parses that line. Prose reads as unreadable and releases nothing.
+  - Also write the Gate Output, <artefact stem>.gate.json, beside the report in the same
+    diff: {"supersedes": [<report file names this re-run replaces, else empty>], "checklist":
+    [{"item": "<a Review checklist line, copied verbatim>", "outcome": "met | partly-met |
+    not-met | not-applicable"}]}. List every Review checklist item. On a re-run after a
+    blocked verdict, name the blocked report in "supersedes".
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/<this-file>.md
   contract_status: approved
@@ -491,6 +500,8 @@ PRIOR_FINDINGS:
 ---
 
 ## Review checklist (filled in after implementation)
+
+`pr_merged.py` fills this list when the contract's work is merged and nothing is pending: a line is checked only when an effective review report's Gate Output says `met`, and every other line stays unchecked with the reason. Do not tick lines by hand.
 
 - [ ] Implementation matches Data Shapes exactly
 - [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
