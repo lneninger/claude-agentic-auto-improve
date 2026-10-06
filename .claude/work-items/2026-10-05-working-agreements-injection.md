@@ -12,9 +12,9 @@ branch: feature/working-agreements-session-start-injection
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261005-feature-working-agreements-injection
 north_stars: none
 contract: .claude/concepts/2026-10-05-working-agreements-session-start.md
-pr: UNKNOWN
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/28
+issue_link: none
+status: shipped
 created: 2026-10-05
 ---
 
