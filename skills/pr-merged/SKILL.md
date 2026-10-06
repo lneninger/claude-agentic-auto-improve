@@ -41,6 +41,8 @@ caller may be a program rather than a session, and a program cannot invoke a ski
 script instead, and both therefore behave identically. Two implementations of these rules
 would drift the moment either changed.
 
+When a run that names a contract applies, read `references/contract-completion.md` in full before continuing. If it cannot be read, stop and report the missing file; do not continue from memory.
+
 ```bash
 py -3 "$PRM" --contract <slug|path> --pr <n|link> [--pr <n|link> ...] --json
 py -3 "$PRM" --contract <slug|path> --status --json   # read-only
@@ -54,12 +56,12 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 313 cases over
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 466 cases over
 identity, parsing, block classification, verdicts, records, releases, conflict detection, the
 Hand-Resolved Summary (including the unread-commit count and its single-fetch walk), the
 cross-repository pull-request path, the `GH_REPO` refusal, the Next Command and the Sub-Task
 Cycle. Measured by running `py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own
-`unittest` summary line: `Ran 313 tests ... OK`. They were mutation-probed: disabling the
+`unittest` summary line: `Ran 466 tests ... OK`. They were mutation-probed: disabling the
 verification check, reading a missing dependency line as none, and counting scope notes as
 sub-tasks each turn the suite red.
 
@@ -309,7 +311,7 @@ person.
 Then update the state store to mark that sub-task completed, so the live position agrees with
 the evidence.
 
-**Commit what you just wrote.** Completion records, state store changes and the brief's final status are written after the merge, so no earlier commit contains them. Stage exactly those files and commit them to a small follow-up branch cut from freshly fetched `origin/master`, named `docs/<contract-slug>-records`. Do not use a `task/...` name: the loop maps a merged pull request to its sub-task by that exact branch pattern, and a records branch must not be mapped to one. Push it and open a draft pull request. When `/flow` is running this phase, pass the list of files to Step 8 of `/flow` instead of committing here. Pushing is outward-facing, so name the branch and the files in your report and confirm once. Never leave the records uncommitted in the starting tree.
+**Commit what you just wrote.** Completion records and the brief's final status are written after the merge, so no earlier commit contains them. The state store is git-ignored and never staged. Stage exactly those files and commit them to a small follow-up branch cut from freshly fetched `origin/master`, named `docs/<contract-slug>-records`. Do not use a `task/...` name: the loop maps a merged pull request to its sub-task by that exact branch pattern, and a records branch must not be mapped to one. Push it and open a draft pull request. When `/flow` is running this phase, pass the list of files to Step 8 of `/flow` instead of committing here. Pushing is outward-facing, so name the branch and the files in your report and confirm once. Never leave the records uncommitted in the starting tree.
 
 ## Step 4: Recompute which sub-tasks are released
 

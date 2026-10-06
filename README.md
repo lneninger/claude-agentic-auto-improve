@@ -395,7 +395,7 @@ cite scripts in `.claude/scripts/`, and every concept contract is a copy of
 `templates/concept-contract.md`. The contract sub-task loop is the newest of these:
 `pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
 both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
-`scripts/tests/test_pr_merged.py`, 319 cases including the placeholder trap that an
+`scripts/tests/test_pr_merged.py`, 466 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
 and `scripts/tests/test_auto_improve_finish_install.py` holds its 199 cases. `scripts/tests/test_script_path_resolution.py` is the

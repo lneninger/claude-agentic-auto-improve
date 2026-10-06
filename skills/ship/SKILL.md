@@ -352,6 +352,8 @@ Only from Step 4d's verdict, never from intent:
 
 Commit the brief update on the branch so the record travels with the work.
 
+**`/ship` never flips the contract's `Status`.** The flip is automatic after the merge, by `/pr-merged` (see Step 6 of the design-first skill). A flip here would reach the default branch as `implemented`, and the script would then find the contract already implemented, with no checklist fill and no run log.
+
 ## Step 6: Worktree lifecycle, after the merge
 
 Only after the pull request is merged, and only for a worktree this chain created:

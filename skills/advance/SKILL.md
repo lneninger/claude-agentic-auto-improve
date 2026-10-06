@@ -55,8 +55,8 @@ py -3 "$PRM" --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
-by 313 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
-`unittest` summary line reads `Ran 313 tests ... OK` — and has been mutation-probed. **Read its
+by 466 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
+`unittest` summary line reads `Ran 466 tests ... OK` — and has been mutation-probed. **Read its
 answer. Do not recompute it from the contract**, or there are two implementations of the same
 rules and they will disagree.
 
@@ -128,6 +128,8 @@ It also refuses with exit code **8**, `gh-repo-set`, when `GH_REPO` is set in th
 a non-empty `GH_REPO` would retarget that call at another repository entirely. This refusal cuts
 no branch and writes nothing either, and it holds under `--dry-run` too. The remedy is unsetting
 `GH_REPO` in that shell and dispatching again.
+
+It refuses with exit code **3** and `{"error": "delivery-unrecorded", ...}` when a merged pull request delivered the whole contract on one branch and no delivery is recorded (the `delivery-unrecorded` move below). That refusal cuts no branch and writes nothing. `--dispatch` never exits 10, so this skill needs no handling for that code.
 
 
 Each packet names the sub-task, its branch, its agent, its file scope, the pre-written TASK
@@ -233,6 +235,12 @@ Route to architect re-entry. Concretely that means `/design-first` amending the 
 not start anything, and do not retry the sub-task from here — whether to retry is one of the
 decisions the architect makes.
 
+### `delivery-unrecorded` — a pull request delivered the whole contract and nothing records it
+
+A merged pull request that is the brief's own, but whose branch maps to no sub-task, delivered the contract on one branch. Until that delivery is recorded the script reports every sub-task as pending, and dispatching one would redo finished work. The script asks this after `escalate` and before `awaiting-merge`.
+
+**Start nothing.** Name each candidate from the script's answer and print the Next Command verbatim. It is `/pr-merged <ref> --record-delivery` for the most recent candidate GitHub confirmed, `/pr-merged <url>` when the records are waiting in an open records pull request (merge it first, then run again in a fresh worktree cut from the default branch), or a plain `/pr-merged <ref>` when GitHub could not be asked. This move never offers `/advance`: recording the delivery is `/pr-merged`'s work, not this skill's.
+
 ### `complete` — every sub-task has a record
 
 Say so, then hand off using the closing call's `next_command`, printed verbatim (Step 3 below).
@@ -293,8 +301,11 @@ prints it verbatim, exactly as `pr_merged.py`'s own human-readable output does.
 - Failed: <sub-task — severity, reason | none>
 - Blocked: <sub-task <- what holds it, one line each | none>
 - Waiting on: <the merge this now needs, or nothing>
+- Completion: <the FINAL call's completion line, verbatim>
 - Next command: <the FINAL call's next_command.commands, joined by ", then ", or "none — <reason>">
 ```
+
+The `completion:` line comes from the same final read-only call: `completion.verdict` and the first entry of `completion.reasons`. Because that call is read-only it shows `not-evaluated` and the dry-run command, never a flip. The flip belongs to `/pr-merged`.
 
 The last two lines matter most. An operator who cannot see what the contract is waiting for,
 and what to type next, will either sit watching it or walk away at the wrong moment. **The next
