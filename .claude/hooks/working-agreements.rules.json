@@ -1,0 +1,8 @@
+{
+  "_comment": "Rules for working-agreements.py (SessionStart hook). Edit this file to tune the hook; no Python change is needed.",
+
+  "_fail_soft": "This hook only informs, so it fails SOFT. If this file is missing or malformed, the hook logs rules-load-failed and uses the built-in default of 9000 characters. It never switches delivery off. Never copy this soft choice to a guard that blocks.",
+
+  "_max_characters_comment": "The size limit for the whole delivered text: the opening paragraph, every heading, every body and the closing 'not delivered' line. Whole agreements are dropped to fit, never cut. Claude Code loses text over about 10000 characters, so keep this below that. There is no always-keep setting: only the shipped plain-language agreement is always kept, and nothing here can change that.",
+  "max_characters": 9000
+}

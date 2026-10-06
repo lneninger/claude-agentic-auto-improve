@@ -103,7 +103,7 @@ These are gates, not suggestions, and they are active the moment the plugin is e
   CodeGraph tool has run in the same turn. It does **not** bypass itself when no CodeGraph
   index exists. A project without an index is blocked until you set `CLAUDE_SKIP_CG=1`.
 
-Ten of the twelve variables below are kill switches, set by you and never by an agent. Two
+Eleven of the thirteen variables below are kill switches, set by you and never by an agent. Two
 are not: `CLAUDE_ACTIVE_CONTRACT` is an approval pin and `CLAUDE_DESTRUCTIVE_DB_OK` is a
 one-shot approval. This table lists exactly the variables the hooks read, and a test
 (INV-12 in `test_plugin_manifests.py`) fails when the two disagree.
@@ -120,6 +120,7 @@ one-shot approval. This table lists exactly the variables the hooks read, and a 
 | `CLAUDE_INTEGRATION_CHECK=off` | disable the integration check |
 | `CLAUDE_MEMORY_PAGER=off` | disable the memory pager |
 | `CLAUDE_ACCURACY_TRACKER=off` | stop the contract-accuracy trackers |
+| `CLAUDE_WORKING_AGREEMENTS=off` | skip the working agreements at session start |
 | `CLAUDE_ACTIVE_CONTRACT=<path>` | approval pin: pin one approved contract |
 | `CLAUDE_DESTRUCTIVE_DB_OK=1` | one-shot approval for a destructive database operation |
 
@@ -191,7 +192,8 @@ this repository has already been bitten by once, so the gaps are stated rather t
 |---|---|---|---|
 | 22 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
-| 16 hooks | yes | no | no |
+| 17 hooks | yes | no | no |
+| 6 working agreements, delivered by a hook | yes | no | no |
 | scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
 
 **Corrected 2026-09-13.** This row used to read `vendoring only`, and that was wrong. An
@@ -252,9 +254,10 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
 skills/          22 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
-  hooks/         16 generic hooks, 3 shared helper modules, 4 generic data files
+  agreements/    6 shipped working agreements, delivered at session start
+  hooks/         17 generic hooks, 3 shared helper modules, 5 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
-    tests/       4 hook test suites
+    tests/       5 hook test suites
   scripts/       14 workflow scripts, 2 shared helper modules
     tests/       9 suites, including the path-resolution suite
   templates/     6 document templates
@@ -335,13 +338,13 @@ concept-gate, architecture-guard, bash-gate, architecture-advisor, codegraph-fir
 codegraph-turn-tracker, codegraph-turn-reset, plain-language-guard, db-destructive-guard,
 db-research-readonly-guard, integration-check, plan-question-advisor,
 critic-verdict-tracker, contract-status-watcher, journal-post-approval-tracker,
-memory-pager, plus the shared helpers `_error_log.py`, `_memory_common.py` and
+memory-pager, working-agreements, plus the shared helpers `_error_log.py`, `_memory_common.py` and
 `_project_paths.py`, and the generic data files `architecture-guard.rules.json`,
-`architecture-guard.exceptions.json`, `plain-language-guard.rules.json` and
-`db-destructive-guard.rules.json`.
+`architecture-guard.exceptions.json`, `plain-language-guard.rules.json`,
+`db-destructive-guard.rules.json` and `working-agreements.rules.json`.
 
-All sixteen hook files are registered in `.claude/hooks/hooks.json`, which the Claude
-manifest references. That makes seventeen registrations, because `plain-language-guard.py`
+All seventeen hook files are registered in `.claude/hooks/hooks.json`, which the Claude
+manifest references. That makes eighteen registrations, because `plain-language-guard.py`
 is registered on two events. The file is the single registration point: adding a hook
 without adding it there ships a file nothing runs.
 
@@ -357,6 +360,33 @@ protected database names treats every database as protected. The rules file this
 ships is neither: it names the fictional `AcmeApp` and `AcmeApp_Testing`. A hook that only
 WARNS may fail soft.
 Never copy the soft choice to a guard that blocks.
+
+### Working agreements
+
+A working agreement is one standing rule about how the assistant works with you, written in
+plain words in its own markdown file. When a session opens, `working-agreements.py` reads
+the files and hands their text to the assistant before its first reply. The plugin ships six
+in `.claude/agreements/`: plain language, one worktree per change, shared repository changes
+through pull requests, one-line commands for the user, stop means stop, and
+recommendations instead of question batches.
+
+- **Add your own** by writing a markdown file in your project's `.claude/agreements/`. The
+  first line is a level-one heading, and some text follows it. Project files arrive after the
+  shipped ones and are labelled "from this project". Every line of a project agreement is
+  shown quoted, so project text cannot pose as a shipped section.
+- **You cannot replace a shipped one.** A project file with the same name as a shipped file
+  is skipped, and the skip is logged.
+- **Project instructions and skill gates win.** The assistant is told that your project's own
+  instructions, and any skill step that requires asking you, win over every agreement.
+- **A size limit applies.** `working-agreements.rules.json` sets it, 9000 characters by
+  default, counted in UTF-16 units as the host counts. Whole agreements are dropped, project
+  ones first. The closing line names at most three dropped agreements with their paths, then
+  gives a count per folder; the log names every dropped agreement. The shipped plain-language
+  agreement is never dropped. A project file that links outside its folder, or is larger than
+  four times the limit, is skipped without being read in full.
+- **Plugin installs only.** A vendored copy of the hook prints nothing in this version.
+- **Guidance, not a check.** Nothing blocks when an agreement is ignored. A new agreement
+  takes effect in the next session. Switch the hook off with `CLAUDE_WORKING_AGREEMENTS=off`.
 
 ### Scripts and templates are not optional
 
@@ -419,9 +449,11 @@ would ship the part that can be wrong and leave behind the part that would say s
 
    *By hand instead:* register the hooks in your `.claude/settings.json`, pathing every command through
    `$CLAUDE_PROJECT_DIR/.claude/hooks/`. `.claude/hooks/hooks.json` in this repository is
-   the worked example: it registers all sixteen against the right events and matchers, so
+   the worked example: it registers all seventeen against the right events and matchers, so
    copy its entries and swap `${CLAUDE_PLUGIN_ROOT}` for `$CLAUDE_PROJECT_DIR`. A plugin
-   install does this step for you and needs no `settings.json` edit.
+   install does this step for you and needs no `settings.json` edit. A vendored copy of
+   `working-agreements.py` prints nothing, because the shipped agreements arrive only
+   with a plugin install; see [Working agreements](#working-agreements).
    Do not point a hook command at this checkout:
    `_project_paths.py` resolves a hook's `.claude` root from the hook file's own location,
    so a hook run from here would add this repository's registries as a second search root
