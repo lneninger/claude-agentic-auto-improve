@@ -1856,20 +1856,22 @@ class TestMerge(Base):
         self.assertEqual(len(self.need(self.plan(), "to-add")), 17,
                          msg="found through the plugin root, never a guessed path")
 
-    def test_the_real_plugin_hooks_json_yields_exactly_its_seventeen_registrations(self):
+    def test_the_real_plugin_hooks_json_yields_exactly_its_eighteen_registrations(self):
         real = json.loads((SCRIPT_ROOT / ".claude/hooks/hooks.json").read_text(encoding="utf-8"))
         expected = sorted((event, key_of(h)[0], key_of(h)[1])
                           for event, groups in real["hooks"].items()
                           for g in groups for h in g.get("hooks", []))
-        self.assertEqual(len(expected), 17,
-                         msg="independent parse of the REAL hooks.json: 17 registrations (16 files)")
+        self.assertEqual(len(expected), 18,
+                         msg="independent parse of the REAL hooks.json: 18 registrations (17 files)")
         self.make_vendored()  # every hook file named by the real hooks.json exists in the project
+        # the fake plugin holds 16 hook files; the real one also holds the session-start hook
+        (self.project / ".claude/hooks/working-agreements.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
         for _e, name, _x in expected:
             self.assertTrue((self.project / ".claude/hooks" / name).is_file(),
                             msg="fixture sanity: the temp project holds %s" % name)
         plan = fi.plan_hooks(self.project, "win32", claude_home=self.home, plugin_root=SCRIPT_ROOT)
         added = self.need(plan, "to-add", "registrations read from the real plugin's hooks.json")
-        self.assertEqual(len(added), 17, msg="all 17 real registrations are missing and to be added")
+        self.assertEqual(len(added), 18, msg="all 18 real registrations are missing and to be added")
         got = []
         for r in added:
             parsed = parse_registration_key(str(r.get("registration-key")))

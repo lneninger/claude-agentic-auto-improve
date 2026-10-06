@@ -72,6 +72,55 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract documents or reports what a blocking guard does when its input is missing or unconfigured
 - **Tags:** `guard, fail-closed, codegraph-first, readme-drift, hooks`
 
+### 2026-10-05 — Never hide a forbidden name by hashing it when the test needs a positive control
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-05-working-agreements-session-start.md`
+- **Lesson:** A scan that must keep certain names out of the plugin cannot prove it works against a hashed list, because the positive control has to plant the real name. Keep the literal list in the consuming project and plant a made-up word as the control.
+- **Apply when:** a contract adds a genericity or leak scan, or any test that must prove a forbidden token is caught
+- **Tags:** `genericity, positive-control, hashing, project-tokens, tests`
+
+### 2026-10-05 — Text delivered to the model must say which rule wins against a skill's gate
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-05-working-agreements-session-start.md`
+- **Lesson:** When a contract ships rule text that tells the model to follow it in every action, state the precedence: a project instruction or a skill's explicit gate wins. Check each shipped rule against the skills that already exist before approving it.
+- **Apply when:** a contract ships standing instructions, agreements or prompt text that a hook delivers to the model
+- **Tags:** `agreements, precedence, design-gate, prompt-injection, session-start`
+
+### 2026-10-05 — Do not add shared state to stop a duplicate the install tool already refuses
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-05-working-agreements-session-start.md`
+- **Lesson:** Before adding a marker file or lock to prevent double delivery, read the install tool: if it already refuses the mode that causes the duplicate, rely on that and state the residual risk in plain words. A marker adds a race and a timing window that can swallow a legitimate delivery.
+- **Apply when:** a contract adds a marker, lock or time window to prevent two copies of a hook from both acting
+- **Tags:** `duplicate-delivery, marker-file, race, install-mode, hooks`
+
+### 2026-10-05 — A size budget must bound the summary it adds, not only the items it keeps
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-05-working-agreements-session-start.md`
+- **Lesson:** When a budget rule says "name every dropped item", the summary line can grow past the budget and make the text longer than before the drop. Bound the summary (a few names, then a count) and add a final hard length check. Probe with many tiny items plus one big item.
+- **Apply when:** a contract limits delivered text size and also requires the text to list what was dropped or skipped
+- **Tags:** `size-budget, closing-line, host-cap, session-start, probe`
+
+### 2026-10-05 — A documented "missing file means the default" must read one named location only
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-05-working-agreements-session-start.md`
+- **Lesson:** The shared `hook_file()` helper searches the hook's folder, then the project, the current directory and the home folder. A fail-soft rules file read through it lets a project decoy set the limit. Read the rules file from the hook's own folder directly, clamp the value, and test the missing-file case with a decoy in each other place.
+- **Apply when:** a contract says a rules or settings file falls back to built-in defaults when missing, or says a project must not change a limit under a plugin install
+- **Tags:** `rules-file, hook_file, fail-soft, decoy, clamp`
+
+### 2026-10-05 — Neutralise every field echoed from untrusted input, not only the body
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-05-working-agreements-session-start.md`
+- **Lesson:** When project text is quoted and cleaned before it reaches the model, every other field derived from the same file (file name, path, slug, title) that is echoed anywhere in the output must be neutralised too. A file name carrying a line separator forged a plugin heading through the closing line. List every output field built from untrusted input and probe each with the payload.
+- **Apply when:** a contract delivers text from a lower-trust source next to higher-trust text and also echoes names, paths or titles of that source
+- **Tags:** `prompt-injection, file-name, origin-label, quoting, session-start`
+
+### 2026-10-05 — Count a host's size cap the way the host counts, and prove the cap with a real trial
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-05-working-agreements-session-start.md`
+- **Lesson:** The host cap on delivered context is not documented as to what happens above it. A real trial showed text above about ten thousand characters is lost entirely, and the host most likely counts UTF-16 units, not Python characters. Measure with the host's unit, keep a margin below the documented number, and put the trial result in the contract before freezing tests.
+- **Apply when:** a contract delivers text into the model's context through a hook and depends on a size limit the host does not fully document
+- **Tags:** `host-cap, utf-16, session-start, trial, size-budget`
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

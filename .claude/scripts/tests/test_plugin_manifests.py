@@ -255,7 +255,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("control: one differing declaration is detected",
           not versions_agree(collect_versions(tmp)))
 
-print("\nINV-11b  the declared version has reached 0.3.0 (the finish-install skill is a feature)")
+print("\nINV-11b  the declared version has reached 0.4.0 (the working-agreements hook is a feature)")
 
 
 def version_tuple(text: str):
@@ -267,9 +267,30 @@ try:
     current = version_tuple(next(iter(declared_versions.values())))
 except (StopIteration, ValueError):
     current = ()
-check("the declared version is at least 0.3.0 (compared as integer tuples)",
-      bool(current) and current >= (0, 3, 0),
+check("the declared version is at least 0.4.0 (compared as integer tuples)",
+      bool(current) and current >= (0, 4, 0),
       "declared %s" % ".".join(str(x) for x in current))
+
+print("\nINV-11c  working-agreements.py is registered on SessionStart, no matcher, no arguments")
+_hooks_cfg = json.loads((ROOT / ".claude" / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+_ss_groups = _hooks_cfg.get("hooks", {}).get("SessionStart", [])
+_wa_regs = [(g, h) for g in _ss_groups for h in g.get("hooks", [])
+            if "working-agreements.py" in str(h.get("command", ""))]
+check("hooks.json registers working-agreements.py under the SessionStart event exactly once",
+      len(_wa_regs) == 1, "found %d registration(s) under SessionStart" % len(_wa_regs))
+check("that SessionStart group has no matcher key, or an empty one (so it runs on every start source)",
+      bool(_wa_regs) and not _wa_regs[0][0].get("matcher"),
+      "group was %r" % (_wa_regs[0][0] if _wa_regs else None))
+check("the command has no arguments after the hook path",
+      bool(_wa_regs) and re.fullmatch(r'py -3 "\$\{CLAUDE_PLUGIN_ROOT\}/\.claude/hooks/working-agreements\.py"',
+                                      str(_wa_regs[0][1].get("command", ""))) is not None,
+      "command was %r" % (_wa_regs[0][1].get("command") if _wa_regs else None))
+check("working-agreements.py is registered under no other event",
+      all("working-agreements.py" not in str(h.get("command", ""))
+          for ev, groups in _hooks_cfg.get("hooks", {}).items() if ev != "SessionStart"
+          for g in groups for h in g.get("hooks", [])))
+check("control: the registration matcher is read from the group, not guessed (a matcher would be seen)",
+      bool({"matcher": "x", "hooks": []}.get("matcher")) and not {"hooks": []}.get("matcher"))
 
 print("\nINV-12  the README's environment-variable table matches what the hooks read")
 EXCLUDED_ENV = {"CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT"}
