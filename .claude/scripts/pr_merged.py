@@ -1010,11 +1010,94 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
 
 
 # ---------------------------------------------------------------------------
-# advance — one move, then stop
+# declared_topology -- the ONE reader of a contract's parent branch (L-13)
+# ---------------------------------------------------------------------------
+def _brief_value(brief: Dict[str, Any], key: str) -> str:
+    """A brief frontmatter value as a plain string: no quotes, no backticks, no padding."""
+    value = brief.get(key)
+    if value is None:
+        return ""
+    return str(value).strip().strip("`'\"").strip()
+
+
+def _brief_names_contract(brief: Dict[str, Any], contract_id: str) -> bool:
+    """True when the brief's ``contract:`` field points at ``contract_id`` (slug or path)."""
+    named = _brief_value(brief, "contract")
+    if not named:
+        return False
+    return Path(named.replace("\\", "/")).stem == contract_id or named == contract_id
+
+
+def declared_topology(contract_id: Optional[str], briefs: List[Dict[str, Any]],
+                      default_branch: str, protected: List[str]) -> Dict[str, Any]:
+    """The parent branch, parent issue and child ids a contract's Sub-Task Work Items declare.
+
+    ONE pure function, called by the trigger (``advance``), by the landing
+    launcher on the operator checkout's briefs, and by the landing stage on the
+    Delivery record set's briefs (L-13). It reads ``briefs`` and nothing else:
+    never the orchestrator state store, whose ``new_state`` fills the default
+    branch into every entry and so cannot tell "declared the default" from
+    "never declared" (``new_state``).
+
+    ``briefs`` are frontmatter mappings (``id``, ``contract``, ``parent_issue``,
+    ``base``, ``branch``; string values). Only briefs whose ``contract:`` names
+    ``contract_id`` count; ``contract_id=None`` means the caller already scoped
+    them. A brief with no ``base:`` is SKIPPED, never read as the default
+    branch -- filling the default in would make a mixed set look ambiguous.
+
+    Returns ``parent_branch`` (None unless exactly one non-default, non-protected
+    base is declared), ``parent_issue``, ``child_ids``, ``declared_base`` (the one
+    base declared, when there is exactly one) and ``reason``: None when a parent
+    branch is declared, else ``none-declared``, ``ambiguous`` or
+    ``parent-is-default`` (the declared base is the default branch or a
+    protected branch).
+    """
+    protected_set = set(protected or [])
+    named = [b for b in briefs if contract_id is None or _brief_names_contract(b, contract_id)]
+    result: Dict[str, Any] = {"parent_branch": None, "parent_issue": None, "child_ids": [],
+                              "declared_base": None, "reason": None}
+
+    with_base = [b for b in named if _brief_value(b, "base")]
+    bases = sorted({_brief_value(b, "base") for b in with_base})
+    if not bases:
+        result["reason"] = "none-declared"
+        return result
+    if len(bases) > 1:
+        result["reason"] = "ambiguous"
+        return result
+
+    base = bases[0]
+    result["declared_base"] = base
+    if base == default_branch or base in protected_set:
+        result["reason"] = "parent-is-default"
+        return result
+
+    absent = ("", "none", "unknown")
+    issues = sorted({_brief_value(b, "parent_issue") for b in named
+                     if _brief_value(b, "parent_issue").lower() not in absent})
+    if len(issues) > 1:
+        result["reason"] = "ambiguous"
+        return result
+
+    parent_issue = issues[0] if issues else None
+    result["parent_branch"] = base
+    result["parent_issue"] = parent_issue
+    result["child_ids"] = [
+        _brief_value(b, "id") for b in named
+        if _brief_value(b, "id") and _brief_value(b, "id") != parent_issue
+        and (_brief_value(b, "base") or _brief_value(b, "parent_issue"))
+    ]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# advance -- one move, then stop
 # ---------------------------------------------------------------------------
 def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
             state: Optional[Dict[str, Any]] = None,
             defects: Optional[List[Any]] = None,
+            briefs: Optional[List[Dict[str, Any]]] = None,
+            default_branch: Optional[str] = None,
             candidates: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Decide the contract's next single move. This never iterates.
 
@@ -1030,6 +1113,12 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
     complete — ``all()`` over an empty collection answers yes, and reading
     that as success is the defect that made the old orchestrator report a
     finished contract having written no code.
+
+    ``briefs`` and ``default_branch`` (L-13) are optional. With ``briefs`` given
+    -- already scoped to this contract by the caller -- the ``complete`` move
+    gains ``parent_branches``: ``[parent_branch]`` when the briefs declare one
+    (``declared_topology``), else ``[]``. The state store is never consulted for
+    it. With ``briefs=None`` every existing caller's move is byte-identical.
 
     ``candidates`` (I-14, I-19) are the Delivery Candidates the caller derived:
     merged pull requests that map to no sub-task but are the contract's brief's
@@ -1069,8 +1158,14 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
                     "detail": "a sub-task is out for merge; /pr-merged continues once it lands"}
 
     if all(t.id in records for t in tasks):
-        return {"action": "complete",
-                "detail": "every sub-task has a completion record"}
+        done: Dict[str, Any] = {"action": "complete",
+                                "detail": "every sub-task has a completion record"}
+        if briefs is not None:
+            default = default_branch or "master"
+            topology = declared_topology(None, briefs, default, [default])
+            done["parent_branches"] = ([topology["parent_branch"]]
+                                       if topology["parent_branch"] else [])
+        return done
 
     released, blocked = compute_released(tasks, records)
     if released:
@@ -1111,10 +1206,11 @@ def next_command_for(
     with a non-empty ``reason``. ``blocked`` is the only move that returns an
     empty ``commands`` list; every other real move returns at least one line.
 
-    ``complete`` always hands off to /verify-before-done, regardless of how
-    many mergeable sub-tasks the contract declares. Routing a multi-sub-task
-    contract's completion to the parent pull request is deferred -- see
-    .claude/concepts/followups/2026-09-23-complete-move-routes-parent-pull-request.followup.md.
+    ``complete`` branches on ``parent_branches``, which ``advance`` fills from
+    the Sub-Task Work Items through ``declared_topology`` (never from the state
+    store). Non-empty: the contract was built on a parent branch, so the next
+    command is ``/advance``, which starts the background landing. Empty or
+    absent: today's ending, ``/verify-before-done``.
     """
     action = move.get("action")
 
@@ -1161,6 +1257,14 @@ def next_command_for(
         }
 
     if action == "complete":
+        parents = list(move.get("parent_branches") or [])
+        if parents:
+            return {
+                "commands": ["/advance %s" % contract_slug],
+                "reason": "every sub-task has a completion record and the contract was built on "
+                          "parent branch %s; /advance starts the background landing"
+                          % ", ".join(parents),
+            }
         return {
             "commands": ["/verify-before-done"],
             "reason": "every sub-task has a completion record",
@@ -1565,6 +1669,33 @@ def read_brief_frontmatter(brief_path: Path) -> Optional[Dict[str, str]]:
         key, _, value = line.partition(":")
         fields[key.strip()] = value.strip()
     return fields
+
+
+def read_work_item_briefs(contract_slug: str) -> List[Dict[str, str]]:
+    """The Sub-Task Work Items under the checkout's ``.claude/work-items/`` naming a contract.
+
+    Resolved through ``_claude_paths`` at call time, like every other locator.
+    Each brief is its frontmatter mapping plus ``_path``. A contract that no
+    brief names yields ``[]`` (so the briefless callers keep today's ending).
+    """
+    try:
+        from _claude_paths import work_items_dir
+        directory = work_items_dir()
+    except ImportError:
+        directory = Path(".claude/work-items")
+    out: List[Dict[str, str]] = []
+    if not directory.is_dir():
+        return out
+    for path in sorted(directory.glob("*.md")):
+        fields = read_brief_frontmatter(path)
+        if not fields:
+            continue
+        if not _brief_names_contract(fields, contract_slug):
+            continue
+        entry = dict(fields)
+        entry["_path"] = str(path)
+        out.append(entry)
+    return out
 
 
 def find_contract(slug_or_path: str) -> Optional[Path]:
@@ -2804,6 +2935,7 @@ def main() -> int:
     #: the stored records, so a run that records the last sub-task still checks the link.
     stored_records = dict(records)
     base = default_branch()
+    briefs = read_work_item_briefs(slug)
     # `base` is already resolved on the line above -- hand it to new_state so
     # a fresh state store costs one subprocess, not two (Extension Points).
     state = load_state(slug) or new_state(slug, tasks, base=base)
@@ -3298,7 +3430,8 @@ def main() -> int:
             print(json.dumps({"error": "unknown-sub-task", "sub_task": args.dispatch,
                               "known": list(by_id)}))
             return 2
-        move_now = advance(tasks, records, state, defects=defects, candidates=candidates)
+        move_now = advance(tasks, records, state, defects=defects,
+                           briefs=briefs, default_branch=base, candidates=candidates)
         if move_now["action"] == "delivery-unrecorded":
             print(json.dumps({"error": "delivery-unrecorded", "sub_task": task.id,
                               "candidates": move_now.get("candidates", []),
@@ -3403,7 +3536,8 @@ def main() -> int:
             print(f"dispatched {task.id} on {branch} -> {task.agent}")
         return 0
 
-    move = advance(tasks, records, state, defects=defects, candidates=candidates)
+    move = advance(tasks, records, state, defects=defects,
+                   briefs=briefs, default_branch=base, candidates=candidates)
     if move["action"] == "delivery-unrecorded" and records_pr_url:
         move["records_pull_request"] = records_pr_url
     report["next_move"] = move

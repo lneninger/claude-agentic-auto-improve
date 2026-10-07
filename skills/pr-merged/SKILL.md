@@ -56,12 +56,12 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 466 cases over
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 484 cases over
 identity, parsing, block classification, verdicts, records, releases, conflict detection, the
 Hand-Resolved Summary (including the unread-commit count and its single-fetch walk), the
 cross-repository pull-request path, the `GH_REPO` refusal, the Next Command and the Sub-Task
 Cycle. Measured by running `py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own
-`unittest` summary line: `Ran 466 tests ... OK`. They were mutation-probed: disabling the
+`unittest` summary line: `Ran 484 tests ... OK` (exit code 0). They were mutation-probed: disabling the
 verification check, reading a missing dependency line as none, and counting scope notes as
 sub-tasks each turn the suite red.
 
@@ -311,7 +311,15 @@ person.
 Then update the state store to mark that sub-task completed, so the live position agrees with
 the evidence.
 
-**Commit what you just wrote.** Completion records and the brief's final status are written after the merge, so no earlier commit contains them. The state store is git-ignored and never staged. Stage exactly those files and commit them to a small follow-up branch cut from freshly fetched `origin/master`, named `docs/<contract-slug>-records`. Do not use a `task/...` name: the loop maps a merged pull request to its sub-task by that exact branch pattern, and a records branch must not be mapped to one. Push it and open a draft pull request. When `/flow` is running this phase, pass the list of files to Step 8 of `/flow` instead of committing here. Pushing is outward-facing, so name the branch and the files in your report and confirm once. Never leave the records uncommitted in the starting tree.
+**Commit what you just wrote.** Completion records and the brief's final status are written after the merge, so no earlier commit contains them. The state store is git-ignored and never staged. Stage exactly those files and commit them to the one stable records branch of the contract, `docs/<contract-slug>-records`. Do not use a `task/...` name: the loop maps a merged pull request to its sub-task by that exact branch pattern, and a records branch must not be mapped to one.
+
+**One stable branch, added to and never re-cut.** Fetch `origin/docs/<contract-slug>-records` first.
+- **It exists on origin:** check it out from that fetched ref, commit on top and push without force. Never re-cut it while it exists, because a re-cut drops the records already on it.
+- **It is absent:** cut it from freshly fetched `origin/master`, push it and open a draft pull request.
+
+When `/flow` is running this phase, pass the list of files to Step 8 of `/flow` instead of committing here, with the one exception below. Pushing is outward-facing, so name the branch and the files in your report and confirm once. Never leave the records uncommitted in the starting tree.
+
+**Exception: the completion hand-off push.** When this run leaves every sub-task with a completion record and the contract has a parent branch (the script's `next_command` for this run is `/advance <slug>`), commit and push the records draft BEFORE handing to `/advance`, even when `/flow` is running. Do not defer it to `/flow` Step 8. The landing reads records only from the remote, so a record that is still on this disk is invisible to it. This one push asks no confirmation (operator decision 2026-10-05, Open Question 1: "no prompt"); name the branch and the files in the report. Every other records push keeps its confirmation.
 
 ## Step 4: Recompute which sub-tasks are released
 
@@ -352,8 +360,8 @@ released, and the set still blocked with what each is waiting for.
 
 **What happens next depends on who called.**
 
-**The loop called.** Return the sets and stop. Do not start a sub-task, do not ask the user
-anything, and do not decide an order. The loop owns iteration, and it already holds the
+**The loop called.** Return the sets and stop, except on the completion move described below. Do
+not start a sub-task, do not ask the user anything, and do not decide an order. The loop owns iteration, and it already holds the
 authority it was started under. A phase that starts work behind its caller's back produces two
 things driving the same queue.
 
@@ -363,17 +371,24 @@ things driving the same queue.
   Do not start a sub-task from here; `/advance` owns dispatch.
 
 **When every sub-task has a completion record,** hand off using the script's own `next_command`
-— printed verbatim, never re-derived here (Step 7 below). Today that command is always
-`/verify-before-done`; `/ship` follows verification. Do not declare the contract finished from
-here. Completion
-of the last sub-task is a fact this phase can report. Whether the contract is done is a verdict
-that belongs to verification.
+— printed verbatim, never re-derived here (Step 7 below). The command depends on whether the
+contract was built on a parent branch, whoever called:
+
+- **No parent branch:** `/verify-before-done`; `/ship` follows verification.
+- **A parent branch:** `/advance <slug>`. This phase hands straight to `/advance`, which starts the
+  background landing and asks nothing. This is the one case where this phase starts something, and
+  it starts it by invoking `/advance`, never by launching the landing itself. Step 3's completion
+  hand-off push comes first, so the landing finds every record on the remote.
+
+Do not declare the contract finished from here. Completion of the last sub-task is a fact this
+phase can report. Whether the contract is done is a verdict that belongs to the landing (parent
+branch) or to verification (none).
 
 For a contract with two or more mergeable sub-tasks, the end of the contract is also its
-**parent** pull request, not any sub-task's own. The rule that the parent must not be marked
-ready while any child issue is still open (the topology contract's I-12) is not enforced by any
-step yet, so the operator must confirm every sub-issue is closed before marking the parent pull
-request ready.
+**parent** pull request, not any sub-task's own. The landing script enforces the rule that the
+parent must not be merged while any child issue is still open (the topology contract's I-12): it
+reads the children from the parent issue twice and halts `children-still-open`. Nothing in this
+phase checks it, and the operator no longer has to.
 
 ## When a sub-task cannot be delivered
 
@@ -502,7 +517,7 @@ empty, `"none — " + report["next_command"]["reason"]`.
 - Released: <sub-tasks now unblocked, and what released them>
 - Still blocked: <sub-task — waiting on X>
 - Failed: <sub-task — severity, one-line reason, and what it now blocks | none>
-- Contract complete: <yes — /verify-before-done, printed verbatim by the script (for two or more mergeable sub-tasks, the end-of-contract hand-off is the parent pull request; confirm every sub-issue is closed before marking it ready — I-12 is not enforced by any step yet) | no, N sub-tasks remain | blocked on architect re-entry>
+- Contract complete: <yes — the script's `next_command`, printed verbatim: `/verify-before-done` (no parent branch) or `/advance <slug>` (a parent branch: the landing script starts there and merges the parent pull request itself, after its children-closed gate) | no, N sub-tasks remain | blocked on architect re-entry>
 - Cleanup: <removed, or offered and declined>
 - Next command: <report["next_command"], rendered exactly as the rule above says>
 ```
@@ -596,9 +611,17 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
 - **Starting several released sub-tasks without asking,** on the person-called path. Each is
   a full run.
 - **Starting anything at all when the loop called you.** Return the sets and stop. Two
-  things driving one queue will disagree the moment either changes.
+  things driving one queue will disagree the moment either changes. The one exception is the
+  completion move of a contract with a parent branch, which hands to `/advance`.
 - **Declaring the contract finished** because the last sub-task closed. That verdict belongs
-  to `/verify-before-done`.
+  to the landing (parent branch) or to `/verify-before-done` (none).
+- **Handing to `/advance` on the completion move before the records draft is pushed.** The landing
+  reads records from the remote only, so an unpushed record reads as `not-complete`.
+- **Re-cutting `docs/<contract-slug>-records` while it exists on origin.** Fetch it, commit on top
+  and push without force. Cut it from `origin/master` only when it is absent.
+- **Moving the completion hand-off push's no-prompt rule to other pushes.** It covers that one push
+  only. Every other records push confirms once.
+- **Launching the landing from this phase.** `/advance` starts it, in the background.
 - **Closing a sub-issue on a local belief that a pull request merged.** Step 1's GitHub
   verification must already have confirmed the merge before Step 2.5 runs.
 - **Closing a sub-issue without first reading the issue's own state.** I-10's read-before-close
@@ -635,12 +658,11 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
 - **Sits inside** `/flow`, which owns the outer chain for one whole work item.
 - **Offers released sub-tasks to** `/tdd-first` on the person-called path only, with the
   contract as the authority.
-- **Hands a finished contract to** `/verify-before-done` — the script's printed `next_command`,
-  whatever the sub-task count; `/ship` follows verification. For a contract with two or more mergeable
-  sub-tasks, the end-of-contract pull request is the parent one; confirming every child issue is
-  closed before marking it ready is on the operator today, since the topology contract's I-12
-  children-still-open gate is not implemented by any step (see
-  `.claude/concepts/followups/2026-09-23-complete-move-routes-parent-pull-request.followup.md`).
+- **Hands a finished contract on** with the script's printed `next_command`: `/verify-before-done`
+  when it has no parent branch (`/ship` follows verification), and `/advance` when it has one.
+  `/advance` starts the background landing, and `.claude/scripts/land_contract.py` merges the parent
+  pull request. The topology contract's I-12 children-still-open gate is enforced there (phases P4
+  and P12). Contract: `.claude/concepts/2026-10-05-contract-completion-lands-on-master.md`.
 - **Complements** `/ship`, which opens pull requests. This skill handles what happens after
   one merges.
 - **Implemented by** `.claude/scripts/pr_merged.py`, which the loop calls directly.

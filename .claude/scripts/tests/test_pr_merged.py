@@ -11374,5 +11374,250 @@ class TestMainMapsAPullRequestThroughTheStateStore(unittest.TestCase):
         self.assertEqual(report["unmapped"][0]["branch"], "feature/foreign-name")
 
 
+# ===========================================================================
+# Contract 2026-10-05 (contract completion lands on master), sub-task 1, item (a).
+#
+# The ``complete`` move learns the contract's parent branch from the Sub-Task
+# Work Items (``declared_topology``), never from the orchestrator state store.
+# A non-empty answer hands to /advance (which starts the landing); an empty one
+# keeps today's /verify-before-done ending.
+#
+# Tests that PASS today by design (named in the hand-off): the briefs=None
+# no-key case, the missing-key and empty-list next-command cases, and the
+# all-default status positive control read only behaviour that already exists;
+# every other case needs a symbol or a branch of ``advance`` /
+# ``next_command_for`` / ``main`` that is absent.
+# ===========================================================================
+def _brief(brief_id, base=None, parent_issue=394, contract_slug="2026-10-05-demo",
+           branch=None):
+    fm = {"id": str(brief_id), "contract": ".claude/concepts/%s.md" % contract_slug}
+    if parent_issue is not None:
+        fm["parent_issue"] = str(parent_issue)
+    if base is not None:
+        fm["base"] = base
+    if branch is not None:
+        fm["branch"] = branch
+    return fm
+
+
+def _topology(briefs, contract_id="2026-10-05-demo", default="master", protected=("master",)):
+    fn = _fn("declared_topology")
+    assert fn is not None, "pr_merged.declared_topology does not exist yet"
+    return fn(contract_id, briefs, default, list(protected))
+
+
+class TestDeclaredTopology(unittest.TestCase):
+
+    def test_the_function_exists(self):
+        self.assertIsNotNone(
+            _fn("declared_topology"),
+            "L-13: the trigger and the landing must call ONE pure function, "
+            "pr_merged.declared_topology(contract_id, briefs, default_branch, protected)")
+
+    def test_briefs_declaring_a_feature_base_give_that_parent_branch_issue_and_children(self):
+        topo = _topology([_brief(401, "feature/p"), _brief(402, "feature/p")])
+        self.assertEqual(topo.get("parent_branch"), "feature/p",
+                         "the declared base of the Sub-Task Work Items is the parent branch")
+        self.assertEqual(str(topo.get("parent_issue")), "394",
+                         "the parent issue comes from the briefs' parent_issue: field")
+        self.assertEqual(sorted(str(c) for c in topo.get("child_ids", [])), ["401", "402"],
+                         "the child ids are the briefs' own id: values")
+
+    def test_every_base_being_the_default_declares_no_parent_branch(self):
+        topo = _topology([_brief(401, "master"), _brief(402, "master")])
+        self.assertIn(topo.get("parent_branch"), (None, ""),
+                      "all-default topology declares no parent branch")
+        self.assertEqual(topo.get("reason"), "parent-is-default",
+                         "all-default topology carries the reason parent-is-default")
+
+    def test_a_brief_with_no_base_is_skipped_never_read_as_the_default(self):
+        topo = _topology([_brief(401, "feature/p"), _brief(402, None)])
+        self.assertEqual(
+            topo.get("parent_branch"), "feature/p",
+            "a brief with no base: is skipped; filling the default into it would make the "
+            "topology look ambiguous (L-13, the state-store defect)")
+        self.assertNotEqual(topo.get("reason"), "ambiguous",
+                            "a skipped brief must not create disagreement")
+
+    def test_positive_control_two_different_bases_are_ambiguous(self):
+        topo = _topology([_brief(401, "feature/p"), _brief(402, "feature/q")])
+        self.assertEqual(topo.get("reason"), "ambiguous",
+                         "briefs that disagree on base: are ambiguous")
+
+    def test_no_brief_naming_the_contract_declares_nothing(self):
+        topo = _topology([_brief(401, "feature/p", contract_slug="some-other-contract")])
+        self.assertEqual(topo.get("reason"), "none-declared",
+                         "a brief naming another contract is not this contract's topology")
+        self.assertIn(topo.get("parent_branch"), (None, ""),
+                      "nothing declared means no parent branch")
+
+    def test_a_declared_parent_in_the_protected_list_is_parent_is_default(self):
+        topo = _topology([_brief(401, "release"), _brief(402, "release")],
+                         protected=("master", "release"))
+        self.assertEqual(topo.get("reason"), "parent-is-default",
+                         "a declared parent in protectedBranches is refused (L-13)")
+
+
+def _two_mergeable_tasks():
+    with mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+         mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)):
+        return pr_merged.classify_handoff(CONTRACT_CLI_TWO_MERGEABLE_INDEPENDENT_TASKS).sub_tasks
+
+
+class TestAdvanceCompleteMoveCarriesParentBranches(unittest.TestCase):
+
+    def _tasks_and_records(self):
+        tasks = _two_mergeable_tasks()
+        recs = {t.id: {"status": "completed", "verified": "github", "pull_request": "u"}
+                for t in tasks}
+        return tasks, recs
+
+    def _advance(self, **kw):
+        tasks, recs = self._tasks_and_records()
+        if kw:
+            self._require_briefs_parameter()
+        return advance(tasks, recs, None, None, **kw)
+
+    def _require_briefs_parameter(self):
+        params = inspect.signature(advance).parameters
+        self.assertIn(
+            "briefs", params,
+            "Extension Point 1: advance() gains briefs= and default_branch= keyword parameters")
+        self.assertIn("default_branch", params,
+                      "Extension Point 1: advance() gains default_branch=")
+
+    def test_briefs_declaring_a_feature_base_give_a_one_element_parent_branches(self):
+        move = self._advance(briefs=[_brief(401, "feature/p"), _brief(402, "feature/p")],
+                             default_branch="master")
+        self.assertEqual(move.get("action"), "complete", "fixture sanity: every record is present")
+        self.assertEqual(move.get("parent_branches"), ["feature/p"],
+                         "the complete move names the parent branch the briefs declare")
+
+    def test_every_base_the_default_gives_an_empty_parent_branches(self):
+        move = self._advance(briefs=[_brief(401, "master"), _brief(402, "master")],
+                             default_branch="master")
+        self.assertEqual(move.get("action"), "complete", "fixture sanity")
+        self.assertEqual(move.get("parent_branches"), [],
+                         "all-default briefs declare no parent branch, so the key is an empty "
+                         "list (present, not absent)")
+
+    def test_a_brief_with_no_base_is_never_read_as_the_default(self):
+        move = self._advance(briefs=[_brief(401, "feature/p"), _brief(402, None)],
+                             default_branch="master")
+        self.assertEqual(move.get("parent_branches"), ["feature/p"],
+                         "a brief without base: is skipped, not filled with master")
+
+    def test_briefs_none_leaves_the_move_without_the_key(self):
+        # Passes today by design: with briefs=None every existing caller is byte-identical.
+        move = self._advance()
+        self.assertEqual(move.get("action"), "complete", "fixture sanity")
+        self.assertNotIn("parent_branches", move,
+                         "briefs=None must leave every existing caller's move byte-identical")
+
+    def test_a_state_store_filled_with_the_default_never_changes_the_briefs_answer(self):
+        tasks, recs = self._tasks_and_records()
+        state = new_state("2026-10-05-demo", tasks, base="master")
+        self.assertTrue(all(e["base"] == "master" for e in state["sub_tasks"].values()),
+                        "fixture sanity: new_state fills the default into every entry")
+        self._require_briefs_parameter()
+        move = advance(tasks, recs, state, None,
+                       briefs=[_brief(401, "feature/p"), _brief(402, "feature/p")],
+                       default_branch="master")
+        self.assertEqual(move.get("parent_branches"), ["feature/p"],
+                         "the state store is never read for topology (L-13)")
+
+
+class TestNextCommandForCompleteBranchesOnParentBranches(unittest.TestCase):
+
+    def test_a_non_empty_parent_branches_hands_to_advance(self):
+        nc = pr_merged.next_command_for(
+            {"action": "complete", "parent_branches": ["feature/p"]}, "demo-slug")
+        self.assertEqual(nc["commands"], ["/advance demo-slug"],
+                         "a contract with a parent branch is landed by /advance, which starts "
+                         "the background landing")
+        self.assertTrue(nc["reason"], "I-5: commands always travel with a reason")
+
+    def test_an_empty_parent_branches_keeps_the_verification_line(self):
+        # Passes today by design.
+        nc = pr_merged.next_command_for({"action": "complete", "parent_branches": []}, "demo-slug")
+        self.assertEqual(nc["commands"], ["/verify-before-done"],
+                         "no parent branch: today's ending applies")
+
+    def test_a_move_without_the_key_keeps_the_verification_line(self):
+        # Passes today by design.
+        nc = pr_merged.next_command_for({"action": "complete"}, "demo-slug")
+        self.assertEqual(nc["commands"], ["/verify-before-done"],
+                         "the briefless callers keep today's ending, byte for byte")
+
+    def test_the_docstring_no_longer_cites_the_superseded_stub(self):
+        doc = pr_merged.next_command_for.__doc__ or ""
+        self.assertNotIn(
+            "2026-09-23-complete-move-routes-parent-pull-request", doc,
+            "Extension Point 2: the complete arm's docstring stops citing the stub this "
+            "contract supersedes")
+
+
+class TestMainStatusReadsTheBriefsForTheCompleteMove(unittest.TestCase):
+    """main --status over a temporary project tree holding Sub-Task Work Items."""
+
+    SLUG = "acme-landing-fixture"
+
+    def _status_text(self, base):
+        records = {
+            "t1-backend": {"status": "completed", "verified": "github", "pull_request": "u1"},
+            "t2-frontend": {"status": "completed", "verified": "github", "pull_request": "u2"},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".claude" / "concepts").mkdir(parents=True)
+            (root / ".claude" / "work-items").mkdir(parents=True)
+            contract = root / ".claude" / "concepts" / (self.SLUG + ".md")
+            contract.write_text(CONTRACT_CLI_TWO_MERGEABLE_INDEPENDENT_TASKS, encoding="utf-8")
+            for n in (401, 402):
+                (root / ".claude" / "work-items" / ("2026-10-05-%d-t.md" % n)).write_text(
+                    "---\nid: %d\ntitle: t\nparent_issue: 394\nbase: %s\n"
+                    "contract: .claude/concepts/%s.md\nstatus: implementing\n---\n\n# t\n"
+                    % (n, base, self.SLUG), encoding="utf-8")
+            out = io.StringIO()
+            argv = ["pr_merged.py", "--contract", str(contract), "--status"]
+            old_cwd = os.getcwd()
+            old_env = os.environ.get("CLAUDE_PROJECT_DIR")
+            os.environ["CLAUDE_PROJECT_DIR"] = str(root)
+            os.chdir(str(root))
+            try:
+                with mock.patch.object(sys, "argv", argv), \
+                     mock.patch.object(pr_merged, "load_records", return_value=dict(records)), \
+                     mock.patch.object(pr_merged, "load_state", return_value=None), \
+                     mock.patch.object(pr_merged, "default_branch", return_value="master"), \
+                     mock.patch.object(pr_merged, "write_state", mock.MagicMock()), \
+                     mock.patch.object(pr_merged, "write_record", mock.MagicMock()), \
+                     mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                     mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)), \
+                     contextlib.redirect_stdout(out):
+                    pr_merged.main()
+            finally:
+                os.chdir(old_cwd)
+                if old_env is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = old_env
+            return out.getvalue()
+
+    def test_briefs_declaring_a_feature_base_print_advance_as_the_next_command(self):
+        text = self._status_text("feature/p")
+        last = [ln for ln in text.splitlines() if ln.strip()][-1]
+        self.assertIn(
+            "/advance %s" % self.SLUG, last,
+            "the Sub-Task Work Items under the checkout's .claude/work-items/ declare base "
+            "feature/p, so the complete move's next command is /advance <slug>. Last line: %r" % last)
+
+    def test_positive_control_briefs_declaring_the_default_print_the_verification_line(self):
+        # Passes today by design: today's ending is /verify-before-done whatever the briefs say.
+        text = self._status_text("master")
+        last = [ln for ln in text.splitlines() if ln.strip()][-1]
+        self.assertIn("/verify-before-done", last,
+                      "all-default briefs keep today's ending. Last line: %r" % last)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

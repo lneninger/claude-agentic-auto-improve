@@ -305,6 +305,17 @@ Run `git status --short` in every tree the work touched and sort each remaining 
 
 Report the result as one line: `tree clean`, or the list of files still pending with what each needs. Do not report the work as done while files this work wrote are still uncommitted.
 
+## Landing a completed contract: the scripted form
+
+A contract built on a parent branch is not verified by this skill's steps. When every sub-task has a completion record, `/advance` starts `.claude/scripts/land_contract.py` in the background, and that script runs its own scripted gate on the merged head of the parent branch (`master` merged in). It then opens the parent pull request and merges it. Read its Landing Report, never re-run these steps by hand for that merge. Contract: `.claude/concepts/2026-10-05-contract-completion-lands-on-master.md`.
+
+The scripted gate substitutes for two steps here:
+
+- **Step 5 (migration safety)** is not run. It applies migrations to the developer database, and the script never does. A contract touching `migration.root` needs a passing `migration-safety-reviewer` artefact instead, which the script checks.
+- **Step 5.5 (safety-critical review gate)** is not judged from session history. The script checks that a completion record of the contract carries a passing review artefact for each reviewer the changed paths require.
+
+Everything else in the gauntlet is a configured verification step in the script (build, tests, drift), read from `master`'s `contractLanding` configuration and compared with the failing-test baseline on `master`. This skill still governs a contract with no parent branch and every sub-task's own branch.
+
 ## Anti-patterns (halt immediately)
 
 - **Reporting done with this work's files still uncommitted** — Step 11 is the check. A green verdict does not make the tree clean.

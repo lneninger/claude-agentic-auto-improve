@@ -395,7 +395,7 @@ cite scripts in `.claude/scripts/`, and every concept contract is a copy of
 `templates/concept-contract.md`. The contract sub-task loop is the newest of these:
 `pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
 both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
-`scripts/tests/test_pr_merged.py`, 466 cases including the placeholder trap that an
+`scripts/tests/test_pr_merged.py`, 484 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
 and `scripts/tests/test_auto_improve_finish_install.py` holds its 199 cases. `scripts/tests/test_script_path_resolution.py` is the
@@ -495,8 +495,16 @@ Three things drive that, and none of them loops on its own:
 
 Then `/advance` again. Between those, that is the loop.
 
+A contract with a parent branch ends differently. Once every sub-task has a completion record,
+`/pr-merged` hands straight to `/advance`, which starts a background landing script
+(`.claude/scripts/land_contract.py`). The script verifies the parent branch, opens the parent pull
+request and merges it with no question asked, so that one merge is the only one a machine takes.
+`/ship` still never merges: it opens drafts, and the landing script owns the parent merge. A fresh
+project ships an empty `contractLanding` block in `.claude/work-item-conventions.json`, so landing
+stops with `landing-not-configured` until the project declares its own verification steps.
+
 The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
-neither can drift from the other. It carries 319 tests.
+neither can drift from the other. It carries 484 tests.
 
 ### What it will refuse to do
 

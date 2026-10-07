@@ -1,6 +1,6 @@
 ---
 name: advance
-description: "Move a contract forward by exactly one step. Asks the script what the next move is, then takes it: start the sub-tasks that are ready, escalate a failure to the architect, hand a finished contract to verification, or report what is blocked and why. Makes one move and stops, because a merge-gated loop suspends until somebody merges and /pr-merged wakes it. Use when: user says /advance, 'what is next on this contract', 'start the next sub-task', 'continue the contract', or after /pr-merged reports newly released sub-tasks. Never iterates on its own."
+description: "Move a contract forward by exactly one step. Asks the script what the next move is, then takes it: start the sub-tasks that are ready, escalate a failure to the architect, land a finished contract that has a parent branch (a background script, no question asked) or hand one without a parent branch to verification, or report what is blocked and why. Makes one move and stops, because a merge-gated loop suspends until somebody merges and /pr-merged wakes it. Use when: user says /advance, 'what is next on this contract', 'start the next sub-task', 'continue the contract', or after /pr-merged reports newly released sub-tasks. Never iterates on its own."
 user_invocable: true
 ---
 
@@ -16,7 +16,8 @@ This skill takes that step.
    ask the script for the next move
    ->  dispatch what is ready     (start it, open a pull request, STOP)
    ->  escalate a failure         (architect re-entry)
-   ->  hand a finished contract   (/verify-before-done)
+   ->  land a finished contract   (parent branch: background landing script)
+   ->  hand a finished contract   (no parent branch: /verify-before-done)
    ->  report what is blocked     (and exactly what holds it)
 ```
 
@@ -55,8 +56,8 @@ py -3 "$PRM" --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
-by 466 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
-`unittest` summary line reads `Ran 466 tests ... OK` — and has been mutation-probed. **Read its
+by 484 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
+`unittest` summary line reads `Ran 484 tests ... OK` (exit code 0) — and has been mutation-probed. **Read its
 answer. Do not recompute it from the contract**, or there are two implementations of the same
 rules and they will disagree.
 
@@ -68,7 +69,7 @@ The answer carries `next_move.action`, plus `dispatch` packets when there is som
 
 **`contract-not-found` is almost always the wrong branch, not a missing contract.** Before anything else, ask which branch holds the file: `git log --all --oneline -- .claude/concepts/<slug>.md`. Then say which branch to switch to and stop. Do not create a worktree to get around it unless the operator says to.
 
-**A released sub-task whose branch or pull request already exists on GitHub means a completion record is missing from this checkout.** A record written on a separate records branch is invisible here until that branch reaches the parent. Dispatching on that answer redoes finished work. Stop, name the sub-task, and say which pull request carries the record.
+**A released sub-task whose branch or pull request already exists on GitHub means a completion record is missing from this checkout.** A record written on a separate records branch is invisible here until that branch reaches the parent. Dispatching on that answer redoes finished work. Stop, name the sub-task, and say which pull request carries the record. This rule is about dispatch, which sees only the parent branch. The landing in `complete` below differs on purpose: it also reads records from the `docs/<contract-slug>-records` branch and from `master`, because that is where `/pr-merged` Step 3 puts them.
 
 **Check the packet's `base` against the sub-task brief's `base:` before dispatching for real.** A packet that says the default branch while the brief says the parent branch means the sub-task's identity was never recorded in this checkout's state. Record it first with `--record-subtask`, then dispatch. Otherwise the new branch is cut from the wrong place and misses what earlier sub-tasks built.
 
@@ -243,13 +244,80 @@ A merged pull request that is the brief's own, but whose branch maps to no sub-t
 
 ### `complete` — every sub-task has a record
 
-Say so, then hand off using the closing call's `next_command`, printed verbatim (Step 3 below).
-Today that is `/verify-before-done`, followed by `/ship` for the contract as a whole. For a
-contract with two or more mergeable sub-tasks, confirm every sub-issue is closed before the
-contract's parent pull request is marked ready — nothing enforces it yet.
+Say so, then branch on `next_move.parent_branches`. The script fills it from the Sub-Task Work
+Items, never from the state store.
 
-**Do not declare the contract finished here.** That the last sub-task closed is a fact this
-skill can report. Whether the contract is done is a verdict belonging to verification.
+**Empty: the contract has no parent branch.** Hand off using the closing call's `next_command`,
+printed verbatim (Step 3 below). That is `/verify-before-done`, followed by `/ship` for the
+contract as a whole.
+
+**Non-empty: the contract was built on a parent branch, and the loop lands it.** No question is
+asked (operator decision 2026-10-05). The landing is a script, `land_contract.py`. It fetches,
+builds its own checkout of the parent branch, merges `master` into it, verifies it, checks that
+every child issue is closed and no review verdict is blocked, opens the parent pull request and
+merges it. It takes about 25 minutes, and a foreground shell call is capped at ten minutes, so it
+runs in the shell tool's **background mode and never in the foreground**. This was measured on
+2026-10-06: a background command ran 11 minutes, was not killed, and its completion notice
+arrived.
+
+1. **Find the script**, the same way Step 1 finds `pr_merged.py`:
+
+   ```bash
+   LANDER=$(ls .claude/scripts/land_contract.py          "$CLAUDE_PLUGIN_ROOT/.claude/scripts/land_contract.py"          ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/land_contract.py          2>/dev/null | head -1)
+   ```
+
+   **If `LANDER` comes back empty, stop and say so.**
+2. **Ask `--status` first.** It takes seconds and changes nothing:
+
+   ```bash
+   py -3 "$LANDER" --contract <slug> --status --json
+   ```
+
+   Read `state`:
+   - `live` — a landing is already running. Report its phase and start time from `lock` and
+     `phase`, launch nothing, and stop.
+   - `report` — a run has ended. Render its Landing Report (step 5). On `landed` or
+     `already-landed` the contract is landed: skip to the parent brief in step 5 and launch
+     nothing. On any halt, this is the previous run's report. Render it in one line and go on to
+     step 3: rerunning `/advance <slug>` is how a halt resumes (operator decision 2026-10-05),
+     and the script re-derives every phase from git and GitHub facts, so a relaunch on an
+     unfixed cause ends in the same halt.
+   - `interrupted` — a lock whose process is gone, with no report for its run. The session
+     ended or the machine slept mid-run. Go on to step 3.
+   - `none` — no run yet. Go on to step 3.
+3. **Launch in background mode.** The command is the operator checkout's copy of the script:
+
+   ```bash
+   py -3 "$LANDER" --contract <slug> --json
+   ```
+
+   That copy is only the launcher. It builds the landing checkout from the parent branch and hands
+   over to that checkout's own copy, so the code that lands is the code that runs (L-16). Never
+   run the landing worktree's copy yourself.
+
+   Say plainly that the landing is running in the background and that this skill is now waiting
+   for its notice. Once the launcher has taken its lock, `--status` names the live run's
+   `run_id`. Keep it.
+4. **Wait for the background task's completion notice,** then read `report.json` for that
+   `run_id`. It is at `<main root>/.claude/state/landing/<slug>/report.json`, where `<main root>`
+   is the parent folder of `git rev-parse --path-format=absolute --git-common-dir`. Read the file,
+   never the task's stdout through a pipe: a run that never started exits quietly through a pipe.
+   A report whose `run_id` differs, or none at all, means the run was cut short. Treat it as
+   `interrupted` and return to step 2. If the session ended or the notice was lost,
+   `/advance <slug>` does exactly this on its next call, through `--status`.
+5. **Render the Landing Report** field by field: `outcome`, `gate`, `detail`, `remedy`,
+   `pull_request`, `merged_commit`, `parent_issue_state_after`, `hand_resolved_in_merge`,
+   `bookkeeping_files` and `notes`. Its `next_command` is the closing line, printed verbatim:
+   the landing has its own table, so do not substitute Step 3's call to `pr_merged.py`. After
+   `landed` or `already-landed`, the script has edited the parent brief in this checkout. Commit
+   it to the records draft exactly as `/pr-merged` Step 3 does: the one stable branch
+   `docs/<contract-slug>-records`, fetched and committed on top when it exists on origin, cut from
+   freshly fetched `origin/master` only when it is absent, pushed without force, never re-cut.
+   That push is an ordinary records push, so Step 3's "confirm once" applies to it.
+
+**Do not declare the contract finished beyond what the report says.** `landed` means the parent
+pull request merged, and the script's gates decided that. A halt names its gate and merged nothing
+into `master`.
 
 ### `awaiting-merge` — a sub-task is out for merge
 
@@ -300,9 +368,10 @@ prints it verbatim, exactly as `pr_merged.py`'s own human-readable output does.
 - Started: <sub-task -> branch -> cycle stage(s) dispatched -> pull request url, or none>
 - Failed: <sub-task — severity, reason | none>
 - Blocked: <sub-task <- what holds it, one line each | none>
+- Landing: <outcome, pull request and merged commit | halted at <gate> — remedy | running in the background (run_id) | not applicable>
 - Waiting on: <the merge this now needs, or nothing>
 - Completion: <the FINAL call's completion line, verbatim>
-- Next command: <the FINAL call's next_command.commands, joined by ", then ", or "none — <reason>">
+- Next command: <the FINAL call's next_command.commands, joined by ", then ", or "none — <reason>". After a landing, the Landing Report's own next_command>
 ```
 
 The `completion:` line comes from the same final read-only call: `completion.verdict` and the first entry of `completion.reasons`. Because that call is read-only it shows `not-evaluated` and the dry-run command, never a flip. The flip belongs to `/pr-merged`.
@@ -327,7 +396,8 @@ directly.
 
 **Pre-authorized when `/flow` or the operator invoked this:** reading the script's answer,
 creating the branch the packet names, dispatching the packet's cycle stage(s) as fresh
-subagents, and reporting.
+subagents, reporting, and on `complete` with a parent branch, launching the landing in the
+background (no question is asked).
 
 **Always the operator's call:** which sub-task to start when several are released, the commit
 confirmation, opening the pull request, amending a contract after an escalation, and anything
@@ -344,7 +414,10 @@ that would start work the script did not release.
 - **Bundling two sub-tasks into one pull request.** The merge then cannot say what it closed.
 - **Reading `nothing-planned` as complete.** That is the defect this whole design exists to
   avoid.
-- **Declaring the contract finished** because the last sub-task closed. Verification decides.
+- **Declaring the contract finished** because the last sub-task closed. For a contract without a parent branch, verification decides. With one, the Landing Report decides.
+- **Launching the landing in the foreground,** or running the landing worktree's copy of the script. A foreground call is capped at ten minutes, and only the operator checkout's copy is the launcher.
+- **Launching before `--status`,** or launching a second landing beside a live one.
+- **Reading the landing's result from stdout through a pipe** instead of `report.json` for the launch's `run_id`.
 - **Retrying a failed sub-task** without the architect. Whether to retry is their decision.
 - **Running a cycle stage inline, in this session,** instead of dispatching it as a fresh
   subagent. `stage["isolation"]` is the constant `fresh-subagent` for a reason.
@@ -363,7 +436,8 @@ that would start work the script did not release.
 ## Skill integrations
 
 - **Reads** `.claude/scripts/pr_merged.py`, which owns the rules and the tests.
+- **Launches** `.claude/scripts/land_contract.py` in the background on a completed contract with a parent branch. That script owns the landing's gates and its own tests.
 - **Dispatches** each stage of the packet's `cycle` as a fresh subagent, then runs `/ship` for its pull request.
 - **Paired with** `/pr-merged`, which closes a sub-task and wakes this skill.
 - **Called by** `/flow`, which owns the work item around the contract.
-- **Escalates to** `/design-first` on a failure, and to `/verify-before-done` on completion.
+- **Escalates to** `/design-first` on a failure, and to `/verify-before-done` on completion of a contract with no parent branch.

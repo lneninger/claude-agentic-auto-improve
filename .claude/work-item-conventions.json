@@ -63,5 +63,11 @@
     },
     "order": [],
     "map": []
+  },
+  "contractLanding": {
+    "$comment": "TEMPLATE, deliberately empty. land_contract.py reads this block and halts with 'landing-not-configured' while it has no verification steps, so a fresh project never merges anything until it declares its own gate. Populate per project: verification.steps, resultPaths outside the tree, protectedBranches. Do not copy another project's baseline.",
+    "verification": {
+      "steps": []
+    }
   }
 }
