@@ -3602,5 +3602,349 @@ class TestContainmentScanExtensions(LandCase):
         self.assertTrue(any(p == ".claude/hooks/f.json" for p, _ in found), "a .json file is scanned: %r" % found)
 
 
+# ===========================================================================
+# Sub-task 10: the landing worktree safety fix (C1, W1, W2, W7, W10 of the t6 review)
+# ===========================================================================
+class TestLandingWorktreeIdentity(LandCase):
+    """C1: a landing worktree is <main root>/.claude/worktrees/<8 digits>-land-<issue>, nothing looser."""
+
+    MAIN = "D:/repo"
+    FOLDER = MAIN + "/.claude/worktrees/"
+
+    def plan(self, paths, suffix=None):
+        if suffix is None:
+            return self.fn("plan_worktree")(paths, 394, self.MAIN, "20261005")
+        return self.fn("plan_worktree_by_suffix")(paths, suffix, self.MAIN, "20261005")
+
+    def refused(self, got, why):
+        self.assertEqual(got.get("outcome"), "environment-failure", why + " (got %r)" % (got,))
+        self.assertNotIn("path", got, "a refused plan never names a path to reset")
+
+    def test_an_operator_worktree_that_merely_ends_with_the_suffix_is_refused_not_adopted(self):
+        got = self.plan([self.MAIN, self.FOLDER + "20261008-debug-land-394"])
+        self.refused(got, "<date>-debug-land-394 is an operator worktree, never a landing worktree")
+        self.assertIn("20261008-debug-land-394", got.get("detail", ""), "the detail names the worktree")
+
+    def test_a_worktree_outside_the_worktrees_folder_is_refused(self):
+        got = self.plan([self.MAIN, "D:/elsewhere/20250101-land-394"])
+        self.refused(got, "the parent folder must be <main root>/.claude/worktrees")
+        got = self.plan([self.MAIN, self.MAIN + "/.claude/worktrees/nested/20250101-land-394"])
+        self.refused(got, "a nested folder is not the worktrees folder either")
+
+    def test_a_date_that_is_not_exactly_eight_digits_is_refused(self):
+        for name in ("2025011-land-394", "202501011-land-394", "2025010a-land-394", "x-land-394"):
+            with self.subTest(name=name):
+                self.refused(self.plan([self.MAIN, self.FOLDER + name]),
+                             "%s is not <8 digits>-land-394" % name)
+
+    def test_a_lookalike_next_to_a_real_landing_worktree_still_halts(self):
+        got = self.plan([self.MAIN, self.FOLDER + "20250101-land-394", self.FOLDER + "20261008-debug-land-394"])
+        self.refused(got, "an unrecognised worktree ending the same way is never ignored")
+
+    def test_the_baseline_suffix_is_held_to_the_same_shape(self):
+        got = self.plan([self.MAIN, self.FOLDER + "20261008-debug-land-baseline"], suffix="-land-baseline")
+        self.refused(got, "an operator worktree ending -land-baseline is not the baseline worktree")
+
+    def test_positive_control_a_correctly_named_worktree_is_still_adopted(self):
+        wanted = self.FOLDER + "20250101-land-394"
+        got = self.plan([self.MAIN, wanted])
+        self.assertEqual(got.get("path"), wanted, "the exact shape under the worktrees folder is adopted")
+        self.assertFalse(got.get("create"), "and reused")
+        base = self.FOLDER + "20250101-land-baseline"
+        got = self.plan([self.MAIN, base], suffix="-land-baseline")
+        self.assertEqual(got.get("path"), base, "the baseline worktree keeps working")
+
+
+class TestDestructiveGitChecksTheLandingIdentity(LandCase):
+    """C1: the identity is checked again right before any reset, clean or removal."""
+
+    def setUp(self):
+        self.mod()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.kit = Kit(self._tmp.name)
+        saved_cwd = os.getcwd()
+        os.chdir(str(self.kit.main))
+        self.addCleanup(os.chdir, saved_cwd)
+
+    def passthrough(self):
+        lc = self.mod()
+        orig = lc._run
+        return mock.patch.object(lc, "_run", side_effect=lambda cmd, *a, **k: orig(cmd, *a, **k))
+
+    def operator_worktree(self):
+        path = self.kit.main / ".claude" / "worktrees" / "20261008-debug-land-394"
+        git(self.kit.main, "worktree", "add", "-b", "debug/land-394", str(path), "origin/%s" % PARENT)
+        return path
+
+    def test_reset_refuses_an_operator_worktree_even_when_listed_and_recorded(self):
+        wt = self.operator_worktree()
+        write_files(self.kit.main, {".claude/state/landing/%s/phase.json" % SLUG:
+                                    json.dumps({"run_id": "r", "phase": "p0", "worktree": str(wt)})})
+        write_files(wt, {"README.txt": "operator edit\n", "notes.txt": "unsaved work\n"})
+        with self.passthrough() as run:
+            with self.assertRaises(ValueError, msg="a name that is not a landing name must be refused"):
+                self.fn("worktree_reset")(wt, self.kit.main, SLUG, ref="origin/%s" % PARENT)
+        destructive = [c[0][0] for c in run.call_args_list
+                       if any(str(x) in ("reset", "clean", "checkout") for x in c[0][0])]
+        self.assertEqual(destructive, [], "no checkout, reset or clean ran")
+        self.assertEqual((wt / "README.txt").read_text(encoding="utf-8"), "operator edit\n", "edit intact")
+        self.assertEqual((wt / "notes.txt").read_text(encoding="utf-8"), "unsaved work\n", "untracked file intact")
+        self.assertEqual(git(wt, "symbolic-ref", "-q", "HEAD"), "refs/heads/debug/land-394", "branch not detached")
+
+    def test_worktree_remove_refuses_an_operator_worktree_even_when_clean(self):
+        wt = self.operator_worktree()
+        with self.assertRaises(RuntimeError, msg="removal of a non-landing worktree must be refused"):
+            self.fn("worktree_remove")(wt)
+        self.assertTrue(wt.is_dir(), "the operator worktree still exists")
+        self.assertIn("20261008-debug-land-394", git(self.kit.main, "worktree", "list"), "and git still lists it")
+
+    def test_positive_control_a_correctly_named_clean_landing_worktree_is_removed(self):
+        wt = self.kit.add_worktree("20260101-land-394")
+        self.fn("worktree_remove")(wt)
+        self.assertFalse(wt.exists(), "a real landing worktree is removed as before")
+
+
+class TestLauncherNeverTouchesAnOperatorWorktree(LauncherCase):
+    """C1, end to end through the launcher."""
+
+    def test_an_operator_worktree_named_debug_land_issue_is_left_exactly_as_it_was(self):
+        kit = Kit(self._tmp.name)
+        wt = kit.main / ".claude" / "worktrees" / "20261008-debug-land-394"
+        git(kit.main, "worktree", "add", "-b", "debug/land-394", str(wt), "origin/%s" % PARENT)
+        write_files(wt, {"README.txt": "operator edit\n", "notes.txt": "unsaved work\n"})
+        _, execm, report = self.launch(kit)
+        self.assertEqual(self.outcome(report), "environment-failure", "the launcher halts")
+        execm.assert_not_called()
+        self.assertEqual((wt / "README.txt").read_text(encoding="utf-8"), "operator edit\n",
+                         "the uncommitted edit survives")
+        self.assertEqual((wt / "notes.txt").read_text(encoding="utf-8"), "unsaved work\n",
+                         "the untracked file survives")
+        self.assertEqual(git(wt, "symbolic-ref", "-q", "HEAD"), "refs/heads/debug/land-394",
+                         "the branch is not detached")
+
+    def test_a_correctly_named_worktree_with_no_phase_record_is_not_reset(self):
+        kit = Kit(self._tmp.name)
+        wt = kit.add_worktree("20250101-land-394")
+        write_files(wt, {"README.txt": "unsaved\n", "notes.txt": "unsaved work\n"})
+        _, execm, report = self.launch(kit)
+        self.assertEqual(self.outcome(report), "environment-failure",
+                         "on reuse phase.json must already name the path; the launcher does not write it first")
+        execm.assert_not_called()
+        self.assertEqual((wt / "notes.txt").read_text(encoding="utf-8"), "unsaved work\n", "nothing was cleaned")
+        self.assertEqual((wt / "README.txt").read_text(encoding="utf-8"), "unsaved\n", "nothing was reset")
+
+    def test_positive_control_a_correctly_named_recorded_worktree_is_reused(self):
+        kit = Kit(self._tmp.name)
+        wt = kit.add_worktree("20250101-land-394")
+        write_files(kit.landing_dir() / SLUG, {"phase.json": json.dumps(
+            {"run_id": "old", "phase": "p8", "worktree": str(wt)})})
+        write_files(wt, {"notes.txt": "stray\n"})
+        _, execm, _ = self.launch(kit)
+        self.assertEqual(execm.call_count, 1, "the recorded landing worktree is accepted and the stage starts")
+        self.assertFalse((wt / "notes.txt").exists(), "and it was cleaned, as L-15 intends")
+
+
+class TestFinishLandedChecksTheIdentityBeforeRemoval(StageCase):
+
+    def test_a_worktree_that_is_not_a_landing_worktree_is_never_removed_at_p15(self):
+        kit = Kit(Path(self._tmp.name), parent_files=self.src_change())
+        st = Stage(self, kit, worktree_name="20260101-debug-land-394")
+        report = st.run()
+        self.assertOutcome(report, "landed", "fixture sanity: the merge itself is unaffected")
+        self.assertEqual(st.count("worktree_remove"), 0, "worktree_remove is not even attempted")
+        self.assertIn("worktree-not-removed", " ".join(report["notes"]), "the report says it was kept")
+
+    def test_positive_control_a_landing_worktree_is_removed_at_p15(self):
+        kit = Kit(Path(self._tmp.name), parent_files=self.src_change())
+        st = Stage(self, kit)
+        self.assertOutcome(st.run(), "landed", "fixture sanity")
+        self.assertEqual(st.count("worktree_remove"), 1, "a correctly named landing worktree is removed")
+
+
+# -- W1: the closing-link check reads the fetched refs, never a checkout's disk ---------------------
+VERIFY_STUB = '''\
+import json, os, sys
+from pathlib import Path
+argv = sys.argv[1:]
+brief = Path(argv[argv.index("--brief") + 1])
+conv = Path(os.environ.get("CLAUDE_PROJECT_DIR", "")) / ".claude" / "work-item-conventions.json"
+problems = []
+if not conv.is_file() or '"contractLanding"' not in conv.read_text(encoding="utf-8"):
+    problems.append("conventions-not-from-origin-master")
+text = brief.read_text(encoding="utf-8") if brief.is_file() else ""
+if "id: 394" not in text:
+    problems.append("brief-unreadable")
+if "work-items" in brief.as_posix():
+    problems.append("brief-read-from-a-checkout")
+print(json.dumps({"verdict": "linked" if not problems else "stub:" + ",".join(problems), "exit_code": 0}))
+'''
+
+
+class RealLinkStage(Stage):
+    """A Stage that runs the REAL verify_closing_link against a stub verify_issue_link.py."""
+
+    stub_dir = None
+
+    def install(self, stack):
+        real = self.lc.verify_closing_link
+        super().install(stack)
+        stack.enter_context(mock.patch.object(self.lc, "verify_closing_link", real))
+        stack.enter_context(mock.patch.object(self.lc, "SCRIPTS_DIR", Path(self.stub_dir)))
+
+
+class TestClosingLinkReadsTheFetchedRefs(StageCase):
+
+    def real_link_stage(self):
+        stub = Path(self._tmp.name) / "stub-scripts"
+        write_files(stub, {"verify_issue_link.py": VERIFY_STUB})
+        world = Path(self._tmp.name) / "world"
+        world.mkdir()
+        kit = Kit(world, parent_files=self.src_change())
+        st = RealLinkStage(self, kit)
+        st.stub_dir = str(stub)
+        return st
+
+    def test_the_conventions_and_brief_the_check_sees_come_from_origin_not_from_any_disk(self):
+        st = self.real_link_stage()
+        # The operator checkout's file differs from origin/master's: only the fetched ref may count.
+        write_files(st.kit.main, {CONVENTIONS: '{"issueLink": "DISK-COPY"}\n'})
+        report = st.run()
+        self.assertOutcome(report, "landed",
+                           "the closing-link check must read origin/master's conventions and the fetched "
+                           "parent brief, not the main checkout's disk (stub verdict: %s)" % report.get("detail"))
+
+    def test_the_environment_is_restored_after_the_check(self):
+        lc = self.mod()
+        seen = {}
+
+        def fake_run(cmd, cwd=None, timeout=60):
+            seen["during"] = os.environ.get("CLAUDE_PROJECT_DIR")
+            root = Path(seen["during"])
+            seen["conv"] = (root / ".claude" / "work-item-conventions.json").read_text(encoding="utf-8")
+            seen["brief"] = Path(cmd[cmd.index("--brief") + 1]).read_text(encoding="utf-8")
+            return 0, json.dumps({"verdict": "linked"})
+
+        os.environ["CLAUDE_PROJECT_DIR"] = "MAIN-ROOT-SENTINEL"
+        self.addCleanup(os.environ.pop, "CLAUDE_PROJECT_DIR", None)
+        with mock.patch.object(lc, "_run", side_effect=fake_run):
+            verdict = lc.verify_closing_link("ignored-disk-path.md", 7, cwd=None,
+                                             conventions_text='{"from": "origin"}', brief_text="id: 394\n")
+        self.assertEqual(verdict, "linked", "the verdict is the child's")
+        self.assertEqual(seen["conv"], '{"from": "origin"}', "the child saw the supplied conventions text")
+        self.assertEqual(seen["brief"], "id: 394\n", "and the supplied brief text")
+        self.assertNotEqual(seen["during"], "MAIN-ROOT-SENTINEL", "the child's project dir was the temporary one")
+        self.assertEqual(os.environ.get("CLAUDE_PROJECT_DIR"), "MAIN-ROOT-SENTINEL", "restored afterwards")
+
+
+# -- W2: review coverage is judged by origin/<default>'s profile, not the merged head's ---------------
+PROFILE_FILE = ".claude/project-profile.md"
+SENTINEL_FILE = ".claude/hooks/sentinel-paths.json"
+
+
+def profile_with_migration_root(value):
+    return "# Profile\n\n## Slots\n\n| slot | value |\n|---|---|\n| migration.root | %s |\n" % value
+
+
+class TestStageCoverageSlotsComeFromTheDefaultBranch(StageCase):
+
+    PROFILE_ROW = {"reviewer": REVIEWER, "paths": ["profile:migration.root"]}
+    SENTINEL_ROW = {"reviewer": REVIEWER, "paths": ["sentinel:rest"]}
+    MASTER_PROFILE = profile_with_migration_root("`db/migrations/`")
+
+    def world(self, row, base_files, parent_files, subdir=""):
+        return self.stage(subdir=subdir, config=landing_config(reviewCoverage=[row]),
+                          base_files=base_files, parent_files=parent_files)
+
+    def test_a_contract_that_drops_the_profile_row_still_needs_the_reviewer(self):
+        st = self.world(self.PROFILE_ROW, {PROFILE_FILE: self.MASTER_PROFILE},
+                        {PROFILE_FILE: profile_with_migration_root("none"), "db/migrations/001.sql": "x\n"})
+        report = st.run()
+        self.assertOutcome(report, "verification-not-ready",
+                           "master's profile still names db/migrations/, so the migration needs its reviewer")
+        self.assertIn(REVIEWER, " ".join(report["verification"]["reasons"]), "the reviewer is named")
+        self.assertEqual(st.count("git_push"), 0, "nothing is pushed")
+
+    def test_positive_control_the_unedited_profile_requires_the_same_reviewer(self):
+        st = self.world(self.PROFILE_ROW, {PROFILE_FILE: self.MASTER_PROFILE}, {"db/migrations/001.sql": "x\n"},
+                        subdir="plain")
+        self.assertOutcome(st.run(), "verification-not-ready", "the same diff, profile untouched")
+
+    def test_positive_control_a_profile_edit_with_no_migration_in_the_diff_lands(self):
+        st = self.world(self.PROFILE_ROW, {PROFILE_FILE: self.MASTER_PROFILE},
+                        {PROFILE_FILE: profile_with_migration_root("none"), "src/feature.py": "x\n"},
+                        subdir="edit-only")
+        self.assertOutcome(st.run(), "landed", "no path under master's migration root changed")
+
+    def test_a_contract_that_empties_the_sentinel_list_still_needs_the_reviewer(self):
+        st = self.world(self.SENTINEL_ROW, {SENTINEL_FILE: json.dumps({"rest": ["api/**"]})},
+                        {SENTINEL_FILE: json.dumps({"rest": []}), "api/x.cs": "x\n"}, subdir="sentinel")
+        report = st.run()
+        self.assertOutcome(report, "verification-not-ready", "master's sentinel list still covers api/**")
+        self.assertIn(REVIEWER, " ".join(report["verification"]["reasons"]), "the reviewer is named")
+
+
+# -- W7: the base branch is re-read right before the merge ---------------------------------------------
+class RetargetedAtP12Stage(Stage):
+    """The pull request's base is changed after it was opened: the fresh read says develop."""
+
+    def install(self, stack):
+        super().install(stack)
+        inner = self.lc.gh_pr_view
+
+        def view(*a, **k):
+            out = dict(inner(*a, **k))
+            if out:
+                out["baseRefName"] = "develop"
+            return out
+
+        stack.enter_context(mock.patch.object(self.lc, "gh_pr_view", side_effect=view))
+
+
+class TestStageP12RereadsTheBase(StageCase):
+
+    def test_a_pull_request_retargeted_before_the_merge_is_never_merged(self):
+        kit = Kit(Path(self._tmp.name), parent_files=self.src_change())
+        st = RetargetedAtP12Stage(self, kit)
+        report = st.run()
+        self.assertOutcome(report, "pr-mismatch", "the fresh read shows a base other than master")
+        self.assertEqual(st.count("gh_pr_merge"), 0, "nothing is merged")
+        self.assertEqual(report["gate"], "P12", "the halt is the P12 re-check")
+
+    def test_positive_control_an_unchanged_base_lands(self):
+        st = self.stage(parent_files=self.src_change())
+        self.assertOutcome(st.run(), "landed", "base and head unchanged: the merge goes ahead")
+
+
+# -- W10: the generated-file conflict arm checks its git commands ---------------------------------------
+class TestStageRegenerateArmChecksExitCodes(StageCase):
+
+    def delete_on_master(self, st, path):
+        scratch = st.kit.scratch
+        git(scratch, "fetch", "origin")
+        git(scratch, "checkout", "-B", "master", "origin/master")
+        git(scratch, "rm", path)
+        git(scratch, "commit", "-m", "master deletes %s" % path)
+        Kit._push(scratch, "master")
+        st.kit.fetch()
+
+    def test_a_generated_file_deleted_on_master_and_edited_on_the_parent_halts(self):
+        regen = {"id": "gen", "paths": ["generated/**"], "triggers": ["nothing/**"],
+                 "command": [["py", "-3", "-c", "pass", "regen-marker"]]}
+        st = self.stage(config=landing_config(regenerators=[regen]),
+                        base_files={"generated/out.txt": "base\n"},
+                        parent_files={"generated/out.txt": "parent\n", "src/feature.py": "x\n"})
+        self.delete_on_master(st, "generated/out.txt")
+        report = st.run()
+        self.assertOutcome(report, "unresolvable-conflict",
+                           "git checkout --theirs cannot take a side master deleted: the landing halts "
+                           "instead of committing the parent's stale copy")
+        self.assertIn("checkout", report["detail"], "the detail names the command that failed")
+        self.assertIn("generated/out.txt", report["detail"], "and the path")
+        self.assertEqual(st.count("git_push"), 0, "nothing is pushed")
+        self.assertEqual(st.count("gh_pr_merge"), 0, "nothing is merged")
+        self.assertEqual(git(st.worktree, "status", "--porcelain"), "", "the merge was aborted, tree clean")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

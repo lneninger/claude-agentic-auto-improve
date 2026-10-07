@@ -46,6 +46,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -339,13 +340,41 @@ def gh_pr_merge(number: Any, head_sha: str, cwd: Any = None) -> Tuple[int, str]:
 
 
 def verify_closing_link(brief_path: Any, pr_number: Any, cwd: Any = None,
-                        repair_attempted: bool = False) -> str:
-    """The Closing Link verdict from ``verify_issue_link.py`` for the parent brief and pull request."""
+                        repair_attempted: bool = False, conventions_text: Optional[str] = None,
+                        brief_text: Optional[str] = None) -> str:
+    """The Closing Link verdict from ``verify_issue_link.py`` for the parent brief and pull request.
+
+    L-16 (W1): the landing reads no brief or conventions file from a checkout's disk. With
+    ``conventions_text`` (``git show origin/<default>:<conventions file>``) and ``brief_text`` (the
+    parent brief from the fetched Delivery record set) the child runs in a temporary project
+    root that holds exactly those two texts; ``CLAUDE_PROJECT_DIR`` points there for the call only
+    and is restored afterwards. Without them the call is the plain one.
+    """
     cmd = [sys.executable, "-B", str(SCRIPTS_DIR / "verify_issue_link.py"), "--brief", str(brief_path),
            "--pr", str(pr_number), "--json"]
     if repair_attempted:
         cmd.append("--repair-attempted")
-    rc, out = _run(cmd, cwd=cwd, timeout=180)
+    if conventions_text is None and brief_text is None:
+        rc, out = _run(cmd, cwd=cwd, timeout=180)
+    else:
+        with tempfile.TemporaryDirectory(prefix="landing-link-") as tmp:
+            root = Path(tmp)
+            (root / ".claude").mkdir()
+            (root / ".claude" / "work-item-conventions.json").write_text(
+                conventions_text if conventions_text is not None else "{}", encoding="utf-8")
+            if brief_text is not None:
+                supplied = root / (Path(str(brief_path)).name or "brief.md")
+                supplied.write_text(brief_text, encoding="utf-8")
+                cmd[cmd.index("--brief") + 1] = str(supplied)
+            saved = os.environ.get("CLAUDE_PROJECT_DIR")
+            os.environ["CLAUDE_PROJECT_DIR"] = str(root)
+            try:
+                rc, out = _run(cmd, cwd=cwd, timeout=180)
+            finally:
+                if saved is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = saved
     try:
         return str(json.loads(out).get("verdict") or "unverifiable")
     except (ValueError, AttributeError):
@@ -392,11 +421,18 @@ def list_worktrees(cwd: Any) -> List[str]:
 
 
 def worktree_remove(path: Any) -> None:
-    """Remove a landing worktree. Never forced; raises when git refuses."""
+    """Remove a landing worktree. Never forced; raises when git refuses.
+
+    C1: the path must be a landing worktree by name and folder, checked again here, right before
+    the removal, whatever the caller already decided.
+    """
     rc, out = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path)
     if rc != 0 or not out.strip():
         raise RuntimeError("cannot locate the repository of %s: %s" % (path, out))
     root = Path(out.strip()).parent
+    if not is_landing_worktree(path, root):
+        raise RuntimeError("%s is not a landing worktree (<main root>/.claude/worktrees/<8 digits>-land-"
+                           "<issue or baseline>); refusing to remove it" % path)
     rc, out = _run(["git", "worktree", "remove", str(path)], cwd=root, timeout=180)
     if rc != 0:
         raise RuntimeError(out or "git worktree remove failed")
@@ -404,6 +440,23 @@ def worktree_remove(path: Any) -> None:
 
 def _norm(path: Any) -> str:
     return os.path.normcase(os.path.realpath(str(path)))
+
+
+#: Any landing worktree's name: exactly eight digits, then ``-land-<parent issue>`` or ``-land-baseline``.
+LANDING_NAME = re.compile(r"\d{8}-land-(?:\d+|baseline)")
+
+
+def is_landing_worktree(path: Any, main_root: Any, suffix: Optional[str] = None) -> bool:
+    """C1 / L-15: ``<main root>/.claude/worktrees/<8 digits><suffix>`` and nothing looser.
+
+    With ``suffix`` (``-land-<issue>`` or ``-land-baseline``) the name must carry exactly it; without
+    one any landing name matches. An operator's ``<date>-debug-land-<issue>`` never does.
+    """
+    p = Path(str(path).replace("\\", "/").rstrip("/"))
+    if _norm(p.parent) != _norm(Path(str(main_root)) / ".claude" / "worktrees"):
+        return False
+    pattern = re.compile(r"\d{8}" + re.escape(suffix)) if suffix else LANDING_NAME
+    return pattern.fullmatch(p.name) is not None
 
 
 def _under(path: Any, root: Any) -> bool:
@@ -422,6 +475,12 @@ def worktree_reset(path: Any, main_root: Any, slug: str, ref: Optional[str] = No
     Ignored files survive (``git clean`` never uses -x), so installed packages and build output
     stay between runs. With ``ref`` the worktree is detached at it first.
     """
+    def landing_only() -> None:
+        if not is_landing_worktree(path, main_root):
+            raise ValueError("%s is not a landing worktree (<main root>/.claude/worktrees/<8 digits>-land-"
+                             "<issue or baseline>); refusing a destructive git command" % path)
+
+    landing_only()
     listed = [_norm(p) for p in list_worktrees(main_root)]
     if _norm(path) not in listed:
         raise ValueError("%s is not in `git worktree list`; refusing a destructive git command" % path)
@@ -430,12 +489,15 @@ def worktree_reset(path: Any, main_root: Any, slug: str, ref: Optional[str] = No
         raise ValueError("%s is not the worktree phase.json records for %s; refusing a destructive "
                          "git command" % (path, slug))
     if ref:
+        landing_only()
         rc, out = _run(["git", "checkout", "--detach"], cwd=path)
         if rc != 0:
             raise RuntimeError("git checkout --detach failed: %s" % out)
+    landing_only()
     rc, out = _run(["git", "reset", "--hard", ref or "HEAD"], cwd=path, timeout=300)
     if rc != 0:
         raise RuntimeError("git reset --hard failed: %s" % out)
+    landing_only()
     rc, out = _run(["git", "clean", "-fd"], cwd=path, timeout=300)
     if rc != 0:
         raise RuntimeError("git clean failed: %s" % out)
@@ -1072,8 +1134,19 @@ def check_configuration(config: Any, worktree: Any, results_dir: Any) -> Optiona
 
 def plan_worktree_by_suffix(worktree_paths: Sequence[str], suffix: str, main_root: Any,
                             today: str) -> Dict[str, Any]:
-    """L-15: the landing worktree is found by git, not by date. One match reuses it; two halt."""
-    matches = [p for p in worktree_paths if p.replace("\\", "/").rstrip("/").endswith(suffix)]
+    """L-15: the landing worktree is found by git, not by date. One match reuses it; two halt.
+
+    C1: only ``<main root>/.claude/worktrees/<8 digits><suffix>`` is a match. A worktree whose path
+    merely ends with ``suffix`` (an operator's ``<date>-debug-land-<issue>``) is never adopted and
+    never reset: the plan halts and names it.
+    """
+    lookalikes = [p for p in worktree_paths if p.replace("\\", "/").rstrip("/").endswith(suffix)]
+    matches = [p for p in lookalikes if is_landing_worktree(p, main_root, suffix)]
+    strangers = [p for p in lookalikes if p not in matches]
+    if strangers:
+        return {"outcome": "environment-failure",
+                "detail": "%s ends with %s but is not a landing worktree (<main root>/.claude/worktrees/"
+                          "<8 digits>%s); it is left untouched" % (" and ".join(strangers), suffix, suffix)}
     if len(matches) > 1:
         return {"outcome": "environment-failure",
                 "detail": "two worktrees end with %s: %s" % (suffix, " and ".join(matches))}
@@ -1420,29 +1493,51 @@ def _blob(cwd: Any, spec: str) -> Optional[str]:
     return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
 
 
-def sentinel_patterns(worktree: Any, key: str) -> List[str]:
-    data = _read_json(Path(worktree) / SENTINEL_PATH)
+def _json_at(worktree: Any, path: str, ref: Optional[str]) -> Any:
+    """A JSON file from ``git show <ref>:<path>`` when ``ref`` is given (absent reads as nothing), else from disk."""
+    if ref is None:
+        return _read_json(Path(worktree) / path)
+    text = git_show(ref, path, cwd=worktree)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+def sentinel_patterns(worktree: Any, key: str, ref: Optional[str] = None) -> List[str]:
+    data = _json_at(worktree, SENTINEL_PATH, ref)
     values = data.get(key) if isinstance(data, dict) else None
     return [v for v in (values or []) if isinstance(v, str)]
 
 
-def profile_roots(worktree: Any, slot: str) -> List[str]:
-    try:
-        text = (Path(worktree) / PROFILE_PATH).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+def profile_roots(worktree: Any, slot: str, ref: Optional[str] = None) -> List[str]:
+    if ref is None:
+        try:
+            text = (Path(worktree) / PROFILE_PATH).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+    else:
+        text = git_show(ref, PROFILE_PATH, cwd=worktree)
+        if text is None:
+            return []
     return list(pr_merged.load_slot(text, slot))
 
 
-def expand_paths(entries: Iterable[str], worktree: Any) -> List[str]:
-    """Expand ``profile:<slot>`` and ``sentinel:<key>`` tokens at run time; globs pass through."""
+def expand_paths(entries: Iterable[str], worktree: Any, ref: Optional[str] = None) -> List[str]:
+    """Expand ``profile:<slot>`` and ``sentinel:<key>`` tokens at run time; globs pass through.
+
+    With ``ref`` (``origin/<default>``) the profile and the sentinel list are read from that ref, so a
+    contract cannot narrow its own coverage by editing them (W2, L-16).
+    """
     out: List[str] = []
     for entry in entries or ():
         if entry.startswith("profile:"):
-            for root in profile_roots(worktree, entry[len("profile:"):]):
+            for root in profile_roots(worktree, entry[len("profile:"):], ref):
                 out.append(root + "**" if root.endswith("/") else root)
         elif entry.startswith("sentinel:"):
-            out.extend(sentinel_patterns(worktree, entry[len("sentinel:"):]))
+            out.extend(sentinel_patterns(worktree, entry[len("sentinel:"):], ref))
         else:
             out.append(entry)
     return out
@@ -1492,11 +1587,12 @@ def _run_commands(commands: Sequence[Sequence[str]], cwd: Path, log_dir: Path, l
     return None
 
 
-def _trigger_patterns(triggers: Iterable[str], worktree: Path, sentinel_file: Optional[str]) -> List[str]:
+def _trigger_patterns(triggers: Iterable[str], worktree: Path, sentinel_file: Optional[str],
+                      ref: Optional[str] = None) -> List[str]:
     out: List[str] = []
     for trig in triggers or ():
         if trig.startswith("sentinel:"):
-            data = _read_json(Path(worktree) / (sentinel_file or SENTINEL_PATH))
+            data = _json_at(worktree, sentinel_file or SENTINEL_PATH, ref)
             values = data.get(trig[len("sentinel:"):]) if isinstance(data, dict) else None
             out.extend(v for v in (values or []) if isinstance(v, str))
         else:
@@ -1704,7 +1800,7 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
 
     # ---- P8 verification --------------------------------------------------------------------------
     summary = _p8_verify(wt, head, config, baseline, baseline_note, baseline_fingerprint, contract_diff,
-                         merge_diff, resolved, records, classification.sub_tasks, logs, contract_dir, run_id)
+                         merge_diff, resolved, records, classification.sub_tasks, logs, contract_dir, run_id, default_ref)
     facts["p8_verification_verdict"] = summary["verdict"]
     shared = {"verification": summary, "merge_commit": head, "hand_resolved_in_merge": resolved}
     new_failures = summary.get("new_failures") or []
@@ -1758,13 +1854,16 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
 
     # ---- P11 closing link -------------------------------------------------------------------------
     phase("p11", merge_commit=head)
-    brief_on_disk = wt / parent_brief_path
-    verdict = verify_closing_link(brief_on_disk, number, cwd=wt)
+    # L-16 (W1): the conventions and the parent brief come from the fetched refs, never from a disk.
+    brief_name = wt / parent_brief_path
+    brief_text = git_show(parent_brief.get("_ref") or default_ref, parent_brief_path, cwd=wt)
+    link_sources = {"conventions_text": conventions_text, "brief_text": brief_text}
+    verdict = verify_closing_link(brief_name, number, cwd=wt, **link_sources)
     if verdict == "absent-repairable":
         current = gh_pr_view(number, cwd=wt)
         repaired = (current.get("body") or "").rstrip() + "\n\nCloses #%s\n" % parent_issue
         gh_pr_edit_body(number, repaired, cwd=wt)
-        verdict = verify_closing_link(brief_on_disk, number, cwd=wt, repair_attempted=True)
+        verdict = verify_closing_link(brief_name, number, cwd=wt, repair_attempted=True, **link_sources)
     if verdict != "linked":
         raise stop("link-not-verified", "P11", "the Closing Link verdict is %r, expected 'linked'" % verdict)
 
@@ -1785,6 +1884,9 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
             view = gh_pr_view(number, cwd=wt)
     if not view:
         raise stop("unverifiable", "P12", "gh cannot read pull request #%s" % number)
+    if view.get("baseRefName") != default or view.get("headRefName") != parent:
+        raise stop("pr-mismatch", "P12", "pull request #%s is now %s into %s; expected %s into %s"
+                   % (number, view.get("headRefName"), view.get("baseRefName"), parent, default))
     facts["p12_head_moved"] = view.get("headRefOid") != head
     facts["p12_not_mergeable"] = str(view.get("mergeable") or "").upper() != "MERGEABLE" or bool(view.get("isDraft"))
     details.update({"children-still-open": "a child issue was reopened while verifying",
@@ -1871,6 +1973,8 @@ def _finish_landed(args: Dict[str, Any], outcome: str, pr: Dict[str, Any], view:
     try:
         # A process standing inside a directory blocks its removal on Windows: step out first.
         os.chdir(str(args["project_root"]))
+        if not is_landing_worktree(args["worktree"], args["project_root"]):
+            raise RuntimeError("not a landing worktree (<main root>/.claude/worktrees/<8 digits>-land-<issue>)")
         worktree_remove(args["worktree"])
     except Exception as exc:
         report["notes"].append("worktree-not-removed: %s" % args["worktree"])
@@ -1917,8 +2021,17 @@ def _p7_merge(args: Dict[str, Any], wt: Path, default: str, mark_m: str, mark_p:
                 details["unresolvable-conflict"] = "%s conflicts and is neither a union path nor regenerated" % path
                 return contract_diff, [], resolved
             if cls == "regenerate":
-                _git(wt, "checkout", "--theirs", "--", path)
-                _git(wt, "add", "--", path)
+                failed = None
+                for command in (("checkout", "--theirs", "--", path), ("add", "--", path)):
+                    rc, out = _git(wt, *command)
+                    if rc != 0:
+                        failed = "git %s failed (exit %s): %s" % (" ".join(command), rc, out)
+                        break
+                if failed:
+                    _git(wt, "merge", "--abort")
+                    facts["p7_unresolvable_conflict"] = True
+                    details["unresolvable-conflict"] = "%s cannot take the default branch's side: %s" % (path, failed)
+                    return contract_diff, [], resolved
             else:
                 base_t, ours_t, theirs_t = (_blob(wt, ":%d:%s" % (n, path)) for n in (1, 2, 3))
                 merged = merge_union(base_t or "", ours_t or "", theirs_t or "", union_entry_key(path, config)) \
@@ -1940,7 +2053,7 @@ def _p7_merge(args: Dict[str, Any], wt: Path, default: str, mark_m: str, mark_p:
         touched = set(contract_diff) | set(staged)
         sentinel_file = config.get("sentinelFile")
         for regen in config.get("regenerators") or []:
-            patterns = _trigger_patterns(regen.get("triggers") or [], wt, sentinel_file)
+            patterns = _trigger_patterns(regen.get("triggers") or [], wt, sentinel_file, "origin/%s" % default)
             if not any(path_matches(p, patterns) for p in touched):
                 continue
             failure = _run_commands(regen.get("command") or [], wt, logs, "regen-%s" % regen.get("id", "x"),
@@ -1974,7 +2087,8 @@ def _p7_merge(args: Dict[str, Any], wt: Path, default: str, mark_m: str, mark_p:
 def _p8_verify(wt: Path, head: str, config: Dict[str, Any], baseline: Dict[str, Any], baseline_note: str,
                baseline_fingerprint: Optional[str], contract_diff: List[str], merge_diff: List[str],
                resolved: List[str], records: Dict[str, Dict[str, Any]], tasks: Sequence[Any],
-               logs: Path, contract_dir: Path, run_id: str) -> Dict[str, Any]:
+               logs: Path, contract_dir: Path, run_id: str,
+               default_ref: Optional[str] = None) -> Dict[str, Any]:
     """Gate 1: the Landing Verification of H. A READY record for H is reused while the worktree is clean."""
     cached = _read_json(contract_dir / "verification.yaml")
     if isinstance(cached, dict) and cached.get("head") == head and cached.get("verdict") == "READY" \
@@ -1993,7 +2107,8 @@ def _p8_verify(wt: Path, head: str, config: Dict[str, Any], baseline: Dict[str, 
     tree_unchanged = before_head == after_head and before_status == after_status
     forbidden = [p for p in contract_diff if path_matches(p, config.get("forbiddenPaths") or [])
                  or path_matches(p.rsplit("/", 1)[-1], config.get("forbiddenPaths") or [])]
-    rows = [dict(row, paths=expand_paths(row.get("paths") or [], wt)) for row in config.get("reviewCoverage") or []]
+    rows = [dict(row, paths=expand_paths(row.get("paths") or [], wt, default_ref))
+            for row in config.get("reviewCoverage") or []]
     needed = required_coverage(rows, contract_diff, resolved)
     review_files = {t.id: [f for f in getattr(t, "files", []) if f.startswith(".claude/reviews/")] for t in tasks}
     satisfied = {r for r in needed if any(
@@ -2286,8 +2401,10 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
                            cwd=main_root, timeout=300)
             if rc != 0:
                 return finish("environment-failure", "P0", "cannot create the landing worktree: %s" % out)
+        if plan["create"]:
+            write_phase(scope_dir, run_id, "p0", worktree=path)  # this run made it, so this run may record it
+        worktree_reset(path, main_root, slug, ref="origin/%s" % parent)  # on reuse phase.json must already name it
         write_phase(scope_dir, run_id, "p0", worktree=path)
-        worktree_reset(path, main_root, slug, ref="origin/%s" % parent)
     except (ValueError, RuntimeError) as exc:
         return finish("environment-failure", "P0", str(exc))
 
@@ -2344,8 +2461,10 @@ def _launch_baseline(args: "argparse.Namespace", checkout: Path, roots: Dict[str
                            cwd=main_root, timeout=300)
             if rc != 0:
                 return finish("environment-failure", "P0", "cannot create the baseline worktree: %s" % out)
-        write_phase(scope_dir, run_id, "p0", worktree=path)
+        if plan["create"]:
+            write_phase(scope_dir, run_id, "p0", worktree=path)
         worktree_reset(path, main_root, "_baseline", ref="origin/%s" % default)
+        write_phase(scope_dir, run_id, "p0", worktree=path)
     except (ValueError, RuntimeError) as exc:
         return finish("environment-failure", "P0", str(exc))
     script = path / ".claude" / "scripts" / "land_contract.py"
