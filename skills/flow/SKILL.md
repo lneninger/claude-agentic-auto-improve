@@ -281,8 +281,13 @@ does not need. This is a decision, not an omission.
 **If the contract carries sub-tasks, hand the inner loop to `/advance`.** A contract whose
 `## Implementation Handoff` section holds more than one numbered sub-task is iterated a step at
 a time, because each sub-task ends in a pull request somebody must merge. `/advance` takes one
-step and stops; `/pr-merged` records the merge and wakes it. `/flow` keeps the outer chain and
-resumes at verification once every sub-task has a completion record.
+step and stops; `/pr-merged` records the merge and wakes it. `/flow` keeps the outer chain.
+**A contract with a parent branch is landed by the loop:** once every sub-task has a completion
+record, `/pr-merged` hands straight to `/advance`, which starts a background landing script. The
+script verifies the parent branch, opens the parent pull request and merges it, with no question
+asked. `/flow` then waits for the Landing Report and does not run Steps 5 to 7 for the parent
+branch. A contract with no parent branch resumes at verification once every sub-task has a
+completion record.
 
 For a contract with a single implementation block there is nothing to iterate, so run it
 directly as below.
@@ -343,6 +348,11 @@ fine does not satisfy this stage.
 
 ## Step 5: Verify
 
+**A contract with a parent branch is not verified here.** Its landing script runs the scripted
+verification on the merged head (see the landing section of `/verify-before-done`), and `/advance`
+starts that script. This step still applies to each sub-task's own branch and to any contract with
+no parent branch.
+
 Invoke `/verify-before-done`. It runs the builds, the test suites, the generated-model
 drift check, the migration safety check, the safety-critical review gate, the handoff
 completeness check and commit hygiene, then reports a verdict.
@@ -381,6 +391,12 @@ produced.
 If the target was `--to-commit`, report and stop here.
 
 ## Step 7: Ship
+
+**A contract with a parent branch is landed by the loop, not shipped from here.** `/advance` starts
+the background landing script, which opens the parent pull request and merges it after its own
+children-closed check. Do not invoke `/ship` for that parent branch. The rest of this step covers a
+branch that is not landed that way: a sub-task's own branch, a contract with no parent branch, and a
+parent pull request somebody opens by hand.
 
 **Before invoking `/ship`, check whether this run is the parent of any sub-tasks.** Step 2.7
 already answered this once, but ask again here: the run may have taken hours or days to reach
@@ -442,7 +458,7 @@ A run is not finished while any file it wrote is uncommitted. Every file this ru
 
 1. **Find the files.** Run `git status --short` in every tree the run touched: the worktree, and the tree the run started from. Agents write into whichever checkout they run in, so the starting tree is the one that collects strays.
 2. **Sort each file.**
-   - **History needs it** (the brief, journal entries, reviewer memory notes, orchestrator result records, review reports, contracts): commit and push. If the run's branch has already merged, use a small follow-up branch from freshly fetched `origin/master` and open a draft pull request.
+   - **History needs it** (the brief, journal entries, reviewer memory notes, orchestrator result records, review reports, contracts): commit and push. If the run's branch has already merged, use a small follow-up branch from freshly fetched `origin/master` and open a draft pull request. **For a multi-sub-task contract, that branch is the one stable `docs/<contract-slug>-records`, under the same rule as `/pr-merged` Step 3:** fetch `origin/docs/<contract-slug>-records` first. When it exists, commit on top of it and push without force. Cut it from freshly fetched `origin/master` only when it is absent, and never re-cut it while it exists. The landing reads records from that branch, so a second records branch for the same contract would hide records from it. On the completion move, `/pr-merged` pushes that branch itself, without a prompt, before it hands to `/advance`; this step does not defer it.
    - **History does not need it** (machine-regenerated files such as the contract accuracy log, changes that differ only in line endings, copies of files already on master or in this run's commit, scratch files): delete it, or restore the tracked file, and state why.
    - **Another session's file:** leave it and name it in the report.
 3. **Prove before deleting.** Delete a file only after showing it is preserved or worthless: compare it with the committed or master copy, ignoring line endings, and report the result. A file that exists nowhere else is never "not needed".

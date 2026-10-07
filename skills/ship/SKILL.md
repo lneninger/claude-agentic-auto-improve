@@ -111,7 +111,9 @@ so; do not open an empty pull request.
 ### 1c. Never ship from the default branch
 
 If `HEAD` is `master` or `main`, halt. `/ship` opens pull requests; it does not push to the
-default branch, force-push, or merge. Those three are the user's, always.
+default branch, force-push, or merge. Those three are the user's, always. The one merge this
+tooling performs is a completed contract's parent pull request, and `land_contract.py` owns it,
+never this skill: `/ship` opens drafts and runs before any merge it could confirm.
 
 ### 1d. Run the verification gauntlet
 
