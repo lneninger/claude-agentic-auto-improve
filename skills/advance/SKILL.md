@@ -161,8 +161,11 @@ branch for a Sub-Task Work Item, the default branch for an ordinary one), `brief
 its Work Item Brief), and `needs_issue` (true only once the contract declares two or more
 mergeable sub-tasks and this one's `issue` is still `null`).
 
-**One released sub-task** → start it. **Several** → list them and ask which. Each is a full
-implementation run, and starting three at once spends a lot of work on the operator's behalf.
+**One released sub-task** → start it. **Several** → start the first one in the script's
+`released` order, say in one line which one and that the rest stay released, and proceed. Do not
+ask which (operator decision 2026-10-09). Start only that one: each is a full implementation run,
+and starting three at once spends a lot of work on the operator's behalf. An operator who names a
+different sub-task overrides the order.
 
 For the one being started:
 
@@ -396,10 +399,10 @@ directly.
 
 **Pre-authorized when `/flow` or the operator invoked this:** reading the script's answer,
 creating the branch the packet names, dispatching the packet's cycle stage(s) as fresh
-subagents, reporting, and on `complete` with a parent branch, launching the landing in the
-background (no question is asked).
+subagents, reporting, starting the first released sub-task when several are released, and on
+`complete` with a parent branch, launching the landing in the background (no question is asked).
 
-**Always the operator's call:** which sub-task to start when several are released, the commit
+**Always the operator's call:** the commit
 confirmation, opening the pull request, amending a contract after an escalation, and anything
 that would start work the script did not release.
 
