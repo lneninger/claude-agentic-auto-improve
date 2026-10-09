@@ -3195,5 +3195,155 @@ class TestRoundThreeStrictReadsOnThePluginPath(Base):
         self.assertIs(report.get("ready"), True, msg="and the report is ready; got %r" % report)
 
 
+# ======================================================================================
+# Hook-server-modes contract (2026-09-28), INV-P2, sub-task 1: plugin mode plans the closed list
+# ======================================================================================
+# The plugin no longer registers its hooks in hooks.json; hook-registration-check.py writes the
+# 17 closed-list entries (plus, ASSUMPTION pending t3 review, working-agreements.py on
+# SessionStart) into the project's .claude/settings.local.json at every session start. Under a
+# plugin install, `hooks` in this script plans the SAME entries through the SAME planner, and an
+# apply still needs the preview hash.
+#
+# SHAPE ASSUMPTIONS (sub-task 2 satisfies these; additive to the readiness report, which keeps
+# every key it has today):
+#   plan_hooks, plugin mode      -> the readiness report PLUS "to-add": [HookRegistration] (the
+#                                   vendored shape: "event", "matcher", "registration-key"),
+#                                   "target": the project's .claude/settings.local.json and
+#                                   "plan-sha256".
+#   apply_hooks, plugin mode     -> with the preview's plan-sha256: {"status": "applied"} after
+#                                   writing settings.local.json (never settings.json); with any
+#                                   other hash: the changed-since-preview refusal and no write; with
+#                                   nothing left to add: {"status": "nothing-to-do"}.
+# Today apply_hooks refuses a plugin install with plugin-install-needs-no-registration, and the
+# existing tests that pin that refusal (TestSafety) must be amended in the same GREEN change.
+# The closed list is read from <plugin root>/.claude/hooks/hook-registration-entries.json, which
+# these tests copy from the repository into the fake plugin root.
+
+ENTRIES_REL = ".claude/hooks/hook-registration-entries.json"
+CHECK_REL = ".claude/hooks/hook-registration-check.py"
+_WORKING_AGREEMENTS_KEY = ("SessionStart", "working-agreements.py", ())
+
+
+class TestPluginModePlansTheSameEntries(Base):
+    def setUp(self):
+        super().setUp()
+        self.install_plugin()
+        real = SCRIPT_ROOT / ENTRIES_REL
+        self.data_present = real.is_file()
+        if self.data_present:
+            shutil.copyfile(str(real), str(self.plugin / ENTRIES_REL))
+
+    def need_data(self):
+        self.assertTrue(self.data_present,
+                        msg="%s does not exist yet (sub-task 2 creates the closed list there)" % ENTRIES_REL)
+
+    def local_path(self):
+        return self.project / ".claude/settings.local.json"
+
+    def planned_keys(self, plan):
+        """{(event, hook file, extras)} of the plan's to-add list, one per entry (no duplicates)."""
+        to_add = self.need(plan, "to-add", "a plugin-mode plan lists the entries it would write")
+        keys = []
+        for entry in to_add:
+            parsed = parse_registration_key(self.need(entry, "registration-key", "HookRegistration"))
+            self.assertIsNotNone(parsed, msg="a registration key names its hook file: %r" % entry)
+            keys.append((self.need(entry, "event", "HookRegistration"), parsed[0], parsed[1]))
+        self.assertEqual(len(keys), len(set(keys)), msg="no entry is planned twice; got %r" % keys)
+        return set(keys)
+
+    def test_plugin_mode_plan_lists_the_closed_list_and_writes_nothing(self):
+        self.need_data()
+        before = snapshot(self.tmp)
+        plan = self.plan()
+        self.assertEqual(plan.get("status"), "plan", msg="a plugin-mode preview is a plan; got %r" % plan)
+        keys = self.planned_keys(plan)
+        self.assertTrue(EXPECTED_KEYS <= keys,
+                        msg="the plan names all 17 closed-list entries; missing %s" % sorted(EXPECTED_KEYS - keys))
+        self.assertTrue(keys - EXPECTED_KEYS <= {_WORKING_AGREEMENTS_KEY},
+                        msg="the only entry beyond the 17 is working-agreements.py (assumption pending t3 review); "
+                            "got %s" % sorted(keys - EXPECTED_KEYS))
+        self.assertEqual(Path(self.need(plan, "target", "where an apply would write")).resolve(),
+                         self.local_path().resolve(),
+                         msg="the entries go to settings.local.json, never settings.json")
+        sha = self.need(plan, "plan-sha256", "the preview must report the plan hash")
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", str(sha)), msg="plan-sha256 is a hex SHA-256; got %r" % sha)
+        self.assertTreeSame(before, "a preview writes nothing")
+
+    def test_plugin_mode_plan_skips_scripts_the_project_settings_json_registers(self):
+        self.need_data()
+        write_json(self.settings_path(), {"hooks": {"PreToolUse": [{
+            "matcher": "Edit|Write|MultiEdit",
+            "hooks": [{"type": "command", "command": "py",
+                       "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py"]}]}]}})
+        before = self.settings_path().read_bytes()
+        keys = self.planned_keys(self.plan())
+        self.assertNotIn(("PreToolUse", "concept-gate.py", ()), keys,
+                         msg="a script the project registers on its event is not planned again (same rule as the check)")
+        self.assertIn(("PreToolUse", "architecture-guard.py", ()), keys,
+                      msg="control: an entry the project does not register is still planned")
+        self.assertEqual(self.settings_path().read_bytes(), before, msg="settings.json is never touched")
+
+    def test_plugin_mode_apply_with_a_wrong_hash_refuses_and_writes_nothing(self):
+        before = snapshot(self.tmp)
+        for wrong in ("0" * 64, ""):
+            with self.subTest(hash=wrong):
+                result = self.apply(wrong)
+                self.assertRefused(result, "changed-since-preview",
+                                   "a plugin-mode apply still needs the previewed hash (round two)")
+                self.assertTreeSame(before, "a refused apply writes nothing")
+
+    def test_plugin_mode_apply_with_the_preview_hash_writes_settings_local_json(self):
+        self.need_data()
+        other = {"env": {"KEEP": "1"}}
+        write_json(self.local_path(), other)
+        plan = self.plan()
+        planned = self.planned_keys(plan)
+        result = self.apply(self.need(plan, "plan-sha256", "the preview must report the plan hash"))
+        self.assertEqual(result.get("status"), "applied", msg="the previewed hash applies; got %r" % result)
+        self.assertFalse(self.settings_path().exists(), msg="settings.json is never created or touched")
+        local = json.loads(self.local_path().read_bytes().decode("utf-8-sig"))
+        self.assertEqual(local.get("env"), other["env"], msg="every other key of settings.local.json is kept")
+        regs = flat_registrations(local)
+        self.assertEqual({(e, f, x) for e, _m, f, x, _h in regs}, planned,
+                         msg="what was written is exactly what the preview named")
+        for event, _matcher, name, _extras, hook in regs:
+            self.assertIn(hook.get("command"), ("py", "python3"),
+                          msg="%s is written in exec form (INV-R1)" % name)
+            written = next(t for t in tokens_of(hook) if t.replace("\\", "/").endswith("/" + name))
+            self.assertEqual(os.path.normcase(os.path.normpath(written)),
+                             os.path.normcase(os.path.normpath(str(self.plugin / ".claude/hooks" / name))),
+                             msg="%s points at the running plugin root" % name)
+        again = self.plan()
+        self.assertEqual(self.planned_keys(again), set(), msg="a second preview has nothing left to add")
+        second = self.apply(self.need(again, "plan-sha256", "the second preview's hash"))
+        self.assertEqual(second.get("status"), "nothing-to-do", msg="and a second apply writes nothing")
+
+    def test_finish_install_and_the_check_write_the_same_entries(self):
+        """The same planner: running the real check on a fresh project and applying this
+        command's plan to another give the same (event, matcher, script, extras, async) set."""
+        self.need_data()
+        self.assertTrue((SCRIPT_ROOT / CHECK_REL).is_file(),
+                        msg="%s does not exist yet (sub-task 2 creates it)" % CHECK_REL)
+        check_project = self.tmp / "checkproj"
+        check_project.mkdir()
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=str(check_project), CLAUDE_PLUGIN_ROOT=str(SCRIPT_ROOT),
+                   PYTHONDONTWRITEBYTECODE="1")
+        done = subprocess.run([sys.executable, str(SCRIPT_ROOT / CHECK_REL)], cwd=str(check_project), env=env,
+                              input=json.dumps({"hook_event_name": "SessionStart", "cwd": str(check_project)}),
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, msg="the check exits 0; stderr=%r" % done.stderr)
+        by_check = json.loads((check_project / ".claude/settings.local.json").read_bytes().decode("utf-8-sig"))
+        plan = self.plan()
+        result = self.apply(self.need(plan, "plan-sha256", "the preview must report the plan hash"))
+        self.assertEqual(result.get("status"), "applied", msg="the apply wrote; got %r" % result)
+        by_apply = json.loads(self.local_path().read_bytes().decode("utf-8-sig"))
+
+        def shape(settings):
+            return {(e, m, f, x, bool(h.get("async"))) for e, m, f, x, h in flat_registrations(settings)}
+
+        self.assertEqual(shape(by_apply), shape(by_check),
+                         msg="finish-install's plugin-mode entries equal the check's, matcher and async included")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -410,6 +410,98 @@ check("control: the count scan reads a stated number",
 check("control: the count scan treats a README without a count as nothing stated",
       stated_case_count("no count is given here") is None)
 
+print("\nINV-P1  hooks.json registers one hook: the SessionStart registration check, in exec form")
+# Contract 2026-09-28-hook-server-modes (ScalpingMachine repository), INV-P1 and sub-task 1. The
+# plugin's other hooks are no longer registered by hooks.json: the check itself writes them into
+# the project's settings.local.json from the closed list in hook-registration-entries.json.
+# NOTE for the implementer: INV-8 (string-form commands, "no hook file is left unregistered") and
+# INV-11c (working-agreements.py registered in hooks.json) above describe the OLD registration and
+# cannot hold once hooks.json carries one exec-form hook. They pass today as positive controls and
+# need an explicit amendment in the same change that makes the checks below green. INV-15 also
+# needs the README's stated case count of the finish-install suite brought up to date.
+
+CHECK_ARGS = ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/hook-registration-check.py"]
+
+
+def all_registrations(cfg: dict) -> list:
+    """[(event, group, hook)] for every hook a hooks.json dict registers."""
+    return [(event, group, hook)
+            for event, groups in cfg.get("hooks", {}).items()
+            for group in groups
+            for hook in group.get("hooks", [])]
+
+
+def is_the_one_registration_check(cfg: dict) -> bool:
+    """True when the dict registers exactly one hook: SessionStart, no matcher, exec form, the check."""
+    regs = all_registrations(cfg)
+    if len(regs) != 1:
+        return False
+    event, group, hook = regs[0]
+    return (event == "SessionStart" and not group.get("matcher") and hook.get("type") == "command"
+            and hook.get("command") == "py" and hook.get("args") == CHECK_ARGS)
+
+
+_hooks_now = loaded[".claude/hooks/hooks.json"]
+_regs_now = all_registrations(_hooks_now)
+check("hooks.json registers exactly one hook", len(_regs_now) == 1, "it registers %d" % len(_regs_now))
+check("that hook is on SessionStart and on no other event",
+      sorted(_hooks_now.get("hooks", {})) == ["SessionStart"], "events: %s" % sorted(_hooks_now.get("hooks", {})))
+check("it is hook-registration-check.py in exec form: command 'py', args -3 then ${CLAUDE_PLUGIN_ROOT}/.claude/hooks/...",
+      is_the_one_registration_check(_hooks_now),
+      "registrations: %r" % [(e, g.get("matcher"), h.get("command"), h.get("args")) for e, g, h in _regs_now])
+check("hook-registration-check.py exists beside the other hooks",
+      (ROOT / ".claude" / "hooks" / "hook-registration-check.py").is_file())
+check("hook-registration-entries.json (the closed list) exists beside it",
+      (ROOT / ".claude" / "hooks" / "hook-registration-entries.json").is_file())
+
+_good = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "py", "args": list(CHECK_ARGS)}]}]}}
+check("control: a hooks.json with exactly the one exec-form SessionStart check is accepted",
+      is_the_one_registration_check(_good))
+_two = json.loads(json.dumps(_good))
+_two["hooks"]["Stop"] = [{"hooks": [{"type": "command", "command": "py", "args": ["-3", "x.py"]}]}]
+check("control: a second hook on any event is rejected", not is_the_one_registration_check(_two))
+_string = {"hooks": {"SessionStart": [{"hooks": [{"type": "command",
+           "command": 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/hook-registration-check.py"'}]}]}}
+check("control: the string form is rejected (INV-R1 wants exec form)", not is_the_one_registration_check(_string))
+_wrong_event = json.loads(json.dumps(_good))
+_wrong_event["hooks"] = {"Stop": _wrong_event["hooks"]["SessionStart"]}
+check("control: the right hook on the wrong event is rejected", not is_the_one_registration_check(_wrong_event))
+
+print("\nINV-P1  every version declaration exceeds origin's version")
+import subprocess  # noqa: E402
+
+
+def origin_version():
+    """The version origin/master declares in .claude-plugin/plugin.json, read through git at test
+    time (never hard-coded); None when origin or the file cannot be read. Does not fetch: run
+    `git fetch origin` first so the remote-tracking ref is current."""
+    try:
+        shown = subprocess.run(["git", "-C", str(ROOT), "show", "origin/master:.claude-plugin/plugin.json"],
+                               capture_output=True, text=True, timeout=60)
+        if shown.returncode != 0:
+            return None
+        return version_tuple(json.loads(shown.stdout)["version"])
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
+
+
+def all_exceed(found: dict, origin) -> bool:
+    return bool(found) and all(version_tuple(v) > origin for v in found.values())
+
+
+_origin = origin_version()
+if _origin is None:
+    print("  SKIP  origin/master's version could not be read through git (origin unreachable or no "
+          "remote-tracking ref); the comparison needs it")
+else:
+    _shown = ".".join(str(x) for x in _origin)
+    check("all five declarations are greater than origin/master's version (%s)" % _shown,
+          all_exceed(declared_versions, _origin), "declared %r" % declared_versions)
+    check("control: a declaration equal to origin's is not greater",
+          not all_exceed({"x#root": _shown}, _origin))
+    check("control: a declaration one patch above origin's is greater",
+          all_exceed({"x#root": ".".join(str(x) for x in _origin[:-1] + (_origin[-1] + 1,))}, _origin))
+
 print("\n%s\n %d passed, %d failed\n%s"
       % ("-" * 60, _passes, len(_failures), "-" * 60))
 sys.exit(1 if _failures else 0)
