@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "agentic-auto-improve",
   "displayName": "Agentic Auto-Improve",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "The Data-First Engineering Protocol as an installable asset set: 22 skills, 14 agents and 17 enforcement hooks that put design before implementation and tests before code.",
   "author": {
     "name": "lneninger",

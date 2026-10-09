@@ -14,10 +14,15 @@ itself -- skips are non-counting (anti-bootstrap-gaming).
 
 State file: the git-tracked <project>/.claude/contract-accuracy.json,
             resolved at call time via accuracy_state_path()
-Audit log:  <project>/.claude/logs/errors.jsonl when CLAUDE_PROJECT_DIR is set,
-            ~/.claude/logs/errors.jsonl otherwise (logs_dir() has no cwd
+Audit log:  <project>/.claude/logs/accuracy.jsonl when CLAUDE_PROJECT_DIR is set,
+            ~/.claude/logs/accuracy.jsonl otherwise (logs_dir() has no cwd
             fallback, unlike claude_roots()).  hook="accuracy",
-            event="clean"|"failure"
+            event="clean"|"failure" (INV-A1, 2026-09-25 hook-latency contract --
+            these routine verdict events moved OUT of errors.jsonl so a
+            healthy, high-volume clean-run signal stops competing with real
+            hook failures in the same file; errors.jsonl still carries
+            critic-verdict-tracker.py's own error events, e.g. "no-areas"
+            (:173), "unknown-verdict" (:198) -- NOT this module's)
 
 CLI:
     accuracy_update.py record-clean <area> <contract>
@@ -56,11 +61,16 @@ from derive_area import derive_areas
 # guard in the test suite is a source-text scan and will flag it (#35).
 from _claude_paths import accuracy_state_path
 
-# Passive error logging (fail-soft import) -- prefer the hooks logger so audit
-# events land in the same errors.jsonl as concept-gate etc. That resolves to
-# <project>/.claude/logs/ when CLAUDE_PROJECT_DIR is set (Claude Code launching
-# a hook) and to ~/.claude/logs/ otherwise (a plain shell) -- logs_dir() has no
-# cwd fallback, unlike claude_roots().
+# Passive error logging (fail-soft import) -- prefer the hooks logger, which
+# resolves to <project>/.claude/logs/ when CLAUDE_PROJECT_DIR is set (Claude
+# Code launching a hook) and to ~/.claude/logs/ otherwise (a plain shell) --
+# logs_dir() has no cwd fallback, unlike claude_roots(). Since INV-A1 (2026-09-25
+# hook-latency contract), this module's own routine "clean"/"failure" verdict
+# events pass log_name="accuracy" and land in accuracy.jsonl, a SEPARATE file
+# from concept-gate's and the other guards' errors.jsonl -- see the module
+# docstring's "Audit log" line. critic-verdict-tracker.py's own error events
+# ("no-areas" at :173, "unknown-verdict" at :198 -- NOT emitted by this
+# module) still go to errors.jsonl, unnamed (the logger's default log_name).
 try:
     from _error_log import log_event  # type: ignore
 except Exception:
@@ -212,19 +222,56 @@ def _trim_history(entry: dict) -> None:
         entry["history"] = entry["history"][-HISTORY_CAP:]
 
 
+#: INV-A3 (operator decision D3) -- the only sources the once-per-verdict
+#: check compares against. A row from any other source (rejection,
+#: reviewer-divergence, post-approval-journal, critique-now-blocker, ...) is
+#: never a match, so it never suppresses and never gets suppressed.
+_CRITIC_SOURCES = {"critic", "critic-warnings-only", "critic-blockers-found"}
+
+
+def _matching_critic_row(entry: dict, contract: str) -> dict | None:
+    """The most recent CRITIC-sourced history row for this contract (INV-A3, A4).
+
+    Contract identity is the file name, case-folded (INV-A4), so a worktree
+    copy and the main-checkout copy of the same contract are one contract.
+    Scans from the most recent row backwards and skips every non-critic row
+    in between -- a rejection, a reviewer divergence or a journal entry never
+    breaks the chain back to the last critic verdict.
+    """
+    contract_name = Path(contract).name.casefold()
+    for row in reversed(entry.get("history", [])):
+        if row.get("source") not in _CRITIC_SOURCES:
+            continue
+        row_contract = row.get("contract") or ""
+        if Path(row_contract).name.casefold() == contract_name:
+            return row
+    return None
+
+
 # ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------
 
-def record_clean(area: str, contract: str) -> dict:
+def record_clean(area: str, contract: str, once_per_verdict: bool = False) -> dict:
     """
     Apply a clean critic verdict to one area. Increments clean_streak and
     flips skip_eligible when the warmup threshold is reached. Returns the
     updated area entry.
+
+    ``once_per_verdict`` (default off, INV-A3/operator decision D3): when
+    True, and this contract's most recent CRITIC-sourced row in this area
+    already reads verdict "clean" / source "critic", this call is a silent
+    no-op inside the same lock the write takes -- no row, no counter change,
+    no log line, and the caller gets back the entry unchanged. Only
+    critic-verdict-tracker.py passes True.
     """
     with _file_lock(state_path()):
         state = _load_state()
         entry = _ensure_area(state, area)
+        if once_per_verdict:
+            existing = _matching_critic_row(entry, contract)
+            if existing is not None and existing.get("verdict") == "clean" and existing.get("source") == "critic":
+                return dict(entry)
         entry["clean_streak"] += 1
         entry["total_runs"] += 1
         entry["skip_eligible"] = entry["clean_streak"] >= WARMUP_THRESHOLD
@@ -245,20 +292,36 @@ def record_clean(area: str, contract: str) -> dict:
         event="clean",
         file=contract,
         details={"area": area, "clean_streak": result["clean_streak"], "skip_eligible": result["skip_eligible"]},
+        log_name="accuracy",
     )
     return result
 
 
-def record_failure(area: str, contract: str, source: str) -> dict:
+def record_failure(area: str, contract: str, source: str, once_per_verdict: bool = False) -> dict:
     """
     Apply a bad-plan signal to one area. Resets clean_streak to 0 and
     flips skip_eligible to False. 'source' is one of:
         rejection · reviewer-divergence · critique-now-blocker · post-approval-journal
+        · critic-warnings-only · critic-blockers-found
     Returns the updated area entry.
+
+    ``once_per_verdict`` (default off, INV-A3/operator decision D3): when
+    True, and this contract's most recent CRITIC-sourced row in this area
+    already reads verdict "failed" / this same ``source``, this call is a
+    silent no-op inside the same lock the write takes -- no row, no counter
+    change, no log line, and the caller gets back the entry unchanged. Only
+    critic-verdict-tracker.py passes True; the command-line entry points and
+    the other two trackers never do, so a rejection, a reviewer divergence or
+    a journal entry always records and always resets the area's clean
+    streak.
     """
     with _file_lock(state_path()):
         state = _load_state()
         entry = _ensure_area(state, area)
+        if once_per_verdict:
+            existing = _matching_critic_row(entry, contract)
+            if existing is not None and existing.get("verdict") == "failed" and existing.get("source") == source:
+                return dict(entry)
         entry["clean_streak"] = 0
         entry["skip_eligible"] = False
         entry["total_runs"] += 1
@@ -279,6 +342,7 @@ def record_failure(area: str, contract: str, source: str) -> dict:
         event="failure",
         file=contract,
         details={"area": area, "source": source},
+        log_name="accuracy",
     )
     return result
 
