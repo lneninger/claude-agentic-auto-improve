@@ -1283,24 +1283,42 @@ def section_tokens() -> None:
     cfg = json.loads((CLAUDE_DIR / ".project-tokens.json").read_text(encoding="utf-8"))
     tokens = [t for t in cfg.get("tokens", []) if t]
     allowed = [a.get("string", "") for a in cfg.get("allowed", []) if a.get("string")]
-    problems: list[str] = []
+    # The shared template is intentionally empty in the plugin (it ships no project's names). Then this case
+    # supplies its OWN list: names that actually identify the consuming project. They are built from pieces so
+    # this file does not contain them, which the scan below would otherwise report against itself.
     if not tokens:
-        problems.append("the token list is empty, so the scan would prove nothing")
-    for label, path in (("this test file", SELF), ("_contract_index.py", INDEX_MODULE)):
-        if not path.exists():
-            problems.append(f"{label}: {path} does not exist")
-            continue
-        text = path.read_text(encoding="utf-8")
-        for a in allowed:
-            text = text.replace(a, "")
-        low = text.lower()
-        for tok in tokens:
-            if tok.lower() in low:
-                problems.append(f"{label}: contains the project token {tok!r}")
-        for m in re.finditer(r"\b[0-9a-f]{7,40}\b", text):
-            word = m.group(0)
-            if re.search(r"\d", word) and re.search(r"[a-f]", word):
-                problems.append(f"{label}: names a commit-like hash {word!r}")
+        tokens = ["Scalping" + "Machine", "StockTool" + "Scalping" + "Machine"]
+
+    def scan(files: list[tuple[str, Path]]) -> list[str]:
+        found: list[str] = []
+        for label, path in files:
+            if not path.exists():
+                found.append(f"{label}: {path} does not exist")
+                continue
+            text = path.read_text(encoding="utf-8")
+            for a in allowed:
+                text = text.replace(a, "")
+            low = text.lower()
+            for tok in tokens:
+                if tok.lower() in low:
+                    found.append(f"{label}: contains the project token {tok!r}")
+            for m in re.finditer(r"\b[0-9a-f]{7,40}\b", text):
+                word = m.group(0)
+                if re.search(r"\d", word) and re.search(r"[a-f]", word):
+                    found.append(f"{label}: names a commit-like hash {word!r}")
+        return found
+
+    problems = scan([("this test file", SELF), ("_contract_index.py", INDEX_MODULE)])
+    # Positive control: a scratch file that names a token must make the scan report it, or the scan is blind.
+    scratch = Path(tempfile.mkdtemp(prefix="ci-tokens-"))
+    try:
+        planted = scratch / "planted.py"
+        planted.write_text(f"# belongs to {tokens[0]}\n", encoding="utf-8")
+        control = scan([("planted scratch file", planted)])
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if not any("project token" in c for c in control):
+        problems.append("control failed: a scratch file naming a token was not reported, so the scan is blind")
     check("this file and _contract_index.py are free of project tokens and commit names",
           not problems, "\n".join(problems))
 

@@ -113,9 +113,20 @@ def registry(name: str) -> Path:
 
 
 def hook_file(name: str) -> Path:
-    """Locate a sidecar file that lives next to the hooks (rules, exceptions)."""
+    """Locate a sidecar file that lives next to the hooks (rules, exceptions).
+
+    INV-O3: the PROJECT's copy (``<CLAUDE_PROJECT_DIR>/.claude/hooks/<name>``) is read first and the
+    plugin's template beside this script is the fallback. A hook that runs from a plugin sits beside
+    a template, never beside the project's data, so the order is what keeps a project's own rules in
+    force. With no project named, the template comes first, as it always did.
+    """
     here = Path(__file__).resolve().parent
-    candidates = [here / name] + [root / "hooks" / name for root in claude_roots()]
+    proj = project_dir()
+    candidates: list[Path] = []
+    if proj is not None:
+        candidates.append(proj / ".claude" / "hooks" / name)
+    candidates.append(here / name)
+    candidates.extend(root / "hooks" / name for root in claude_roots())
     for candidate in candidates:
         if candidate.is_file():
             return candidate
@@ -179,6 +190,29 @@ def _first_root_containing(relative: str) -> Path:
 def area_mapping_path() -> Path:
     """The area-map that ``derive_area.py`` buckets contracts against."""
     return _first_root_containing("area-mapping.json")
+
+
+def memory_blocks_path() -> Path:
+    """The memory-surface budgets that the pager and the health audit read.
+
+    Mirrors :func:`area_mapping_path` exactly. It exists because
+    ``_memory_common`` hard-coded ``~/.claude/memory-blocks.json``, which the
+    2026-08-25 migration emptied: the pager stayed registered, could not find
+    its configuration, logged ``config-load-failed`` and returned 0 on every
+    single turn for forty-four days. A hook that fails open and logs quietly
+    looks exactly like a hook with nothing to say.
+    """
+    return _first_root_containing("memory-blocks.json")
+
+
+def settings_path() -> Path:
+    """The ``settings.json`` that registers this project's hooks.
+
+    Needed by any check that asks "is that hook actually wired?". Hard-coding
+    the answer breaks in a worktree, where the repository root is not the one
+    the user cloned.
+    """
+    return _first_root_containing("settings.json")
 
 
 def work_item_conventions_path() -> Path:

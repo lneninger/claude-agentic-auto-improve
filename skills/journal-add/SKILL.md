@@ -55,7 +55,7 @@ If yes:
 - **Ask the optional app scope** via a second `AskUserQuestion`: "Which app does this apply to?" — one option per application named by the `frontend.roots` slot of `.claude/project-profile.md`, spelled `app:<name> only`, plus an `all apps (no sub-tag)` option. If an `app:*` option is picked, append the chosen sub-tag to the Tags line.
 - **Recurring-mistake check.** If the user described this as a repeat occurrence (e.g. "the third time we hit this"), also append `recurring-mistake` to the Tags line. This is the signal `/promote-ui-rule` reads when gating automated guard-rule promotion.
 
-If no, skip this step. (The architecture-advisor hook and ui-ux-designer agent's Step 0 grep would still pick up the entry on a tag match, but you avoid the noise of marking generic lessons as UI-tagged.)
+If no, skip this step. (The ui-ux-designer agent's Step 0 grep would still pick up the entry on a tag match, but you avoid the noise of marking generic lessons as UI-tagged. The architecture-advisor hook that used to do the same at every prompt was retired in 0.7.0.)
 
 **Optional Areas line.** For any entry (UI or not) whose `Source contract:` is `N/A` (manual entries), offer to append an `Areas:` line so the cross-area scanner can attribute the lesson to specific buckets. Use `AskUserQuestion` with the options drawn from `.claude/area-mapping.json` keys + `(universal — no Areas line)`. The user picks any subset; the Areas line gets the comma-separated slugs. Skip the prompt for non-manual triggers — those derive their area from the Source contract automatically.
 

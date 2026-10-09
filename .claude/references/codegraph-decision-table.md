@@ -1,7 +1,7 @@
 # CodeGraph decision table — full version with worked examples
 
 The condensed table lives in [CLAUDE.md](../../CLAUDE.md) → "CodeGraph (PRIMARY investigation
-tool)". This is the long form: the same routing plus worked examples, the gate mechanics, and the
+tool)". This is the long form: the same routing plus worked examples, the retired gate, and the
 failure modes that have actually bitten this project.
 
 > **Provenance.** Reconstructed on 2026-08-25. `CLAUDE.md` cited this path for the worked-example
@@ -11,9 +11,9 @@ failure modes that have actually bitten this project.
 
 ## The rule
 
-**Every codebase question starts with a CodeGraph call.** `Read` / `Grep` / `Glob` on source paths
-are blocked at the hook layer until at least one `mcp__codegraph__*` tool has been called in the
-current turn.
+**Every codebase question starts with a CodeGraph call.** This is guidance, not a gate: the plugin's
+code-search-first hook was retired in 0.7.0, so a `Read` / `Grep` / `Glob` is never blocked for want of
+a CodeGraph call. The routing below still says which tool answers which question best.
 
 ## Routing
 
@@ -27,8 +27,8 @@ current turn.
 | "Is the index alive / fresh?" | `codegraph_status` | Main session |
 | "Explain the area around `X`" (broad) | `codegraph_context` | **Explore subagent only** |
 | "Map a feature from scratch" | `codegraph_explore` | **Explore subagent only** |
-| "Read a markdown / config file" | `Read` (gate does not apply) | Main session |
-| "Read a file CodeGraph just pointed to" | `Read` (sentinel set, gate open) | Main session |
+| "Read a markdown / config file" | `Read` (no CodeGraph call needed) | Main session |
+| "Read a file CodeGraph just pointed to" | `Read` | Main session |
 
 ### Why the main-session / subagent split
 
@@ -49,13 +49,13 @@ When spawning an Explore agent, include this directive verbatim:
 
 ### "Why does the screener return no rows for AAPL?"
 
-Wrong: `Grep -r "AAPL" src/` → blocked by the gate, and would be noise anyway.
+Wrong: `Grep -r "AAPL" src/` → would be noise; ask CodeGraph instead.
 
 Right:
 1. `codegraph_search("StockScreenerService")` → locates the type.
 2. `codegraph_node` on the hit → members and file:line.
 3. `codegraph_callees` on the filter method → shows it reads `StockFundamentals` locally.
-4. Now `Read` the file — the sentinel is set, the gate is open.
+4. Now `Read` the file.
 
 ### "If I rename `StrategyStatus.Paused`, what breaks?"
 
@@ -76,21 +76,25 @@ only its summary.
 
 1. `codegraph_search("JwtSettings")`.
 2. `codegraph_callers` on the settings type → the DI registration and the token service.
-3. `Read` `Program.cs` and the service — gate is open.
+3. `Read` `Program.cs` and the service.
 
-## Gate mechanics
+## Retired gate (0.7.0)
 
-| Hook | Event | Effect |
-|---|---|---|
-| `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the sentinel is missing and the target is a source path. The message names the CodeGraph tool to use instead. |
-| `codegraph-turn-tracker.py` | PostToolUse on `mcp__codegraph__*` | Creates `<cwd>/.claude/.codegraph-used-this-turn`. |
-| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the sentinel — every new user turn opens a fresh investigation budget. |
+Three hooks used to turn the rule above into a block. The plugin no longer ships or registers them:
 
-Lifecycle hooks that keep the index fresh (not part of the gate): `SessionStart` →
+| Retired hook | What it did |
+|---|---|
+| code-search-first guard | Blocked `Read`/`Grep`/`Glob` on source paths until a CodeGraph tool had run in the turn. |
+| CodeGraph turn tracker | Created the per-turn marker file after a CodeGraph call. |
+| CodeGraph turn reset | Deleted the marker at every new prompt. |
+
+A project that wants the block back registers its own copies; the README's "Retired hooks" section says how.
+
+Lifecycle hooks that keep the index fresh (not part of the retired gate): `SessionStart` →
 `codegraph sync-if-dirty`; PostToolUse on Edit/Write/MultiEdit → `codegraph mark-dirty` (async);
 `Stop` → `codegraph sync-if-dirty`.
 
-## Allowlist — the gate does not apply
+## Allowlist — paths the retired gate skipped
 
 - **Extensions:** `.md`, `.json`, `.yaml`, `.toml`, `.ini`, `.env`, `.lock`, `.log`, `.csv`, `.sql`,
   `.http`, `.gitignore`, `.editorconfig`
@@ -107,15 +111,8 @@ real ones, while `codegraph status` says "up to date". **Trust it for relationsh
 existence or inventories.** Confirm on disk before asserting a file exists or that a count is
 complete.
 
-**The documented auto-bypass does not exist.** `CLAUDE.md` claims the gate auto-bypasses when
-CodeGraph is unavailable. It does not — the hook still hard-blocks `Read`/`Grep`/`Glob` when the
-MCP server is absent. Workaround: read via Bash (`cat`, `sed -n`) which the gate does not intercept.
+**The retired gate had no escape without an index.** Before 0.7.0 the hook still hard-blocked `Read`/`Grep`/`Glob` when the MCP server was absent, which is one reason it was retired.
 
-**Worktree paths bypass the gate.** `.claude/worktrees/` matches the allowlist's `/.claude/`
-segment, so an agent working in a worktree can `Grep` source directly. Do not build an argument on
-the assumption that the gate held there.
+## Index health
 
-## Escape hatches
-
-- One-shot: the **user** (not an agent) sets `CLAUDE_SKIP_CG=1`.
 - Index dead or stale: run `codegraph sync` or `codegraph init -i`, then resume normally.

@@ -191,28 +191,28 @@ on Claude Code's own command line are not read, and the answer's message says so
 
 ### 2b. `mode` is `plugin`: report, write nothing
 
-The plugin's own `hooks.json` registers the hooks, so the project needs no `settings.json`
-edit. The answer is a readiness report. Tell the user, in plain words:
+The plugin's own `hooks.json` registers the hooks, so a plugin install needs no registration
+and the project's `settings.json` registers none of them (a hook registered in both places
+runs twice). The answer is a readiness report. Tell the user, in plain words:
 
 - **Ready to load is not live.** The report says what it checked and what it could not. Say
   both. Never say "the hooks are live".
 - **Which gates are on.** Name the files in `gates`. The ones that block are the concept
-  gate, the architecture guard, the bash gate, the two database guards and the code-search-first
-  guard.
+  gate, the architecture guard and the two database guards. The bash gate and the
+  code-search-first guard were retired in 0.7.0.
 - **The environment variables.** Print the list in `kill-switches`. Most are kill switches,
   set by the user and never by an agent. Two are different: `CLAUDE_ACTIVE_CONTRACT` pins one
   approved contract, and `CLAUDE_DESTRUCTIVE_DB_OK` is a one-shot approval for one destructive
   database operation.
-- **The database guards use a template rules file.** Report `database-guard-rules` as it
-  reads. Under a plugin install the file names the made-up databases `AcmeApp` and
-  `AcmeApp_Testing` until the project supplies its own rules. So only those names are
-  protected by name. The general drop and truncate checks still apply. Making this
-  configurable under a plugin install needs a change to the hook itself. It is tracked as
-  follow-up issue #21.
-- **The code-search-first note.** Print `code-search-first-note`. In short: the check blocks
-  source reads until a CodeGraph tool has run, it has **no** bypass when no CodeGraph index
-  exists, and `CLAUDE_SKIP_CG=1` silences it for one session. A new user without CodeGraph
-  will hit this, so say it early.
+- **The database guards read the project's rules file.** Report `database-guard-rules` as it
+  reads, but know that it describes the template shipped inside the plugin, which names the
+  made-up databases `AcmeApp` and `AcmeApp_Testing`. The guards themselves never read that
+  template: they read the project's own `.claude/hooks/db-destructive-guard.rules.json`. A
+  project that has no such file (or an empty list) has every database protected, which is
+  strict on purpose. The project names its real databases in that file.
+- **The code-search-first note.** Print `code-search-first-note`. In short: the check was
+  retired in 0.7.0, the plugin no longer blocks source reads, and no CodeGraph tool has to run
+  first, so there is nothing to bypass.
 - **The platform note.** If the answer has `platform-note` (macOS and Linux), say plainly
   that this command cannot fix it under a plugin install. The cached `hooks.json` launches
   `py -3`. The two options are to copy the hooks into the project instead (vendor them), or to

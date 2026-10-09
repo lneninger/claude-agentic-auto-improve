@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -55,6 +56,11 @@ except Exception:  # pragma: no cover
     _pp_log = None
 LOG_DIR = _pp_log.logs_dir() if _pp_log else Path.home() / ".claude" / "logs"
 LOG_PATH = LOG_DIR / "errors.jsonl"
+
+#: INV-A5 -- a valid log name is a short lower-case word. Anything else
+#: (wrong case, punctuation beyond ``-``/``_``, empty, non-string) falls back
+#: to "errors" rather than raising, keeping log_event fail-soft.
+_VALID_LOG_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def _session_id() -> str:
@@ -78,8 +84,9 @@ def log_event(
     session_id: str | None = None,
     agent: str | None = None,
     details: Mapping[str, Any] | None = None,
+    log_name: str = "errors",
 ) -> None:
-    """Append a structured event to ~/.claude/logs/errors.jsonl.
+    """Append a structured event to ``<LOG_DIR>/<log_name>.jsonl``.
 
     Fail-soft: returns silently on any error. Never raises.
 
@@ -90,12 +97,23 @@ def log_event(
         session_id: optional override; defaults to env / parent pid hash.
         agent: optional agent name, if known.
         details: optional mapping of additional structured fields.
+        log_name: which log file to append to (INV-A5). Defaults to
+            "errors" (``errors.jsonl``, unchanged for every existing caller).
+            Must be a short lower-case word; anything else falls back to
+            "errors".
     """
     try:
         if not LOG_DIR.exists():
             # Do not auto-create -- the /audit-errors skill owns dir creation.
             # This keeps the fast path truly passive until the user enables it.
             return
+
+        name = (
+            log_name
+            if isinstance(log_name, str) and _VALID_LOG_NAME.match(log_name)
+            else "errors"
+        )
+        log_path = LOG_DIR / f"{name}.jsonl"
 
         record = {
             "ts": int(time.time()),
@@ -109,7 +127,7 @@ def log_event(
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
 
         # Atomic append -- Windows handles concurrent appends OK for short lines.
-        with LOG_PATH.open("a", encoding="utf-8") as fp:
+        with log_path.open("a", encoding="utf-8") as fp:
             fp.write(line + "\n")
     except Exception:
         # Intentionally swallow -- the log is an observation tool, never a gate.

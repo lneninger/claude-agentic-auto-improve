@@ -9,20 +9,38 @@
     "root-level hooks/ directory would resolve SELF_ROOT to the repository root",
     "and every registry, area-map and contract lookup would silently miss.",
     "",
-    "INTERPRETER: 'py -3' is the Windows Python launcher, which is the invocation",
-    "every hook docstring in this repository already specifies. On macOS and Linux",
-    "replace 'py -3' with 'python3' throughout this file. There is no per-platform",
-    "branch available in this format, so the choice is documented rather than solved.",
+    "THE PLUGIN IS THE SOURCE OF ITS HOOKS. A project that installs this plugin",
+    "registers none of these hooks itself. Registering one again makes it run twice,",
+    "because Claude Code does not merge a project hook with the same command in a",
+    "plugin's hooks.json: both run.",
+    "",
+    "EXEC FORM: every entry names the interpreter as \"command\": \"py\" and the",
+    "arguments as \"args\": [\"-3\", \"<script>\", ...]. No shell parses the line, so a",
+    "path with a space needs no quoting. ${CLAUDE_PLUGIN_ROOT} always resolves to the",
+    "running version of the plugin, so a deleted version folder cannot strand an",
+    "entry. 'py -3' is the Windows Python launcher. On macOS and Linux replace",
+    "\"py\" and the \"-3\" argument with \"python3\" and drop the \"-3\". There is no",
+    "per-platform branch available in this format, so the choice is documented",
+    "rather than solved.",
+    "",
+    "WHAT IS REGISTERED (twelve entries). The gates are the concept gate, the",
+    "architecture guard and the plain-language guard. As of operator decision 8 of",
+    "2026-10-09 this plugin also registers BOTH database guards itself:",
+    "db-destructive-guard.py on the edit group, Bash and PowerShell, and",
+    "db-research-readonly-guard.py on Bash and PowerShell (it left the edit group).",
+    "The four post-edit trackers run inside ONE asynchronous dispatcher,",
+    "post-edit-dispatcher.py, so an edit starts one process instead of four.",
     "",
     "BLAST RADIUS: these are enforcement gates, not suggestions. Installing this",
     "plugin turns them on. concept-gate blocks Edit/Write on non-trivial files until",
     "an approved concept contract exists, and the database guards fail CLOSED, which",
-    "means a database is treated as protected when the guard's rules file is absent",
-    "or empty. The shipped rules file names only the fictional databases AcmeApp and",
-    "AcmeApp_Testing, so per-name write protection under a plugin install covers only",
-    "those until the project supplies its own rules. That is the intended posture of",
-    "the Data-First Engineering Protocol, but it is a real change to how the session",
-    "behaves. README.md lists the per-hook environment-variable kill switches."
+    "means every database is treated as protected when the project's rules file is",
+    "absent, unreadable or empty, or when CLAUDE_PROJECT_DIR is not set. The guards",
+    "read <project>/.claude/hooks/db-destructive-guard.rules.json and never the",
+    "template that ships beside them (that template names only the fictional",
+    "databases AcmeApp and AcmeApp_Testing). The advisory hooks read their rules",
+    "project-first too, and fall back to the shipped template. README.md lists the",
+    "per-hook environment-variable kill switches."
   ],
   "hooks": {
     "SessionStart": [
@@ -30,22 +48,30 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/working-agreements.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/working-agreements.py"]
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py"]
           },
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/architecture-guard.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/architecture-guard.py"]
+          },
+          {
+            "type": "command",
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-destructive-guard.py"]
           }
         ]
       },
@@ -54,29 +80,28 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/bash-gate.py\""
-          }
-        ]
-      },
-      {
-        "matcher": "Bash|Edit|Write|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-destructive-guard.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-destructive-guard.py"]
           },
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-research-readonly-guard.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-research-readonly-guard.py"]
           }
         ]
       },
       {
-        "matcher": "Read|Grep|Glob",
+        "matcher": "PowerShell",
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/codegraph-first-guard.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-destructive-guard.py"]
+          },
+          {
+            "type": "command",
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-research-readonly-guard.py"]
           }
         ]
       }
@@ -87,28 +112,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/contract-status-watcher.py\""
-          },
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/critic-verdict-tracker.py\""
-          },
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/journal-post-approval-tracker.py\""
-          },
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/integration-check.py\""
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__codegraph__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/codegraph-turn-tracker.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/post-edit-dispatcher.py"],
+            "async": true
           }
         ]
       }
@@ -118,19 +124,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/codegraph-turn-reset.py\""
-          },
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/architecture-advisor.py\""
-          },
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plan-question-advisor.py\""
-          },
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py\" --carry-forward"
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py", "--carry-forward"]
           }
         ]
       }
@@ -140,11 +135,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py"],
+            "statusMessage": "Checking the message reads plainly..."
           },
           {
             "type": "command",
-            "command": "py -3 \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/memory-pager.py\""
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/memory-pager.py"],
+            "async": true
           }
         ]
       }

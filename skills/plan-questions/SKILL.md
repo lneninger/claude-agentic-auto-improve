@@ -1,6 +1,6 @@
 ---
 name: plan-questions
-description: Question-quality rubric for AskUserQuestion calls during /plan mode. Triggers when the developer says /plan-questions, "ask better questions", "that question was confusing", or as a mid-session reset. Auto-injected by ~/.claude/hooks/plan-question-advisor.py whenever plan mode is detected.
+description: Question-quality rubric for AskUserQuestion calls during /plan mode. Triggers when the developer says /plan-questions, "ask better questions", "that question was confusing", or as a mid-session reset. Invoke it by name; the plugin no longer injects it automatically (the plan-question advisor hook was retired in 0.7.0).
 ---
 
 # Plan-Mode Question Quality Rubric
@@ -162,5 +162,5 @@ If a question fails any rule, rewrite it before sending.
 - Developer types `/plan-questions` or says "that question was confusing" /
   "ask better questions".
 - Mid-plan, before any `AskUserQuestion` call, mentally walk the 10 rules.
-- The hook injects a one-line reminder pointing here at every prompt
-  while plan mode is active; treat that reminder as the trigger.
+- Plan mode is active and no reminder will arrive: the plan-question advisor hook that used to
+  inject one at every prompt was retired in 0.7.0, so invoke this skill yourself.

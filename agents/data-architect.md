@@ -90,7 +90,7 @@ If the project section does NOT exist in `MECHANISMS.md`, you still consult the 
 
 ### Step 3 — Investigate the relevant code (CodeGraph FIRST, READ ONLY)
 
-**CodeGraph is your primary investigation tool.** The `~/.claude/hooks/codegraph-first-guard.py` hook will block `Read` / `Grep` / `Glob` on source-code paths until you make at least one `mcp__codegraph__*` call in this turn. Follow the decision table at `.claude/references/codegraph-decision-table.md`.
+**CodeGraph is your primary investigation tool.** No hook blocks `Read` / `Grep` / `Glob` for want of a CodeGraph call (the plugin's code-search-first hook was retired in 0.7.0), but a CodeGraph call is still the fastest way to learn who calls what. Follow the decision table at `.claude/references/codegraph-decision-table.md`.
 
 **Investigation sequence:**
 

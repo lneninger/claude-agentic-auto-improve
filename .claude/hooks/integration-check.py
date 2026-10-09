@@ -53,7 +53,14 @@ FRONTEND_EXTENSIONS = {".ts"}
 # itself is generic. See that file for the fail-soft note: this hook only ever
 # emits a WARNING, so an absent rules file costs a reminder rather than a
 # safety layer. A guard that BLOCKS must fail closed instead.
-_IC_RULES_PATH = Path(__file__).resolve().parent / "integration-check.rules.json"
+#
+# The project's own file is read first and the plugin's template is the fallback (INV-O3), so a
+# project that ships no rules still gets the generic markers.
+_IC_RULES_NAME = "integration-check.rules.json"
+_IC_RULES_PATH = (
+    _pp.hook_file(_IC_RULES_NAME) if _pp is not None
+    else Path(__file__).resolve().parent / _IC_RULES_NAME
+)
 
 
 def _load_integration_rules() -> dict:
