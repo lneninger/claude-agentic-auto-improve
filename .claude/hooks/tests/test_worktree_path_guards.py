@@ -136,11 +136,45 @@ def tok() -> str:
 # file the hook reads, like test_db_destructive_guard.py). Fails loud, on
 # purpose: a vacuous substitute would let the Layer-3c cases test nothing.
 # ---------------------------------------------------------------------------
-_RULES_PATH = HOOKS_DIR / "db-destructive-guard.rules.json"
-try:
-    _RULES = json.loads(_RULES_PATH.read_text(encoding="utf-8"))
-except Exception as _e:  # pragma: no cover - configuration error
-    raise SystemExit(f"cannot read {_RULES_PATH}: {_e}")
+#
+# PLUGIN PORT (contract 2026-09-28-hook-server-modes, amendment 2026-10-09, INV-O7 / INV-O3, sub-task 23).
+# This is this repository's suite less the cases that launch bash-gate.py or codegraph-first-guard.py
+# (both hooks are cut). The one other change: the project's rules are no longer the file beside the hook
+# (the plugin ships a fictional template there). A FIXTURE PROJECT supplies this project's database
+# names: the text below is written to <fixture project>/.claude/hooks/db-destructive-guard.rules.json
+# for every project tree this suite builds, and to every hook copy that carries rules. It copies this
+# project's rules and names ScalpingMachine and ScalpingMachine_Testing, as the contract requires.
+_RULES_PATH = Path("<fixture project>/.claude/hooks/db-destructive-guard.rules.json")
+_RULES = {
+    "protected_databases": ["ScalpingMachine", "ScalpingMachine_Testing"],
+    "production_path_allowlist": [
+        "src/scalpingmachine.api/",
+        "src/scalpingmachine.persistence/",
+        "tools/db-protection/",
+        ".claude/",
+        "/.claude/",
+        "docs/",
+    ],
+    "human_only_commands": [
+        {"script": "tools/db-protection/update-dev-database.cmd"},
+        {"script": "tools/db-protection/restore-latest.cmd", "flag": "--recover-missing-dev-db"},
+    ],
+}
+RULES_NAME = "db-destructive-guard.rules.json"
+
+
+def write_fixture_rules(directory: Path) -> None:
+    """Write the fixture project's rules file into ``directory`` (a ``.claude/hooks`` folder)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / RULES_NAME).write_text(json.dumps(_RULES), encoding="utf-8")
+
+
+def copy_hook_file(name: str, dest_dir: Path) -> None:
+    """Copy one hook-folder file beside a hook copy; the rules file comes from the fixture, never the plugin."""
+    if name == RULES_NAME:
+        write_fixture_rules(dest_dir)
+    else:
+        shutil.copy2(HOOKS_DIR / name, dest_dir / name)
 
 _PROTECTED_DBS = [str(n) for n in (_RULES.get("protected_databases") or []) if str(n).strip()]
 if not _PROTECTED_DBS:
@@ -263,6 +297,10 @@ def make_tree() -> dict:
     (wt2 / "CLAUDE.md").write_text("# worktree 2\n", encoding="utf-8")
     (wt2 / ".git").write_text(f"gitdir: {fs(repo)}/.git/worktrees/{wt2_name}\n", encoding="utf-8")
 
+    # PLUGIN PORT: every project tree carries the fixture project's rules (INV-O3).
+    for project_tree in (repo, wt, wt2):
+        write_fixture_rules(project_tree / ".claude" / "hooks")
+
     home = root / "home"
     (home / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -361,7 +399,7 @@ def make_situation_c_copy(repo: Path, guard_filename: str, include_rules: bool =
     if include_rules:
         names.append("db-destructive-guard.rules.json")
     for name in names:
-        shutil.copy2(HOOKS_DIR / name, dest_hooks / name)
+        copy_hook_file(name, dest_hooks)
     dest_scripts = repo / ".claude" / "scripts"
     dest_scripts.mkdir(parents=True, exist_ok=True)
     shutil.copy2(SCRIPTS_DIR / "_contract_files.py", dest_scripts / "_contract_files.py")
@@ -377,7 +415,7 @@ def make_isolated_copy(isolated_dir: Path, guard_filename: str, include_rules: b
     if include_rules:
         names.append("db-destructive-guard.rules.json")
     for name in names:
-        shutil.copy2(HOOKS_DIR / name, isolated_dir / name)
+        copy_hook_file(name, isolated_dir)
     return isolated_dir / guard_filename
 
 
@@ -457,7 +495,7 @@ def make_stale_helper_copy(dest_dir: Path, guard_filename: str, include_rules: b
     if include_rules:
         names.append("db-destructive-guard.rules.json")
     for name in names:
-        shutil.copy2(HOOKS_DIR / name, dest_dir / name)
+        copy_hook_file(name, dest_dir)
     (dest_dir / "_project_paths.py").write_text(_STALE_PROJECT_PATHS_SOURCE, encoding="utf-8")
     return dest_dir / guard_filename
 
@@ -922,255 +960,9 @@ def run_concept_gate_cases(tree: dict) -> None:
 
 
 # ===========================================================================
-# bash-gate (B1-B9)
+# PLUGIN PORT (sub-task 23): the bash-gate (B1-B9) and codegraph-first-guard (C1-C10) cases are cut
+# with those hooks; every other case below is this repository's, unchanged.
 # ===========================================================================
-def run_bash_gate_cases(tree: dict) -> None:
-    hook = HOOKS_DIR / "bash-gate.py"
-    repo, wt, wt_name = tree["repo"], tree["wt"], tree["wt_name"]
-
-    cases: list[GateCase] = []
-
-    # B1 a: absolute worktree src/Probe_<tok>.cs -> BLOCK, equals main
-    t = tok()
-    cases.append(GateCase(
-        id="B1", guard_key="bash-gate", hook_path=hook,
-        payload=bash_append_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-        main_payload=bash_append_payload(fs(repo / "src" / f"Probe_{t}.cs")),
-        cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-    ))
-
-    # B2 b: relative src/Probe_<tok>.cs, cwd = worktree -> BLOCK
-    t = tok()
-    cases.append(GateCase(
-        id="B2", guard_key="bash-gate", hook_path=hook,
-        payload=bash_append_payload(f"src/Probe_{t}.cs"),
-        cwd=wt, env=base_env(wt), expect="block", fails_today=True,
-    ))
-
-    # B3 a: raw ./.claude/worktrees/<wt>/src/Probe_<tok>.cs, cwd = repo -> BLOCK
-    t = tok()
-    raw = f"./.claude/worktrees/{wt_name}/src/Probe_{t}.cs"
-    cases.append(GateCase(
-        id="B3", guard_key="bash-gate", hook_path=hook,
-        payload=bash_append_payload(raw),
-        cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-    ))
-
-    # B4 a: project .claude/hooks/x_<tok>.py -> ALLOW (control)
-    t = tok()
-    sib_t = tok()
-    cases.append(GateCase(
-        id="B4", guard_key="bash-gate", hook_path=hook,
-        payload=bash_append_payload(fs(repo / ".claude" / "hooks" / f"x_{t}.py")),
-        sibling_payload=bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-    ))
-
-    # B5 a: worktree .claude/hooks/x_<tok>.py -> ALLOW (control)
-    t = tok()
-    sib_t = tok()
-    cases.append(GateCase(
-        id="B5", guard_key="bash-gate", hook_path=hook,
-        payload=bash_append_payload(fs(wt / ".claude" / "hooks" / f"x_{t}.py")),
-        sibling_payload=bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-    ))
-
-    # B6 a: worktree src target covered by an approved worktree contract -> ALLOW
-    t = tok()
-    target = fs(wt / "src" / f"Probe_{t}.cs")
-    _b6_contract = write_contract(wt / ".claude" / "concepts", f"probe_bash_{t}", [f"src/Probe_{t}.cs"])
-    assert_contract_fixture("B6", _b6_contract, target)
-    sib_t = tok()
-    cases.append(GateCase(
-        id="B6", guard_key="bash-gate", hook_path=hook,
-        payload=bash_append_payload(target),
-        sibling_payload=bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-    ))
-
-    c_hook = make_situation_c_copy(repo, "bash-gate.py")
-
-    # B7 c, cwd = worktree root: relative src/Probe_<tok>.cs -> BLOCK
-    t = tok()
-    cases.append(GateCase(
-        id="B7", guard_key="bash-gate", hook_path=c_hook,
-        payload=bash_append_payload(f"src/Probe_{t}.cs"),
-        cwd=wt, env=base_env(repo), expect="block", fails_today=True,
-    ))
-
-    # B8 c, cwd = worktree root: absolute worktree .claude/hooks/x_<tok>.py -> ALLOW
-    t = tok()
-    sib_t = tok()
-    cases.append(GateCase(
-        id="B8", guard_key="bash-gate", hook_path=c_hook,
-        payload=bash_append_payload(fs(wt / ".claude" / "hooks" / f"x_{t}.py")),
-        sibling_payload=bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=wt, env=base_env(repo), expect="allow", fails_today=False,
-    ))
-
-    # B9 a: absolute <repo>/.claude//worktrees/<wt>/src/Probe_<tok>.cs -> BLOCK
-    t = tok()
-    doubled = fs(repo) + "/.claude//worktrees/" + wt_name + f"/src/Probe_{t}.cs"
-    cases.append(GateCase(
-        id="B9", guard_key="bash-gate", hook_path=hook,
-        payload=bash_append_payload(doubled),
-        cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-    ))
-
-    for c in cases:
-        run_gate_case(c)
-
-
-# ===========================================================================
-# codegraph-first-guard (C1-C10)
-# ===========================================================================
-def _sentinel_path(directory: Path) -> Path:
-    return directory / ".claude" / ".codegraph-used-this-turn"
-
-
-def _write_sentinel(directory: Path) -> None:
-    p = _sentinel_path(directory)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("turn-sentinel\n", encoding="utf-8")
-
-
-def _remove_sentinel(directory: Path) -> None:
-    p = _sentinel_path(directory)
-    if p.exists():
-        p.unlink()
-
-
-def run_codegraph_guard_cases(tree: dict) -> None:
-    hook = HOOKS_DIR / "codegraph-first-guard.py"
-    repo, wt, wt_name = tree["repo"], tree["wt"], tree["wt_name"]
-
-    cases: list[GateCase] = []
-
-    # Every C-series case declares the sentinel state IT needs via `setup=`,
-    # run immediately before its own launch (never while the case list is
-    # being built -- see GateCase.setup's docstring). No case relies on
-    # whatever a PRIOR case's construction, or even a prior case's own RUN,
-    # happened to leave behind; each states its precondition explicitly.
-
-    # C1 a: Read worktree src/Probe_<tok>.cs -> BLOCK, equals main
-    t = tok()
-    cases.append(GateCase(
-        id="C1", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-        main_payload=read_payload(fs(repo / "src" / f"Probe_{t}.cs")),
-        cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: (_remove_sentinel(repo), _remove_sentinel(wt)),
-    ))
-
-    # C2 a: Grep path = the worktree root, no glob/type -> BLOCK, equals repo root
-    cases.append(GateCase(
-        id="C2", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=grep_path_payload(fs(wt)),
-        main_payload=grep_path_payload(fs(repo)),
-        cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: (_remove_sentinel(repo), _remove_sentinel(wt)),
-    ))
-
-    # C3 a: Read project .claude/hooks/x_<tok>.py -> ALLOW (control)
-    t = tok()
-    sib_t = tok()
-    cases.append(GateCase(
-        id="C3", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=read_payload(fs(repo / ".claude" / "hooks" / f"x_{t}.py")),
-        sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-        setup=lambda: _remove_sentinel(repo),
-        pre_sibling=lambda: _remove_sentinel(repo),
-    ))
-
-    # C4 a: Read worktree .claude/hooks/x_<tok>.py -> ALLOW (control)
-    t = tok()
-    sib_t = tok()
-    cases.append(GateCase(
-        id="C4", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=read_payload(fs(wt / ".claude" / "hooks" / f"x_{t}.py")),
-        sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-        setup=lambda: _remove_sentinel(repo),
-        pre_sibling=lambda: _remove_sentinel(repo),
-    ))
-
-    # C5 b: Read worktree src, sentinel present in <worktree>/.claude/ -> ALLOW
-    t = tok()
-    sib_t = tok()
-    cases.append(GateCase(
-        id="C5", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-        sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=wt, env=base_env(wt), expect="allow", fails_today=False,
-        setup=lambda: _write_sentinel(wt),
-        pre_sibling=lambda: _remove_sentinel(wt),
-    ))
-
-    c_hook = make_situation_c_copy(repo, "codegraph-first-guard.py")
-
-    # C6 c, cwd = worktree root: Read worktree src, sentinel present in
-    # <worktree>/.claude/ -> ALLOW
-    t = tok()
-    sib_t = tok()
-    cases.append(GateCase(
-        id="C6", guard_key="codegraph-first-guard", hook_path=c_hook,
-        payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-        sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=wt, env=base_env(repo), expect="allow", fails_today=False,
-        setup=lambda: _write_sentinel(wt),
-        pre_sibling=lambda: _remove_sentinel(wt),
-    ))
-
-    # C7 c, cwd = worktree root: Read worktree src, no sentinel anywhere -> BLOCK
-    t = tok()
-    cases.append(GateCase(
-        id="C7", guard_key="codegraph-first-guard", hook_path=c_hook,
-        payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-        cwd=wt, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: (_remove_sentinel(wt), _remove_sentinel(repo)),
-    ))
-
-    # C8 c, cwd = worktree root: Read worktree src, sentinel ONLY in
-    # <repo>/.claude/ -> BLOCK (sentinel is looked for under cwd)
-    t = tok()
-    cases.append(GateCase(
-        id="C8", guard_key="codegraph-first-guard", hook_path=c_hook,
-        payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-        cwd=wt, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: (_remove_sentinel(wt), _write_sentinel(repo)),
-    ))
-
-    # C9 a: Read <repo>/.claude/./worktrees/<wt>/src/Probe_<tok>.cs -> BLOCK
-    # setup clears repo's sentinel -- C8 may have left it present, and since
-    # C9's cwd is repo, a leftover sentinel there would let it ALLOW for a
-    # reason unrelated to the bypass this case exists to pin down.
-    t = tok()
-    dotted = fs(repo) + "/.claude/./worktrees/" + wt_name + f"/src/Probe_{t}.cs"
-    cases.append(GateCase(
-        id="C9", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=read_payload(dotted),
-        cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: _remove_sentinel(repo),
-    ))
-
-    # C10 a: Read <repo>/.claude//hooks/x_<tok>.py (main, doubled separator)
-    # -> ALLOW, unchanged
-    t = tok()
-    sib_t = tok()
-    doubled = fs(repo) + f"/.claude//hooks/x_{t}.py"
-    cases.append(GateCase(
-        id="C10", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=read_payload(doubled),
-        sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-        setup=lambda: _remove_sentinel(repo),
-        pre_sibling=lambda: _remove_sentinel(repo),
-    ))
-
-    for c in cases:
-        run_gate_case(c)
 
 
 # ===========================================================================
@@ -1278,14 +1070,6 @@ def run_fallback_cases(tree: dict) -> None:
          lambda t: write_payload(fs(wt / "src" / f"Probe_{t}.cs"), "public class Probe {}\n"),
          lambda t: write_payload(fs(repo / ".claude" / "hooks" / f"x_{t}.py"), "# probe\n"),
          lambda t: write_payload(fs(wt / ".claude" / "hooks" / f"x_{t}.py"), "# probe\n")),
-        ("bash-gate", "bash-gate.py", False,
-         lambda t: bash_append_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-         lambda t: bash_append_payload(fs(repo / ".claude" / "hooks" / f"x_{t}.py")),
-         lambda t: bash_append_payload(fs(wt / ".claude" / "hooks" / f"x_{t}.py"))),
-        ("codegraph-first-guard", "codegraph-first-guard.py", False,
-         lambda t: read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-         lambda t: read_payload(fs(repo / ".claude" / "hooks" / f"x_{t}.py")),
-         lambda t: read_payload(fs(wt / ".claude" / "hooks" / f"x_{t}.py"))),
         ("db-destructive-guard", "db-destructive-guard.py", True,
          lambda t: write_payload(fs(wt / "src" / f"Probe_{t}.cs"), db_content(DB_PROT)),
          lambda t: write_payload(fs(repo / ".claude" / "concepts" / f"example_{t}.md"), db_doc_content(DB_PROT)),
@@ -1326,10 +1110,6 @@ def run_fallback_cases(tree: dict) -> None:
         # blocks today and after the fix) instead of the worktree.
         if guard_key == "db-destructive-guard":
             sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), db_content(DB_PROT))
-        elif guard_key == "bash-gate":
-            sib_payload = bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-        elif guard_key == "codegraph-first-guard":
-            sib_payload = read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
         else:
             sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
 
@@ -1346,12 +1126,7 @@ def run_fallback_cases(tree: dict) -> None:
             sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), db_content(DB_PROT))
             ok, detail = run_db_allow_case(hook_copy, wt_allow_fn(t), sib_payload, repo, env, home / ".claude" / "logs")
         else:
-            if guard_key == "bash-gate":
-                sib_payload = bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            elif guard_key == "codegraph-first-guard":
-                sib_payload = read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            else:
-                sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
+            sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
             ok, detail = run_gate_allow_case(guard_key, hook_copy, wt_allow_fn(t), sib_payload, repo, env)
         check(f"F3-{guard_key} [control]", ok, detail)
 
@@ -1383,25 +1158,6 @@ def run_task_a_negative_twins(tree: dict) -> None:
     proc = run_hook(hook, write_payload(main_target, "public class Probe {}\n"), repo, base_env(repo))
     ok, detail = assert_block("concept-gate", proc)
     check("task A concept-gate main-target: contract only in wt, target in main -> BLOCK [control]", ok, detail)
-
-    # ---- bash-gate ----
-    hook = HOOKS_DIR / "bash-gate.py"
-
-    t = tok()
-    sibling_target = fs(wt2 / "src" / f"Probe_{t}.cs")
-    contract = write_contract(wt / ".claude" / "concepts", f"taska_bg_sibling_{t}", [f"src/Probe_{t}.cs"])
-    assert_contract_fixture("task A bash-gate sibling", contract, sibling_target)
-    proc = run_hook(hook, bash_append_payload(sibling_target), repo, base_env(repo))
-    ok, detail = assert_block("bash-gate", proc)
-    check("task A bash-gate sibling: contract only in wt, target in wt2 -> BLOCK [control]", ok, detail)
-
-    t = tok()
-    main_target = fs(repo / "src" / f"Probe_{t}.cs")
-    contract = write_contract(wt / ".claude" / "concepts", f"taska_bg_main_{t}", [f"src/Probe_{t}.cs"])
-    assert_contract_fixture("task A bash-gate main-target", contract, main_target)
-    proc = run_hook(hook, bash_append_payload(main_target), repo, base_env(repo))
-    ok, detail = assert_block("bash-gate", proc)
-    check("task A bash-gate main-target: contract only in wt, target in main -> BLOCK [control]", ok, detail)
 
 
 # ===========================================================================
@@ -1446,7 +1202,7 @@ def run_task_d_stale_helper(tree: dict) -> None:
     def stale_case_prefix(guard_key: str) -> str:
         return f"task D stale-helper {guard_key} [FAILS TODAY]"
 
-    # ---- concept-gate, bash-gate, codegraph-first-guard: identical shape ----
+    # ---- concept-gate (the bash-gate and codegraph-first-guard rows are cut with those hooks) ----
     for guard_key, filename, main_payload_fn, wt_payload_fn, proj_cfg_fn, wt_cfg_fn in (
         (
             "concept-gate", "concept-gate.py",
@@ -1454,14 +1210,6 @@ def run_task_d_stale_helper(tree: dict) -> None:
             lambda p: write_payload(p, "public class Probe {}\n"),
             lambda p: write_payload(p, "# probe\n"),
             lambda p: write_payload(p, "# probe\n"),
-        ),
-        (
-            "bash-gate", "bash-gate.py",
-            bash_append_payload, bash_append_payload, bash_append_payload, bash_append_payload,
-        ),
-        (
-            "codegraph-first-guard", "codegraph-first-guard.py",
-            read_payload, read_payload, read_payload, read_payload,
         ),
     ):
         dest = stale_root / guard_key
@@ -1563,8 +1311,6 @@ def run_task_e_fallback_spellings(tree: dict) -> None:
         ("concept-gate", "concept-gate.py", False,
          lambda p: write_payload(p, "public class Probe {}\n"),
          lambda p: write_payload(p, "# probe\n")),
-        ("bash-gate", "bash-gate.py", False, bash_append_payload, bash_append_payload),
-        ("codegraph-first-guard", "codegraph-first-guard.py", False, read_payload, read_payload),
         ("db-destructive-guard", "db-destructive-guard.py", True,
          lambda p: write_payload(p, db_content(DB_PROT)),
          lambda p: write_payload(p, db_doc_content(DB_PROT))),
@@ -1621,12 +1367,7 @@ def run_task_e_fallback_spellings(tree: dict) -> None:
                 tree["home"] / ".claude" / "logs",
             )
         else:
-            if guard_key == "bash-gate":
-                sib_payload = bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            elif guard_key == "codegraph-first-guard":
-                sib_payload = read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            else:
-                sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
+            sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
             ok, detail = run_gate_allow_case(guard_key, hook_copy, cfg_payload_fn(own_claude_dotted), sib_payload, repo, env)
         check(f"{prefix}: worktree's own .claude/ via /./ -> ALLOW [control]", ok, detail)
 
@@ -1661,8 +1402,6 @@ def run_task_f_windows_aliases(tree: dict) -> None:
     guard_specs = [
         ("concept-gate", HOOKS_DIR / "concept-gate.py",
          lambda p: write_payload(p, "public class Probe {}\n"), None),
-        ("bash-gate", HOOKS_DIR / "bash-gate.py", bash_append_payload, None),
-        ("codegraph-first-guard", HOOKS_DIR / "codegraph-first-guard.py", read_payload, None),
         ("db-destructive-guard", HOOKS_DIR / "db-destructive-guard.py",
          lambda p: write_payload(p, db_content(DB_PROT)), PROTECTED_WRITE_TEXT),
     ]
@@ -1700,24 +1439,15 @@ def run_task_f_windows_aliases(tree: dict) -> None:
                 sib_payload, repo, base_env(repo), repo / ".claude" / "logs",
             )
         else:
-            if guard_key == "bash-gate":
-                own_payload = bash_append_payload(own_claude_alias)
-                sib_payload = bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            elif guard_key == "codegraph-first-guard":
-                own_payload = read_payload(own_claude_alias)
-                sib_payload = read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            else:
-                own_payload = write_payload(own_claude_alias, "# probe\n")
-                sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
+            own_payload = write_payload(own_claude_alias, "# probe\n")
+            sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
             ok, detail = run_gate_allow_case(guard_key, hook_path, own_payload, sib_payload, repo, base_env(repo))
         check(f"task F {guard_key}: worktree's own .claude/ under alias '{WORKTREES_ALIAS_DOT}' -> ALLOW [control]", ok, detail)
 
-    # ---- fallback mode, db-destructive-guard + codegraph-first-guard: same
-    # two aliases -> BLOCK ----
+    # ---- fallback mode, db-destructive-guard: same two aliases -> BLOCK ----
     for guard_key, filename, include_rules, payload_fn, extra_text in (
         ("db-destructive-guard", "db-destructive-guard.py", True,
          lambda p: write_payload(p, db_content(DB_PROT)), PROTECTED_WRITE_TEXT),
-        ("codegraph-first-guard", "codegraph-first-guard.py", False, read_payload, None),
     ):
         isolated_dir = tree["isolated"] / f"taskF-{guard_key}"
         isolated_dir.mkdir(parents=True, exist_ok=True)
@@ -1748,8 +1478,6 @@ def run_fallback_table(tree: dict) -> None:
         ("concept-gate", "concept-gate.py", False,
          lambda p: write_payload(p, "public class Probe {}\n"),
          lambda p: write_payload(p, "# probe\n")),
-        ("bash-gate", "bash-gate.py", False, bash_append_payload, bash_append_payload),
-        ("codegraph-first-guard", "codegraph-first-guard.py", False, read_payload, read_payload),
         ("db-destructive-guard", "db-destructive-guard.py", True,
          lambda p: write_payload(p, db_content(DB_PROT)),
          lambda p: write_payload(p, db_doc_content(DB_PROT))),
@@ -1789,12 +1517,7 @@ def run_fallback_table(tree: dict) -> None:
                 tree["home"] / ".claude" / "logs",
             )
         else:
-            if guard_key == "bash-gate":
-                sib_payload = bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            elif guard_key == "codegraph-first-guard":
-                sib_payload = read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            else:
-                sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
+            sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
             ok, detail = run_gate_allow_case(guard_key, hook_copy, cfg_payload_fn(own_claude), sib_payload, repo, env)
         check(f"{prefix}: worktree's own .claude/ file -> ALLOW [control]", ok, detail)
 
@@ -1812,33 +1535,9 @@ def run_fallback_table(tree: dict) -> None:
                 tree["home"] / ".claude" / "logs",
             )
         else:
-            if guard_key == "bash-gate":
-                sib_payload = bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            elif guard_key == "codegraph-first-guard":
-                sib_payload = read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-            else:
-                sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
+            sib_payload = write_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), "public class Probe {}\n")
             ok, detail = run_gate_allow_case(guard_key, hook_copy, cfg_payload_fn(worktreesx_target), sib_payload, repo, env)
         check(f"{prefix}: <repo>/.claude/worktreesX/<n>/hooks/x_<tok>.py -> ALLOW [control]", ok, detail)
-
-
-# ===========================================================================
-# Round 4 item 2: bash-gate twin of task B's INV-2 corner (test-strategy
-# pass 2 WARN W1). Nothing currently proves bash-gate's OWN name/extension
-# test reads the raw path rather than the checkout-equivalent one.
-# ===========================================================================
-def run_task_b_bash_gate_twin(tree: dict) -> None:
-    hook = HOOKS_DIR / "bash-gate.py"
-    repo = tree["repo"]
-
-    t = tok()
-    sib_t = tok()
-    md_target = fs(repo / ".claude" / "worktrees" / f"notes_{t}.md")
-    sib_payload = bash_append_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"))
-    ok, detail = run_gate_allow_case(
-        "bash-gate", hook, bash_append_payload(md_target), sib_payload, repo, base_env(repo),
-    )
-    check("task B bash-gate twin: <repo>/.claude/worktrees/notes_<tok>.md -> ALLOW (trivial extension) [control]", ok, detail)
 
 
 # ===========================================================================
@@ -1852,7 +1551,7 @@ def run_task_b_bash_gate_twin(tree: dict) -> None:
 def run_aliased_claude_join(tree: dict) -> None:
     repo, wt_name = tree["repo"], tree["wt_name"]
 
-    src_tail = _SRC_ALLOWED.split("/", 1)[1]   # e.g. "<project>.api/"
+    src_tail = _SRC_ALLOWED.split("/", 1)[1]   # e.g. "scalpingmachine.api/"
     tools_head, tools_tail = _TOOLS_ALLOWED.split("/", 1)  # "tools", "db-protection/"
 
     db_hook = HOOKS_DIR / "db-destructive-guard.py"
@@ -1874,13 +1573,6 @@ def run_aliased_claude_join(tree: dict) -> None:
     proc = run_hook(db_hook, write_payload(target, db_content(DB_PROT)), repo, base_env(repo))
     ok, detail = assert_block("db-destructive-guard", proc, PROTECTED_WRITE_TEXT)
     check("task 3 db-destructive-guard: tools/.claude./worktrees/<w>/<tools-allowlist-tail> join -> BLOCK [FAILS TODAY]", ok, detail)
-
-    cg_hook = HOOKS_DIR / "codegraph-first-guard.py"
-    t = tok()
-    target = fs(repo) + "/assets/.claude./worktrees/" + wt_name + f"/wiki/x_{t}.ts"
-    proc = run_hook(cg_hook, read_payload(target), repo, base_env(repo))
-    ok, detail = assert_block("codegraph-first-guard", proc)
-    check("task 3 codegraph-first-guard: assets/.claude./worktrees/<w>/wiki join -> BLOCK [FAILS TODAY]", ok, detail)
 
     # Helper-level: once the join is fixed, an aliased ".claude" is not a
     # worktree segment at all, so checkout_equivalent_path must return the
@@ -2037,13 +1729,9 @@ def main() -> int:
     try:
         print("-- concept-gate (W1-W11) --")
         run_concept_gate_cases(tree)
-        print("-- bash-gate (B1-B9) --")
-        run_bash_gate_cases(tree)
-        print("-- codegraph-first-guard (C1-C10) --")
-        run_codegraph_guard_cases(tree)
         print("-- db-destructive-guard (D1-D7) --")
         run_db_guard_cases(tree)
-        print("-- fallback mode (F1-F3 x 4 guards) --")
+        print("-- fallback mode (F1-F3 x 2 guards) --")
         run_fallback_cases(tree)
         print("-- helper functions (_project_paths) --")
         run_helper_cases()
@@ -2057,10 +1745,8 @@ def main() -> int:
         run_task_e_fallback_spellings(tree)
         print("-- round 3 task F: Windows aliases --")
         run_task_f_windows_aliases(tree)
-        print("-- round 4 item 1: fallback table (all 4 generic-suite copies) --")
+        print("-- round 4 item 1: fallback table (the remaining generic-suite copies) --")
         run_fallback_table(tree)
-        print("-- round 4 item 2: bash-gate twin of task B --")
-        run_task_b_bash_gate_twin(tree)
         print("-- round 4 item 3: aliased-.claude join --")
         run_aliased_claude_join(tree)
     finally:
