@@ -138,6 +138,10 @@ class Case:
     # Run a copy of the hook whose rules file is the REAL one with these keys replaced (round 2: a value
     # of the wrong type must fail closed). The real rules file is never edited.
     rules_override: dict = field(default_factory=dict)
+    # The project's rules file exists but is not valid JSON (the unreadable fail-closed path).
+    rules_unreadable: bool = False
+    # CLAUDE_PROJECT_DIR is not set at all (the guard reads no rules file).
+    no_project_dir: bool = False
 
 
 CASES: list[Case] = [
@@ -1759,25 +1763,37 @@ CASES += [
                 _bash(f'sqlcmd -E -Q "{_DROP_TBL} [{_DISP}] . dbo . Users"')),
 
     # -----------------------------------------------------------------------------------------
-    # Item 7c -- the protected names are built in; the rules file can only ADD names
+    # Item 7c -- the protected names come ONLY from the project's rules file; no rules file fails closed
+    # Operator decision 2026-10-09 (contract 2026-09-28-hook-server-modes, amendment Open Question 3): the
+    # built-in names are removed. A rules file protects exactly the names it lists and no others; a project
+    # with NO rules file, an unreadable one, or no CLAUDE_PROJECT_DIR blocks the same operation on ANY database.
     # -----------------------------------------------------------------------------------------
-    *[_blk_rules(f"r4.7c.1 rules file omits {p}: a test file writing to it still blocks",
-                 _write("d:/Dev/Foo/tests/SomeTest.cs",
-                        f'const string cs = "Server=(localdb)\\m;Database={p};Trusted_Connection=True;";\n'
-                        f'await conn.ExecuteAsync("{_INSERT} Users (Id, Name) VALUES (1, \'x\')");'),
-                 {"protected_databases": ["Unrelated_Prod_Db"]}, "protected-db-write-from-non-production-path")
+    # (a) A rules file naming only Unrelated_Prod_Db does NOT protect a database it does not name.
+    *[Case(name=f"r4.7c.1 rules file names only Unrelated_Prod_Db, not {p}: a test file writing to {p} is not blocked -> ALLOW",
+           payload=_write("d:/Dev/Foo/tests/SomeTest.cs",
+                          f'const string cs = "Server=(localdb)\\m;Database={p};Trusted_Connection=True;";\n'
+                          f'await conn.ExecuteAsync("{_INSERT} Users (Id, Name) VALUES (1, \'x\')");'),
+           expect_rc=0, isolate=True, rules_override={"protected_databases": ["Unrelated_Prod_Db"]})
       for p in _PROTECTED_DBS],
-    *[_blk_rules(f"r4.7c.2 rules file omits {p}: a sqlcmd session write still blocks",
-                 _bash(f'sqlcmd -S "(localdb)\\m" -E -d {p} -Q "UPDATE Users SET Name = \'x\' WHERE Id = 1"'),
-                 {"protected_databases": ["Unrelated_Prod_Db"]}, "protected-db-write-from-non-production-path")
-      for p in _PROTECTED_DBS],
-    _blk_rules("r4.7c.3 rules file omits the dev name: USE <dev>; DELETE still blocks",
-               _bash(f'sqlcmd -S "(localdb)\\m" -E -Q "USE {_DB_PROT}; DELETE FROM Users WHERE Id = 1"'),
-               {"protected_databases": ["Unrelated_Prod_Db"]}, "protected-db-write-from-non-production-path"),
-    _blk_rules("r4.7c.4 rules file omits the dev name: a connection-string write from a PowerShell tool still blocks",
-               _ps(f"Invoke-Sqlcmd -ConnectionString 'Server=(localdb)\\m;Initial Catalog={_DB_PROT}' "
-                   f"-Query \"{_INSERT} Users VALUES (1, 'x')\""),
-               {"protected_databases": ["Unrelated_Prod_Db"]}, "protected-db-write-from-non-production-path"),
+    # (b) NO rules file (first case) and an unreadable rules file (second): the same write blocks on a database no one named.
+    Case(name="r4.7c.2 project has NO rules file: a sqlcmd session write to an arbitrary database blocks (fail closed) -> BLOCK (audited)",
+         payload=_bash('sqlcmd -S "(localdb)\\m" -E -d Arbitrary_Other_Db -Q "UPDATE Users SET Name = \'x\' WHERE Id = 1"'),
+         expect_rc=2, isolate=True, session_id=_sid(), expect_audit_decision="BLOCK",
+         expect_audit_reason="protected-db-write-from-non-production-path", rules_missing=True),
+    Case(name="r4.7c.2 project rules file is UNREADABLE (not JSON): a sqlcmd session write to an arbitrary database blocks (fail closed) -> BLOCK (audited)",
+         payload=_bash('sqlcmd -S "(localdb)\\m" -E -d Arbitrary_Other_Db -Q "UPDATE Users SET Name = \'x\' WHERE Id = 1"'),
+         expect_rc=2, isolate=True, session_id=_sid(), expect_audit_decision="BLOCK",
+         expect_audit_reason="protected-db-write-from-non-production-path", rules_unreadable=True),
+    # (a) Same rule through a session-database write: the unnamed ScalpingMachine is not protected. (That a name
+    # the file DOES list is protected is pinned by r4.7c.5 below.)
+    Case(name="r4.7c.3 rules file names only Unrelated_Prod_Db: USE ScalpingMachine; DELETE is not blocked -> ALLOW",
+         payload=_bash(f'sqlcmd -S "(localdb)\\m" -E -Q "USE {_DB_PROT}; DELETE FROM Users WHERE Id = 1"'),
+         expect_rc=0, isolate=True, rules_override={"protected_databases": ["Unrelated_Prod_Db"]}),
+    # (b) No CLAUDE_PROJECT_DIR at all: nothing is read, so the strict default applies to any database.
+    Case(name="r4.7c.4 no CLAUDE_PROJECT_DIR: a connection-string write to an arbitrary database from a PowerShell tool blocks (fail closed) -> BLOCK",
+         payload=_ps("Invoke-Sqlcmd -ConnectionString 'Server=(localdb)\\m;Initial Catalog=Arbitrary_Other_Db' "
+                     f"-Query \"{_INSERT} Users VALUES (1, 'x')\""),
+         expect_rc=2, no_project_dir=True),
     _blk_rules("r4.7c.5 a name the rules file ADDS is honoured as well  [passes today]",
                _bash(f"sqlcmd -S \"(localdb)\\m\" -E -Q \"Database=Extra_Prod_Db; {_INSERT} Users VALUES (1, 'x')\""),
                {"protected_databases": ["Extra_Prod_Db"] + _PROTECTED_DBS}, "protected-db-write-from-non-production-path"),
@@ -2122,6 +2138,8 @@ def run_case(case: Case, base_env: dict | None = None) -> tuple[bool, str]:
     hook = HOOK
     scratch = tempfile.mkdtemp(prefix="dbguard-test-")
     env["CLAUDE_PROJECT_DIR"] = scratch
+    if case.no_project_dir:
+        env.pop("CLAUDE_PROJECT_DIR", None)
     try:
         # PLUGIN PORT (INV-O7 / INV-O3): the hook runs IN PLACE, from the plugin; the fixture project's own
         # .claude/hooks/ folder carries the rules. Nothing is copied beside the hook.
@@ -2130,6 +2148,8 @@ def run_case(case: Case, base_env: dict | None = None) -> tuple[bool, str]:
         if case.rules_missing:
             # NO rules file in the project: the fail-closed path (every database protected).
             assert not (project_hooks / "db-destructive-guard.rules.json").exists()
+        elif case.rules_unreadable:
+            (project_hooks / "db-destructive-guard.rules.json").write_text("{ not json", encoding="utf-8")
         else:
             # The fixture rules, with the named keys replaced by a value of the wrong type when asked.
             rules = dict(_RULES)

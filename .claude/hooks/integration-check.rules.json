@@ -1,0 +1,15 @@
+{
+  "_comment": "TEMPLATE. Per-project settings for integration-check.py. The hook itself is generic: it warns when one side of a backend-to-frontend contract is edited without the other. Which path prefixes ARE the backend and the frontend is the only project-shaped fact it needs, and it lives here. A project that wants its own markers copies this file to .claude/hooks/integration-check.rules.json in its own repository and replaces the values; the hook reads the project's file first and falls back to this template (INV-O3).",
+  "_fail_soft": "If no file can be read the hook falls back to empty marker lists, which means it classifies nothing as backend or frontend and therefore warns about nothing. That is the correct direction for this hook and only this hook: it emits a WARNING and never blocks, so an absent configuration costs a reminder, not a safety layer. Do not copy this fail-soft choice to a guard that blocks.",
+  "_extension_seam": "Add a path prefix to backend_markers or frontend_markers. Prefixes are matched against the file path with forward slashes.",
+
+  "backend_markers": [
+    "src/AcmeApp.",
+    "backend/"
+  ],
+
+  "frontend_markers": [
+    "ClientApp/projects/",
+    "frontend/"
+  ]
+}

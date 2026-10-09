@@ -57,6 +57,32 @@ try:
 except Exception:
     _USE_SHARED_PARSER = False
 
+# Contract lookup index (fail-soft). Used ONLY when the shared parser is in use:
+# the inline fallback further down never touches it (D5). Every entry point is
+# bound with getattr, so a missing, stale or broken module leaves this gate on
+# its own functions (D4); nothing is called at import, so the bypass and pinned
+# paths never reach the index (D6).
+_ci_make = _ci_status = _ci_covers = _ci_extract = _ci_cover_fn = None
+_ci_cf_file = _ci_file = None
+if _USE_SHARED_PARSER:
+    try:
+        import _contract_files as _cf_mod
+        import _contract_index as _ci_mod
+        _ci_make = getattr(_ci_mod, "make_variant", None)
+        _ci_status = getattr(_ci_mod, "status_of", None)
+        _ci_covers = getattr(_ci_mod, "covers", None)
+        _ci_extract = getattr(_cf_mod, "extract_files_from_contract", None)
+        _ci_cover_fn = getattr(_cf_mod, "entries_cover_target", None)
+        _ci_cf_file = getattr(_cf_mod, "__file__", None)
+        _ci_file = getattr(_ci_mod, "__file__", None)
+        if any(f is None for f in (
+            _ci_make, _ci_status, _ci_covers, _ci_extract, _ci_cover_fn, _ci_cf_file, _ci_file,
+        )):
+            raise AttributeError("contract lookup index is incomplete")
+    except Exception:
+        _ci_make = _ci_status = _ci_covers = _ci_extract = _ci_cover_fn = None
+        _ci_cf_file = _ci_file = None
+
 HOME = Path.home()
 try:  # project-local .claude first, global second
     import _project_paths as _pp
@@ -428,6 +454,64 @@ else:
         return bool(regex.search(target))
 
 
+_CI_VARIANT = None
+_CI_TRIED = False
+
+
+def _ci_variant():
+    """This gate's variant spec for the contract lookup index, built on first use.
+
+    None whenever the index is unavailable (not imported, incomplete, or the
+    spec could not be built): the wrappers below then run this gate's own
+    functions on the real file, exactly as without an index.
+    """
+    global _CI_VARIANT, _CI_TRIED
+    if not _CI_TRIED:
+        _CI_TRIED = True
+        try:
+            if _ci_make is not None:
+                _CI_VARIANT = _ci_make(
+                    "concept-shared", contract_status, _ci_extract, _ci_cover_fn,
+                    [os.path.abspath(__file__), _ci_cf_file, _ci_file],
+                )
+        except Exception:
+            _CI_VARIANT = None
+    return _CI_VARIANT
+
+
+def _indexed_contract_status(contract_path: Path) -> str:
+    """``contract_status`` through the contract lookup index (D4: any doubt reads the file).
+
+    The index answers only for a file whose stat signature is unchanged and not
+    racy, so it can skip a read but never change an allow or a block. Named
+    limit it cannot see: a same-size in-place rewrite whose modification time is
+    then restored, over two seconds after the last parse. Recovery:
+    ``CLAUDE_CONTRACT_INDEX=off`` or deleting ``.claude/cache/contract-index/``.
+    """
+    try:
+        variant = _ci_variant()
+        if variant is not None:
+            result = _ci_status(variant, contract_path)
+            if isinstance(result, str):
+                return result
+    except Exception:
+        pass
+    return contract_status(contract_path)
+
+
+def _indexed_contract_covers_target(contract_path: Path, target: Path) -> bool:
+    """``contract_covers_target`` through the contract lookup index (D4)."""
+    try:
+        variant = _ci_variant()
+        if variant is not None:
+            result = _ci_covers(variant, contract_path, target)
+            if isinstance(result, bool):
+                return result
+    except Exception:
+        pass
+    return contract_covers_target(contract_path, target)
+
+
 def resolve_target(
     target: Path,
     pinned: Path | None,
@@ -449,12 +533,12 @@ def resolve_target(
     project_name = detect_project_name(target)
     extra_roots = _extra_concepts_roots_for_target(str(target))
     for contract in iter_contracts(project_name, extra_roots):
-        status = contract_status(contract)
+        status = _indexed_contract_status(contract)
         if status in IGNORED_STATUSES:
             continue
         if status not in HONORED_STATUSES:
             continue
-        if contract_covers_target(contract, target):
+        if _indexed_contract_covers_target(contract, target):
             return True, None, contract
 
     # 4. Determine an accurate reason.

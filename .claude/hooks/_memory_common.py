@@ -38,10 +38,30 @@ def expand(path_str: str) -> Path:
 
     Handles ~ home prefix, forward-slash Windows paths (d:/Dev/...), and
     relative-to-home values. Does NOT require the path to exist.
+
+    A RELATIVE path resolves against the project root, not the current
+    directory. That matters because the same configuration file is checked out
+    into every worktree, so a surface has to be named once and still point at
+    the copy the session is actually reading. Resolving against the current
+    directory looked equivalent and was not: a hook runs from wherever the
+    harness happens to be, and the audit command runs from wherever the
+    operator happens to be.
     """
     s = (path_str or "").strip().strip('"')
-    s = os.path.expanduser(s)
-    return Path(s)
+    s = os.path.expandvars(os.path.expanduser(s))
+    p = Path(s)
+    if p.is_absolute() or not s:
+        return p
+    try:
+        import _project_paths as _pp
+        roots = _pp.claude_roots()
+    except Exception:
+        return p
+    for root in roots:
+        candidate = root.parent / p        # <checkout>/.claude -> <checkout>
+        if candidate.exists():
+            return candidate
+    return (roots[0].parent / p) if roots else p
 
 
 def estimate_tokens_from_text(text: str) -> int:
@@ -57,10 +77,33 @@ def estimate_tokens(path: Path) -> int:
     return estimate_tokens_from_text(text)
 
 
+def resolve_config_path() -> Path:
+    """Where memory-blocks.json lives: project-local first, global second.
+
+    CONFIG_PATH below is the global location and stays as the fallback, so a
+    project that keeps its Claude setup under ``~/.claude`` is unaffected.
+
+    This indirection exists because the constant alone was wrong after the
+    2026-08-25 migration moved hooks into the repository. ``memory-pager.py``
+    stayed registered on Stop, looked only in the emptied global directory,
+    logged ``config-load-failed`` and returned 0 -- on every turn for
+    forty-four days, 398 times. Nothing surfaced, because the pager is
+    deliberately fail-open and its log is not read.
+    """
+    try:
+        import _project_paths as _pp  # local import: hooks run as standalone scripts
+    except Exception:
+        return CONFIG_PATH
+    try:
+        return _pp.memory_blocks_path()
+    except Exception:
+        return CONFIG_PATH
+
+
 def load_config(config_path: Path | None = None) -> dict:
     """Load memory-blocks.json. Raises only on hard IO/JSON error; callers
     fail-soft."""
-    cp = config_path or CONFIG_PATH
+    cp = config_path or resolve_config_path()
     return json.loads(cp.read_text(encoding="utf-8"))
 
 

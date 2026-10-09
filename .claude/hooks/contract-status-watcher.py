@@ -175,6 +175,7 @@ def main() -> int:
                 event="rejection-transition",
                 file=contract_key,
                 details={"from": previous_status, "to": current_status, "areas": areas},
+                log_name="accuracy",
             )
         except Exception as exc:  # pragma: no cover - fail-soft
             log_event(

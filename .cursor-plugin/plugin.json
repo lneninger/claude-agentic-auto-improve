@@ -1,6 +1,6 @@
 {
   "name": "agentic-auto-improve",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "The Data-First Engineering Protocol as an installable asset set: 22 skills and 14 subagents that put design before implementation and tests before code.",
   "author": {
     "name": "lneninger"

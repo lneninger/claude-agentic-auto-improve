@@ -19,8 +19,11 @@ The exposed surface:
         (multi-segment) and '*' (single-segment) wildcards plus substring
         matching. Both inputs must already be forward-slash lowercase.
 
+    entries_cover_target(entries, target) -> bool
+        True iff any already-extracted entry matches the target Path.
+
     contract_covers_target(contract_path, target) -> bool
-        Convenience wrapper: True iff any entry matches the target Path.
+        Convenience wrapper: extract_files_from_contract + entries_cover_target.
 
 Behavior is byte-for-byte identical to the original implementation that
 lived inline in concept-gate.py:240-303. Any future change to the parser
@@ -110,6 +113,10 @@ def matches_path(pattern: str, target: str) -> bool:
         return False
     if pattern in target:
         return True
+    # A literal entry (neither '*' nor '...') has a regex that is the entry itself,
+    # which can only match where the substring test above already did.
+    if "*" not in pattern and "..." not in pattern:
+        return False
     escaped = re.escape(pattern)
     escaped = escaped.replace(r"\.\.\.", ".*")
     escaped = escaped.replace(r"\*", "[^/]*")
@@ -117,15 +124,25 @@ def matches_path(pattern: str, target: str) -> bool:
     return bool(regex.search(target))
 
 
+def entries_cover_target(entries: list[str], target: Path) -> bool:
+    """
+    True iff any already-extracted 'Files to touch' entry references the target.
+
+    Holds the target normalisation and the any-match loop, so the contract
+    lookup index and the direct path run the same code.
+    """
+    target_norm = str(target).replace("\\", "/").lower()
+    for entry in entries:
+        if matches_path(entry, target_norm):
+            return True
+    return False
+
+
 def contract_covers_target(contract_path: Path, target: Path) -> bool:
     """
     True iff the contract's 'Files to touch' list references the target.
 
     Convenience wrapper that combines extract_files_from_contract +
-    matches_path; preserves the original concept-gate.py semantics.
+    entries_cover_target; preserves the original concept-gate.py semantics.
     """
-    target_norm = str(target).replace("\\", "/").lower()
-    for entry in extract_files_from_contract(contract_path):
-        if matches_path(entry, target_norm):
-            return True
-    return False
+    return entries_cover_target(extract_files_from_contract(contract_path), target)

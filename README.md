@@ -85,48 +85,135 @@ session starts. To check which copy is live, search the cache and not the market
 
 ### Installing the hooks turns on enforcement
 
-These are gates, not suggestions, and they are active the moment the plugin is enabled:
+**The plugin is the source of its hooks.** Its `.claude/hooks/hooks.json` registers twelve
+hooks, and they are active the moment the plugin is enabled. They are gates, not suggestions.
+
+**A project registers none of them itself.** Claude Code does not merge a project hook with the
+same command in a plugin's `hooks.json`; both run. So a hook that your own `settings.json` also
+registers runs twice. Your `settings.json` holds only the hooks that are yours.
+
+What the plugin registers. Every entry is in exec form (`"command": "py"`, `"args": ["-3",
+"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/<script>"]`), so no shell parses it and
+`${CLAUDE_PLUGIN_ROOT}` always names the running version:
+
+| Event | Matcher | Hook | Blocks |
+|---|---|---|---|
+| SessionStart | none | `working-agreements.py` | no, it only adds text |
+| PreToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit` | `concept-gate.py` | yes |
+| PreToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit` | `architecture-guard.py` | yes |
+| PreToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit` | `db-destructive-guard.py` | yes |
+| PreToolUse | `Bash` | `db-destructive-guard.py` | yes |
+| PreToolUse | `Bash` | `db-research-readonly-guard.py` | yes |
+| PreToolUse | `PowerShell` | `db-destructive-guard.py` | yes |
+| PreToolUse | `PowerShell` | `db-research-readonly-guard.py` | yes |
+| UserPromptSubmit | none | `plain-language-guard.py --carry-forward` | no, it only hands over a saved note |
+| PostToolUse | `Edit\|Write\|MultiEdit` | `post-edit-dispatcher.py` (asynchronous) | no |
+| Stop | none | `plain-language-guard.py` | yes, with a short correction request |
+| Stop | none | `memory-pager.py` (asynchronous) | no |
 
 - **`concept-gate`** blocks `Edit` / `Write` / `MultiEdit` on non-trivial files until an
   approved concept contract names them. Run `/design-first` to produce one.
-- **`bash-gate`** blocks shell redirection, `sed -i` and `tee` that would write source and
-  dodge the gate above.
+- **`architecture-guard`** blocks banned patterns at the write, using the project's own rules.
 - **`db-destructive-guard`** and **`db-research-readonly-guard`** block database operations
-  that could destroy data. The destructive guard **fails closed** only when its
-  `db-destructive-guard.rules.json` is missing or names no database, and then every database
-  is treated as protected. The file this plugin ships is not empty. It names two fictional
-  databases, `AcmeApp` and `AcmeApp_Testing`, so until your project supplies its own rules the
-  per-name protection covers only those two. The general drop and truncate checks still
-  apply to any database without a disposable suffix. Giving an installed plugin your own
-  database names needs a change to the hook itself; it is tracked as follow-up issue #21.
-- **`codegraph-first-guard`** blocks `Read` / `Grep` / `Glob` on source paths until a
-  CodeGraph tool has run in the same turn. It does **not** bypass itself when no CodeGraph
-  index exists. A project without an index is blocked until you set `CLAUDE_SKIP_CG=1`.
+  that could destroy data. As of 0.7.0 the plugin registers both guards itself. The destructive
+  guard now runs on the edit group, `Bash` and `PowerShell`; the read-only guard runs on `Bash`
+  and `PowerShell` and **has left the edit group**. Before 0.7.0 the guards ran on
+  `Bash|Edit|Write|MultiEdit` and never on PowerShell.
+- **`plain-language-guard`** checks that the assistant's prose reads plainly.
+- **`post-edit-dispatcher`** runs four small checks after an edit inside one process, in this
+  order: `integration-check.py`, `critic-verdict-tracker.py`, `contract-status-watcher.py` and
+  `journal-post-approval-tracker.py`. One check that fails never stops the next, and its output
+  joins theirs, each part named by its file. Four process starts per edit became one.
+- **`memory-pager`** stages a proposal when an always-loaded memory surface goes over budget.
 
-Eleven of the thirteen variables below are kill switches, set by you and never by an agent. Two
-are not: `CLAUDE_ACTIVE_CONTRACT` is an approval pin and `CLAUDE_DESTRUCTIVE_DB_OK` is a
-one-shot approval. This table lists exactly the variables the hooks read, and a test
-(INV-12 in `test_plugin_manifests.py`) fails when the two disagree.
+**The guards read your rules, never the plugin's template.** Both database guards read
+`<your project>/.claude/hooks/db-destructive-guard.rules.json` and nothing else. The file that
+ships inside the plugin is only a template naming the fictional databases `AcmeApp` and
+`AcmeApp_Testing`; it is never read. When your file is missing, unreadable or names no
+database, or when `CLAUDE_PROJECT_DIR` is not set, the guards **fail closed**: every database is
+treated as protected, and only a disposable suffix gets through. Copy the template to your own
+`.claude/hooks/` and replace the names. No database name is built into the guard.
+
+**The advisory hooks read your rules first.** `architecture-guard.rules.json`,
+`architecture-guard.exceptions.json`, `plain-language-guard.rules.json` and
+`integration-check.rules.json` are read from your project's `.claude/hooks/` when it has them,
+and from the template beside the hook otherwise.
+
+Seven of the nine variables below are kill switches, set by you and never by an agent. Two are
+not: `CLAUDE_ACTIVE_CONTRACT` is an approval pin and `CLAUDE_DESTRUCTIVE_DB_OK` is a one-shot
+approval. This table lists exactly the variables the hooks read, and a test (INV-12 in
+`test_plugin_manifests.py`) fails when the two disagree.
 
 | Variable | Effect |
 |---|---|
 | `CLAUDE_CONCEPT_GATE=off` | disable the concept gate |
 | `CLAUDE_ARCH_GUARD=off` | disable the architecture guard |
-| `CLAUDE_BASH_GATE=off` | disable the bash gate |
-| `CLAUDE_SKIP_CG=1` | disable the CodeGraph-first gate for a session |
-| `CLAUDE_ARCH_ADVISOR=off` | silence the architecture advisor |
 | `CLAUDE_PLAIN_LANGUAGE_GUARD=off` | disable the plain-language guard |
-| `CLAUDE_PLAN_QUESTION_ADVISOR=off` | silence the plan-question advisor |
-| `CLAUDE_INTEGRATION_CHECK=off` | disable the integration check |
+| `CLAUDE_INTEGRATION_CHECK=off` | disable the integration check (one piece of the dispatcher) |
 | `CLAUDE_MEMORY_PAGER=off` | disable the memory pager |
-| `CLAUDE_ACCURACY_TRACKER=off` | stop the contract-accuracy trackers |
+| `CLAUDE_ACCURACY_TRACKER=off` | stop the three contract-accuracy trackers (the rest of the dispatcher) |
 | `CLAUDE_WORKING_AGREEMENTS=off` | skip the working agreements at session start |
 | `CLAUDE_ACTIVE_CONTRACT=<path>` | approval pin: pin one approved contract |
 | `CLAUDE_DESTRUCTIVE_DB_OK=1` | one-shot approval for a destructive database operation |
 
-An `off` switch also accepts `0`, `false` and `no`. To take the assets without the
-enforcement, vendor the repository instead of installing it and register only the hooks you
-want.
+An `off` switch also accepts `0`, `false` and `no`. Beside the table, `CLAUDE_CONTRACT_INDEX=off`
+turns the contract-lookup index off for concept-gate, which then reads every contract file itself.
+To take the assets without the enforcement, vendor the repository instead of installing it and
+register only the hooks you want.
+
+### Retired hooks, and how to restore one
+
+Version 0.7.0 retired six hooks. The plugin neither ships nor registers them any more:
+
+| Retired hook | What it did | Why it went |
+|---|---|---|
+| `bash-gate.py` | blocked shell writes into source files without a contract | the slowest Bash hook, and it refused legitimate writes; `concept-gate` still gates every edit tool |
+| `codegraph-first-guard.py` | blocked `Read` / `Grep` / `Glob` on source until a CodeGraph tool had run | the slowest single cost per read, and unusable by an agent without CodeGraph tools |
+| `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | kept the per-turn marker the guard above read | they existed only for that guard |
+| `architecture-advisor.py` | a keyword reminder at every prompt | the guard still enforces at the write |
+| `plan-question-advisor.py` | scanned the transcript at every prompt | the `plan-questions` skill stays and is invoked by name |
+
+The four post-edit checks are not retired: they still exist as files and run, but inside
+`post-edit-dispatcher.py` rather than as four registrations.
+
+**To restore a retired hook in one project**, take its file from the last release that had it
+(0.6.2) and register it yourself, because the plugin no longer carries it:
+
+1. Copy the file from that release's folder in the plugin cache, or from the repository at that
+   tag with `git show <tag>:.claude/hooks/<name>`, into your project's `.claude/hooks/`.
+   Bring `_project_paths.py`, `_error_log.py`, `_contract_files.py` and `_contract_index.py` along
+   when it imports them.
+2. Register it in your own `.claude/settings.local.json` (this machine only) or
+   `.claude/settings.json` (the team), under the event and matcher in the table above.
+3. Start a new session. Hooks are read when a session starts.
+
+### Local development workflow
+
+To change the plugin and try the change in a real project before it is released:
+
+1. Make a plugin worktree from fresh `origin/master` and edit there.
+2. Run the plugin's suites in that worktree, for example
+   `py -3 .claude/scripts/tests/test_plugin_manifests.py`. The plugin can be tested alone.
+3. From the consuming project, run `claude --plugin-dir <that worktree>`. It replaces the
+   installed copy of the same name for that one session, running from the folder itself with no
+   cache copy. After an edit, run `/reload-plugins`. `CLAUDE_CODE_PLUGIN_DIRS` does the same from
+   the shell. Project and local settings cannot set it.
+4. Bump all five version declarations, merge, then run the marketplace update and the plugin
+   update under "Updating an installed plugin", start a new session, and confirm the new
+   version's folder in the plugin cache.
+
+To switch the installed plugin off for a session while you compare, set
+`"agentic-auto-improve@auto-improve": false` under `enabledPlugins` in the project's
+`.claude/settings.local.json`, and put the value back afterwards.
+
+### Restoring an earlier version
+
+- **Revert the release.** Revert its pull request with a version number above the bad one, then
+  run the two update commands above. The version has to go up, or an installed copy never
+  refreshes.
+- **For one session.** Check out the previous tag in a worktree and run `claude --plugin-dir`
+  on it.
+- **Reinstall.** Install the previous version again from the marketplace.
 
 ### Running a hook through an HTTP host (optional)
 
@@ -140,9 +227,9 @@ too slow for a hook you are willing to see fail open.
 host answers with a 2xx status and a JSON body that says to block. A connection that cannot
 be made, a non-2xx status and a timeout are all treated as non-blocking errors, so the tool
 call goes ahead. A host that is down therefore removes the gate it was running. For that
-reason the gates in the list above (`concept-gate`, `bash-gate`, both database guards and
-`codegraph-first-guard`) stay command hooks. Put only advisory hooks behind a host, such as
-the plain-language guard, the plan-question advisor or the memory pager. For a hard allow or
+reason the gates in the list above (`concept-gate`, `architecture-guard` and both database
+guards) stay command hooks. Put only advisory hooks behind a host, such as the post-edit
+dispatcher or the memory pager. For a hard allow or
 deny, use a `permissions.deny` rule, which Claude Code enforces without any process.
 
 **How to turn one on.**
@@ -192,7 +279,7 @@ this repository has already been bitten by once, so the gaps are stated rather t
 |---|---|---|---|
 | 22 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
-| 17 hooks | yes | no | no |
+| 12 hooks | yes | no | no |
 | 6 working agreements, delivered by a hook | yes | no | no |
 | scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
 
@@ -222,10 +309,11 @@ translation would be worse than shipping none.
 
 ### Known limitations
 
-- **The hook commands invoke `py -3`**, the Windows Python launcher, matching the
+- **The hook entries launch `py -3`**, the Windows Python launcher, matching the
   invocation every hook docstring in this repository already specifies. On macOS and Linux,
-  change `py -3` to `python3` throughout `.claude/hooks/hooks.json`. The format has no
-  per-platform branch, so this is documented rather than solved.
+  change `"command": "py"` to `"python3"` and drop the `"-3"` argument throughout
+  `.claude/hooks/hooks.json`. The format has no per-platform branch, so this is documented
+  rather than solved.
 - **Plugin install and vendoring are not reconciled.** Under an install the assets live in
   the provider's cache, so a skill or hook that resolves a path such as
   `.claude/scripts/cross_area_scan.py` inside *your* repository will not find it there.
@@ -255,11 +343,11 @@ skills/          22 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    6 shipped working agreements, delivered at session start
-  hooks/         17 generic hooks, 3 shared helper modules, 5 generic data files
+  hooks/         12 generic hooks, 4 shared helper modules, 6 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
-    tests/       5 hook test suites
-  scripts/       14 workflow scripts, 2 shared helper modules
-    tests/       9 suites, including the path-resolution suite
+    tests/       9 hook test suites
+  scripts/       15 workflow scripts, 3 shared helper modules
+    tests/       11 suites, including the path-resolution suite
   templates/     6 document templates
   references/    2 reference documents
   registries/    MECHANISMS.md, VOCABULARY.md, JOURNAL.md (Universal tier only)
@@ -334,31 +422,35 @@ Neither half loops. A person merging is what joins them.
 
 ### Hooks
 
-concept-gate, architecture-guard, bash-gate, architecture-advisor, codegraph-first-guard,
-codegraph-turn-tracker, codegraph-turn-reset, plain-language-guard, db-destructive-guard,
-db-research-readonly-guard, integration-check, plan-question-advisor,
-critic-verdict-tracker, contract-status-watcher, journal-post-approval-tracker,
-memory-pager, working-agreements, plus the shared helpers `_error_log.py`, `_memory_common.py` and
-`_project_paths.py`, and the generic data files `architecture-guard.rules.json`,
-`architecture-guard.exceptions.json`, `plain-language-guard.rules.json`,
+concept-gate, architecture-guard, plain-language-guard, db-destructive-guard,
+db-research-readonly-guard, memory-pager, working-agreements, post-edit-dispatcher, and the
+four checks the dispatcher runs: integration-check, critic-verdict-tracker,
+contract-status-watcher, journal-post-approval-tracker. That is twelve hook files. Beside them
+sit the shared helpers `_error_log.py`, `_memory_common.py`, `_project_paths.py` and
+`_inprocess_hook.py` (the dispatcher's in-process runner), and the generic data files
+`architecture-guard.rules.json`, `architecture-guard.exceptions.json`,
+`plain-language-guard.rules.json`, `integration-check.rules.json`,
 `db-destructive-guard.rules.json` and `working-agreements.rules.json`.
 
-All seventeen hook files are registered in `.claude/hooks/hooks.json`, which the Claude
-manifest references. That makes eighteen registrations, because `plain-language-guard.py`
-is registered on two events. The file is the single registration point: adding a hook
-without adding it there ships a file nothing runs.
+All twelve hook files are accounted for in `.claude/hooks/hooks.json`, which the Claude
+manifest references: eight are registered there directly and the four checks are named in the
+dispatcher's constant list. That makes twelve registrations, because `plain-language-guard.py`
+is registered on two events and `db-destructive-guard.py` on three matchers, while the four
+checks share the dispatcher's one. The file plus that list are the single registration point:
+adding a hook without adding it to one of them ships a file nothing runs, and a test
+(INV-8 in `test_plugin_manifests.py`) fails on it.
 
-**A guard hook keeps its per-project settings in a `<hook-name>.rules.json` file beside
-it**, so the hook body names no project. Those rules files ship as templates carrying
-deliberately fictional placeholder values — they are not safe defaults, and a guard is only
-as correct as the file you replace them with. `integration-check.rules.json` holds one
-project's own constants and is not shipped here.
+**A hook keeps its per-project settings in a `<hook-name>.rules.json` file beside it**, so the
+hook body names no project. Those files ship as templates carrying deliberately fictional
+placeholder values. They are not safe defaults, and a guard is only as correct as the file you
+replace them with. A hook running from the plugin reads your project's copy in
+`<project>/.claude/hooks/` first, and the advisory hooks fall back to the template. The database
+guards never fall back to it (see above).
 
 **The fail direction is per hook and is stated in each rules file.** A hook that BLOCKS
 fails **closed** when its rules file is missing or empty: `db-destructive-guard.py` with no
-protected database names treats every database as protected. The rules file this plugin
-ships is neither: it names the fictional `AcmeApp` and `AcmeApp_Testing`. A hook that only
-WARNS may fail soft.
+protected database names treats every database as protected. A hook that only WARNS may fail
+soft: `integration-check.py` with no markers warns about nothing.
 Never copy the soft choice to a guard that blocks.
 
 ### Working agreements
@@ -449,9 +541,10 @@ would ship the part that can be wrong and leave behind the part that would say s
 
    *By hand instead:* register the hooks in your `.claude/settings.json`, pathing every command through
    `$CLAUDE_PROJECT_DIR/.claude/hooks/`. `.claude/hooks/hooks.json` in this repository is
-   the worked example: it registers all seventeen against the right events and matchers, so
+   the worked example: it registers all twelve against the right events and matchers, so
    copy its entries and swap `${CLAUDE_PLUGIN_ROOT}` for `$CLAUDE_PROJECT_DIR`. A plugin
-   install does this step for you and needs no `settings.json` edit. A vendored copy of
+   install does this step for you and needs no `settings.json` edit, and a project that
+   installs the plugin registers none of these hooks itself. A vendored copy of
    `working-agreements.py` prints nothing, because the shipped agreements arrive only
    with a plugin install; see [Working agreements](#working-agreements).
    Do not point a hook command at this checkout:

@@ -2706,10 +2706,14 @@ class TestReadiness(Base):
                 self.assertIn(word, text, msg="%s: the list names the session load, the trust prompt "
                                               "and the imports" % label)
             note = self.need(report, "code-search-first-note")
-            for needle in ("CodeGraph", "CLAUDE_SKIP_CG=1", "block"):
+            # Amended by sub-task 24 (hook-server-modes contract, amendment 2026-10-09): the code-search-first
+            # check is cut from the plugin, so the note says it was retired and no longer names its bypass.
+            for needle in ("CodeGraph", "retired", "block"):
                 self.assertIn(needle, note, msg="%s: the code-search-first note must mention %s" % (label, needle))
-            self.assertRegex(note.lower(), r"no (bypass|escape)|not bypass|does not bypass|no index",
-                             msg="%s: and say there is no bypass without an index" % label)
+            self.assertNotIn("CLAUDE_SKIP_CG", note,
+                             msg="%s: the retired check's switch is no longer a thing to tell the operator" % label)
+            self.assertRegex(note.lower(), r"no longer blocks|nothing to bypass",
+                             msg="%s: and say the plugin no longer blocks source reads" % label)
 
 
 # ======================================================================================

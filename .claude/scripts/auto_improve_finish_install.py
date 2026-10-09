@@ -129,9 +129,8 @@ NOT_VERIFIABLE: Tuple[str, ...] = (
 )
 
 CODE_SEARCH_NOTE = (
-    "The code-search-first check blocks every source Read, Grep and Glob until a CodeGraph tool "
-    "has run in the turn. It has no bypass when no CodeGraph index exists. CLAUDE_SKIP_CG=1 "
-    "silences it for one session."
+    "The code-search-first check was retired in 0.7.0. The plugin no longer blocks a source Read, "
+    "Grep or Glob, and no CodeGraph tool has to run first, so there is nothing to bypass."
 )
 
 PLATFORM_NOTE = (

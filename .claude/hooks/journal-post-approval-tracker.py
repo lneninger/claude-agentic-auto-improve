@@ -186,6 +186,7 @@ def main() -> int:
             event="journal-tracker-seeded",
             file=str(target),
             details={"entries_seeded": len(entries)},
+            log_name="accuracy",
         )
         return 0
 
@@ -234,6 +235,7 @@ def main() -> int:
             event="journal-post-approval-fired",
             file=str(target),
             details={"count": len(fired), "fired": fired},
+            log_name="accuracy",
         )
     return 0
 

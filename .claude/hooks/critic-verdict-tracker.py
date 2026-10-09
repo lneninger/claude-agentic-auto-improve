@@ -178,11 +178,11 @@ def apply_verdict(contract_path: Path, verdict: str) -> dict:
 
     if verdict == "clean":
         for a in areas:
-            result["actions"][a] = record_clean(a, str(contract_path))
+            result["actions"][a] = record_clean(a, str(contract_path), once_per_verdict=True)
     elif verdict in {"warnings-only", "blockers-found"}:
         source = f"critic-{verdict}"
         for a in areas:
-            result["actions"][a] = record_failure(a, str(contract_path), source)
+            result["actions"][a] = record_failure(a, str(contract_path), source, once_per_verdict=True)
     elif verdict == "skipped":
         # Non-counting -- skips are not evidence of accuracy. Log only.
         log_event(
@@ -190,6 +190,7 @@ def apply_verdict(contract_path: Path, verdict: str) -> dict:
             event="skip-stub-observed",
             file=str(contract_path),
             details={"areas": areas},
+            log_name="accuracy",
         )
     else:
         log_event(

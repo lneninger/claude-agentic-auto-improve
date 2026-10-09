@@ -150,12 +150,30 @@ _V_ALTER = "AL" + "TER"
 # file is missing, unreadable or has an empty list, every database name is
 # treated as protected, which makes clause (b) below match every command and so
 # withdraws the disposable exemption entirely. Stricter, never looser.
-_RULES_PATH = Path(__file__).resolve().parent / "db-destructive-guard.rules.json"
+#
+# THE RULES FILE IS THE PROJECT'S, NEVER THE PLUGIN'S (INV-O3). This hook runs from the plugin, so
+# the file beside it is only a template naming fictional databases. The rules are read from
+# <CLAUDE_PROJECT_DIR>/.claude/hooks/ and nowhere else; an unset CLAUDE_PROJECT_DIR reads nothing,
+# which takes the fail-closed path above.
+_RULES_FILE_NAME = "db-destructive-guard.rules.json"
+
+
+def _project_rules_path() -> Path | None:
+    raw = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    if not raw:
+        return None
+    return Path(raw) / ".claude" / "hooks" / _RULES_FILE_NAME
+
+
+_RULES_PATH = _project_rules_path() or Path(_RULES_FILE_NAME)
 
 
 def _load_protected_names() -> tuple[str, ...]:
+    project_path = _project_rules_path()
+    if project_path is None:
+        return ()
     try:
-        with _RULES_PATH.open(encoding="utf-8") as _f:
+        with project_path.open(encoding="utf-8") as _f:
             data = json.load(_f)
     except Exception:
         return ()
