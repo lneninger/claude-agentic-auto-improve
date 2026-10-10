@@ -57,7 +57,6 @@ Standard library only.
 from __future__ import annotations
 
 import atexit
-import hashlib
 import json
 import os
 import sys
@@ -81,6 +80,24 @@ _VARIANTS: list = []
 
 #: True once the exit handler is registered.
 _ARMED = False
+
+
+def _new_sha256():
+    """A SHA-256 hasher. The built-in module is used when there is one: it gives the same
+    digest as ``hashlib`` and skips importing OpenSSL, which costs about 8 ms in every
+    fresh process. Any trouble falls back to ``hashlib``."""
+    try:
+        from _sha2 import sha256  # CPython 3.12 and later
+        return sha256()
+    except Exception:
+        pass
+    try:
+        from _sha256 import sha256  # CPython 3.11 and earlier
+        return sha256()
+    except Exception:
+        pass
+    import hashlib
+    return hashlib.sha256()
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +157,8 @@ class _Variant:
         self.fingerprint_tried = False
         self.roots: dict = {}
         self.by_spelling: dict = {}
+        self.dir_cache: dict = {}
+        self.held_stat = None
         self.hits = 0
         self.misses = 0
         self.uncacheable = 0
@@ -195,7 +214,7 @@ def _resolve(variant, path, want: str):
     rel = None
     before = None
     try:
-        located = _locate(path)
+        located = _locate_cached(variant, path)
         if located is not None:
             root = _root_state(variant, located[0])
             rel = located[1]
@@ -204,7 +223,7 @@ def _resolve(variant, path, want: str):
             else:
                 if not root.loaded:
                     _load(variant, root)
-                before = os.stat(path)
+                before = _stat_for(variant, path, want)
     except Exception:
         root = None
         before = None
@@ -233,6 +252,53 @@ def _resolve(variant, path, want: str):
             except Exception:
                 pass
     return value
+
+
+def _stat_for(variant, path, want: str):
+    """``os.stat`` of the path, taken once for a status lookup and its entries lookup.
+
+    A gate asks for a contract's status and then, only for a contract it honours, for its
+    entries, one call after the other. The stat taken for the status lookup is held for
+    that one follow-up call (and dropped by it), so the two calls see one signature and the
+    file is stat-ed once instead of twice. Nothing is kept beyond that call, and nothing is
+    carried to another process. A change between the two calls is still caught: a record is
+    only stored when the file's signature after the read equals the one taken before it
+    (rule R4).
+    """
+    key = os.fspath(path)
+    if want == "entries":
+        held = variant.held_stat
+        variant.held_stat = None
+        if held is not None and held[0] == key:
+            return held[1]
+    result = os.stat(path)
+    if want == "status":
+        variant.held_stat = (key, result)
+    return result
+
+
+def _locate_cached(variant, path):
+    """``_locate`` with the folder walk done once per folder, not once per file.
+
+    The first file of a folder runs ``_locate`` itself; every later file of the same
+    folder spelling reuses that answer, so the result is the one ``_locate`` gives.
+    """
+    text = os.fspath(path)
+    folder, name = os.path.split(text)
+    if not name:
+        return _locate(path)
+    hit = variant.dir_cache.get(folder, False)
+    if hit is False:
+        located = _locate(path)
+        if located is None:
+            hit = None
+        else:
+            hit = (located[0], located[1].rpartition("/")[0])
+        variant.dir_cache[folder] = hit
+    if hit is None:
+        return None
+    root, rel_dir = hit
+    return root, (rel_dir + "/" + name if rel_dir else name)
 
 
 def _locate(path):
@@ -274,7 +340,7 @@ def _fingerprint(variant) -> str | None:
     if not variant.fingerprint_tried:
         variant.fingerprint_tried = True
         try:
-            digest = hashlib.sha256()
+            digest = _new_sha256()
             for source in variant.sources:
                 with open(source, "rb") as handle:
                     data = handle.read()

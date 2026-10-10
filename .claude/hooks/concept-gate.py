@@ -31,7 +31,6 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Iterable
 
 # Passive error logging (fail-soft import).
 sys.path.insert(0, str(Path(__file__).parent))
@@ -320,6 +319,40 @@ def detect_project_name(target: Path) -> str | None:
     return None
 
 
+def _markdown_files_newest_first(root: Path) -> list[Path]:
+    """Every ``*.md`` file under ``root``, newest modification time first.
+
+    Same files as ``sorted(root.rglob("*.md"), key=mtime, reverse=True)``, found with one
+    ``os.scandir`` pass instead of a ``Path`` object and a ``stat`` call per file: the
+    modification time used for the ORDER is the one the directory listing already carries
+    (the order only decides which covering contract is found first, never whether one is).
+    A folder that cannot be listed is skipped, as ``rglob`` skips it. Every decision that
+    reads a file still reads it through the contract lookup index (rule R1), never through
+    this listing.
+    """
+    fold = os.name == "nt"
+    found: list[tuple[float, str]] = []
+    pending = [str(root)]
+    while pending:
+        top = pending.pop()
+        try:
+            with os.scandir(top) as listing:
+                for entry in listing:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(entry.path)
+                            continue
+                        name = entry.name.lower() if fold else entry.name
+                        if name.endswith(".md"):
+                            found.append((entry.stat().st_mtime, entry.path))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [Path(p) for _mtime, p in found]
+
+
 def iter_contracts(project_name: str | None, extra_roots: list[Path] | None = None) -> Iterable[Path]:
     """
     Yield every candidate concept contract file, newest first.
@@ -341,11 +374,7 @@ def iter_contracts(project_name: str | None, extra_roots: list[Path] | None = No
         if not root.exists():
             continue
         try:
-            candidates = sorted(
-                root.rglob("*.md"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            candidates = _markdown_files_newest_first(root)
         except OSError:
             continue
         for path in candidates:
