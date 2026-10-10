@@ -1323,6 +1323,121 @@ def section_tokens() -> None:
           not problems, "\n".join(problems))
 
 
+# ---------------------------------------------------------------------------
+# Lever A guards: the fixed parity corpus, and the racy-window margin control
+# ---------------------------------------------------------------------------
+CORPUS = HOOKS_DIR / "tests" / "fixtures" / "gate_parity_corpus.json"
+CORPUS_CATEGORIES = (
+    "worktree-target", "trivial-file", "non-trivial-file", "shell-write",
+    "contract-edited-between-calls", "same-size-rewrite-in-racy-window",
+)
+
+
+def _corpus_calls(steps) -> list[dict]:
+    out: list[dict] = []
+    for step in steps:
+        if step.get("op") == "group":
+            out += _corpus_calls(step.get("steps", []))
+        elif step.get("op") == "call":
+            out.append(step)
+    return out
+
+
+def _corpus_all_steps(steps) -> list[dict]:
+    out: list[dict] = []
+    for step in steps:
+        out.append(step)
+        if step.get("op") == "group":
+            out += _corpus_all_steps(step.get("steps", []))
+    return out
+
+
+def corpus_problems(data) -> list[str]:
+    problems: list[str] = []
+    if not isinstance(data, dict) or data.get("schema") != 1 or not isinstance(data.get("steps"), list):
+        return ["the corpus is not an object with schema 1 and a steps list"]
+    calls = _corpus_calls(data["steps"])
+    ids = [c.get("id") for c in calls]
+    if len(ids) != len(set(ids)) or not all(isinstance(i, str) and i for i in ids):
+        problems.append("call ids are missing or repeated")
+    for call in calls:
+        if not isinstance(call.get("expect_exit"), int):
+            problems.append(f"{call.get('id')}: no integer expect_exit")
+        if ("payload" in call) == ("raw" in call):
+            problems.append(f"{call.get('id')}: needs exactly one of payload and raw")
+    seen = {c.get("category") for c in calls}
+    for cat in CORPUS_CATEGORIES:
+        if cat not in seen:
+            problems.append(f"no call in the category {cat!r}")
+    if {c.get("expect_exit") for c in calls} < {0, 2}:
+        problems.append("the corpus must hold both an allowed and a blocked call")
+    rewrites = [s for s in _corpus_all_steps(data["steps"]) if s.get("op") == "rewrite_same_size"]
+    good = [r for r in rewrites
+            if len(r.get("find", "").encode("utf-8")) == len(r.get("replace", "").encode("utf-8"))
+            and "approved" in r.get("find", "") and "draft" in r.get("replace", "")
+            and r.get("restore_mtime") is True]
+    if not good:
+        problems.append("no same-size approved-to-draft rewrite that restores the stamp")
+    return problems
+
+
+def _same_size_row(sb: Sandbox, gate: str):
+    """The (c) row: approved -> archived at equal size inside the racy window, stamp restored."""
+    kind = "main"
+    v = VARIANT[gate]
+    last = None
+    for _ in range(4):
+        sb.reset()
+        p = sb.contract(kind, "c1.md", "approved", ["src/feat/racy.cs"], age=0.0)
+        m0 = p.stat().st_mtime_ns
+        T = sb.target(kind, "src/feat/racy.cs")
+        r1 = sb.run(gate, T)
+        rec = sb.record(kind, v, "c1.md")
+        p.write_bytes(p.read_bytes().replace(b"approved", b"archived"))
+        os.utime(p, ns=(m0, m0))
+        r2 = sb.run(gate, T)
+        off = sb.off(gate, T)
+        last = (r1, r2, off, rec)
+        if r1.code == 0 and rec and rec.get("status") == "approved":
+            break
+    return last
+
+
+def section_lever_a() -> None:
+    print("-- Lever A guards: the parity corpus and the racy-window margin control --")
+    try:
+        data = json.loads(CORPUS.read_text(encoding="utf-8"))
+        problems = corpus_problems(data)
+    except (OSError, ValueError) as exc:
+        problems = [f"{CORPUS} cannot be read: {exc}"]
+    check("the fixed parity corpus exists and holds every required kind of case "
+          "(worktree targets, trivial and non-trivial files, shell writes, a contract edited between calls, "
+          "a same-size approved-to-draft rewrite inside the racy window)",
+          not problems, "\n".join(problems))
+
+    src = INDEX_MODULE.read_text(encoding="utf-8")
+    mutated, n = re.subn(r"^_RACY_NS\s*=\s*2_000_000_000[ \t]*$", "_RACY_NS = 0", src, flags=re.M)
+    check("control setup: the racy-window margin is one assignment that the mutation can set to zero",
+          n == 1, f"found {n} assignments of the form '_RACY_NS = 2_000_000_000'")
+    if n != 1:
+        return
+    for gate in GATES:
+        real = Sandbox("a1real")
+        mut = Sandbox("a1mut")
+        (mut.scripts / "_contract_index.py").write_text(mutated, encoding="utf-8", newline="")
+        r1, r2, off, rec = _same_size_row(real, gate)
+        m1, m2, moff, mrec = _same_size_row(mut, gate)
+        check(f"{gate}-gate, real index: the same-size approved-to-draft rewrite inside the window is read "
+              "(its decision equals the switch set to off)",
+              r1.code == 0 and bool(rec) and r2.code == 2 and decisions_equal(r2, off),
+              f"first: {short(r1)}\nsecond: {short(r2)}\noff: {short(off)}")
+        check(f"{gate}-gate, MUTATION CONTROL: a scratch index with the margin set to zero reports a difference "
+              "on the same case (it serves the stale approval)",
+              m1.code == 0 and bool(mrec) and moff.code == 2 and not decisions_equal(m2, moff),
+              f"first: {short(m1)}\nsecond: {short(m2)}\noff: {short(moff)}\n"
+              "the mutation changed nothing the case can see, so the case would not catch a real margin bug")
+
+
 # ===========================================================================
 def run_section(fn) -> None:
     try:
@@ -1334,7 +1449,7 @@ def run_section(fn) -> None:
 def main() -> int:
     try:
         for fn in (section_b, section_c, section_d, section_e, section_f,
-                   section_g, section_h, section_i, section_tokens):
+                   section_g, section_h, section_i, section_lever_a, section_tokens):
             run_section(fn)
     finally:
         cleanup()
