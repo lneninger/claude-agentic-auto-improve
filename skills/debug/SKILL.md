@@ -14,6 +14,8 @@ Bug fixes that skip root-cause analysis either (a) patch the symptom and leave t
 
 ## Step 0: Capture the bug report
 
+**Work in a worktree.** In the main checkout, run `/task` first: it cuts and enters a worktree, and the main-checkout guard refuses the scratch file below and every later edit in the shared tree. `py -3 .claude/scripts/flat_worktree.py --describe` reports `current_tree`; `main-checkout` means stop and run `/task`.
+
 Ask the user if not already stated:
 
 1. **Symptom** — what does the user observe? (error message, wrong value, missing behavior, crash, hang)

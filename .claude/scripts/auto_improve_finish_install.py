@@ -981,6 +981,21 @@ def _hook_key(hook: Dict[str, Any]) -> Optional[Tuple[str, Tuple[str, ...], str,
     return None
 
 
+def _compare_extras(extras: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Comparison form of the arguments after a hook file: a ``.py`` path is reduced to its file name,
+    so the gate launcher's gate argument matches whether it names the plugin's folder or the project's."""
+    return tuple(a.replace("\\", "/").rsplit("/", 1)[-1] if a.lower().endswith(".py") else a for a in extras)
+
+
+_PLUGIN_ROOT_PREFIXES = ("${CLAUDE_PLUGIN_ROOT}/", "$CLAUDE_PLUGIN_ROOT/")
+
+
+def _is_plugin_script_arg(arg: str) -> bool:
+    """True for an argument that is a ``.py`` path under the plugin root variable."""
+    text = arg.replace("\\", "/")
+    return text.lower().endswith(".py") and text.startswith(_PLUGIN_ROOT_PREFIXES)
+
+
 @dataclass(frozen=True)
 class _Registration:
     """One hook registration read from a hooks.json."""
@@ -995,9 +1010,14 @@ class _Registration:
     other_keys: Tuple[Tuple[str, Any], ...]
 
     @property
+    def compare_extras(self) -> Tuple[str, ...]:
+        """The arguments after the hook file, each ``.py`` path reduced to its file name."""
+        return _compare_extras(self.extras)
+
+    @property
     def key(self) -> str:
-        """The registration key: event, hook file and any argument after it."""
-        return "|".join((self.event, self.file) + self.extras)
+        """The registration key: event, hook file and any argument after it (``.py`` paths by file name)."""
+        return "|".join((self.event, self.file) + self.compare_extras)
 
 
 def _iter_hooks(settings: Any):
@@ -1046,7 +1066,7 @@ def _existing_registrations(project: Path, home: Path
             parsed = _hook_key(hook)
             if parsed:
                 found.append({"layer": layer, "event": event, "matcher": matcher, "file": parsed[0],
-                              "extras": parsed[1], "folder": parsed[2]})
+                              "extras": _compare_extras(parsed[1]), "folder": parsed[2]})
     return found, disabled, None
 
 
@@ -1098,12 +1118,29 @@ def _readiness(project: Path, home: Path, verdict: Result, platform: str) -> Res
         _problem, regs = _source_registrations(hooks_json)
     unresolved: List[str] = []
     resolved_files: Dict[str, Path] = {}
+    def _expand(token: str) -> str:
+        return token.replace("${CLAUDE_PLUGIN_ROOT}", str(install)).replace("$CLAUDE_PLUGIN_ROOT", str(install))
+
     for reg in regs:
-        text = reg.path_token.replace("${CLAUDE_PLUGIN_ROOT}", str(install)).replace("$CLAUDE_PLUGIN_ROOT", str(install))
+        text = _expand(reg.path_token)
         if Path(text).is_file():
             resolved_files[reg.file] = Path(text)
+            if reg.file == "gate-launch.py":
+                # the launcher's body is imported by the stub: a syntax error there blocks every call
+                body = Path(text).with_name("_gate_launch.py")
+                if body.is_file():
+                    resolved_files[body.name] = body
+                else:
+                    unresolved.append("%s %s" % (reg.event, body))
         else:
             unresolved.append("%s %s" % (reg.event, reg.path_token))
+        for extra in reg.extras:
+            if _is_plugin_script_arg(extra):
+                extra_path = Path(_expand(extra))
+                if extra_path.is_file():
+                    resolved_files[extra_path.name] = extra_path
+                else:
+                    unresolved.append("%s %s" % (reg.event, extra))
     launchers = sorted({reg.launcher for reg in regs})
     found_launchers = [bool(shutil.which(name)) for name in launchers]
     interpreter_found = bool(launchers) and all(found_launchers)
@@ -1116,7 +1153,7 @@ def _readiness(project: Path, home: Path, verdict: Result, platform: str) -> Res
     existing, disabled, problem = _existing_registrations(project, home)
     if problem:
         return problem
-    plugin_keys = {(r.event, r.file, r.extras) for r in regs}
+    plugin_keys = {(r.event, r.file, r.compare_extras) for r in regs}
     duplicate = any(e["layer"] in ("project", "local") and (e["event"], e["file"], e["extras"]) in plugin_keys
                     for e in existing)
     installed_version = verdict.get("installed-version")
@@ -1217,10 +1254,14 @@ def _parse_settings(data: bytes, target: Path) -> Tuple[Optional[Result], Any]:
 def _written_hook(reg: _Registration, platform: str) -> Dict[str, Any]:
     """The command + args form, with the project path variable, never the plugin one."""
     path = "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + reg.file
+    # An argument that is itself a plugin script (the gate launcher's gate) gets the same rewrite as the
+    # first path; every other argument is copied unchanged.
+    extras = ["${CLAUDE_PROJECT_DIR}/.claude/hooks/" + a.replace("\\", "/").rsplit("/", 1)[-1]
+              if _is_plugin_script_arg(a) else a for a in reg.extras]
     if platform == "win32":
-        command, args = "py", ["-3", path] + list(reg.extras)
+        command, args = "py", ["-3", path] + extras
     else:
-        command, args = "python3", [path] + list(reg.extras)
+        command, args = "python3", [path] + extras
     hook: Dict[str, Any] = {"type": reg.hook_type, "command": command, "args": args}
     hook.update(dict(reg.other_keys))
     return hook
@@ -1273,7 +1314,7 @@ def _plan_vendored(project: Path, platform: str, home: Path, plugin_root: Option
     present: List[Dict[str, Any]] = []
     notes: List[str] = []
     for reg in regs:
-        matches = [e for e in existing if (e["event"], e["file"], e["extras"]) == (reg.event, reg.file, reg.extras)]
+        matches = [e for e in existing if (e["event"], e["file"], e["extras"]) == (reg.event, reg.file, reg.compare_extras)]
         if not matches:
             to_add.append(reg)
         for match in matches:

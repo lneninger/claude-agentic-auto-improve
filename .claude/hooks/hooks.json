@@ -61,7 +61,7 @@
           {
             "type": "command",
             "command": "py",
-            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py"]
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/gate-launch.py", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py"]
           },
           {
             "type": "command",

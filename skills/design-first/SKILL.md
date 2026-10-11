@@ -17,6 +17,8 @@ Before anything else, remember:
 3. **Communication gate.** The contract is presented to the user and Open Questions resolved BEFORE implementer agents are invoked.
 4. **Hard block.** `~/.claude/hooks/concept-gate.py` blocks Edit/Write on non-trivial files without an approved contract.
 
+**Where this runs.** In the main checkout, run `/task` first: it cuts and enters a worktree, and the main-checkout guard refuses the contract file and every later edit in the shared tree. A `data-architect` or `contract-critic` handoff ending `BLOCKED: main checkout <target>` halts the run: enter a worktree with `EnterWorktree` and relaunch the agent there.
+
 ## Step 1: Classify the task
 
 Decide whether the task is **trivial** or **non-trivial**.
