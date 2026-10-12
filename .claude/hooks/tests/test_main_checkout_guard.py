@@ -22,8 +22,14 @@ COUNTING RULE
 * BLOCK counts only with exit code 2 AND the marker ``MAIN CHECKOUT`` in stderr, so a gate that
   blocks for its own reason, or a launcher that is missing (Python exits 2 for a missing file),
   never counts as a guard block.
+* Every BLOCK row also names the REASON KIND it expects (t8 F7): ``guard`` (the guard's own decision; the
+  banner holds neither "guard degraded" nor "launcher failed"), ``degraded`` ("guard degraded"),
+  ``launcher`` ("launcher failed") or ``misregistered`` ("launcher misregistered"). A crash of the guard that
+  the degraded rule then blocks can therefore never pass as a guard block.
 * ALLOW counts only with a same-run BLOCK sibling: ``_expect_allow`` fails unless a BLOCK row of
   the same test method has already been confirmed. Allow targets are .md files.
+* Every child environment puts a REFUSING fake ``gh`` first on PATH (t8 F8); the module's teardown fails if
+  it was ever called, so no row of this suite can reach GitHub.
 
 RED TODAY: gate-launch.py does not exist yet, so every launch exits 2 with Python's "can't open
 file" text and no ``MAIN CHECKOUT``; every row therefore fails on an ASSERTION (never an
@@ -72,13 +78,48 @@ _STRIPPED_EXACT = ("CLAUDE_PROJECT_DIR", "GH_REPO", "GH_HOST", "CLAUDE_CONCEPT_G
 
 def clean_env(extra: dict | None = None) -> dict:
     """The one helper that builds every child environment (no project dir, no gh repo or host,
-    no GIT_* variable, no off switch)."""
+    no GIT_* variable, no off switch, a refusing fake gh first on PATH)."""
     env = {k: v for k, v in os.environ.items()
            if k not in _STRIPPED_EXACT and not k.startswith("GIT_")}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if FX.fake_bin is not None:
+        env["PATH"] = str(FX.fake_bin) + os.pathsep + env.get("PATH", "")
     if extra:
         env.update(extra)
     return env
+
+
+#: A gh that records its argument vector and refuses (written in this file; the technique of
+#: test_flat_worktree.py's ``Tools``, never imported across suites).
+FAKE_GH_CODE = r'''
+import json, os, sys
+here = os.path.dirname(os.path.abspath(sys.argv[0]))
+with open(os.path.join(here, "gh_calls.jsonl"), "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\n")
+sys.stderr.write("fake gh: refusing, this suite must never reach GitHub\n")
+sys.exit(1)
+'''
+
+
+def write_fake_gh(directory: Path) -> Path:
+    """A REAL executable called gh (gh.exe on Windows, built from the launcher distlib ships with pip)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    body = FAKE_GH_CODE.encode("utf-8")
+    if IS_WINDOWS:
+        import io
+        import zipfile
+        from pip._vendor.distlib.scripts import ScriptMaker  # type: ignore
+        launcher = ScriptMaker(None, str(directory))._get_launcher("t")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("__main__.py", body)
+        target = directory / "gh.exe"
+        target.write_bytes(launcher + b"#!" + sys.executable.encode("utf-8") + b"\r\n" + buf.getvalue())
+    else:
+        target = directory / "gh"
+        target.write_bytes(b"#!" + sys.executable.encode("utf-8") + b"\n" + body)
+        target.chmod(0o755)
+    return target
 
 
 def posix(path) -> str:
@@ -96,6 +137,9 @@ class Fixture:
     plain: Path
     junction: Path | None
     junction_skip_reason: str | None
+    junction_src: Path | None
+    junction_src_skip_reason: str | None
+    fake_bin: Path | None = None
     short_main: str | None
     short_skip_reason: str | None
     copy_counter = 0
@@ -126,6 +170,8 @@ def _make_repo(path: Path) -> None:
 
 def setUpModule() -> None:
     FX.root = Path(os.path.realpath(tempfile.mkdtemp(prefix="mcg_fixture_")))
+    FX.fake_bin = FX.root / "fakebin"
+    write_fake_gh(FX.fake_bin)
     FX.main = FX.root / "main_checkout_fixture"
     _make_repo(FX.main)
     FX.wt = FX.main / ".claude" / "worktrees" / "20261007-test-fixture"
@@ -148,6 +194,20 @@ def setUpModule() -> None:
     else:
         FX.junction_skip_reason = "junction rows are Windows-only"
 
+    # t8 F1: a junction in the temp root (outside every repository) into a SUBFOLDER of the main checkout.
+    FX.junction_src, FX.junction_src_skip_reason = None, None
+    if IS_WINDOWS:
+        link_src = FX.root / "junction_to_main_src"
+        proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link_src), str(FX.main / "src")],
+                              capture_output=True, text=True)
+        if proc.returncode == 0 and link_src.exists():
+            FX.junction_src = link_src
+        else:
+            FX.junction_src_skip_reason = (f"this machine refused to create a junction: "
+                                           f"{proc.stdout.strip()} {proc.stderr.strip()}")
+    else:
+        FX.junction_src_skip_reason = "junction rows are Windows-only"
+
     FX.short_main, FX.short_skip_reason = None, None
     if IS_WINDOWS:
         import ctypes
@@ -162,11 +222,14 @@ def setUpModule() -> None:
 
 
 def tearDownModule() -> None:
-    if FX.junction is not None:
-        try:
-            os.rmdir(FX.junction)
-        except OSError:
-            pass
+    gh_log = FX.fake_bin / "gh_calls.jsonl" if FX.fake_bin is not None else None
+    gh_calls = gh_log.read_text(encoding="utf-8", errors="replace").splitlines() if gh_log and gh_log.exists() else []
+    for link in (FX.junction, FX.junction_src):
+        if link is not None:
+            try:
+                os.rmdir(link)
+            except OSError:
+                pass
     for extra in FX.root.rglob("junction_inside"):
         try:
             os.rmdir(extra)
@@ -180,6 +243,9 @@ def tearDownModule() -> None:
         except OSError:
             pass
     shutil.rmtree(FX.root, onerror=_onerror)
+    if gh_calls:  # t8 F8: after the module, the refusing gh was never called
+        raise AssertionError(f"the refusing fake gh was called {len(gh_calls)} time(s) during this module; "
+                             f"the guard suite must never reach GitHub: {gh_calls[:3]}")
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +295,8 @@ def shell_payload(tool: str, command: str, cwd: Path | str) -> dict:
 
 class Case:
     def __init__(self, name, payload, expect, *, project=None, extra_env=None, contains=(), hooks_dir=None,
-                 gate=None):
-        self.name, self.payload, self.expect = name, payload, expect
+                 gate=None, kind="guard"):
+        self.name, self.payload, self.expect, self.kind = name, payload, expect, kind
         self.project, self.extra_env, self.contains = project, extra_env, tuple(contains)
         self.hooks_dir = hooks_dir or HOOKS_DIR
         if gate is None:
@@ -257,10 +323,23 @@ class GuardTestCase(unittest.TestCase):
     def is_block(res: Result) -> bool:
         return res.rc == 2 and MARKER in res.err
 
-    def _expect_block(self, res: Result, contains=()) -> None:
+    #: The banner text each reason kind must carry; every other kind's text must be ABSENT (t8 F7).
+    KIND_TEXT = {"guard": None, "degraded": "guard degraded", "launcher": "launcher failed",
+                 "misregistered": "launcher misregistered"}
+
+    def _expect_block(self, res: Result, kind: str, contains=()) -> None:
+        self.assertIn(kind, self.KIND_TEXT, msg="a BLOCK row must name its reason kind")
         self.assertTrue(self.is_block(res),
                         msg=f"must BLOCK with exit 2 AND '{MARKER}' in stderr (a gate-only block or a missing "
                             f"launcher does not count): {res.describe()}")
+        required = self.KIND_TEXT[kind]
+        if required is not None:
+            self.assertIn(required, res.err, msg=f"a {kind} block must say {required!r}: {res.describe()}")
+        for other in self.KIND_TEXT.values():
+            if other is not None and other != required:
+                self.assertNotIn(other, res.err,
+                                 msg=f"a {kind} block must not say {other!r} (that is another reason kind, so the "
+                                     f"row would pass for the wrong reason): {res.describe()}")
         for text in contains:
             self.assertIn(text, res.err, msg=f"the block banner must say {text!r}")
         self._block_ok = True
@@ -288,7 +367,7 @@ class GuardTestCase(unittest.TestCase):
         for case, res in zip(ordered, results):
             with self.subTest(case.name):
                 if case.expect == "block":
-                    self._expect_block(res, case.contains)
+                    self._expect_block(res, case.kind, case.contains)
                 else:
                     self._expect_allow(res)
 
@@ -357,6 +436,25 @@ class HelperEnvironmentControlTests(unittest.TestCase):
         self.assertEqual(json.loads(proc.stdout), [],
                          msg="control: the one environment helper must strip CLAUDE_PROJECT_DIR, GH_REPO, GH_HOST "
                              "and every GIT_* variable even when the parent sets them")
+
+    def test_fake_gh_is_first_on_the_child_path_and_records_a_call(self):
+        env = clean_env()
+        found = shutil.which("gh", path=env["PATH"])
+        self.assertIsNotNone(found, msg="control: a gh must be found on the child PATH")
+        self.assertEqual(os.path.normcase(os.path.dirname(found)), os.path.normcase(str(FX.fake_bin)),
+                         msg="control (t8 F8): the refusing fake gh must be FIRST on every child PATH")
+        log = FX.fake_bin / "gh_calls.jsonl"
+        self.assertFalse(log.exists(), msg="control: nothing has called the fake gh yet")
+        # the lookup uses the child's own PATH, so the call goes through a Python child holding the env
+        proc = subprocess.run([sys.executable, "-c", "import subprocess; raise SystemExit(subprocess.call(['gh', '--t9-control']))"],
+                              env=env, capture_output=True, text=True)
+        try:
+            self.assertEqual(proc.returncode, 1, msg=f"control: the fake gh refuses with exit 1: {proc.stderr!r}")
+            self.assertIn("--t9-control", log.read_text(encoding="utf-8"),
+                          msg="control: a call is recorded, so the after-module check can see one")
+        finally:
+            if log.exists():
+                log.unlink()
 
     def test_fixtures_are_real_git_trees_outside_any_claude_path(self):
         self.assertTrue((FX.main / ".git").is_dir(), msg="the main checkout fixture has a .git DIRECTORY")
@@ -462,6 +560,25 @@ class FileToolSpellingTests(GuardTestCase):
         self.run_cases([
             f("Edit main e-acute file", "Edit", FX.main / "src" / "é.cs", FX.main, FX.main, "block"),
             f("Edit worktree e-acute md allows", "Edit", FX.wt / "docs" / "é.md", FX.wt, FX.main, "allow"),
+        ])
+
+
+class JunctionIntoMainSubfolderTests(GuardTestCase):
+    """t8 F1 [kill M05]: a junction OUTSIDE every repository into a SUBFOLDER of the main checkout. The
+    root-junction row cannot tell a resolved path from a literal one; this one can."""
+
+    @unittest.skipUnless(IS_WINDOWS, "junction rows are Windows-only")
+    def test_junction_into_main_src_blocks_in_a_file_tool_and_both_shells(self):
+        if FX.junction_src is None:
+            print(f"SKIP junction-into-src rows: {FX.junction_src_skip_reason}", file=sys.stderr)
+            self.skipTest(FX.junction_src_skip_reason)
+        link = posix(FX.junction_src)
+        self.assertNotIn(posix(FX.main).lower(), link.lower(), msg="control: the spelling holds no main-checkout text")
+        self.run_cases([
+            f("Edit junction-into-src md", "Edit", f"{link}/x.md", FX.wt, FX.main, "block"),
+            sh("Bash redirect junction-into-src md", "Bash", f"echo x > {link}/x.md", FX.wt, FX.main, "block"),
+            sh("PowerShell Set-Content junction-into-src md", "PowerShell", f"Set-Content {link}/x.md x", FX.wt, FX.main, "block"),
+            f("Edit worktree md allows", "Edit", FX.wt / "docs" / "x.md", FX.wt, FX.main, "allow"),
         ])
 
 
@@ -625,6 +742,44 @@ class GitCommandClassTests(GuardTestCase):
         cases += [sh(f"powershell allow: {c}", "PowerShell", c, FX.main, FX.main, "allow") for c in self._allow_list()]
         self.run_cases(cases)
 
+    #: One row per member of the contract's "Git command class" text: "A member becomes `mutating` when it
+    #: carries a global option other than ..., a `GIT_*=` prefix, any option starting `--output` or equal to `-o`;
+    #: for `fetch` ...; for `push` ...; for `grep` ...", plus `branch` (not `-m`, `-M`, `-f`, `--force`). A list
+    #: in the test, not the production constant (t8 F3: six exclusions had no row).
+    MUTATING_MEMBERS = [
+        ("global -c", "git -c x=y status"),
+        ("global --config-env", "git --config-env=x=y status"),
+        ("global --exec-path", "git --exec-path=x status"),
+        ("global --git-dir", "git --git-dir=x status"),
+        ("global --work-tree", "git --work-tree=x status"),
+        ("global --namespace", "git --namespace=x status"),
+        ("GIT_ prefix", "GIT_DIR=x git status"),
+        ("-o", "git log -o x"),
+        ("--output", "git diff --output=x"),
+        ("fetch -u", "git fetch -u origin"),
+        ("fetch --update-head-ok", "git fetch --update-head-ok origin"),
+        ("fetch --upload-pack", "git fetch --upload-pack=x origin"),
+        ("fetch --recurse-submodules", "git fetch --recurse-submodules origin"),
+        ("fetch --recurse-submodules=yes", "git fetch --recurse-submodules=yes origin"),
+        ("push --receive-pack", "git push --receive-pack=x origin HEAD"),
+        ("push --exec", "git push --exec=x origin HEAD"),
+        ("grep -O", "git grep -O foo"),
+        ("grep --open-files-in-pager", "git grep --open-files-in-pager=x foo"),
+        ("branch -m", "git branch -m a b"),
+        ("branch -M", "git branch -M a b"),
+        ("branch -f", "git branch -f b HEAD"),
+        ("branch --force", "git branch --force b HEAD"),
+    ]
+    READ_SIBLINGS = ["git status", "git fetch origin", "git push origin HEAD:refs/heads/x", "git grep foo",
+                     "git branch -a", "git log --oneline -5"]
+
+    def test_every_member_of_the_git_command_class_blocks_in_both_shells_from_main(self):
+        cases = [sh(f"{tool}: {name}: {cmd}", tool, cmd, FX.main, FX.main, "block")
+                 for tool in ("Bash", "PowerShell") for name, cmd in self.MUTATING_MEMBERS]
+        cases += [sh(f"{tool} allow: {cmd}", tool, cmd, FX.main, FX.main, "allow")
+                  for tool in ("Bash", "PowerShell") for cmd in self.READ_SIBLINGS]
+        self.run_cases(cases)
+
     def test_acting_directory_changes_into_main_block_a_commit(self):
         main, wt = posix(FX.main), posix(FX.wt)
         self.run_cases([
@@ -775,7 +930,7 @@ class BlockBannerTests(GuardTestCase):
         results = [launch(c.payload, gate=c.gate, project=c.project) for c in cases]
         for case, res in zip(cases, results):
             with self.subTest(case.name):
-                self._expect_block(res)
+                self._expect_block(res, "guard")
                 for text in ("/task", "EnterWorktree", "do not retry", "BLOCKED: main checkout"):
                     self.assertIn(text, res.err, msg=f"I-6: every banner must hold {text!r} (session remedy, then "
                                                       "subagent remedy line)")
@@ -797,12 +952,24 @@ class LauncherInputEdgeTests(GuardTestCase):
         }
         for name, res in results.items():
             with self.subTest(name):
-                self._expect_block(res)
+                self._expect_block(res, "launcher")
+        self._expect_allow(launch(good, project=FX.main))
+
+    def test_one_invalid_byte_inside_a_json_string_blocks_as_launcher_failed(self):
+        """t8 F2 [kill M16]: the payload is well-formed JSON in every way but one byte of a string that is not
+        UTF-8. Decoding with errors="replace" would let it through to the gate."""
+        slot = "QQBYTEQQ"
+        template = json.dumps(file_payload("Edit", str(FX.wt / "docs" / f"{slot}.md"), FX.wt)).encode("utf-8")
+        bad = template.replace(slot.encode(), b"\xff")
+        good = template.replace(slot.encode(), b"x")
+        self.assertEqual(bad.count(b"\xff"), 1, msg="control: exactly one invalid byte, inside the file_path string")
+        self.assertEqual(json.loads(good)["tool_input"]["file_path"].count(slot), 0, msg="control: the sibling is clean")
+        self._expect_block(launch(bad, project=FX.main), "launcher", contains=["UnicodeDecodeError"])
         self._expect_allow(launch(good, project=FX.main))
 
     def test_non_ascii_payload_reaches_the_gate_byte_identically(self):
         main_block = launch(file_payload("Edit", str(FX.main / "src" / "é.cs"), FX.main), project=FX.main)
-        self._expect_block(main_block)
+        self._expect_block(main_block, "guard")
         payload = json.dumps(file_payload("Edit", str(FX.wt / "docs" / "é.md"), FX.wt), ensure_ascii=False).encode("utf-8")
         via = launch(payload, project=FX.main)
         direct_env = clean_env({"PYTHONIOENCODING": "utf-8", "CLAUDE_PROJECT_DIR": str(FX.main)})
@@ -854,7 +1021,8 @@ class LauncherSourceShapeTests(unittest.TestCase):
         self.assertTrue(LAUNCHER_BODY.is_file(), msg=f"{LAUNCHER_BODY} must exist (the launcher body)")
         self._compile(LAUNCHER_BODY)
         lines = LAUNCHER_BODY.read_text(encoding="utf-8").splitlines()
-        self.assertLess(len(lines), 120, msg="I-3: the body stays under 120 lines")
+        self.assertLess(len(lines), 135, msg="I-3: the body stays under 135 lines (Open question R8-1 raised the "
+                                              "ceiling from 120)")
         allowed = {"sys", "os", "io", "json", "runpy", "traceback", "_main_checkout_guard"}
         self.assertLessEqual(self._imports(LAUNCHER_BODY), allowed,
                              msg="I-3: the body imports only sys, os, io, json, runpy, traceback (plus the guard "
@@ -879,14 +1047,14 @@ class LauncherFailureTests(GuardTestCase):
             marker = hooks / "gate_ran.marker"
             with self.subTest(f"decide calls sys.exit({code})"):
                 res = launch(self._allow_payload(), hooks_dir=hooks, project=FX.main)
-                self._expect_block(res, contains=["launcher failed"])
+                self._expect_block(res, "launcher", contains=["launcher failed"])
                 self.assertFalse(marker.exists(), msg="the gate must not run after the launcher failed")
 
     def test_guard_that_returns_a_non_verdict_blocks(self):
         hooks = self._copy("guard_nonverdict", overwrite={
             "_main_checkout_guard.py": "def decide(*a, **k):\n    return 42\n"})
         res = launch(self._allow_payload(), hooks_dir=hooks, project=FX.main)
-        self._expect_block(res)
+        self._expect_block(res, "launcher")
         self.assertFalse((hooks / "gate_ran.marker").exists(), msg="a non-verdict must never reach the gate")
 
     def test_body_that_raises_before_its_decision_blocks(self):
@@ -896,7 +1064,7 @@ class LauncherFailureTests(GuardTestCase):
         self.assertEqual(count, 1, msg="the body must define main(), where the failure is injected")
         hooks = self._copy("body_raises", overwrite={"_gate_launch.py": injected})
         res = launch(self._allow_payload(), hooks_dir=hooks, project=FX.main)
-        self._expect_block(res)
+        self._expect_block(res, "launcher")
         self.assertFalse((hooks / "gate_ran.marker").exists(), msg="the gate must not run when the body raised")
 
     def test_body_deleted_or_with_a_syntax_error_blocks_through_the_stub_fallback(self):
@@ -905,13 +1073,13 @@ class LauncherFailureTests(GuardTestCase):
         for name, hooks in (("_gate_launch.py deleted", deleted), ("_gate_launch.py syntax error", broken)):
             with self.subTest(name):
                 res = launch(self._allow_payload(), hooks_dir=hooks, project=FX.main)
-                self._expect_block(res)
+                self._expect_block(res, "launcher")
                 self.assertFalse((hooks / "gate_ran.marker").exists(), msg="the gate must not run")
 
     def test_named_gate_file_deleted_blocks(self):
         hooks = self._copy("gate_deleted", delete=("concept-gate.py",))
         res = launch(self._allow_payload(), hooks_dir=hooks, gate_arg=str(hooks / "concept-gate.py"), project=FX.main)
-        self.assertEqual(res.rc, 2, msg=f"a missing gate file must exit 2 as a direct launch of a missing file does: {res.describe()}")
+        self._expect_block(res, "launcher", contains=["is missing"])
         self.assertTrue(LAUNCHER.is_file(), msg="the launcher itself must exist for this row to mean anything")
 
 
@@ -939,7 +1107,7 @@ class GatePassThroughTests(GuardTestCase):
             with self.subTest(name):
                 self._block_ok = False
                 blocked = launch(block_payload, hooks_dir=hooks, project=FX.main)
-                self._expect_block(blocked)
+                self._expect_block(blocked, "guard")
                 self.assertFalse((hooks / "gate_ran.marker").exists(), msg="a guard block must precede the gate: it never ran")
                 res = launch(allow_payload, hooks_dir=hooks, project=FX.main)
                 self.assertTrue(self._block_ok, msg="same-run BLOCK sibling confirmed first")
@@ -965,7 +1133,7 @@ class MisregistrationTests(GuardTestCase):
                                   ("unexpanded plugin root text", literal, "${CLAUDE_PLUGIN_ROOT}")):
             with self.subTest(name):
                 res = launch(allow_payload, gate_arg=arg, project=FX.main)
-                self._expect_block(res, contains=["launcher misregistered", "auto_improve_finish_install.py"])
+                self._expect_block(res, "misregistered", contains=["launcher misregistered", "auto_improve_finish_install.py"])
                 norm = res.err.replace("\\", "/").lower()
                 self.assertIn(posix(HOOKS_DIR).lower(), norm, msg="the banner names the launcher's own folder")
                 self.assertIn(folder.replace("\\", "/").lower(), norm, msg="the banner names the gate's folder")
@@ -980,7 +1148,7 @@ class MisregistrationTests(GuardTestCase):
         try:
             allow_payload = file_payload("Edit", str(FX.wt / "docs" / "x.md"), FX.wt)
             blocked = launch(allow_payload, gate_arg=str(FX.root / "other_hooks" / "concept-gate.py"), project=FX.main)
-            self._expect_block(blocked, contains=["launcher misregistered"])
+            self._expect_block(blocked, "misregistered", contains=["launcher misregistered"])
             res = launch(allow_payload, gate_arg=str(link / "concept-gate.py"), project=FX.main)
             self._expect_allow(res)
         finally:
@@ -1008,7 +1176,7 @@ class DegradedGuardTests(GuardTestCase):
                 self._block_ok = False
                 before = error_log_lines()
                 res = launch(file_payload("Edit", str(FX.main / "src" / "x.cs"), FX.main), hooks_dir=hooks, project=FX.main)
-                self._expect_block(res, contains=["guard degraded"])
+                self._expect_block(res, "degraded", contains=["guard degraded"])
                 self.assertEqual(error_log_lines() - before, 1,
                                  msg="a degraded block writes exactly one errors.jsonl line "
                                      "(<project>/.claude/logs/errors.jsonl, the project-local logs_dir())")
@@ -1023,20 +1191,116 @@ class DegradedGuardTests(GuardTestCase):
             proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(FX.main)], capture_output=True, text=True)
             if proc.returncode == 0:
                 extra.append(f("degraded: junction from a worktree path into main", "Edit",
-                               link / "src" / "a.cs", FX.wt, FX.main, "block", hooks_dir=hooks))
+                               link / "src" / "a.cs", FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded"))
             else:
                 print(f"SKIP degraded junction row: {proc.stdout.strip()}", file=sys.stderr)
         cases = [
-            f("degraded: dot-dot out of the worktree into main", "Edit", f"{wt}/../../../src/a.cs", FX.wt, FX.main, "block", hooks_dir=hooks),
-            sh("degraded: cd main then commit", "Bash", f"cd {main} && git commit -m x", FX.wt, FX.main, "block", hooks_dir=hooks),
-            sh("degraded: git -C main commit", "Bash", f"git -C {main} commit -m x", FX.wt, FX.main, "block", hooks_dir=hooks),
-            sh("degraded: worktree add into src", "Bash", f"git worktree add {main}/src/x", FX.wt, FX.main, "block", hooks_dir=hooks),
-            sh("degraded: gh pr create from a worktree", "Bash", "gh pr create --title t --body b", FX.wt, FX.main, "block", hooks_dir=hooks),
+            f("degraded: dot-dot out of the worktree into main", "Edit", f"{wt}/../../../src/a.cs", FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded: cd main then commit", "Bash", f"cd {main} && git commit -m x", FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded: git -C main commit", "Bash", f"git -C {main} commit -m x", FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded: worktree add into src", "Bash", f"git worktree add {main}/src/x", FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded: gh pr create from a worktree", "Bash", "gh pr create --title t --body b", FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded"),
             sh("degraded: flat worktree add", "Bash", f"git worktree add {main}/.claude/worktrees/20261008-degraded-flat -b degraded1",
                FX.wt, FX.main, "allow", hooks_dir=hooks),
             f("degraded: worktree md edit", "Edit", FX.wt / "docs" / "x.md", FX.wt, FX.main, "allow", hooks_dir=hooks),
         ] + extra
         self.run_cases(cases)
+
+    # ---- t8 F4: one BLOCK row per clause of I-3's degraded rule, each holding ONLY that clause's token ----
+    #: (clause, command). Every command is otherwise harmless from a worktree folder, so the clause is the
+    #: only thing that can block it.
+    CLAUSE_TOKENS = [
+        ("word cd", "cd docs"), ("word pushd", "pushd docs"), ("word popd", "popd"),
+        ("word Set-Location", "Set-Location docs"), ("word sl", "sl docs"),
+        ("word Push-Location", "Push-Location docs"), ("word gh", "gh pr view 5"),
+        ("text -C", "git -C docs status"), ("text --git-dir", "git --git-dir=docs status"),
+        ("text --work-tree", "git --work-tree=docs status"), ("text GIT_", "GIT_PAGER=cat git status"),
+        ("text ..", "echo a..b"), ("text ~", "echo a~b"), ("text $", "echo $X"), ("text %", "echo 100%"),
+        ("text backtick", "echo a`b"), ("drive-letter path", "echo C:/x"), ("rooted path", "echo /x"),
+    ]
+
+    def test_each_banned_word_and_text_of_the_degraded_rule_blocks_on_its_own(self):
+        hooks = self._hooks("degraded_clauses", self.VARIANTS["guard deleted"])
+        cases = [sh(f"degraded {tool} {name}: {cmd}", tool, cmd, FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded")
+                 for tool in ("Bash", "PowerShell") for name, cmd in self.CLAUSE_TOKENS]
+        cases += [sh(f"degraded {tool} allow: {cmd}", tool, cmd, FX.wt, FX.main, "allow", hooks_dir=hooks)
+                  for tool in ("Bash", "PowerShell") for cmd in ("echo hello", "git status")]
+        self.run_cases(cases)
+
+    def test_each_flat_add_condition_and_the_dot_dot_file_target_block_on_their_own(self):
+        hooks = self._hooks("degraded_flat_clauses", self.VARIANTS["guard deleted"])
+        main, wt = posix(FX.main), posix(FX.wt)
+        flat = f"git worktree add {main}/.claude/worktrees/20261012-clause"
+        rows = [
+            ("two trailing words", f"{flat} -b t9a origin/master extra"),
+            ("nested name, worktree inside a worktree", f"git worktree add {main}/.claude/worktrees/a/.claude/worktrees/b -b n1"),
+            ("nested name, two segments", f"git worktree add {main}/.claude/worktrees/a/b -b n2"),
+            ("dot-dot in the path", f"git worktree add {main}/src/../.claude/worktrees/x -b n3"),
+            ("variable in the path", f"git worktree add {main}/.claude/worktrees/$X -b n4"),
+            ("quote around the path", f'git worktree add "{main}/.claude/worktrees/x" -b n5'),
+        ]
+        cases = [sh(f"degraded flat add: {name}", "Bash", cmd, FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded")
+                 for name, cmd in rows]
+        cases.append(f("degraded Edit with dot-dot back into the same worktree", "Edit",
+                       f"{wt}/../{FX.wt.name}/docs/x.md", FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded"))
+        cases += [
+            sh("degraded flat add control allows", "Bash", f"{flat} -b ok1", FX.wt, FX.main, "allow", hooks_dir=hooks),
+            f("degraded worktree md control allows", "Edit", FX.wt / "docs" / "x.md", FX.wt, FX.main, "allow", hooks_dir=hooks),
+        ]
+        self.run_cases(cases)
+
+    # ---- t7 F1, the backslash spelling and the start folder below the root: RED until the degraded rule
+    # ---- compares the path with the main checkout's flat folder and reads only a bare flat add ----------
+    def test_flat_add_with_a_wrong_prefix_or_a_tail_that_is_not_one_start_point_blocks(self):
+        hooks = self._hooks("degraded_t7f1", self.VARIANTS["guard deleted"])
+        main, second = posix(FX.main), posix(FX.second)
+        flat = f"git worktree add {main}/.claude/worktrees/20261012-t7f1"
+        red = [
+            ("flat folder under main/src", f"git worktree add {main}/src/.claude/worktrees/x -b r1"),
+            ("flat folder of the second repository", f"git worktree add {second}/.claude/worktrees/x -b r1"),
+            ("second command after the branch name", f"{flat} -b r2;git commit"),
+            ("redirect glued to the start point", f"{flat} HEAD>out.txt"),
+            ("pipe glued to the branch name", f"{flat} -b r3|whoami"),
+            ("extra option after the branch name", f"{flat} -b r4 --force"),
+            ("newline and a second command", f"{flat} -b r5\nwhoami"),
+        ]
+        cases = [sh(f"degraded t7 F1: {name}", "Bash", cmd, FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded")
+                 for name, cmd in red]
+        # a BLOCK row that passes today, so the ALLOW siblings below count; then the siblings (pass today and after)
+        cases.append(sh("degraded control: add into main/src blocks", "Bash", f"git worktree add {main}/src/x -b r0",
+                        FX.wt, FX.main, "block", hooks_dir=hooks, kind="degraded"))
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        for label, cmd in (("branch and start point", f"{flat} -b task/a/t1 origin/master"),
+                           ("detached start point", f"{flat} --detach origin/master"),
+                           ("commit id", f"{flat} {sha}")):
+            cases.append(sh(f"degraded allow, main project and cwd: {label}", "Bash", cmd, FX.main, FX.main, "allow", hooks_dir=hooks))
+            cases.append(sh(f"degraded allow, worktree project and cwd: {label}", "Bash", cmd, FX.wt, FX.wt, "allow", hooks_dir=hooks))
+        self.run_cases(cases)
+
+    @unittest.skipUnless(IS_WINDOWS, "backslash spellings are a Windows reading")
+    def test_flat_add_written_with_backslashes_in_bash_blocks_but_the_same_text_in_powershell_allows(self):
+        hooks = self._hooks("degraded_backslash", self.VARIANTS["guard deleted"])
+        main = posix(FX.main)
+        text = f"git worktree add {str(FX.main)}\\.claude\\worktrees\\x -b r6"
+        self.run_cases([
+            sh("degraded Bash: flat add written with backslashes", "Bash", text, FX.main, FX.main, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded control: add into main/src blocks", "Bash", f"git worktree add {main}/src/x -b r0",
+               FX.main, FX.main, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded PowerShell: the same text allows", "PowerShell", text, FX.main, FX.main, "allow", hooks_dir=hooks),
+        ])
+
+    def test_flat_add_from_a_start_folder_below_the_root_blocks_but_the_root_itself_allows(self):
+        hooks = self._hooks("degraded_start", self.VARIANTS["guard deleted"])
+        main, src = posix(FX.main), FX.main / "src"
+        below = f"git worktree add {main}/src/.claude/worktrees/x -b r7"
+        self.run_cases([
+            sh("degraded: project dir and cwd are main/src", "Bash", below, src, src, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded: no project dir, payload cwd is main/src", "Bash", below, src, None, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded control: add into main/src blocks", "Bash", f"git worktree add {main}/src/x -b r0",
+               FX.main, FX.main, "block", hooks_dir=hooks, kind="degraded"),
+            sh("degraded allow: the root is found by walking up from main/src", "Bash",
+               f"git worktree add {main}/.claude/worktrees/x -b r8", src, src, "allow", hooks_dir=hooks),
+        ])
 
 
 if __name__ == "__main__":

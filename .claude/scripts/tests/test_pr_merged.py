@@ -12174,6 +12174,17 @@ class TestRehydration(_WorktreeWorldCase):
         self.assertEqual(str(entry.get("brief")).replace("\\", "/"), WT_BRIEF_T1,
                          "positive control: the EMPTY field beside them is still filled")
 
+    def test_rehydration_never_overwrites_a_brief_that_has_a_value(self):
+        # twin of the test above for the third field (t8 F6): the brief path is kept like issue and base
+        other = "docs/another-brief.md"
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry(issue=None, base=None, brief=other)})
+        _proc, report = self.status()
+        entry = self.entry(report)
+        self.assertEqual(str(entry.get("brief")).replace("\\", "/"), other,
+                         "I-8: a brief path that has a value is never overwritten by the one tracked brief")
+        self.assertEqual((entry.get("issue"), entry.get("base")), (473, WT_PARENT),
+                         "positive control: the EMPTY issue and base beside it are still filled from the brief")
+
     def test_a_brief_naming_another_contract_is_not_used(self):
         _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry(base=None)})
         _proc, report = self.status()

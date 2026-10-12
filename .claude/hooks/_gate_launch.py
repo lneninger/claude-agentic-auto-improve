@@ -19,16 +19,32 @@ def _worktree(path):
     return any(parts[i] == ".claude" and parts[i + 1] == "worktrees" and parts[i + 2] for i in range(len(parts) - 2))
 
 
-def _flat_add(command):
-    words = command.split()
+def _root(path):
+    here = os.path.normcase(os.path.realpath(path)).replace("\\", "/").split(WT_MARK)[0]
+    while not os.path.exists(here + "/.git"):
+        if os.path.dirname(here) == here:
+            return None
+        here = os.path.dirname(here)
+    return here if os.path.isdir(here + "/.git") else None
+
+
+def _flat_add(tool, command, root):
+    if root is None or (tool == "Bash" and "\\" in command) or any(c in command for c in ";&|<>()$`'\"%~\r\n"):
+        return False
+    words = command.replace("\\", "/").split()
     if words[:3] != ["git", "worktree", "add"] or len(words) < 4:
         return False
-    rest = words[4:]
-    rest = rest[2:] if rest[:1] == ["-b"] else rest[1:] if rest[:1] == ["--detach"] else rest
-    path = words[3].replace("\\", "/")
-    head, _, name = path.rpartition(WT_MARK)
-    return (len(rest) <= 1 and bool(head) and bool(name) and "/" not in name and WT_MARK not in head + "/"
-            and ".." not in path and not any(q in path for q in "'\"$%`~"))
+    tail = words[4:]
+    flag = tail[:1] if tail[:1] in (["-b"], ["--detach"]) else []
+    vals = tail[len(flag):]
+    if len(vals) > (2 if flag == ["-b"] else 1) or (flag == ["-b"] and not vals):
+        return False
+    if not all(v[0] != "-" and all(c.isascii() and c.isalnum() or c in "._/-" for c in v) for v in vals):
+        return False
+    head, _, name = words[3].rpartition(WT_MARK)
+    if not (head and name and "/" not in name and WT_MARK not in head + "/" and ".." not in words[3]):
+        return False
+    return os.path.normcase(os.path.realpath(head)).replace("\\", "/") == root
 
 
 def _degraded(payload):
@@ -41,7 +57,7 @@ def _degraded(payload):
     command = tool_input.get("command")
     if tool not in ("Bash", "PowerShell") or not isinstance(command, str) or not cwd:
         return "this call cannot be judged without the guard"
-    if _flat_add(command):
+    if _flat_add(tool, command, _root(os.environ.get("CLAUDE_PROJECT_DIR") or cwd)):
         return None
     flat = command.lower()
     for ch in ";&|()\"'=":
