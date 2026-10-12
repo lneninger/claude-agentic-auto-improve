@@ -87,6 +87,8 @@ project_dir = _pp.project_dir
 state_dir = _pp.state_dir
 logs_dir = _pp.logs_dir
 hook_file = _pp.hook_file
+tree_kind = _pp.tree_kind
+main_checkout_root = _pp.main_checkout_root
 
 __all__ = [
     "claude_roots",
@@ -105,4 +107,6 @@ __all__ = [
     "state_dir",
     "logs_dir",
     "hook_file",
+    "tree_kind",
+    "main_checkout_root",
 ]

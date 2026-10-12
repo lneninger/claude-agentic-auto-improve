@@ -93,6 +93,8 @@ git -C <tree> rev-parse --abbrev-ref HEAD     # must equal the brief's branch:
 git -C <tree> status --short                  # uncommitted work is not shipped
 ```
 
+**Also halt in the main checkout:** if `py -3 .claude/scripts/flat_worktree.py --describe` reports `current_tree: main-checkout`, stop and say "run `/task`, or `EnterWorktree` into a worktree, then `/ship`". A detached HEAD is otherwise a halt, with one exception: the detached flat worktree `/advance` makes when the parent branch is held by the main checkout, where the branch to ship is the brief's `branch:`.
+
 ### 1b. The branch must actually differ from the base
 
 ```bash
@@ -259,7 +261,11 @@ carries no closing line, and Step 4d's verdict will be `not-applicable` — whic
 git -C <tree> push -u origin <branch>
 ```
 
+**In a detached advance worktree** publish with `git push origin HEAD:refs/heads/<parent>` (`<parent>` is the brief's `branch:`), with no force form and no `+` refspec. If refused, halt with: "the parent moved on origin; `git fetch` and `git merge --ff-only origin/<parent>` here, then retry".
+
 ### 4b. Open it
+
+**Before the create, check the merge direction:** `py -3 .claude/scripts/merge_direction.py --head <branch> --base <declared base> --session-root <main_root from flat_worktree.py --describe>`. Any non-zero exit (11 refused, 10 unverifiable), a missing script or a timeout halts with the printed reason. Always pass `--head <branch>` as well as `--base` to `gh pr create`; in a detached advance worktree that is `--head <parent> --base <default branch>`.
 
 Write the body to a file rather than passing it inline — a shell will mangle the backticks
 and the checklist.

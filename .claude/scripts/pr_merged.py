@@ -809,6 +809,168 @@ def awaiting_merge(state: Dict[str, Any]) -> List[str]:
             if v.get("status") == "awaiting-merge"]
 
 
+def _branch_sets() -> Tuple[set, set]:
+    """Branch names that exist locally, and branch names origin itself lists (asked, not a stale tracking ref)."""
+    code, out = _run(["git", "for-each-ref", "--format=%(refname)", "refs/heads/"])
+    local = {l.strip()[len("refs/heads/"):] for l in out.splitlines()
+             if code == 0 and l.strip().startswith("refs/heads/")}
+    code, out = _run(["git", "ls-remote", "--heads", "origin"])
+    remote = set()
+    for line in out.splitlines() if code == 0 else []:
+        _sha, _tab, ref = line.strip().partition("\t")
+        if ref.startswith("refs/heads/"):
+            remote.add(ref[len("refs/heads/"):])
+    return local, remote
+
+
+def rehydrate_state(state: Dict[str, Any], slug: str, *, fresh: bool = False,
+                    default: Optional[str] = None) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Rebuild what a fresh state store lacks from the tracked briefs and the branches (I-8).
+
+    Runs right after ``backfill_state`` and before every reader. (a) An entry's empty ``issue``,
+    ``base`` and ``brief`` are filled from the ONE tracked brief that ``brief_for_branch`` finds
+    for ``task/<slug>/<id>`` and whose ``contract:`` names this contract. (b) A ``pending`` entry
+    whose branch exists locally or on origin becomes ``awaiting-merge``. It never overwrites a
+    field that has a value and never downgrades a status; completion records still win through
+    ``reconcile_state``. ``fresh`` marks a store this run just created: its ``base`` is the
+    default branch ``new_state`` stamped, not a recorded decision, so it counts as empty.
+
+    Returns ``(new state, {sub-task id: detail})`` where the second part names every sub-task
+    with two matching briefs (the dispatch refuses those as ``identity-ambiguous``).
+    """
+    st = copy.deepcopy(state)
+    ambiguous: Dict[str, str] = {}
+    branches: Optional[Tuple[set, set]] = None
+    for tid, entry in (st.get("sub_tasks") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        branch = branch_for(slug, tid)
+        base_empty = not entry.get("base") or bool(fresh and default and entry.get("base") == default)
+        if not entry.get("issue") or base_empty or not entry.get("brief"):
+            brief: Optional[Dict[str, str]] = None
+            try:
+                brief = brief_for_branch(branch, "HEAD")
+            except AmbiguousBrief as exc:
+                ambiguous[tid] = str(exc)
+            except Exception:
+                brief = None
+            if brief and _names_contract(brief.get("contract"), slug):
+                digits = re.fullmatch(r"#?(\d+)", str(brief.get("id") or "").strip())
+                if not entry.get("issue") and digits:
+                    entry["issue"] = int(digits.group(1))
+                if base_empty and brief.get("base"):
+                    entry["base"] = brief["base"]
+                if not entry.get("brief"):
+                    entry["brief"] = brief["path"]
+        if entry.get("status") == "pending":
+            if branches is None:
+                try:
+                    branches = _branch_sets()
+                except Exception:  # rehydration is best effort: an unreadable git changes nothing
+                    branches = (set(), set())
+            if branch in branches[0] or branch in branches[1]:
+                entry["status"] = "awaiting-merge"
+                if not entry.get("branch"):
+                    entry["branch"] = branch
+    return st, ambiguous
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _is_advance_worktree(path: str, slug: str) -> bool:
+    """True when ``path`` is named like this slug's advance worktree: ``<date>-advance-<slug>[-2..9]``."""
+    m = re.fullmatch(r"\d{8}-advance-(.+)", os.path.basename(os.path.normpath(path)))
+    if not m:
+        return False
+    rest = m.group(1)
+    for cand in (rest, re.sub(r"-[2-9]$", "", rest)):
+        if slug == cand or slug.startswith(cand + "-"):
+            return True
+    return False
+
+
+def locate_parent(slug: str) -> Dict[str, Any]:
+    """Where a contract's parent branch lives -- Parent location (I-10). Writes nothing but ``git fetch``.
+
+    Candidates: local and remote branches whose tree holds ``.claude/concepts/<slug>.md``, minus
+    the default branch, ``task/<slug>/...`` and ``docs/<slug>-records...``, each confirmed by a
+    brief on it that names this contract and that branch. The contract file need not exist in the
+    current checkout. Precedence: already-here, found, ahead-of-origin, held-by-main-checkout,
+    not-checked-out, then (no candidate) on-default or not-found; two candidates are ambiguous.
+    """
+    import flat_worktree
+    _run(["git", "fetch", "origin"])  # a failed fetch leaves the tracking refs as they are
+    default = default_branch()
+    concept = "%s/%s.md" % (CONCEPTS_DIR.as_posix(), slug)
+    code, out = _run(["git", "for-each-ref", "--format=%(refname)", "refs/heads/", "refs/remotes/origin/"])
+    local: set = set()
+    remote: set = set()
+    for line in out.splitlines() if code == 0 else []:
+        ref = line.strip()
+        if ref.startswith("refs/heads/"):
+            local.add(ref[len("refs/heads/"):])
+        elif ref.startswith("refs/remotes/origin/") and not ref.endswith("/HEAD"):
+            remote.add(ref[len("refs/remotes/origin/"):])
+
+    def ref_of(name: str) -> str:
+        return "refs/heads/" + name if name in local else "refs/remotes/origin/" + name
+
+    candidates: List[str] = []
+    for name in sorted(local | remote):
+        if name == default or name.startswith("task/%s/" % slug) or name.startswith(records_branch_prefix(slug)):
+            continue
+        if _run(["git", "cat-file", "-e", "%s:%s" % (ref_of(name), concept)])[0] != 0:
+            continue
+        try:
+            brief = brief_for_branch(name, ref_of(name))
+        except AmbiguousBrief:
+            brief = None
+        if brief and _names_contract(brief.get("contract"), slug):
+            candidates.append(name)
+
+    report: Dict[str, Any] = {"status": "not-found", "branch": None, "worktree": None,
+                              "candidates": candidates, "plan": None}
+    if not candidates:
+        if _run(["git", "cat-file", "-e", "%s:%s" % (ref_of(default), concept)])[0] == 0:
+            report["status"] = "on-default"
+        return report
+    if len(candidates) > 1:
+        report["status"] = "ambiguous"
+        return report
+
+    branch = candidates[0]
+    report["branch"] = branch
+    entries = flat_worktree.worktree_entries(os.getcwd())
+    code, top = _run(["git", "rev-parse", "--show-toplevel"])
+    current = next((i for i, e in enumerate(entries) if code == 0 and top and _same_path(e["path"], top)), None)
+    if current not in (None, 0):
+        here = entries[current]
+        if here.get("branch") == branch or (here.get("detached") and _is_advance_worktree(here["path"], slug)):
+            report.update(status="already-here", worktree=here["path"])
+            return report
+    holders = [i for i, e in enumerate(entries) if i > 0 and e.get("branch") == branch]
+    if holders:
+        report.update(status="found", worktree=entries[holders[0]]["path"])
+        return report
+    if entries and entries[0].get("branch") == branch:
+        ahead_code, ahead = _run(["git", "rev-list", "--count",
+                                  "refs/remotes/origin/%s..refs/heads/%s" % (branch, branch)])
+        if branch not in remote or (ahead_code == 0 and ahead.strip().isdigit() and int(ahead) > 0):
+            report.update(status="ahead-of-origin", remedy="git push origin %s" % branch)
+            return report
+        sha = _run(["git", "rev-parse", "--verify", "refs/heads/" + branch])[1]
+        advance = next((e["path"] for i, e in enumerate(entries)
+                        if i > 0 and e.get("detached") and _is_advance_worktree(e["path"], slug)), None)
+        report.update(status="held-by-main-checkout", worktree=advance,
+                      plan={"action": "advance", "slug": slug, "source": "detached-at", "ref": sha})
+        return report
+    report.update(status="not-checked-out",
+                  plan={"action": "advance", "slug": slug, "source": "existing-branch", "branch": branch})
+    return report
+
+
 def state_path(contract_slug: str) -> Path:
     return STATE_DIR / contract_slug / "state.yaml"
 
@@ -832,18 +994,25 @@ def write_state(contract_slug: str, state: Dict[str, Any]) -> Path:
     return f
 
 
-def create_branch(branch: str, base: str, issue: Optional[int] = None) -> Tuple[bool, str]:
-    """Cut a sub-task branch from a freshly fetched ``base``.
+def create_branch(branch: str, base: str, issue: Optional[int] = None,
+                  worktree: Optional[str] = None) -> Tuple[bool, str]:
+    """Cut a sub-task branch from a freshly fetched ``base``, in a NEW flat worktree.
 
     Never from whatever happens to be checked out -- a sub-task seeded from
     another branch inherits its commits and its review surface. ``base`` is
     the sub-task's own declared parent branch, not necessarily the
     repository default branch; the caller decides which.
 
+    ``worktree`` is the flat worktree path, computed by the caller BEFORE this call
+    (``flat_worktree.plan_path``). The local half is ``git worktree add`` through the flat
+    worktree helper -- never ``git switch`` or ``git checkout``, so the checkout this runs
+    from keeps its branch, index and files (I-7). Without a ``worktree`` one is planned
+    here from the process folder.
+
     With an ``issue`` and a working ``gh``, the branch is cut through
-    ``gh issue develop`` so it is registered against its sub-issue before it
-    exists locally, then fetched and checked out. Without an issue, or when
-    ``gh`` fails, this falls back to the plain ``git switch -c`` form and
+    ``gh issue develop`` (without ``--checkout``) so it is registered against its sub-issue
+    before it exists locally, then fetched and added as a worktree. Without an issue, or when
+    ``gh`` fails, this falls back to the plain ``git worktree add -b`` form and
     says which path was taken -- a silent fallback is what hides a missing
     linked branch.
 
@@ -857,12 +1026,23 @@ def create_branch(branch: str, base: str, issue: Optional[int] = None) -> Tuple[
     a silent one; (3) ``gh issue develop`` was never called, or it failed
     outright, so the plain-git path ran and the detail says exactly that.
     """
+    import flat_worktree  # lazy: only a dispatch needs the helper, and it imports the path resolver
+    if worktree is None:
+        root = flat_worktree.describe()["main_root"]
+        name, planned, refusal = (flat_worktree.plan_path(root, "task", branch.rsplit("/", 1)[-1])
+                                  if root else ("", None, "git-failed"))
+        if planned is None:
+            return False, "%s: no flat worktree path could be planned for %s" % (refusal, branch)
+        worktree = planned
+    worktree = str(worktree).replace("\\", "/")
+
     if issue is not None:
         code, _out = _run(["gh", "issue", "develop", str(issue), "--name", branch,
                            "--base", base])
         if code == 0:
             _run(["git", "fetch", "origin", branch])
-            checkout_code, checkout_out = _run(["git", "switch", branch])
+            checkout_code, checkout_out = flat_worktree.add_worktree(
+                _run, worktree, branch=branch, start="origin/" + branch)
             if checkout_code == 0:
                 return True, (checkout_out or
                              f"registered {branch} against issue {issue} via gh issue develop")
@@ -883,9 +1063,11 @@ def create_branch(branch: str, base: str, issue: Optional[int] = None) -> Tuple[
     if _run(["git", "rev-parse", "--verify", branch])[0] == 0:
         return False, "branch already exists"
     if _run(["git", "fetch", "origin", base])[0] != 0:
-        return False, "could not fetch origin/" + base
-    code, out = _run(["git", "switch", "-c", branch, "origin/" + base])
+        return False, "fetch-failed: could not fetch origin/" + base + gh_fallback_detail
+    code, out = flat_worktree.add_worktree(_run, worktree, branch=branch, start="origin/" + base)
     detail = (out or ("created " + branch)) + gh_fallback_detail
+    if code != 0:
+        detail = "git-failed: " + detail
     return code == 0, detail
 
 
@@ -1419,12 +1601,19 @@ def parse_review_verdict(artefact_text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Edges: the only places that touch git or GitHub
 # ---------------------------------------------------------------------------
-def _run(cmd: List[str]) -> Tuple[int, str]:
+def _run(cmd: List[str], *, cwd: Optional[str] = None,
+         env: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
+    """Run one command; ``(exit code, stripped stdout)``.
+
+    ``cwd`` and ``env`` (keyword-only, both ``None`` by default, which is exactly the call this
+    function always made) let a caller aim ONE call at another folder or environment without a
+    process-wide ``chdir`` or ``os.environ`` edit (I-9).
+    """
     try:
         # UTF-8 on purpose: git and gh both emit it, and a locale code page would turn a
         # contract's em dashes into mojibake and make a byte-exact comparison (I-11) fail.
         p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=60)
+                           errors="replace", timeout=60, cwd=cwd, env=env)
         return p.returncode, p.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return 1, ""
@@ -1448,7 +1637,8 @@ def gh_pr(ref: "int | str") -> Optional[Dict[str, Any]]:
         return None
 
 
-def repo_view(name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def repo_view(name: Optional[str] = None, *, cwd: Optional[str] = None,
+              env: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
     """A repository's identity -- Extension Point 6, the new edge X-3/X-5 need.
 
     Runs ``gh repo view [<name>] --json nameWithOwner,defaultBranchRef``.
@@ -1470,7 +1660,14 @@ def repo_view(name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if name:
         cmd.append(name)
     cmd += ["--json", "nameWithOwner,defaultBranchRef"]
-    code, out = _run(cmd)
+    # Keywords only when given: a caller (or a test double) that passes neither sees exactly the
+    # one-argument call this function always made.
+    extra: Dict[str, Any] = {}
+    if cwd is not None:
+        extra["cwd"] = cwd
+    if env is not None:
+        extra["env"] = env
+    code, out = _run(cmd, **extra)
     if code != 0 or not out:
         return None
     try:
@@ -1570,9 +1767,24 @@ def ensure_commit_local(sha: str, ref: str) -> bool:
     return code == 0
 
 
+def default_branch_or_none(*, cwd: Optional[str] = None,
+                           env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The ``origin/HEAD`` read of ``default_branch()``, answering ``None`` when it is unreadable.
+
+    A gate must not guess: the merge-direction check uses only this strict reader (I-9).
+    ``cwd`` and ``env`` are passed to ``_run`` only when given.
+    """
+    extra: Dict[str, Any] = {}
+    if cwd is not None:
+        extra["cwd"] = cwd
+    if env is not None:
+        extra["env"] = env
+    code, out = _run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], **extra)
+    return out.rsplit("/", 1)[-1] if code == 0 and out else None
+
+
 def default_branch() -> str:
-    code, out = _run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"])
-    return out.rsplit("/", 1)[-1] if code == 0 and out else "master"
+    return default_branch_or_none() or "master"
 
 
 def _read_issue_state(issue: int) -> Optional[str]:
@@ -1659,6 +1871,15 @@ def read_brief_frontmatter(brief_path: Path) -> Optional[Dict[str, str]]:
         text = brief_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    return parse_brief_frontmatter(text)
+
+
+def parse_brief_frontmatter(text: str) -> Dict[str, str]:
+    """The text parser behind ``read_brief_frontmatter``: a brief's frontmatter fields.
+
+    An empty mapping when the text carries no frontmatter block. Pure, so a caller that already
+    holds the text (a file read at a commit) reuses it instead of writing a second reader.
+    """
     match = _FRONTMATTER.match(text.replace("\r\n", "\n"))
     if not match:
         return {}
@@ -1696,6 +1917,44 @@ def read_work_item_briefs(contract_slug: str) -> List[Dict[str, str]]:
         entry["_path"] = str(path)
         out.append(entry)
     return out
+
+
+class AmbiguousBrief(Exception):
+    """Two tracked briefs name the same branch: picking either would guess the sub-task's identity."""
+
+    def __init__(self, branch: str, paths: List[str]) -> None:
+        super().__init__("%d briefs name %s: %s" % (len(paths), branch, ", ".join(paths)))
+        self.branch, self.paths = branch, paths
+
+
+def brief_for_branch(branch: str, commit: str) -> Optional[Dict[str, str]]:
+    """The one tracked Work Item Brief whose ``branch:`` is ``branch``, read AT ``commit`` (I-8, I-9).
+
+    Returns the brief's frontmatter fields plus ``path`` (repository-relative, forward slashes),
+    or ``None`` when no brief names the branch (or the commit cannot be read). Two briefs for one
+    branch raise ``AmbiguousBrief`` and are never returned as one. Reads the commit's tree, not
+    the working tree, through the module's own ``_run`` and ``file_at_commit`` edges.
+    """
+    code, out = _run(["git", "grep", "-l", "-F", "-e", branch, commit, "--", WORK_ITEMS_DIR.as_posix()])
+    if code != 0 or not out:
+        return None
+    found: List[Tuple[str, Dict[str, str]]] = []
+    for line in out.splitlines():
+        _ref, sep, path = line.strip().partition(":")
+        if not sep or not path.lower().endswith(".md"):
+            continue
+        text = file_at_commit(commit, path)
+        if text is None:
+            continue
+        fields = parse_brief_frontmatter(text)
+        if fields.get("branch", "").strip().strip("'\"") == branch:
+            found.append((path, fields))
+    if not found:
+        return None
+    if len(found) > 1:
+        raise AmbiguousBrief(branch, sorted(p for p, _f in found))
+    path, fields = found[0]
+    return dict(fields, path=path.replace("\\", "/"))
 
 
 def find_contract(slug_or_path: str) -> Optional[Path]:
@@ -2890,6 +3149,8 @@ def main() -> int:
     ap.add_argument("--base", metavar="BRANCH",
                     help="the sub-task's declared base branch, with --record-subtask")
     ap.add_argument("--brief", metavar="PATH", help="the sub-task's brief path, with --record-subtask")
+    ap.add_argument("--locate-parent", action="store_true",
+                    help="report where the contract's parent branch lives (reads and fetches, writes nothing)")
     ap.add_argument("--record-delivery", action="store_true",
                     help="record that the one --pr delivered every block of the contract (GitHub-verified)")
     ap.add_argument("--owner-resolved", action="append", default=[], metavar="REPORT",
@@ -2897,6 +3158,12 @@ def main() -> int:
     ap.add_argument("--skipped", action="append", default=[], metavar="TEXT",
                     help="a verification the owner declares skipped or impossible (repeatable)")
     args = ap.parse_args()
+
+    if args.locate_parent:
+        # I-10: the slug comes from --contract and the contract file need not exist here.
+        name = re.split(r"[\\/]", args.contract.strip())[-1]
+        print(json.dumps(locate_parent(name[:-3] if name.lower().endswith(".md") else name), indent=2))
+        return 0
 
     # G-1 (Open Question 1, answered yes): a non-empty GH_REPO retargets every
     # `gh` call this process makes, including `gh issue close` -- so refuse
@@ -2938,7 +3205,8 @@ def main() -> int:
     briefs = read_work_item_briefs(slug)
     # `base` is already resolved on the line above -- hand it to new_state so
     # a fresh state store costs one subprocess, not two (Extension Points).
-    state = load_state(slug) or new_state(slug, tasks, base=base)
+    stored_state = load_state(slug)
+    state = stored_state or new_state(slug, tasks, base=base)
     # Defect Two: a sub-task the plan already declares but the stored state
     # was written before may still be entirely absent from it (an amendment
     # appended it after the fact). backfill_state applies right here, before
@@ -2946,6 +3214,9 @@ def main() -> int:
     # which would otherwise refuse an id /flow's sub-issue step already
     # opened a sub-issue for on GitHub.
     state = backfill_state(state, tasks)
+    # I-8: a fresh checkout's state store is empty (it is git-ignored and per checkout), so rebuild
+    # what the tracked briefs and the existing branches already say, before any reader below.
+    state, ambiguous_briefs = rehydrate_state(state, slug, fresh=not stored_state, default=base)
 
     if args.record_subtask:
         # /flow Step 2.7's writer: stamp one sub-task's issue, declared base
@@ -3462,6 +3733,11 @@ def main() -> int:
         # a state where no OTHER entry declares a non-default base triggers
         # nothing here, and dispatch proceeds exactly as it did before this
         # refusal existed.
+        if task.id in ambiguous_briefs:
+            # I-8: two tracked briefs name this sub-task's branch, so either would be a guess.
+            print(json.dumps({"error": "identity-ambiguous", "sub_task": task.id,
+                              "detail": ambiguous_briefs[task.id]}))
+            return 5
         base_refusal = base_not_declared(state, task.id, base)
         if base_refusal:
             print(json.dumps({"error": "base-not-declared", "sub_task": task.id,
@@ -3508,8 +3784,19 @@ def main() -> int:
         # identical three-flag guard already used for --record-subtask and
         # for closing the sub-issue (both above).
         read_only_dispatch = args.dry_run or args.resume or args.status
+        # I-7: the sub-task branch is cut inside a NEW flat worktree, whose path is computed here,
+        # before the call. The checkout this run stands in keeps its branch, index and files.
+        import flat_worktree
+        wt_root = flat_worktree.describe()["main_root"]
+        wt_path: Optional[str] = None
+        if wt_root:
+            _wt_name, wt_path, wt_refusal = flat_worktree.plan_path(wt_root, "task", task.id)
+            if wt_path is None:
+                print(json.dumps({"error": "branch-failed", "branch": branch,
+                                  "detail": "refused: %s (no flat worktree path for %s)" % (wt_refusal, task.id)}))
+                return 4
         ok, detail = (True, "read-only run") if read_only_dispatch else create_branch(
-            branch, declared_task_base, issue=task_issue)
+            branch, declared_task_base, issue=task_issue, worktree=wt_path)
         if not ok:
             print(json.dumps({"error": "branch-failed", "branch": branch, "detail": detail}))
             return 4
@@ -3528,6 +3815,9 @@ def main() -> int:
         # the branch (`ok, detail` above is a stub "read-only run" result),
         # so the packet and the printed line must not claim it did either.
         packet["branch_created"] = None if read_only_dispatch else branch
+        # I-7: where the sub-task's worktree is (or, on a read-only run, WOULD be).
+        packet["worktree"] = os.path.abspath(wt_path) if wt_path else None
+        packet["worktree_created"] = None if read_only_dispatch else True
         if args.json:
             print(json.dumps(packet, indent=2))
         elif read_only_dispatch:

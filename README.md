@@ -1,5 +1,27 @@
 # claude-agentic-auto-improve
 
+> **Breaking change in 0.8.0: edits and writes in a repository's main checkout are refused.**
+>
+> - **What is blocked.** In each consuming repository, the plugin's concept-gate entry now runs
+>   through a gate launcher (`gate-launch.py`) that first refuses `Edit`, `Write`, `MultiEdit` and
+>   `NotebookEdit` aimed at the repository's *main checkout* (the original checkout, whose `.git` is a
+>   folder). Linked worktrees are not affected. There is **no off switch**: no environment variable,
+>   flag or file turns it off.
+> - **Shell git is not guarded by the plugin.** The tree-changing `git` and `gh` check lives in
+>   `bash-gate.py`, which this plugin keeps cut (contract `2026-09-28-hook-server-modes`, INV-O1), so only
+>   the edit tools are covered here. `/ship` still runs `merge_direction.py`, which checks that a pull
+>   request targets the right branch before it is opened.
+> - **What to do.** Start each change in a fresh flat worktree: `/task` creates one under
+>   `.claude/worktrees/` and enters it; or run `py -3 .claude/scripts/flat_worktree.py --create --action
+>   <feature|bug|infra> --slug <name> --detached origin/<default>` and `EnterWorktree` into the path it
+>   prints.
+> - **Repair path.** Hooks load from the plugin's install folder, not from your repository. If the guard
+>   answers wrongly, the repair is a fixed plugin version, or reinstalling the previous version. An
+>   older consumer worktree does not help, because it runs the same installed hooks. A vendored copy
+>   needs `auto_improve_finish_install.py` from this version, which rewrites the launcher's gate
+>   argument to the project's own hooks folder; an unrewritten row blocks loudly with the banner
+>   `MAIN CHECKOUT (launcher misregistered)`.
+
 A reusable repository holding the project-independent half of a Claude Code setup:
 generic agents, skills, hooks, workflow scripts, templates, references and the Universal
 tier of the registries, for any project following the Data-First Engineering Protocol.
@@ -490,7 +512,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 484 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 199 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 203 cases. `scripts/tests/test_script_path_resolution.py` is the
 177-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 

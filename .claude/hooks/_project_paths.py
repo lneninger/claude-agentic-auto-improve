@@ -18,6 +18,7 @@ per-session state are machine-level, not repository content.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 HOME = Path.home()
@@ -528,3 +529,147 @@ def enclosing_worktree_root(path_str: str) -> str | None:
         return None
     _, last_end = spans[-1]
     return leading + "/".join(components[:last_end])
+
+
+# ---------------------------------------------------------------------------
+# Main-checkout classification and path resolution (contract
+# 2026-10-07-worktree-isolation-by-default, Data Shapes: Tree kind, Main
+# checkout root, Resolved path).
+#
+# Unlike their neighbours these read ``.git`` entries, never the environment
+# or the working folder (``resolve_target`` alone reads the hook's environment
+# to expand variables). Standard library only; no subprocess.
+# ---------------------------------------------------------------------------
+
+#: Git for Windows' own root folders: a path rooted in one of them is outside
+#: every repository.
+GIT_ROOT_FOLDERS = ("tmp", "usr", "etc", "bin", "dev", "proc", "opt", "var", "mingw32", "mingw64")
+
+#: Marker for a Resolved path that lies outside every repository.
+OUTSIDE = "<outside-every-repository>"
+
+_NO_TARGET_BASH = ("/dev/null", "/dev/stdout", "/dev/stderr")
+_ENV_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)|%(\w+)%")
+
+
+def _git_file_kind(gitfile: str, folder: str) -> tuple[str, str | None]:
+    """Classify a ``.git`` FILE: linked worktree when its git directory holds ``commondir``."""
+    try:
+        with open(gitfile, "r", encoding="utf-8") as fh:
+            first = fh.readline().strip()
+        if not first.startswith("gitdir:") or not first[len("gitdir:"):].strip():
+            return "undecidable", None
+        target = os.path.normpath(os.path.join(folder, first[len("gitdir:"):].strip()))
+        if not os.path.isdir(target):
+            return "undecidable", None
+        commondir = os.path.join(target, "commondir")
+        if not os.path.isfile(commondir):
+            return "main-checkout", os.path.realpath(folder)
+        with open(commondir, "r", encoding="utf-8") as fh:
+            relative = fh.readline().strip()
+        common = os.path.realpath(os.path.join(target, relative)) if relative else ""
+        if not common or not os.path.isdir(common):
+            return "undecidable", None
+        return "linked-worktree", os.path.dirname(common)
+    except (OSError, ValueError, UnicodeError):
+        return "undecidable", None
+
+
+def _classify(path: str) -> tuple[str, str | None]:
+    """``(tree kind, main checkout root)`` of the nearest existing ancestor of ``path``."""
+    try:
+        folder = os.path.abspath(path)
+        while not os.path.exists(folder):
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return "outside-repository", None
+            folder = parent
+        while True:
+            entry = os.path.join(folder, ".git")
+            if os.path.isdir(entry):
+                return "main-checkout", os.path.realpath(folder)
+            if os.path.isfile(entry):
+                return _git_file_kind(entry, folder)
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return "outside-repository", None
+            folder = parent
+    except (OSError, ValueError):
+        return "undecidable", None
+
+
+def tree_kind(path: str) -> str:
+    """``main-checkout``, ``linked-worktree``, ``outside-repository`` or ``undecidable``."""
+    return _classify(path)[0]
+
+
+def main_checkout_root(path: str) -> str | None:
+    """Folder holding the main checkout's ``.git`` (for a linked worktree, the parent of the
+    common git directory); ``None`` for outside-repository and undecidable."""
+    return _classify(path)[1]
+
+
+def _expand_variables(text: str) -> str:
+    """Expand ``~`` and the variables present in the hook's own environment."""
+    if text == "~" or text.startswith(("~/", "~\\")):
+        text = os.path.expanduser(text)
+    return _ENV_REF.sub(lambda m: os.environ.get(m.group(1) or m.group(2) or m.group(3), m.group(0)), text)
+
+
+def resolve_target(text: str, acting_dir: str | None, reading: str) -> tuple[str, str | None]:
+    """Resolve one path text. Returns ``(status, path)``; status is ``path``, ``no-target``,
+    ``outside`` or ``unresolvable``. ``reading`` is ``bash`` or ``windows``; ``acting_dir`` is a
+    resolved path, ``OUTSIDE`` or ``None`` (unresolvable)."""
+    try:
+        t = text.strip()
+        if reading == "windows" and t.lower() in ("$null", "nul"):
+            return "no-target", None
+        t = _expand_variables(t)
+        if t.startswith("~") or re.search(r"[$`]|%[^%\s]+%", t):
+            return "unresolvable", None
+        t = re.sub(r"^[/\\]{2}[?.][/\\]", "", t)
+        slashed = t.replace("\\", "/")
+        drive = os.path.splitdrive(t)[0]
+        if not drive and re.match(r"^/(?!/)", slashed):
+            if reading == "bash":
+                if slashed in _NO_TARGET_BASH:
+                    return "no-target", None
+                m = re.match(r"^/(?:(?:cygdrive|mnt)/)?([A-Za-z])(?:/(.*))?$", slashed)
+                if m:
+                    t = m.group(1).upper() + ":/" + (m.group(2) or "")
+                elif slashed.lstrip("/").split("/")[0].lower() in GIT_ROOT_FOLDERS:
+                    return "outside", None
+                else:
+                    return "unresolvable", None
+            else:
+                lead = os.path.splitdrive(acting_dir)[0] if acting_dir not in (None, OUTSIDE) else ""
+                if not lead:
+                    return "unresolvable", None
+                t = lead + t
+        elif not drive:
+            if acting_dir is None:
+                return "unresolvable", None
+            if acting_dir == OUTSIDE:
+                return "outside", None
+            t = os.path.join(acting_dir, t)
+        drive, rest = os.path.splitdrive(t)
+        parts = []
+        for comp in re.split(r"[/\\]+", rest):
+            if comp in ("", "."):
+                continue
+            if comp != ".." and os.name == "nt":
+                comp = _windows_alias_normalize(comp)
+            if comp:
+                parts.append(comp)
+        current = drive + os.sep + os.sep.join(parts)
+        tail: list[str] = []
+        while not os.path.exists(current):
+            parent, leaf = os.path.split(current)
+            if parent == current or not leaf:
+                break
+            tail.insert(0, leaf)
+            current = parent
+        real = os.path.realpath(current)
+        return "path", os.path.normpath(os.path.join(real, *tail)) if tail else real
+    except (OSError, ValueError):
+        return "unresolvable", None

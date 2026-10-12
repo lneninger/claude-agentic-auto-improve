@@ -215,6 +215,10 @@ unresolved = [r for r in relatives if not (ROOT / r).is_file()]
 check("all %d hook entries resolve to a real file" % len(relatives), not unresolved, str(unresolved))
 
 registered = {pathlib.Path(r).name for r in relatives}
+# Consequence of the gate launcher (contract 2026-10-07-worktree-isolation-by-default, block 6): a gate it
+# launches is named as the launcher entry's extra argument, so that name counts as registered too.
+registered |= {pathlib.Path(a).name for _e, _m, h in _real_regs for a in (h.get("args") or [])[2:]
+               if isinstance(a, str) and a.startswith(PLUGIN_ROOT_PREFIX) and a.endswith(".py")}
 on_disk = {p.name for p in (ROOT / ".claude" / "hooks").glob("*.py")
            if not p.name.startswith("_")}
 _dispatcher_file = ROOT / DISPATCHER_REL
@@ -487,7 +491,9 @@ OWN = PLUGIN_ROOT_PREFIX + ".claude/hooks/"
 EXPECTED_TABLE = [
     # event, matcher, script, extras, async
     ("SessionStart", None, "working-agreements.py", (), False),
-    ("PreToolUse", EDIT_GROUP, "concept-gate.py", (), False),
+    # Amended by contract 2026-10-07-worktree-isolation-by-default, block 6: the concept gate is launched
+    # through the gate launcher, which takes the gate as its extra argument.
+    ("PreToolUse", EDIT_GROUP, "gate-launch.py", (PLUGIN_ROOT_PREFIX + ".claude/hooks/concept-gate.py",), False),
     ("PreToolUse", EDIT_GROUP, "architecture-guard.py", (), False),
     ("PreToolUse", EDIT_GROUP, "db-destructive-guard.py", (), False),
     ("PreToolUse", "Bash", "db-destructive-guard.py", (), False),

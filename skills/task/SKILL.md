@@ -1,6 +1,6 @@
 ---
 name: task
-description: "Intake a work item — a GitHub issue (this project's tracker), or a Jira/ADO item, or a free-text request — and turn it into a normalized Work Item Brief at .claude/work-items/, with acceptance criteria, size classification, an issue-linked branch, and optionally an isolated parallel worktree branched from master. Resolves ambiguity with the user BEFORE any design happens, grades the item against the active north-stars at .claude/north-stars/ (capturing a new one via /north-star when the intake text carries an aspiration), then runs /design-first automatically in the same turn — the handoff is pre-authorized by the /task invocation, not a question to put to the user. Use when: user says /task, '/task #123', 'start on this issue', 'pick up issue 42', 'work on this in a worktree', pastes a GitHub issue URL, or begins any piece of tracked work. This is the front door of the delivery chain."
+description: "Intake a work item — a GitHub issue (this project's tracker), or a Jira/ADO item, or a free-text request — and turn it into a normalized Work Item Brief at .claude/work-items/, with acceptance criteria, size classification, and an issue-linked branch cut inside a flat worktree of its own (every change is made in a worktree, never in the main checkout). Resolves ambiguity with the user BEFORE any design happens, grades the item against the active north-stars at .claude/north-stars/ (capturing a new one via /north-star when the intake text carries an aspiration), then runs /design-first automatically in the same turn — the handoff is pre-authorized by the /task invocation, not a question to put to the user. Use when: user says /task, '/task #123', 'start on this issue', 'pick up issue 42', 'work on this in a worktree', pastes a GitHub issue URL, or begins any piece of tracked work. This is the front door of the delivery chain."
 user_invocable: true
 ---
 
@@ -273,6 +273,22 @@ Treat the argument as the task statement. Set `Source: free-text` (or `Source: <
 
 This is a fully supported mode, not a degraded one — a well-clarified free-text brief beats a badly-parsed ticket.
 
+## Step 1.5: Enter a worktree
+
+Every change is made in a linked worktree under `.claude/worktrees/`, never in the main checkout. The main-checkout guard refuses edits, file writes and tree-changing git there. This step runs once Step 1 has resolved the work item and before Step 2 writes the brief, so the brief is created inside the worktree and travels with the branch.
+
+**Parent-aware mode never asks.** It works in the worktree its caller stands in. If `py -3 .claude/scripts/flat_worktree.py --describe` reports `current_tree: main-checkout`, halt and say: "enter a worktree with `EnterWorktree`, then relaunch". Otherwise skip the rest of this step.
+
+On the no-parent path, run `py -3 .claude/scripts/flat_worktree.py --describe` (under a plugin install, the copy beside `pr_merged.py`) and read `current_tree` from its JSON. Then ask once via `AskUserQuestion`: "new worktree (default) or current checkout". An explicit request in the invocation answers it without asking. **Refuse "current checkout" when `current_tree` is `main-checkout`**: say the guard would block every edit there, and take the new worktree.
+
+Cut the new worktree detached at the freshly fetched default branch, named `<YYYYMMDD>-<action>-<id-or-slug>` (the Step 5c naming, at most 60 characters):
+
+```bash
+py -3 .claude/scripts/flat_worktree.py --create --action <feature|bug|infra> --slug <id-or-slug> --detached origin/master
+```
+
+The helper fetches `origin/master`, refuses a nested path, and prints one JSON plan. Go on only when `outcome` is `created` or `reused`; any `refused: ...` outcome halts, reported verbatim. Enter the plan's `path` with `EnterWorktree` (the path form), and record it in the brief's `worktree:` field at Step 5d. From here every command and every subagent runs inside that worktree. Never call `ExitWorktree`: it lands in the main checkout, where edits are refused. To leave, enter another worktree by path. Step 5b cuts the branch inside it.
+
 ## Step 2: Write the Work Item Brief
 
 Write to `.claude/work-items/<YYYY-MM-DD>-<id-or-slug>.md`. Create the directory if needed. `<ProjectName>` is derived from the repo folder name, matching the `.claude/concepts/` convention already in use.
@@ -524,28 +540,18 @@ Apply `/design-first` Step 1's own rule when torn: **if unsure, treat as non-tri
 
 Set `status: clarified` in the frontmatter.
 
-## Step 5: Workspace — branch, optionally a parallel worktree
+## Step 5: Workspace — branch, always inside a worktree
 
 **In Parent-aware mode this step creates nothing.** It records the caller-supplied
 `BRANCH_NAME` into the brief's `branch:` field and stops there — see "Parent-aware mode" above
 for why the branch is cut later, at dispatch, rather than here. Everything below this line
 describes the no-parent path.
 
-**Pre-flight.** Read the current branch first. **Detached HEAD, mid-rebase, or mid-merge → halt.** Tell the user to resolve it before any branch or worktree is created; both paths below produce garbage from an unresolved index.
+**Pre-flight.** Read the current branch first. Step 1.5 left the session in a worktree whose HEAD is detached at the fetched default branch; that is the expected state here, and 5b branches from it. Any other detached HEAD, or a rebase or merge in progress, halts: tell the user to resolve it before any branch is created.
 
 ### 5a. Pick the workspace shape
 
-| Shape | What you get | Use when |
-|---|---|---|
-| **Branch in place** *(default)* | A new branch in the current working tree | One item at a time, tree is clean, nothing else running |
-| **Branch + parallel worktree** *(opt-in)* | A second checkout on disk branched from `origin/master`; the current tree keeps its branch and its uncommitted work | Anything below |
-
-Offer the worktree — never assume it. Ask via `AskUserQuestion` when any of these hold, and honour an explicit request ("do this in a worktree" / "just branch here") without asking at all:
-
-- Another work item is in flight on the current branch, or the tree holds unrelated WIP.
-- Parallel or background sessions will run against this repo.
-- The item is long-running, broad, or risky (migrations, cross-cutting refactor, live order flow).
-- The user is currently standing on a feature branch and this is a *new*, unrelated item — branching here would stack the new work on top of unreviewed commits.
+There is one shape now. Step 1.5 already put the session inside a flat worktree, so nothing is offered here and no second checkout is made; the only branch step left is 5b. In the next paragraph, read "both shapes" as "every branch this step cuts".
 
 Naming is identical for both shapes. Follows this repo's convention (`feature/rbac-role-permission-system`), with the issue number in front when one exists:
 
@@ -554,6 +560,8 @@ Naming is identical for both shapes. Follows this repo's convention (`feature/rb
 - Drop the number prefix only for free-text work with no issue
 
 ### 5b. Branch in place
+
+"In place" here means inside the worktree Step 1.5 entered, never the main checkout. HEAD is detached at the fetched default branch, so take the first bullet below: `gh issue develop ... --checkout` or `git switch -c` runs in the worktree and changes only the worktree.
 
 - **On `master` / `main`** → propose the branch and create it after confirming. When `gh` is available, let GitHub create the link itself:
 
@@ -565,6 +573,8 @@ Naming is identical for both shapes. Follows this repo's convention (`feature/rb
 - **Already on a feature branch** → keep it *only if this work genuinely belongs there* (a follow-up to the same item). Confirm with the user. If it is a new item, this is the worktree case — go to 5c rather than stacking on unreviewed commits.
 
 ### 5c. Branch + parallel worktree from master
+
+**Creation moved to Step 1.5.** The worktree is now cut and entered through `flat_worktree.py` (an absolute flat path, detached at `origin/master`) and 5b cuts the branch inside it, so the `git worktree add` commands and the "enter it only if" paragraph below are not run for a fresh item. The base proof, the VS Code window, the lifecycle, and the rules about the stash and uncommitted work still apply.
 
 **The base is the entire point of this shape. Get it wrong and the isolation is worthless.**
 
@@ -682,6 +692,8 @@ The data-architect must treat the brief's acceptance criteria as requirements in
 
 **If Step 5c created a worktree, settle the working directory before handing off.** Either enter the worktree (`EnterWorktree` with its `path`) or state the path explicitly in the `CONTEXT:` block above so whoever implements works inside it. A contract implemented in the parent tree while the branch lives in the worktree produces exactly one outcome: a branch with no commits on it, discovered at `/ship`.
 
+Step 1.5 always leaves the session inside a worktree (a Parent-aware run starts inside the parent worktree), so the working directory is already settled. State its path in the `CONTEXT:` block anyway, for the agents `/design-first` dispatches.
+
 For XS/S, skip `/design-first` and go straight to the implementer (or `/debug` for a bug), but still keep the brief — `/ship` uses it to write the PR body. That transition is equally pre-authorized: the size classification already made the call, so route into it rather than asking. The brief's `## North-star alignment` section travels with the item — for XS/S that grade is the only north-star check the work will get, which is why Step 3.5 runs before the route is taken rather than after.
 
 ## Status lifecycle
@@ -715,6 +727,8 @@ question; that notice governs, not the entry below. Every other entry applies to
 - **Creating a sub-issue in Parent-aware mode without reading the parent link back.** `gh issue create --parent`'s exit code is a request, never a fact. Always follow it with `verify_parent_link.py` and branch on its verdict before writing anything else.
 - **Cutting a task's branch at creation time in Parent-aware mode.** Its own Step 5 records the branch name only. Cutting it early seeds the sub-task from a parent branch that none of its own dependencies has merged into yet.
 - **Writing a Parent-aware brief's acceptance criteria after delivery, or inventing them at creation.** The `SUB_TASK` field supplied at invocation is the contract's own approved handoff block — copy it into the brief when the brief is written, never after the work is done and never re-derived from memory.
+
+- **Writing the brief, or any file, before Step 1.5 has put the session in a worktree.** The main-checkout guard refuses the write, and a brief left in the shared main checkout is the stray file the isolation exists to prevent.
 
 ## When NOT to use this skill
 

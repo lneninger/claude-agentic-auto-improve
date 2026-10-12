@@ -49,6 +49,46 @@ from pr_merged import (  # noqa: E402
 )
 import pr_merged  # noqa: E402  -- the module itself, for symbols this contract has not built yet
 
+# Shared fixtures for the worktree-isolation tests at the end of this file (contract
+# 2026-10-07-worktree-isolation-by-default, sub-task 3). Only helper NAMES are imported, never a test
+# class, so nothing here runs twice. test_flat_worktree captured the real subprocess.run at ITS import,
+# before setUpModule below replaces it with the mutation guard, so its real-git fixtures are unaffected.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_flat_worktree import (  # noqa: E402
+    DATE as WT_DATE, FLAT_WORKTREE, HOOKS_DIR as WT_HOOKS_DIR, REPO_ROOT as WT_REPO_ROOT,
+    SCRIPTS_DIR as WT_SCRIPTS_DIR, Tools, add_worktree, clean_env, clone_of, commit, git, git_rc, make_world,
+    real as wt_real, rmtree_force, run as wt_run, run_py, snapshot, tree_switching_calls, worktree_paths,
+)
+from test_merge_direction import brief_text, build_md_world, gh_config as md_gh_config  # noqa: E402
+
+
+def _is_worktree_add(cmd):
+    """True for any ``git ... worktree add ...`` argument vector (``-C <dir>`` and the like may precede)."""
+    cmd = list(cmd)
+    return bool(cmd) and cmd[0] == "git" and any(
+        cmd[i] == "worktree" and cmd[i + 1] == "add" for i in range(len(cmd) - 1))
+
+
+def _is_git_read(cmd):
+    """Read-only git questions the worktree helper may ask on the way (never switch or checkout)."""
+    cmd = list(cmd)
+    if not cmd or cmd[0] != "git" or {"switch", "checkout"} & set(cmd):
+        return False
+    rest = [c for c in cmd[1:] if not c.startswith("-")]
+    return bool(rest) and (rest[0] in ("rev-parse", "show-ref", "for-each-ref", "ls-remote", "symbolic-ref",
+                                       "cat-file", "branch", "status")
+                           or rest[:2] == ["worktree", "list"])
+
+
+def _worktree_kwargs():
+    """``worktree=<path>`` for create_branch once it takes one (contract Extension Point 5), else nothing."""
+    try:
+        takes = "worktree" in inspect.signature(pr_merged.create_branch).parameters
+    except (TypeError, ValueError):
+        takes = False
+    path = os.path.join(tempfile.gettempdir(), "fake-flat-main", ".claude", "worktrees", "20261007-task-fixture")
+    return {"worktree": path} if takes else {}
+
 
 # ---------------------------------------------------------------------------
 # Structural guard: no test in this suite may reach a real GitHub mutation.
@@ -1789,7 +1829,7 @@ class TestCreateBranchIssueAwareCutover(unittest.TestCase):
 
         with mock.patch.object(pr_merged, "_run", side_effect=fake_run_with_issue):
             ok_with, _detail_with = pr_merged.create_branch(
-                "task/c/t1-a", "feature/160-parent", issue=163)
+                "task/c/t1-a", "feature/160-parent", issue=163, **_worktree_kwargs())
 
         self.assertTrue(ok_with, "the gh-issue-develop path must report success when gh succeeds")
         gh_develop_calls = [c for c in with_issue_calls
@@ -1813,13 +1853,18 @@ class TestCreateBranchIssueAwareCutover(unittest.TestCase):
                 return 1, ""  # branch does not exist yet
             if cmd[:2] == ["git", "fetch"]:
                 return 0, ""
-            if cmd[:3] == ["git", "switch", "-c"]:
+            # DELIBERATE amendment (contract 2026-10-07-worktree-isolation-by-default, sub-task 3): the
+            # local half now adds a worktree instead of switching, so this fake learns the
+            # `git worktree add` shapes. Its outcome (success, "created it") is unchanged.
+            if cmd[:3] == ["git", "switch", "-c"] or _is_worktree_add(cmd):
                 return 0, "created it"
+            if _is_git_read(cmd):
+                return 0, ""
             return 1, "unexpected command: %r" % (cmd,)
 
         with mock.patch.object(pr_merged, "_run", side_effect=fake_run_without_issue):
             ok_without, _detail_without = pr_merged.create_branch(
-                "task/c/t1-a", "feature/160-parent")
+                "task/c/t1-a", "feature/160-parent", **_worktree_kwargs())
 
         self.assertTrue(ok_without, "the plain git path must still succeed when no issue is given")
         self.assertFalse(
@@ -2490,12 +2535,19 @@ class TestCreateBranchNamesThePathDistinctly(unittest.TestCase):
                 return 0, "https://github.com/acme/repo/tree/task/c/t1-a"
             if cmd[:2] == ["git", "fetch"]:
                 return 0, ""
-            if cmd[0] == "git" and len(cmd) > 1 and cmd[1] in ("switch", "checkout"):
+            # DELIBERATE amendment (contract 2026-10-07-worktree-isolation-by-default, sub-task 3): the
+            # local half now adds a worktree, so the failing step is `git worktree add`. Same outcome
+            # (the local step fails with this text); the old switch/checkout shape is kept for the
+            # code that still has it.
+            if (cmd[0] == "git" and len(cmd) > 1 and cmd[1] in ("switch", "checkout")) or _is_worktree_add(cmd):
                 return 1, "local checkout blew up"
+            if _is_git_read(cmd):
+                return 0, ""
             return 1, "unexpected command: %r" % (cmd,)
 
         with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
-            ok, detail = pr_merged.create_branch("task/c/t1-a", "feature/160-parent", issue=163)
+            ok, detail = pr_merged.create_branch("task/c/t1-a", "feature/160-parent", issue=163,
+                                                 **_worktree_kwargs())
 
         self.assertFalse(ok, "a failed local checkout must not be reported as success")
         self.assertIn("163", detail, "the detail must name the sub-issue this path used")
@@ -2527,12 +2579,17 @@ class TestCreateBranchNamesThePathDistinctly(unittest.TestCase):
                 return 1, ""
             if cmd[:2] == ["git", "fetch"]:
                 return 0, ""
-            if cmd[:3] == ["git", "switch", "-c"]:
+            # DELIBERATE amendment (contract 2026-10-07-worktree-isolation-by-default, sub-task 3): the
+            # plain-git fallback now adds a worktree. Same outcome ("created it"), same detail text.
+            if cmd[:3] == ["git", "switch", "-c"] or _is_worktree_add(cmd):
                 return 0, "created it"
+            if _is_git_read(cmd):
+                return 0, ""
             return 1, "unexpected command: %r" % (cmd,)
 
         with mock.patch.object(pr_merged, "_run", side_effect=fake_run):
-            ok, detail = pr_merged.create_branch("task/c/t1-a", "feature/160-parent", issue=163)
+            ok, detail = pr_merged.create_branch("task/c/t1-a", "feature/160-parent", issue=163,
+                                                 **_worktree_kwargs())
 
         self.assertTrue(ok, "the plain-git fallback must still succeed when gh fails outright")
         self.assertIn(
@@ -11617,6 +11674,820 @@ class TestMainStatusReadsTheBriefsForTheCompleteMove(unittest.TestCase):
         last = [ln for ln in text.splitlines() if ln.strip()][-1]
         self.assertIn("/verify-before-done", last,
                       "all-default briefs keep today's ending. Last line: %r" % last)
+
+
+# ==========================================================================
+# Contract: "Isolate every session and sub-task in its own worktree"
+#   .claude/concepts/2026-10-07-worktree-isolation-by-default.md  (approved)
+#   sub-task 3 (issue #474), RED phase: invariants I-4, I-5, I-7 to I-10 and AC2, AC3.
+#
+# Everything below runs REAL git against temp repositories with a bare origin, outside any
+# .claude path, with a fake `gh` (a real executable first on PATH replaying canned JSON, see
+# test_flat_worktree.py) and a logging `git` wrapper that records every argument vector and then
+# runs the real git. No test here reaches GitHub or this repository. Children get a clean
+# environment: no CLAUDE_PROJECT_DIR, GH_REPO, GH_HOST or GIT_* variable (control in
+# test_flat_worktree.py::HelperEnvironmentControlTests).
+#
+# Assumed shapes, pinned here because the contract names the roles and not the spelling:
+#   * pr_merged.py --locate-parent prints (with --json) one object: status, branch, worktree (an
+#     absolute path or null), candidates (a list), and plan -- {action, slug, source, branch|ref} --
+#     where source is "existing-branch" (branch) or "detached-at" (ref). The plan feeds
+#     flat_worktree.py --create --action <action> --slug <slug> --existing --branch <branch>
+#     (or --detached <ref>).
+#   * pr_merged.brief_for_branch(branch, commit) returns the brief's frontmatter fields as a dict
+#     plus "path" (repo-relative, forward slashes), or None for no brief; two briefs for one branch
+#     are never returned as one.
+#   * --dispatch --json prints worktree (absolute) and worktree_created (true, or null on a
+#     read-only run); a helper refusal is {"error": "branch-failed", "detail": <helper outcome>},
+#     exit 4.
+#   * create_branch(branch, base, issue=None, worktree=None) keeps its (ok, detail) result and sends
+#     its git commands through pr_merged._run.
+# ==========================================================================
+PR_MERGED_SCRIPT = WT_SCRIPTS_DIR / "pr_merged.py"
+WT_SLUG = "2026-10-07-acme-fixture"
+WT_CONTRACT = ".claude/concepts/%s.md" % WT_SLUG
+WT_PARENT = "feature/460-parent"
+WT_T1 = "task/%s/t1-backend" % WT_SLUG
+WT_T2 = "task/%s/t2-frontend" % WT_SLUG
+
+WT_CONTRACT_ONE = """# Contract
+
+## Implementation Handoff
+
+### 1. Backend (`dotnet-backend-architect`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Foo.cs
+"""
+WT_CONTRACT_TWO = WT_CONTRACT_ONE + """
+### 2. Frontend (`angular-senior-dev`)
+
+**Depends on:** none
+
+**Files to touch:**
+- src/Bar.ts
+"""
+WT_BRIEF_PARENT = ".claude/work-items/2026-10-07-460-parent.md"
+WT_BRIEF_T1 = ".claude/work-items/2026-10-07-473-t1.md"
+
+
+def _wt_parent_world(root, contract_text=WT_CONTRACT_ONE, *, with_parent=True, contract_on_default=False,
+                     extra_branches=False):
+    """A bare origin and a main checkout on the default branch; the parent branch (contract plus the
+    parent's brief id 460 plus the sub-task's brief id 473) pushed. ``extra_branches`` adds the branches
+    --locate-parent must NOT count as the parent: the sub-task's, a records branch, a stray copy."""
+    world = make_world(root, files={WT_CONTRACT: contract_text} if contract_on_default else None)
+    main = world.main
+    if with_parent:
+        git(main, "switch", "-q", "-c", WT_PARENT)
+        commit(main, {WT_CONTRACT: contract_text,
+                      WT_BRIEF_PARENT: brief_text(id=460, branch=WT_PARENT, base=world.default),
+                      WT_BRIEF_T1: brief_text(id=473, branch=WT_T1, base=WT_PARENT, parent_issue=460)},
+               "parent branch with its briefs")
+        git(main, "push", "-q", "origin", WT_PARENT)
+        if extra_branches:
+            for name in (WT_T1, "docs/%s-records-1" % WT_SLUG):
+                git(main, "branch", name)
+                git(main, "push", "-q", "origin", name)
+            git(main, "switch", "-q", "-c", "feature/stray-copy", world.default)
+            commit(main, {WT_CONTRACT: contract_text}, "a stray copy of the contract, no brief")
+            git(main, "push", "-q", "origin", "feature/stray-copy")
+        git(main, "switch", "-q", world.default)
+    return world
+
+
+def _wt_parent_worktree(world):
+    return add_worktree(world.main, world.main / ".claude" / "worktrees" / ("20261007-advance-" + WT_SLUG),
+                        WT_PARENT)
+
+
+def _wt_write_state(cwd, entries):
+    import yaml
+    path = Path(cwd) / ".claude" / "orchestrator" / "state" / WT_SLUG / "state.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.dump({"contract": WT_SLUG, "started_at": "2026-10-07T00:00:00+00:00",
+                               "sub_tasks": entries}, default_flow_style=False, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _wt_entry(**kw):
+    entry = {"status": "pending", "branch": None, "pull_request": None, "issue": None, "base": WT_PARENT,
+             "brief": None}
+    entry.update(kw)
+    return entry
+
+
+def _wt_flat_args(plan):
+    """flat_worktree.py arguments for a --locate-parent plan (see the shapes note above)."""
+    args = ["--create", "--action", plan["action"], "--slug", plan["slug"]]
+    if plan["source"] == "existing-branch":
+        return args + ["--existing", "--branch", plan["branch"]]
+    return args + ["--detached", plan["ref"]]
+
+
+class _WorktreeWorldCase(unittest.TestCase):
+    """A temp folder, fake tools (gh, a logging git) and a clean environment."""
+
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="prm_wt_")))
+        self.addCleanup(rmtree_force, self.tmp)
+        self.tools = Tools(self.tmp)
+        self.tools.install_gh({})
+        self.tools.install_git_logger()
+
+    def env(self, extra=None):
+        return clean_env(extra, tools=self.tools)
+
+    def pr_merged_cli(self, *args, cwd):
+        return run_py(PR_MERGED_SCRIPT, *args, cwd=cwd, env=self.env())
+
+    def need_json(self, proc, what):
+        payload = proc.json()
+        self.assertIsInstance(payload, dict, msg="%s: expected one JSON object, got %s" % (what, proc.describe()))
+        return payload
+
+    def branch_of(self, path):
+        return git(path, "rev-parse", "--abbrev-ref", "HEAD")
+
+    def dirty(self, main):
+        (Path(main) / "src" / "uncommitted.txt").write_text("dirty\n", encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# I-9: _run and the readers take a working folder and an environment
+# --------------------------------------------------------------------------
+class TestRunAndReadersTakeCwdAndEnv(unittest.TestCase):
+    """_run(cmd, *, cwd=None, env=None) passes both to subprocess.run; repo_view and
+    default_branch_or_none gain the same two keyword-only parameters. The defaults are exactly today's
+    call, so every existing caller is unchanged and no chdir or os.environ edit is ever made."""
+
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="prm_run_")))
+        self.addCleanup(rmtree_force, self.tmp)
+        self.tools = Tools(self.tmp)
+        self.tools.install_git_echo()
+        self.here = self.tmp / "process-folder"
+        self.there = self.tmp / "elsewhere"
+        self.here.mkdir()
+        self.there.mkdir()
+
+    def _on_path(self, extra_env=None):
+        """The fake git first on THIS process's PATH (Windows looks a bare program name up on the parent's PATH)."""
+        env = {"PATH": self.tools.bin_dir_text + os.pathsep + os.environ.get("PATH", "")}
+        env.update(extra_env or {})
+        return mock.patch.dict(os.environ, env)
+
+    def test_run_defaults_match_todays_call(self):
+        params = inspect.signature(pr_merged._run).parameters
+        for name in ("cwd", "env"):
+            self.assertIn(name, params, "I-9: _run must gain a keyword-only %s parameter" % name)
+            self.assertEqual(params[name].kind, inspect.Parameter.KEYWORD_ONLY,
+                             "I-9: %s must be keyword-only, so no positional call site can change meaning" % name)
+            self.assertIsNone(params[name].default, "I-9: %s defaults to None, which is today's call" % name)
+        previous = os.getcwd()
+        try:
+            os.chdir(str(self.here))
+            with self._on_path({"GH_REPO": "inherited/repo"}):
+                code, out = pr_merged._run(["git", "anything"])
+        finally:
+            os.chdir(previous)
+        self.assertEqual(code, 0, "fixture sanity: the fake git ran")
+        seen = json.loads(out)
+        self.assertEqual(wt_real(seen["cwd"]), wt_real(self.here),
+                         "no keywords: the child runs in the PROCESS folder, as today")
+        self.assertEqual(seen["gh_repo"], "inherited/repo",
+                         "no keywords: the child inherits the process environment, as today")
+
+    def test_run_passes_cwd_and_env(self):
+        params = inspect.signature(pr_merged._run).parameters
+        self.assertIn("cwd", params, "I-9: _run must accept cwd")
+        self.assertIn("env", params, "I-9: _run must accept env")
+        env = clean_env({"GH_REPO": "explicit/repo"}, tools=self.tools)
+        previous = os.getcwd()
+        try:
+            os.chdir(str(self.here))
+            with self._on_path({"GH_REPO": "inherited/repo"}):
+                code, out = pr_merged._run(["git", "anything"], cwd=str(self.there), env=env)
+        finally:
+            os.chdir(previous)
+        self.assertEqual(code, 0)
+        seen = json.loads(out)
+        self.assertEqual(wt_real(seen["cwd"]), wt_real(self.there), "cwd= must be the child's working folder")
+        self.assertEqual(seen["gh_repo"], "explicit/repo",
+                         "env= must REPLACE the inherited environment (the inherited GH_REPO must not leak)")
+
+    def test_readers_pass_cwd_and_env_through_and_old_call_sites_pass_neither(self):
+        for fn in (pr_merged.repo_view, getattr(pr_merged, "default_branch_or_none", None)):
+            self.assertIsNotNone(fn, "I-9: pr_merged must define default_branch_or_none")
+            params = inspect.signature(fn).parameters
+            for name in ("cwd", "env"):
+                self.assertIn(name, params, "I-9: %s must gain a keyword-only %s" % (fn.__name__, name))
+                self.assertEqual(params[name].kind, inspect.Parameter.KEYWORD_ONLY)
+        calls = []
+
+        def spy(cmd, **kw):
+            calls.append((list(cmd), kw))
+            return 0, '{"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}' if cmd[0] == "gh" else "refs/remotes/origin/main"
+
+        with mock.patch.object(pr_merged, "_run", side_effect=spy):
+            pr_merged.repo_view(None, cwd="/some/where", env={"A": "b"})
+            pr_merged.default_branch_or_none(cwd="/some/where", env={"A": "b"})
+        for cmd, kw in calls:
+            self.assertEqual(kw, {"cwd": "/some/where", "env": {"A": "b"}},
+                             "the readers must hand cwd and env to _run: %r" % (cmd,))
+
+        def one_argument_fake(cmd):  # exactly today's fakes: a single positional parameter
+            return 0, '{"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}' if cmd[0] == "gh" else "refs/remotes/origin/main"
+
+        with mock.patch.object(pr_merged, "_run", side_effect=one_argument_fake):
+            self.assertEqual(pr_merged.repo_view()["nameWithOwner"], "o/r",
+                             "I-9: without keywords the call is exactly today's -- _run(cmd), nothing more")
+            self.assertEqual(pr_merged.default_branch(), "main")
+
+
+class TestSessionIdentityIgnoresGhRepo(unittest.TestCase):
+    """I-9: the session repository's identity is read from the session root with GH_REPO removed
+    (gh would otherwise answer for GH_REPO). Seen through the whole check, with the fake gh logging
+    the working folder and GH_REPO of every call."""
+
+    def test_session_identity_ignores_gh_repo(self):
+        tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="prm_ident_")))
+        self.addCleanup(rmtree_force, tmp)
+        w = build_md_world(tmp)
+        tools = Tools(tmp)
+        tools.install_gh(md_gh_config(w))
+        env = clean_env({"GH_REPO": "other/second"}, tools=tools)  # the PARENT process is aimed at another repository
+        md = WT_SCRIPTS_DIR / "merge_direction.py"
+        proc = run_py(md, "--head", "task/%s/t1-a" % WT_SLUG, "--base", "trunk", "--session-root", w.main,
+                      "--cwd", w.task_wt, cwd=w.task_wt, env=env)
+        self.assertEqual(proc.rc, 0,
+                         "a sub-task pull request into the OTHER repository's default branch (trunk) is "
+                         "cross-repository and allowed -- but only if the session identity is acme/app, read "
+                         "from the session root without GH_REPO: %s" % proc.describe())
+        views = [c for c in tools.gh_calls() if c["args"][:2] == ["repo", "view"] and "other/second" not in c["args"]]
+        session_views = [c for c in views if wt_real(c["cwd"]) == wt_real(w.main)]
+        self.assertTrue(session_views, "the session identity must be read by `gh repo view` run in the session "
+                                       "root; saw %r" % [(c["cwd"], c["gh_repo"]) for c in views])
+        self.assertTrue(all(c["gh_repo"] is None for c in session_views),
+                        "the session-identity read must run WITHOUT GH_REPO in its environment")
+
+
+# --------------------------------------------------------------------------
+# I-7: create_branch and --dispatch work in a new flat worktree
+# --------------------------------------------------------------------------
+class TestCreateBranchAddsAWorktree(unittest.TestCase):
+    """create_branch(branch, base, issue, worktree): the local half is `git worktree add`, never a
+    switch or a checkout. Driven through a fake _run (and a fake subprocess.run behind it, so no real
+    git can run in this repository)."""
+
+    def _drive(self, issue):
+        argv_seen = []
+
+        def fake_run(cmd, **kw):
+            argv_seen.append(list(cmd))
+            if cmd[:3] == ["git", "rev-parse", "--verify"] or cmd[:3] == ["git", "show-ref", "--verify"]:
+                return 1, ""  # the branch does not exist yet
+            if cmd[:2] == ["gh", "issue"] and "develop" in cmd:
+                return 0, "https://github.com/acme/repo/tree/task/c/t1-a"
+            return 0, ""
+
+        def fake_subprocess_run(cmd, *a, **kw):
+            argv_seen.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch.object(pr_merged, "_run", side_effect=fake_run), \
+             mock.patch.object(subprocess, "run", side_effect=fake_subprocess_run):
+            result = pr_merged.create_branch("task/c/t1-a", "feature/160-parent", issue=issue,
+                                             **_worktree_kwargs())
+        return result, argv_seen
+
+    def test_create_branch_takes_the_worktree_it_was_computed_for(self):
+        params = inspect.signature(pr_merged.create_branch).parameters
+        self.assertIn("worktree", params, "Extension Point 5: create_branch(branch, base, issue, worktree)")
+
+    def test_no_issue_path_adds_a_worktree_and_never_switches_or_checks_out(self):
+        (ok, _detail), argv_seen = self._drive(None)
+        self.assertTrue(any(_is_worktree_add(c) for c in argv_seen),
+                        "I-7: the local half must be `git worktree add`; saw %r" % argv_seen)
+        self.assertEqual(tree_switching_calls([{"args": c[1:]} for c in argv_seen if c and c[0] == "git"]), [],
+                         "I-7: create_branch must never run `git switch` or `git checkout`")
+
+    def test_issue_path_develops_without_checkout_then_fetches_then_adds_the_worktree(self):
+        (ok, _detail), argv_seen = self._drive(163)
+        develop = [c for c in argv_seen if c[:2] == ["gh", "issue"] and "develop" in c]
+        self.assertTrue(develop, "with an issue, gh issue develop registers the branch")
+        self.assertFalse({"--checkout", "-c"} & set(develop[0]),
+                         "I-7: gh issue develop must run WITHOUT --checkout (it would switch the checkout it runs from)")
+        order = [("develop" if c in develop else "fetch" if c[:2] == ["git", "fetch"] else "add" if _is_worktree_add(c) else None)
+                 for c in argv_seen]
+        order = [o for o in order if o]
+        self.assertEqual(order[:3], ["develop", "fetch", "add"],
+                         "I-7: gh issue develop, then git fetch, then the helper adds the existing branch; saw %r" % order)
+        self.assertEqual(tree_switching_calls([{"args": c[1:]} for c in argv_seen if c and c[0] == "git"]), [])
+
+
+class TestDispatchIntoAFlatWorktree(_WorktreeWorldCase):
+    """--dispatch creates the sub-task branch in a new flat worktree cut from the declared base and
+    never switches the checkout it runs from (I-7); a helper refusal is branch-failed (AC3)."""
+
+    def setUp(self):
+        super().setUp()
+        self.world = _wt_parent_world(self.tmp)
+        self.main = self.world.main
+        self.parent_wt = _wt_parent_worktree(self.world)
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry()})
+        self.dirty(self.main)
+
+    def dispatch(self, *flags, cwd=None):
+        return self.pr_merged_cli("--contract", WT_CONTRACT, "--dispatch", "t1-backend", *flags, "--json",
+                                  cwd=cwd or self.parent_wt)
+
+    def test_packet_carries_worktree_and_worktree_created(self):
+        parent_head = git(self.parent_wt, "rev-parse", "HEAD")
+        origin_tip = git(self.main, "ls-remote", "origin", "refs/heads/" + WT_PARENT).split()[0]
+        proc = self.dispatch()
+        packet = self.need_json(proc, "--dispatch")
+        self.assertEqual(proc.rc, 0, proc.describe())
+        self.assertIn("worktree", packet, "I-7: the dispatch packet must carry `worktree`")
+        self.assertIs(packet.get("worktree_created"), True,
+                      "I-7: `worktree_created` is true when the run created it")
+        path = Path(packet["worktree"])
+        self.assertTrue(path.is_absolute() and path.is_dir(), "the worktree path is absolute and exists")
+        self.assertEqual(self.branch_of(path), WT_T1, "the sub-task branch is checked out in the new worktree")
+        self.assertEqual(git(path, "rev-parse", "HEAD"), origin_tip,
+                         "the branch is cut from the declared base (the parent), freshly fetched")
+        self.assertEqual(self.branch_of(self.parent_wt), WT_PARENT, "I-7: the checkout --dispatch ran from keeps its branch")
+        self.assertEqual(git(self.parent_wt, "rev-parse", "HEAD"), parent_head)
+        self.assertEqual(tree_switching_calls(self.tools.git_calls()), [],
+                         "I-7: no git argument vector may hold `switch` or `checkout`")
+        self.assertTrue(self.tools.git_calls(), "positive control: the logging git saw this run's calls")
+
+    def test_main_checkout_is_byte_identical_across_a_dispatch(self):
+        before = snapshot(self.main)
+        proc = self.dispatch()
+        self.assertEqual(self.need_json(proc, "--dispatch").get("worktree_created"), True,
+                         "fixture sanity: the dispatch really created a worktree")
+        self.assertEqual(snapshot(self.main), before, "I-4/I-7: the main checkout's HEAD, index and files are untouched")
+
+    def test_a_read_only_dispatch_creates_nothing(self):
+        for flag in ("--dry-run", "--status", "--resume"):
+            with self.subTest(flag=flag):
+                before = worktree_paths(self.main)
+                proc = self.dispatch(flag)
+                packet = self.need_json(proc, "--dispatch " + flag)
+                self.assertEqual(proc.rc, 0, proc.describe())
+                self.assertIn("worktree", packet, "a read-only run still reports where the worktree WOULD be")
+                self.assertIsNone(packet.get("worktree_created"),
+                                  "I-7: `worktree_created` is null on a read-only run")
+                self.assertEqual(worktree_paths(self.main), before, "a read-only dispatch creates no worktree")
+                self.assertFalse(Path(packet["worktree"]).exists(), "and no folder")
+                self.assertEqual(git(self.main, "branch", "--list", WT_T1), "", "and no branch")
+
+    def test_dispatch_from_inside_a_worktree_lands_flat(self):
+        proc = self.dispatch(cwd=self.parent_wt)  # the parent worktree is itself under .claude/worktrees
+        packet = self.need_json(proc, "--dispatch from inside a worktree")
+        self.assertIn("worktree", packet, "I-7: the dispatch packet must carry `worktree`")
+        path = Path(packet["worktree"])
+        self.assertEqual(wt_real(path.parent), wt_real(self.main / ".claude" / "worktrees"),
+                         "AC7/I-7: the new worktree sits directly in <main>/.claude/worktrees")
+        self.assertEqual(wt_real(path).replace("\\", "/").count("/.claude/worktrees/"), 1,
+                         "exactly one Worktree segment: a nested path breaks SqlClient's SNI.dll load")
+        self.assertFalse((self.parent_wt / ".claude" / "worktrees").exists(),
+                         "nothing is created inside the worktree --dispatch ran from")
+
+    def test_dispatch_surfaces_helper_refusal_as_branch_failed(self):
+        # AC3: the helper refuses (origin is unreachable, so fetch-failed); the sub-task is not dispatched.
+        git(self.main, "remote", "set-url", "origin", str(self.tmp / "no-such-origin.git"))
+        before = worktree_paths(self.main)
+        proc = self.dispatch()
+        payload = self.need_json(proc, "--dispatch with a refusing helper")
+        self.assertEqual(payload.get("error"), "branch-failed", "AC3: a helper refusal surfaces as branch-failed")
+        self.assertEqual(proc.rc, 4, "branch-failed keeps its exit code")
+        self.assertIn("fetch-failed", str(payload.get("detail")),
+                      "AC3: branch-failed carries the helper's own outcome, not a paraphrase")
+        self.assertEqual(worktree_paths(self.main), before, "a refusal creates no worktree")
+        self.assertEqual(git(self.main, "branch", "--list", WT_T1), "", "and no branch")
+
+    def test_dispatch_with_an_issue_registers_the_branch_without_checkout_and_adds_its_worktree(self):
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry(issue=473)})
+        proc = self.dispatch()
+        packet = self.need_json(proc, "--dispatch with an issue")
+        self.assertEqual(proc.rc, 0, proc.describe())
+        develop = [c for c in self.tools.gh_calls() if c["args"][:2] == ["issue", "develop"]]
+        self.assertTrue(develop, "with an issue, gh issue develop registers the branch")
+        self.assertFalse({"--checkout", "-c"} & set(develop[0]["args"]),
+                         "I-7: gh issue develop runs WITHOUT --checkout")
+        self.assertIn("worktree", packet, "I-7: the dispatch packet must carry `worktree`")
+        self.assertEqual(self.branch_of(packet["worktree"]), WT_T1)
+        self.assertEqual(tree_switching_calls(self.tools.git_calls()), [])
+
+
+# --------------------------------------------------------------------------
+# I-8: brief_for_branch
+# --------------------------------------------------------------------------
+class TestBriefForBranch(_WorktreeWorldCase):
+    def _in(self, repo, branch, commit_ref):
+        previous = os.getcwd()
+        os.chdir(str(repo))
+        try:
+            fn = getattr(pr_merged, "brief_for_branch", None)
+            self.assertIsNotNone(fn, "I-8: pr_merged must define brief_for_branch(branch, commit)")
+            return fn(branch, commit_ref)
+        finally:
+            os.chdir(previous)
+
+    def setUp(self):
+        super().setUp()
+        self.world = _wt_parent_world(self.tmp)
+        self.main = self.world.main
+
+    def test_one_matching_brief_is_found_at_the_commit(self):
+        tip = git(self.main, "rev-parse", WT_PARENT)
+        found = self._in(self.main, WT_T1, tip)
+        self.assertIsNotNone(found, "I-8: the one tracked brief whose branch: is %s is found" % WT_T1)
+        self.assertEqual(found.get("base"), WT_PARENT)
+        self.assertEqual(str(found.get("id")), "473")
+        self.assertEqual(str(found.get("path")).replace("\\", "/"), WT_BRIEF_T1)
+
+    def test_no_matching_brief_is_none_and_a_brief_not_yet_at_that_commit_is_none(self):
+        tip = git(self.main, "rev-parse", WT_PARENT)
+        self.assertIsNone(self._in(self.main, "task/%s/t7-nothing" % WT_SLUG, tip),
+                          "I-8: no brief names that branch, so there is none")
+        earlier = git(self.main, "rev-parse", self.world.default)  # before the briefs were committed
+        self.assertIsNone(self._in(self.main, WT_T1, earlier),
+                          "the lookup reads the briefs AT the given commit, not the working tree")
+
+    def test_two_matching_briefs_are_never_returned_as_one(self):
+        git(self.main, "switch", "-q", WT_PARENT)
+        commit(self.main, {".claude/work-items/2026-10-07-999-duplicate.md":
+                           brief_text(id=999, branch=WT_T1, base=WT_PARENT, parent_issue=460)}, "a second brief for t1")
+        tip = git(self.main, "rev-parse", "HEAD")
+        self.assertIsNotNone(getattr(pr_merged, "brief_for_branch", None),
+                             "I-8: pr_merged must define brief_for_branch(branch, commit)")
+        try:
+            found = self._in(self.main, WT_T1, tip)
+        except AssertionError:
+            raise
+        except Exception:
+            return  # raising a named error is one honest way to say "ambiguous"
+        self.assertFalse(isinstance(found, dict) and found.get("base"),
+                         "I-8: two briefs name this branch, so picking either would guess the sub-task's identity")
+
+
+# --------------------------------------------------------------------------
+# I-8: rehydration of a fresh state store
+# --------------------------------------------------------------------------
+class TestRehydration(_WorktreeWorldCase):
+    """Right after backfill_state and before every reader: (a) fill issue, base, brief from the one
+    tracked brief; (b) mark a pending entry awaiting-merge when its branch exists. Never overwrite,
+    never downgrade; completion records still win. Seen through `--status --json` (read-only)."""
+
+    def setUp(self):
+        super().setUp()
+        self.world = _wt_parent_world(self.tmp)
+        self.main = self.world.main
+        self.parent_wt = _wt_parent_worktree(self.world)
+
+    def status(self, cwd=None):
+        proc = self.pr_merged_cli("--contract", WT_CONTRACT, "--status", "--json", cwd=cwd or self.parent_wt)
+        return proc, self.need_json(proc, "--status")
+
+    def entry(self, report, tid="t1-backend"):
+        return report["state"]["sub_tasks"][tid]
+
+    def test_a_fresh_entry_gets_issue_base_and_brief_from_its_brief(self):
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry(base=None)})
+        _proc, report = self.status()
+        entry = self.entry(report)
+        self.assertEqual(entry.get("issue"), 473, "I-8(a): issue comes from the brief's id")
+        self.assertEqual(entry.get("base"), WT_PARENT, "I-8(a): base comes from the brief's base:")
+        self.assertEqual(str(entry.get("brief")).replace("\\", "/"), WT_BRIEF_T1, "I-8(a): brief is the brief's path")
+
+    def test_rehydration_never_overwrites_a_field_that_has_a_value(self):
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry(issue=999, base="feature/elsewhere", brief=None)})
+        _proc, report = self.status()
+        entry = self.entry(report)
+        self.assertEqual((entry.get("issue"), entry.get("base")), (999, "feature/elsewhere"),
+                         "I-8: a field with a value is never overwritten")
+        self.assertEqual(str(entry.get("brief")).replace("\\", "/"), WT_BRIEF_T1,
+                         "positive control: the EMPTY field beside them is still filled")
+
+    def test_a_brief_naming_another_contract_is_not_used(self):
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry(base=None)})
+        _proc, report = self.status()
+        self.assertEqual(self.entry(report).get("issue"), 473,
+                         "positive control: while the brief names THIS contract the entry is filled")
+        commit(self.parent_wt, {WT_BRIEF_T1: brief_text(id=473, branch=WT_T1, base=WT_PARENT, parent_issue=460,
+                                                        contract=".claude/concepts/some-other-contract.md")},
+               "the brief now names another contract")
+        _proc, report = self.status()
+        self.assertIsNone(self.entry(report).get("issue"),
+                          "I-8(a): only a brief whose contract: names THIS contract may fill the entry")
+
+    def test_two_briefs_for_one_branch_refuse_identity_ambiguous(self):
+        commit(self.parent_wt, {".claude/work-items/2026-10-07-999-duplicate.md":
+                                brief_text(id=999, branch=WT_T1, base=WT_PARENT, parent_issue=460)}, "second brief")
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry(base=None)})
+        proc = self.pr_merged_cli("--contract", WT_CONTRACT, "--dispatch", "t1-backend", "--json", cwd=self.parent_wt)
+        payload = self.need_json(proc, "--dispatch with two briefs")
+        self.assertEqual(payload.get("error"), "identity-ambiguous",
+                         "I-8: two matching briefs refuse the dispatch as identity-ambiguous")
+        self.assertNotEqual(proc.rc, 0)
+        self.assertEqual(git(self.main, "branch", "--list", WT_T1), "", "and no branch is cut")
+
+    def test_no_brief_keeps_base_not_declared_exit_7(self):
+        # t2 has no brief; t1 declares a non-default base, so t2 falling back to the default is refused (today's rule).
+        pw = self.parent_wt
+        commit(pw, {WT_CONTRACT: WT_CONTRACT_TWO}, "two sub-tasks")
+        _wt_write_state(pw, {"t1-backend": _wt_entry(), "t2-frontend": _wt_entry(base=None)})
+        proc = self.pr_merged_cli("--contract", WT_CONTRACT, "--dispatch", "t2-frontend", "--json", cwd=pw)
+        payload = self.need_json(proc, "--dispatch of a sub-task with no brief")
+        self.assertEqual((proc.rc, payload.get("error")), (7, "base-not-declared"),
+                         "I-8: with no brief to rehydrate from, base-not-declared (exit 7) stays the backstop")
+
+    def test_a_pending_entry_whose_branch_exists_locally_is_awaiting_merge(self):
+        git(self.main, "branch", WT_T1, WT_PARENT)
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry()})
+        _proc, report = self.status()
+        self.assertEqual(self.entry(report).get("status"), "awaiting-merge", "I-8(b): the branch exists locally")
+        self.assertEqual(report["next_move"]["action"], "awaiting-merge")
+
+    def test_a_pending_entry_whose_branch_exists_on_origin_is_awaiting_merge(self):
+        # pushed by ANOTHER clone, so this repository has never fetched it
+        other = clone_of(self.world)
+        git(other, "branch", WT_T1, "origin/" + WT_PARENT)
+        git(other, "push", "-q", "origin", WT_T1)
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry()})
+        _proc, report = self.status()
+        self.assertEqual(self.entry(report).get("status"), "awaiting-merge",
+                         "I-8(b): the branch exists on origin (read from origin, not only from a stale tracking ref)")
+
+    def test_a_pending_entry_with_no_branch_anywhere_stays_pending(self):
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry()})
+        _proc, report = self.status()
+        self.assertEqual(self.entry(report).get("status"), "pending", "control: no branch, no change")
+        self.assertEqual(report["next_move"]["action"], "dispatch")
+
+    def test_an_entry_already_past_pending_is_never_downgraded(self):
+        commit(self.parent_wt, {WT_CONTRACT: WT_CONTRACT_TWO}, "two sub-tasks")
+        git(self.main, "branch", WT_T1, WT_PARENT)
+        git(self.main, "branch", WT_T2, WT_PARENT)
+        for status in ("completed", "failed"):
+            with self.subTest(status=status):
+                _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry(status=status),
+                                                 "t2-frontend": _wt_entry()})
+                _proc, report = self.status()
+                self.assertEqual(self.entry(report, "t2-frontend").get("status"), "awaiting-merge",
+                                 "positive control: the PENDING sibling whose branch exists is marked")
+                self.assertEqual(self.entry(report, "t1-backend").get("status"), status,
+                                 "I-8(b): an entry past pending is never downgraded to awaiting-merge")
+
+    def test_a_completion_record_still_wins_over_a_rehydrated_awaiting_merge(self):
+        import yaml
+        git(self.main, "branch", WT_T1, WT_PARENT)
+        _wt_write_state(self.parent_wt, {"t1-backend": _wt_entry()})
+        _proc, before = self.status()
+        self.assertEqual(before["next_move"]["action"], "awaiting-merge",
+                         "positive control: with no record, the rehydrated entry holds the loop at awaiting-merge")
+        record = self.parent_wt / ".claude" / "orchestrator" / "results" / WT_SLUG / "t1-backend.yaml"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(yaml.dump({"status": "completed", "verified": "github", "pull_request": "u",
+                                     "commit": "abc"}), encoding="utf-8")
+        _proc, report = self.status()
+        self.assertNotEqual(report["next_move"]["action"], "awaiting-merge",
+                            "I-8: completion records still win through reconcile_state")
+        self.assertEqual(report["next_move"]["action"], "complete")
+
+
+# --------------------------------------------------------------------------
+# I-10: --locate-parent
+# --------------------------------------------------------------------------
+class TestLocateParent(_WorktreeWorldCase):
+    def locate(self, cwd, contract=WT_CONTRACT):
+        proc = self.pr_merged_cli("--contract", contract, "--locate-parent", "--json", cwd=cwd)
+        return proc, self.need_json(proc, "--locate-parent")
+
+    def world_with_extras(self, **kw):
+        world = _wt_parent_world(self.tmp, extra_branches=True, **kw)
+        self.main = world.main
+        return world
+
+    def assert_status(self, report, status, proc):
+        self.assertEqual(report.get("status"), status, "expected %s, got %s / %s" % (status, report, proc.describe()))
+
+    def test_not_checked_out_plans_the_existing_branch_and_the_contract_need_not_exist_locally(self):
+        world = self.world_with_extras()
+        self.assertFalse((self.main / WT_CONTRACT).exists(), "fixture sanity: the contract is absent from this checkout")
+        proc, report = self.locate(self.main)
+        self.assert_status(report, "not-checked-out", proc)
+        self.assertEqual(report.get("branch"), WT_PARENT)
+        self.assertEqual(report["plan"]["source"], "existing-branch")
+        self.assertEqual(report["plan"]["branch"], WT_PARENT)
+        names = json.dumps(report.get("candidates"))
+        for excluded in (WT_T1, "records-1", "stray-copy"):
+            self.assertNotIn(excluded, names, "the default branch, task/<slug>/..., docs/<slug>-records... and an "
+                                               "unconfirmed copy are never candidates: %s" % excluded)
+
+    def test_a_local_only_candidate_is_found(self):
+        self.world_with_extras()
+        git(self.main, "push", "-q", "origin", "--delete", WT_PARENT)
+        proc, report = self.locate(self.main)
+        self.assert_status(report, "not-checked-out", proc)
+        self.assertEqual(report.get("branch"), WT_PARENT)
+
+    def test_a_remote_only_candidate_is_found_even_when_never_fetched(self):
+        self.world_with_extras()
+        git(self.main, "branch", "-D", WT_PARENT)  # the local branch is gone; origin still has it
+        git(self.main, "branch", "-D", "-r", "origin/" + WT_PARENT)  # and so is the tracking ref: origin must be asked
+        proc, report = self.locate(self.main)
+        self.assert_status(report, "not-checked-out", proc)
+        self.assertEqual(report.get("branch"), WT_PARENT)
+        self.assertEqual(report["plan"]["source"], "existing-branch")
+
+    def test_found_when_a_linked_worktree_holds_it(self):
+        world = self.world_with_extras()
+        wt = _wt_parent_worktree(world)
+        proc, report = self.locate(self.main)
+        self.assert_status(report, "found", proc)
+        self.assertEqual(wt_real(report.get("worktree", "")), wt_real(wt))
+
+    def test_already_here_inside_the_linked_worktree_that_holds_it(self):
+        world = self.world_with_extras()
+        wt = _wt_parent_worktree(world)
+        proc, report = self.locate(wt)
+        self.assert_status(report, "already-here", proc)
+        self.assertEqual(wt_real(report.get("worktree", "")), wt_real(wt))
+
+    def test_already_here_inside_this_slugs_detached_advance_worktree_even_when_main_holds_the_parent(self):
+        world = self.world_with_extras()
+        git(self.main, "switch", "-q", WT_PARENT)  # the main checkout holds the parent
+        sha = git(self.main, "rev-parse", "HEAD")
+        detached = add_worktree(self.main, self.main / ".claude" / "worktrees" / ("20261007-advance-" + WT_SLUG),
+                                "--detach", sha)
+        proc, report = self.locate(detached)
+        self.assert_status(report, "already-here", proc)
+        self.assertEqual(wt_real(report.get("worktree", "")), wt_real(detached))
+        # control: from the main checkout the same fixture is held-by-main-checkout, not already-here
+        proc, report = self.locate(self.main)
+        self.assertNotEqual(report.get("status"), "already-here", "control: the main checkout is not 'here' for the slug")
+
+    def test_ahead_of_origin_names_the_push_remedy(self):
+        self.world_with_extras()
+        git(self.main, "switch", "-q", WT_PARENT)
+        commit(self.main, {"src/local-only.txt": "x\n"}, "unpushed commit")
+        proc, report = self.locate(self.main)
+        self.assert_status(report, "ahead-of-origin", proc)
+        self.assertIn("push", json.dumps(report).lower(), "the remedy is `git push`, which the allow-list permits")
+
+    def test_held_by_main_checkout_plans_a_detached_worktree_at_the_branch_commit(self):
+        self.world_with_extras()
+        git(self.main, "switch", "-q", WT_PARENT)
+        proc, report = self.locate(self.main)
+        self.assert_status(report, "held-by-main-checkout", proc)
+        self.assertEqual(report["plan"]["source"], "detached-at")
+        self.assertEqual(git(self.main, "rev-parse", report["plan"]["ref"]), git(self.main, "rev-parse", WT_PARENT),
+                         "the plan's ref is the branch's commit")
+
+    def test_on_default_when_the_contract_lives_only_on_the_default_branch(self):
+        _wt_parent_world(self.tmp, with_parent=False, contract_on_default=True)
+        main = self.tmp / "main_checkout"
+        proc, report = self.locate(main)
+        self.assert_status(report, "on-default", proc)
+
+    def test_not_found_when_no_branch_holds_the_contract(self):
+        _wt_parent_world(self.tmp, with_parent=False)
+        proc, report = self.locate(self.tmp / "main_checkout")
+        self.assert_status(report, "not-found", proc)
+
+    def test_ambiguous_when_two_branches_each_have_a_confirming_brief(self):
+        world = self.world_with_extras()
+        git(self.main, "switch", "-q", "-c", "feature/460-parent-alt", WT_PARENT)
+        commit(self.main, {".claude/work-items/2026-10-07-461-alt.md":
+                           brief_text(id=461, branch="feature/460-parent-alt", base=world.default)}, "alt parent")
+        git(self.main, "push", "-q", "origin", "feature/460-parent-alt")
+        git(self.main, "switch", "-q", world.default)
+        proc, report = self.locate(self.main)
+        self.assert_status(report, "ambiguous", proc)
+        self.assertGreaterEqual(len(report.get("candidates") or []), 2)
+
+    def test_locate_parent_writes_nothing(self):
+        self.world_with_extras()
+        git(self.main, "switch", "-q", WT_PARENT)
+        self.dirty(self.main)
+        before = snapshot(self.main)
+        worktrees = worktree_paths(self.main)
+        proc, report = self.locate(self.main)
+        self.assert_status(report, "held-by-main-checkout", proc)
+        self.assertEqual(snapshot(self.main), before, "I-10: --locate-parent changes no file, no index, no HEAD")
+        self.assertEqual(worktree_paths(self.main), worktrees, "and creates no worktree")
+        self.assertFalse((self.main / ".claude" / "orchestrator").exists(), "and no state store")
+        self.assertEqual(tree_switching_calls(self.tools.git_calls()), [])
+
+
+# --------------------------------------------------------------------------
+# AC2, end to end
+# --------------------------------------------------------------------------
+class TestAdvanceFromTheMainCheckout(_WorktreeWorldCase):
+    def test_advance_from_dirty_main_checkout_makes_parent_worktree(self):
+        world = _wt_parent_world(self.tmp, extra_branches=True)
+        main = world.main
+        self.dirty(main)
+        before = snapshot(main)
+        # 1. locate: the parent exists but nothing has it checked out
+        proc = self.pr_merged_cli("--contract", WT_CONTRACT, "--locate-parent", "--json", cwd=main)
+        first = self.need_json(proc, "--locate-parent from the main checkout")
+        self.assertEqual(first.get("status"), "not-checked-out", proc.describe())
+        plan = first.get("plan") or {}
+        for key in ("action", "slug", "source"):
+            self.assertIn(key, plan, "the plan must carry %s so flat_worktree.py can run it" % key)
+        # 2. create the worktree with the plan it returned
+        created = run_py(FLAT_WORKTREE, *_wt_flat_args(plan), cwd=main, env=self.env())
+        made = self.need_json(created, "flat_worktree.py --create with the plan")
+        self.assertEqual(made.get("outcome"), "created", created.describe())
+        path = Path(made["path"])
+        self.assertEqual(wt_real(path.parent), wt_real(main / ".claude" / "worktrees"))
+        self.assertEqual(self.branch_of(path), WT_PARENT)
+        # 3. locate again, from the new worktree
+        proc = self.pr_merged_cli("--contract", WT_CONTRACT, "--locate-parent", "--json", cwd=path)
+        again = self.need_json(proc, "--locate-parent from the new worktree")
+        self.assertEqual(again.get("status"), "already-here", proc.describe())
+        self.assertEqual(wt_real(again.get("worktree", "")), wt_real(path))
+        # the three statuses, in order, and nothing in the main checkout moved
+        self.assertEqual((first["status"], made["outcome"], again["status"]), ("not-checked-out", "created", "already-here"))
+        self.assertEqual(snapshot(main), before, "AC2: the main checkout's HEAD, index and the dirty file are byte-identical")
+        self.assertEqual(tree_switching_calls(self.tools.git_calls()), [], "AC2: no git argument vector held switch or checkout")
+        self.assertTrue(self.tools.git_calls(), "positive control: the logging git saw the calls")
+
+    def test_parent_held_by_main_checkout_ships_from_detached_worktree(self):
+        world = _wt_parent_world(self.tmp, extra_branches=True)
+        main = world.main
+        git(main, "switch", "-q", WT_PARENT)  # the main checkout HOLDS the parent
+        self.dirty(main)
+        before = snapshot(main)
+        local_parent = git(main, "rev-parse", WT_PARENT)
+        # 1. --locate-parent: held by the main checkout
+        proc = self.pr_merged_cli("--contract", WT_CONTRACT, "--locate-parent", "--json", cwd=main)
+        located = self.need_json(proc, "--locate-parent")
+        self.assertEqual(located.get("status"), "held-by-main-checkout", proc.describe())
+        # 2. a detached flat worktree at the parent's commit
+        made_proc = run_py(FLAT_WORKTREE, *_wt_flat_args(located["plan"]), cwd=main, env=self.env())
+        made = self.need_json(made_proc, "flat_worktree.py --create (detached)")
+        self.assertEqual(made.get("outcome"), "created", made_proc.describe())
+        wt = Path(made["path"])
+        self.assertEqual(self.branch_of(wt), "HEAD", "the advance worktree is detached")
+        self.assertEqual(git(wt, "rev-parse", "HEAD"), local_parent)
+        # 3. a commit made there
+        first = commit(wt, {"src/advance-1.txt": "one\n"}, "work done in the detached advance worktree")
+        # 4. publish with the no-force push: it succeeds
+        pushed = git_rc(wt, "push", "origin", "HEAD:refs/heads/" + WT_PARENT)
+        self.assertEqual(pushed.rc, 0, "git push origin HEAD:refs/heads/<parent> succeeds: " + pushed.describe())
+        self.assertEqual(git(main, "ls-remote", "origin", "refs/heads/" + WT_PARENT).split()[0], first)
+        # 5. origin moves on; a second push of unrelated work is refused as non-fast-forward
+        other = clone_of(world)
+        git(other, "switch", "-q", WT_PARENT)
+        moved = commit(other, {"src/elsewhere.txt": "someone else\n"}, "origin moves")
+        git(other, "push", "-q", "origin", WT_PARENT)
+        commit(wt, {"src/advance-2.txt": "two\n"}, "more work, from before origin moved")
+        refused = git_rc(wt, "push", "origin", "HEAD:refs/heads/" + WT_PARENT)
+        self.assertNotEqual(refused.rc, 0, "a push that is not a fast-forward is refused: " + refused.describe())
+        self.assertRegex(refused.err.lower(), r"rejected|non-fast-forward|fetch first",
+                         "git itself says why it refused")
+        self.assertEqual(git(main, "ls-remote", "origin", "refs/heads/" + WT_PARENT).split()[0], moved,
+                         "origin is unchanged by the refused push")
+        # 6. the pull request is judged on the GIVEN head (a detached HEAD has no current branch)
+        self.tools.set_gh(repo_view={"by_cwd": {str(main): {"nameWithOwner": "acme/app",
+                                                            "defaultBranchRef": {"name": world.default}}},
+                                     "by_name": {}},
+                          open_prs=[], sub_issues={"460": []})
+        hooks = WT_HOOKS_DIR
+
+        def gate(command):
+            data = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(wt)}).encode("utf-8")
+            return wt_run([sys.executable, "-B", str(hooks / "gate-launch.py"), str(hooks / "bash-gate.py")],
+                          cwd=wt, env=self.env(), stdin=data)
+
+        # Plugin copy (contract 2026-10-07-worktree-isolation-by-default, round-7 amendment): the plugin ships and
+        # registers no bash-gate.py (cut by 2026-09-28-hook-server-modes, INV-O1), so only this gate-launching
+        # part of the case is skipped; steps 1 to 5 and 7 still run.
+        if (hooks / "bash-gate.py").is_file():
+            without_head = gate("gh pr create --base %s --title t --body b" % world.default)
+            self.assertTrue(without_head.rc == 2 and "MERGE DIRECTION" in without_head.err,
+                            "control: with no --head a detached HEAD cannot be judged, so the create is refused "
+                            "(unverifiable): " + without_head.describe())
+            with_head = gate("gh pr create --head %s --base %s --title t --body b" % (WT_PARENT, world.default))
+            self.assertEqual(with_head.rc, 0, "the same create with --head <parent> is judged on that head and allowed: "
+                             + with_head.describe())
+            self.assertNotIn("MERGE DIRECTION", with_head.err)
+        # 7. the main checkout never moved: HEAD, index, the dirty file, and its own local branch
+        self.assertEqual(snapshot(main), before, "AC2: the main checkout's HEAD, index and dirty file are byte-identical")
+        self.assertEqual(git(main, "rev-parse", WT_PARENT), local_parent,
+                         "its local parent branch only falls behind origin; it is never moved")
+        self.assertEqual(tree_switching_calls(self.tools.git_calls()), [])
+
+
+# --------------------------------------------------------------------------
 
 
 if __name__ == "__main__":

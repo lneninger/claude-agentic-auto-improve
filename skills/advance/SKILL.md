@@ -51,6 +51,29 @@ cannot find it can only guess at what it says.
 
 
 
+### Locate the parent branch's worktree first
+
+Work happens in a worktree, never in the main checkout. Before the `--status` call below, find where the contract's parent branch lives and stand there. Run this from wherever the session starts:
+
+```bash
+py -3 "$PRM" --contract <slug|path> --locate-parent
+```
+
+It takes the slug from the argument, needs no local copy of the contract, and writes nothing but a `git fetch`. Act on `status`:
+
+| `status` | Do |
+|---|---|
+| `already-here` | Continue. This checkout is the parent worktree, or this contract's detached advance worktree. |
+| `found` | `EnterWorktree` with the reported `worktree` path, then continue there. |
+| `held-by-main-checkout` | If `worktree` is set, enter it. Otherwise run `py -3 .claude/scripts/flat_worktree.py --create --action advance --slug <slug> --detached <plan.ref>` and enter the plan's `path`. Continue there. |
+| `ahead-of-origin` | Stop and print the reported `remedy` (`git push origin <parent>`, which the guard allows). Run `/advance` again after it. |
+| `not-checked-out` | Run `py -3 .claude/scripts/flat_worktree.py --create --action advance --slug <slug> --existing --branch <parent>`, enter the plan's `path`, continue. |
+| `on-default`, `not-found`, `ambiguous` | Stop, say which, and name the remedy: the contract is already on the default branch, or no branch carries it, or two do and the operator must name one. Do not create a worktree to get around it. |
+
+**Parent held by the main checkout.** Work continues in the detached flat worktree, and the main checkout is never touched. Commits made there are published only with `git push origin HEAD:refs/heads/<parent>`: never `--force`, `--force-with-lease` or a `+` refspec, so git itself refuses anything but a fast-forward. If the push is refused, halt with: "the parent moved on origin; `git fetch` and `git merge --ff-only origin/<parent>` here, then retry". No step is left to a person. `/ship` follows the same rule.
+
+**A subagent handoff ending `BLOCKED: main checkout <target>` halts the run.** The guard refused a write because the stage was launched from the main checkout. Do not retry it there: enter the packet's worktree with `EnterWorktree` and relaunch the stage.
+
 ```bash
 py -3 "$PRM" --contract <slug|path> --status --json
 ```
@@ -67,7 +90,7 @@ The answer carries `next_move.action`, plus `dispatch` packets when there is som
 
 **Run it from a checkout of the contract's parent branch.** The contract, its sub-task briefs and every completion record live on that branch. Until the parent pull request merges, no other branch carries them. The work item brief's `branch:` field names it.
 
-**`contract-not-found` is almost always the wrong branch, not a missing contract.** Before anything else, ask which branch holds the file: `git log --all --oneline -- .claude/concepts/<slug>.md`. Then say which branch to switch to and stop. Do not create a worktree to get around it unless the operator says to.
+**`contract-not-found` is almost always the wrong branch, not a missing contract.** Before anything else, ask which branch holds the file: `git log --all --oneline -- .claude/concepts/<slug>.md`. Then run the locator above and act on its status. Never switch the main checkout to the parent branch and never edit there: the guard refuses it.
 
 **A released sub-task whose branch or pull request already exists on GitHub means a completion record is missing from this checkout.** A record written on a separate records branch is invisible here until that branch reaches the parent. Dispatching on that answer redoes finished work. Stop, name the sub-task, and say which pull request carries the record. This rule is about dispatch, which sees only the parent branch. The landing in `complete` below differs on purpose: it also reads records from the `docs/<contract-slug>-records` branch and from `master`, because that is where `/pr-merged` Step 3 puts them.
 
@@ -133,6 +156,8 @@ no branch and writes nothing either, and it holds under `--dry-run` too. The rem
 It refuses with exit code **3** and `{"error": "delivery-unrecorded", ...}` when a merged pull request delivered the whole contract on one branch and no delivery is recorded (the `delivery-unrecorded` move below). That refusal cuts no branch and writes nothing. `--dispatch` never exits 10, so this skill needs no handling for that code.
 
 
+**The branch is cut in a new flat worktree.** `--dispatch` creates the sub-task branch inside a new flat worktree under `<main checkout>/.claude/worktrees/` and never switches the checkout it runs from. The packet's `worktree` is that worktree's absolute path, and `worktree_created` is true when this run made it (null on a read-only run). A helper refusal comes back as `branch-failed` carrying the helper's outcome (`nested`, `branch-in-main-checkout`, `path-taken`, `fetch-failed` or `git-failed`); stop and report it.
+
 Each packet names the sub-task, its branch, its agent, its file scope, the pre-written TASK
 block the architect wrote into the contract, the Sub-Task Cycle, and the sub-task's own
 identity.
@@ -185,6 +210,8 @@ For the one being started:
    opening its own pull request.
 4. **Stop.** Report the pull request and say plainly that the contract now waits for a merge,
    and that `/pr-merged` is what continues it.
+
+**Where each part runs.** Every `pr_merged.py` call (`--status`, `--dispatch`, `--record-subtask`, and `/pr-merged`) runs from the parent worktree, because its state store holds `awaiting-merge`. The cycle stages and `/ship` run in the packet's `worktree`: enter it with `EnterWorktree` by path before launching the stage subagents (a subagent launched afterwards runs there), and keep it for `/ship`. When `/ship` returns, enter the parent worktree by path again before the Step 3 status call. Never `ExitWorktree`, which lands in the main checkout. When the parent is held by the main checkout, the parent worktree is the detached flat worktree, and its commits are published with the no-force push above.
 
 **A packet flagged `needs_agent` names no recognised agent.** Refuse it the same way. Say which
 sub-task is missing one, and that its heading must name an agent from the project profile's

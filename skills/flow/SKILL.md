@@ -67,9 +67,9 @@ answer them on the operator's behalf.
 the branch name. Every later stage reads the brief rather than a paraphrase of it, and
 `/ship` pushes the branch that actually holds the commits.
 
-**If `/task` created a worktree, settle the working directory here.** Enter it, or state
-its path in every later handoff. A contract implemented in the parent tree while the branch
-lives in the worktree produces a branch with no commits, and nothing notices until `/ship`.
+**`/task` puts the run in a worktree of its own (its Step 1.5), so enter it here and stay in it.** Enter the path `/task` reported with `EnterWorktree`, or confirm the session already stands in it, before any later stage. Every later stage and every subagent runs in that worktree, and each handoff states its path. The main-checkout guard refuses edits to the main checkout, so a stage run there is blocked, not misplaced.
+
+**A subagent handoff ending `BLOCKED: main checkout <target>` halts the run.** It means the guard refused a write because the subagent was launched while the session stood in the main checkout. Do not retry it there and do not write the file elsewhere: enter the run's worktree with `EnterWorktree` and relaunch the subagent.
 
 **Routing.** `/task` sizes the item and picks the route. Honour it:
 

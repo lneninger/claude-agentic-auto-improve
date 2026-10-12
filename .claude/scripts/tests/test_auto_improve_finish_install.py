@@ -202,8 +202,11 @@ def template_text(overrides=None, drop=(), extra=None):
 
 
 # (event, matcher, [hook file or (hook file, extra argument)])  -> 17 registrations, 16 files.
+# Amended by contract 2026-10-07-worktree-isolation-by-default, block 6: the concept gate is a gate-launch.py
+# row with the gate as its extra argument; the counts stay.
 REGISTRATIONS = [
-    ("PreToolUse", "Edit|Write|MultiEdit", ["concept-gate.py", "architecture-guard.py"]),
+    ("PreToolUse", "Edit|Write|MultiEdit", [("gate-launch.py", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py"),
+                                            "architecture-guard.py"]),
     ("PreToolUse", "Bash", ["bash-gate.py"]),
     ("PreToolUse", "Bash|Edit|Write|MultiEdit", ["db-destructive-guard.py", "db-research-readonly-guard.py"]),
     ("PreToolUse", "Read|Grep|Glob", ["codegraph-first-guard.py"]),
@@ -226,8 +229,17 @@ def _entries():
 
 
 HOOK_FILES = sorted({name for _e, _m, name, _x in _entries()})
-EXPECTED_KEYS = {(e, n, (x,) if x else ()) for e, _m, n, x in _entries()}
+def reduce_arg(arg):
+    """The comparison form of one argument: a .py path reduces to its file name (block 6 amendment)."""
+    return arg.replace("\\", "/").rsplit("/", 1)[-1] if arg.endswith(".py") else arg
+
+
+EXPECTED_KEYS = {(e, n, (reduce_arg(x),) if x else ()) for e, _m, n, x in _entries()}
 assert len(list(_entries())) == 17 and len(HOOK_FILES) == 16
+
+# The launcher's support files and the gate it launches. The vendored copy holds them too (round-7: the
+# plugin has no bash-gate.py).
+GATE_SUPPORT_FILES = ["concept-gate.py", "_gate_launch.py", "_main_checkout_guard.py", "_project_paths.py"]
 
 _HOOK_SOURCES = {
     "concept-gate.py": 'import os\nos.environ.get("CLAUDE_CONCEPT_GATE", "")\nos.environ.get("CLAUDE_PROJECT_DIR")\n',
@@ -258,6 +270,8 @@ def build_plugin(root):
     hooks.mkdir(parents=True)
     for name in HOOK_FILES:
         (hooks / name).write_text(_HOOK_SOURCES.get(name, "import sys\nsys.exit(0)\n"), encoding="utf-8")
+    for name in GATE_SUPPORT_FILES:
+        (hooks / name).write_text(_HOOK_SOURCES.get(name, "import sys\nsys.exit(0)\n"), encoding="utf-8")
     (hooks / "db-destructive-guard.rules.json").write_text(
         json.dumps({"protected_databases": ["AcmeApp", "AcmeApp_Testing"]}), encoding="utf-8")
     (hooks / "hooks.json").write_text(json.dumps(hooks_json_obj(), indent=2), encoding="utf-8")
@@ -270,7 +284,8 @@ def hooks_json_obj(only=None):
     for event, matcher, name, extra in _entries():
         if only is not None and name not in only:
             continue
-        cmd = 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/%s"%s' % (name, (" " + extra) if extra else "")
+        shown = (' "%s"' if extra and extra.endswith(".py") else " %s") % extra if extra else ""
+        cmd = 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/%s"%s' % (name, shown)
         groups = events.setdefault(event, [])
         group = next((g for g in groups if g.get("matcher") == matcher), None)
         if group is None:
@@ -328,7 +343,7 @@ def key_of(hook):
     toks = tokens_of(hook)
     for i, t in enumerate(toks):
         if t.endswith(".py"):
-            return (t.replace("\\", "/").rsplit("/", 1)[-1], tuple(toks[i + 1:]))
+            return (t.replace("\\", "/").rsplit("/", 1)[-1], tuple(reduce_arg(a) for a in toks[i + 1:]))
     return None
 
 
@@ -365,7 +380,7 @@ def env_vars_read_by(sources):
 def parse_registration_key(key):
     """(hook file name, arguments after it) from a registration-key string."""
     m = re.search(r"([\w.-]+\.py)(.*)$", key)
-    return (m.group(1), tuple(re.findall(r"--?[\w-]+", m.group(2)))) if m else None
+    return (m.group(1), tuple(p for p in m.group(2).split("|") if p)) if m else None
 
 
 def authored_rows_intact(old_text, new_text, slots):
@@ -502,7 +517,7 @@ class Base(unittest.TestCase):
     def make_vendored(self, own_hooks_json=None):
         hooks = self.project / ".claude/hooks"
         hooks.mkdir(parents=True, exist_ok=True)
-        for name in HOOK_FILES:
+        for name in list(HOOK_FILES) + GATE_SUPPORT_FILES:
             (hooks / name).write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
         if own_hooks_json is not None:
             (hooks / "hooks.json").write_text(json.dumps(own_hooks_json), encoding="utf-8")
@@ -1012,7 +1027,7 @@ class TestVendoredConsumerReachesThePluginSources(Base):
         (proj / ".claude/templates/concept-contract.md").write_text("# Concept Contract\n", encoding="utf-8")
         hooks = proj / ".claude/hooks"
         hooks.mkdir()
-        for name in HOOK_FILES:  # the vendored copy; NO hooks.json (the sync never delivers it)
+        for name in list(HOOK_FILES) + GATE_SUPPORT_FILES:  # the vendored copy; NO hooks.json (the sync never delivers it)
             (hooks / name).write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
         (proj / ".claude/project-profile.md").write_text(
             template_text(drop=("review-gates",) if with_profile_row_dropped else ()),
@@ -1656,12 +1671,12 @@ class TestMerge(Base):
             args = hook.get("args")
             self.assertEqual(args[:2], ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + name],
                              msg="-3 first, then the braced project path of %s" % name)
-            self.assertEqual(tuple(args[2:]), extras, msg="arguments after the file are kept")
+            self.assertEqual(tuple(reduce_arg(a) for a in args[2:]), extras, msg="arguments after the file are kept")
 
     def test_each_registration_keeps_its_matcher(self):
         self.apply_to_fresh()
         got = {(e, n, x): m for e, m, n, x, _h in flat_registrations(self.read_settings())}
-        want = {(e, n, (x,) if x else ()): m for e, m, n, x in _entries()}
+        want = {(e, n, (reduce_arg(x),) if x else ()): m for e, m, n, x in _entries()}
         self.assertEqual(got, want, msg="matchers travel with their registrations")
 
     def test_the_plain_language_guard_pair_stays_two_distinct_keys(self):
@@ -1727,17 +1742,17 @@ class TestMerge(Base):
 
     def test_a_registration_under_a_different_matcher_is_reported_not_duplicated(self):
         existing = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
-            {"type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py"]}]}]}}
+            {"type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py", "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py"]}]}]}}
         plan, result = self.apply_to_fresh(existing)
-        present = [p for p in self.need(plan, "already-present") if "concept-gate.py" in str(p.get("registration-key"))]
+        present = [p for p in self.need(plan, "already-present") if "gate-launch.py" in str(p.get("registration-key"))]
         self.assertEqual(len(present), 1, msg="concept-gate is reported present")
         self.assertIs(present[0].get("different-matcher"), True, msg="its matcher differs from the source's")
         self.assertIs(present[0].get("foreign-path"), False,
                       msg="a ${CLAUDE_PROJECT_DIR}/.claude/hooks path is the project's own, not foreign")
         self.assertEqual(present[0].get("layer"), "project", msg="it is in the project layer")
-        self.assertNotIn("concept-gate.py", json.dumps(plan["to-add"]), msg="it is never added again")
+        self.assertNotIn("gate-launch.py", json.dumps(plan["to-add"]), msg="it is never added again")
         self.assertEqual(result.get("status"), "applied", msg="the other 16 are added")
-        count = sum(1 for _e, _m, n, _x, _h in flat_registrations(self.read_settings()) if n == "concept-gate.py")
+        count = sum(1 for _e, _m, n, _x, _h in flat_registrations(self.read_settings()) if n == "gate-launch.py")
         self.assertEqual(count, 1, msg="still exactly one concept-gate registration")
 
     def test_a_registration_in_another_layer_is_reported_with_its_layer(self):
@@ -1758,14 +1773,14 @@ class TestMerge(Base):
 
     def test_string_form_and_command_plus_args_form_are_both_recognised(self):
         existing = {"hooks": {"PreToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [
-            {"type": "command", "command": 'py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py"'},
+            {"type": "command", "command": 'py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py" "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py"'},
             {"type": "command", "command": "python3",
              "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/architecture-guard.py"]}]}]}}
         self.make_vendored()
         write_json(self.settings_path(), existing)
         plan = self.plan()
         added = json.dumps(self.need(plan, "to-add"))
-        self.assertNotIn("concept-gate.py", added, msg="string form is recognised")
+        self.assertNotIn("gate-launch.py", added, msg="string form is recognised")
         self.assertNotIn("architecture-guard.py", added, msg="command + args form is recognised")
         self.assertEqual(len(plan["to-add"]), 15, msg="the other 15 are missing")
         pres = plan.get("already-present", [])
@@ -1775,7 +1790,7 @@ class TestMerge(Base):
 
     def test_another_plugins_registration_counts_only_on_an_exact_key_match(self):
         existing = {"hooks": {"PreToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [
-            {"type": "command", "command": "py -3 /opt/other-plugin/hooks/concept-gate.py"},
+            {"type": "command", "command": "py -3 /opt/other-plugin/hooks/gate-launch.py /opt/other-plugin/hooks/concept-gate.py"},
             {"type": "command", "command": "py -3 /opt/other-plugin/hooks/architecture-guard-lite.py"}]},
             {"matcher": "Bash", "hooks": [
                 {"type": "command", "command": "py -3 /opt/other-plugin/hooks/bash-gate.py --strict"}]}]}}
@@ -1783,8 +1798,8 @@ class TestMerge(Base):
         write_json(self.settings_path(), existing)
         plan = self.plan()
         added = json.dumps(self.need(plan, "to-add"))
-        self.assertNotIn("concept-gate.py", added, msg="same event, file and arguments: present")
-        hit = [p for p in plan.get("already-present", []) if "concept-gate.py" in str(p.get("registration-key"))]
+        self.assertNotIn("gate-launch.py", added, msg="same event, file and arguments: present")
+        hit = [p for p in plan.get("already-present", []) if "gate-launch.py" in str(p.get("registration-key"))]
         self.assertEqual([h.get("foreign-path") for h in hit], [True], msg="reported as a foreign path")
         self.assertIn("architecture-guard.py", added, msg="a different file name is not a match")
         self.assertIn("bash-gate.py", added, msg="different arguments are a different key")
@@ -1846,7 +1861,7 @@ class TestMerge(Base):
         self.assertIs(plan.get("disable-all-hooks"), True, msg="the local layer disables every hook: say so")
 
     def test_the_source_is_the_projects_own_hooks_json_when_it_exists(self):
-        self.make_vendored(own_hooks_json=hooks_json_obj(only={"concept-gate.py", "bash-gate.py"}))
+        self.make_vendored(own_hooks_json=hooks_json_obj(only={"gate-launch.py", "bash-gate.py"}))
         plan = self.plan()
         self.assertEqual(len(self.need(plan, "to-add")), 2,
                          msg="the project's own hooks.json is the source, not the plugin's 17")
@@ -1900,6 +1915,115 @@ class TestMerge(Base):
         self.assertEqual(plan.get("source-sha256"), "absent", msg="no settings.json yet")
         self.assertIn("concept-gate.py", self.need(plan, "unified-diff"), msg="the diff shows the change")
         self.assertEqual(plan.get("interpreter"), "py -3", msg="win32 launcher")
+
+
+class TestLauncherGateArgument(Base):
+    """Contract 2026-10-07-worktree-isolation-by-default, block 6: the gate launcher's second argument.
+
+    The plugin registers the concept gate as ``gate-launch.py <plugin path of concept-gate.py>``. A vendored
+    consumer's written row must carry the project path for BOTH, or the launcher blocks every edit (I-3).
+    The plugin has no bash-gate row (round-7: bash-gate stays cut by 2026-09-28-hook-server-modes, INV-O1).
+    """
+
+    GATE_ARG_PROJECT = "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py"
+    LAUNCHER_PROJECT = "${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py"
+
+    def real_launcher_project(self):
+        """The vendored project with the REAL launcher files and a stub concept gate that prints a marker."""
+        self.make_vendored()
+        hooks = self.project / ".claude/hooks"
+        real = SCRIPT_ROOT / ".claude/hooks"
+        for name in ("gate-launch.py", "_gate_launch.py", "_main_checkout_guard.py", "_project_paths.py"):
+            shutil.copy2(real / name, hooks / name)
+        (hooks / "concept-gate.py").write_text("import sys\nsys.stdin.read()\nprint('GATE RAN')\nsys.exit(0)\n",
+                                               encoding="utf-8")
+        return hooks
+
+    def launch_written(self, args, plugin_root):
+        """Run a written row the way Claude Code would: variables expanded, payload on stdin."""
+        expanded = [a.replace("${CLAUDE_PROJECT_DIR}", str(self.project)).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin_root))
+                    for a in args[2:]]
+        payload = json.dumps({"tool_name": "Edit", "cwd": str(self.project),
+                              "tool_input": {"file_path": str(self.project / "src" / "a.cs"),
+                                             "old_string": "a", "new_string": "b"}})
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PLUGIN_ROOT",)}
+        env["CLAUDE_PROJECT_DIR"] = str(self.project)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        return subprocess.run([sys.executable] + expanded, input=payload, capture_output=True, text=True,
+                              env=env, timeout=90)
+
+    def launcher_rows(self):
+        return [h for _e, _m, n, _x, h in flat_registrations(self.read_settings()) if n == "gate-launch.py"]
+
+    def test_vendored_install_rewrites_the_launcher_gate_argument(self):
+        self.real_launcher_project()
+        plan = self.plan()
+        result = self.apply(self.need(plan, "plan-sha256"))
+        self.assertEqual(result.get("status"), "applied", msg="got %r" % result)
+        rows = self.launcher_rows()
+        self.assertEqual(len(rows), 1, msg="exactly one launcher row: the concept gate (the plugin has no bash-gate row)")
+        self.assertEqual(rows[0].get("args"), ["-3", self.LAUNCHER_PROJECT, self.GATE_ARG_PROJECT],
+                         msg="both script paths name the project's hooks folder, never ${CLAUDE_PLUGIN_ROOT}")
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT", json.dumps(rows[0]), msg="the plugin variable is gone from the row")
+        names = [n for _e, _m, n, _x, _h in flat_registrations(self.read_settings())]
+        self.assertNotIn("bash-gate.py", [a for h in self.launcher_rows() for a in h["args"]],
+                         msg="no bash-gate argument anywhere in the launcher rows")
+        self.assertIn("gate-launch.py", names, msg="fixture sanity: the launcher is registered")
+        # the written row, launched in the temp vendored project, runs the gate
+        proc = self.launch_written(["py"] + rows[0]["args"], plugin_root=self.plugin)
+        self.assertNotIn("launcher misregistered", proc.stderr, msg="the rewritten row is not misregistered: %r" % proc.stderr)
+        self.assertEqual(proc.returncode, 0, msg="the allowed edit reaches the gate and exits 0: %r %r" % (proc.stdout, proc.stderr))
+        self.assertIn("GATE RAN", proc.stdout, msg="the launcher ran the gate named by the rewritten argument")
+
+    def test_rerun_after_launcher_rewrite_adds_nothing(self):
+        self.make_vendored()
+        first = self.apply(self.need(self.plan(), "plan-sha256"))
+        self.assertEqual(first.get("status"), "applied", msg="the first run writes")
+        path = self.settings_path()
+        data = path.read_bytes()
+        plan2 = self.plan()
+        self.assertEqual(plan2.get("to-add"), [],
+                         msg="the rewritten launcher row is found by its file-name key: nothing to add")
+        self.assertIn(self.GATE_ARG_PROJECT, [a for h in self.launcher_rows() for a in h["args"]],
+                      msg="and what was found is the REWRITTEN row, not a copy of the plugin path")
+        result = self.apply(self.need(plan2, "plan-sha256"))
+        self.assertEqual(result.get("status"), "nothing-to-do", msg="got %r" % result)
+        self.assertEqual(path.read_bytes(), data, msg="settings.json is byte-identical")
+
+    def test_readiness_compiles_the_gate_argument_and_launcher_body(self):
+        self.install_plugin()
+        hooks = self.plugin / ".claude/hooks"
+        healthy = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
+        self.assertIs(healthy.get("hooks-compile"), True, msg="control: a healthy install compiles: %r" % healthy)
+        for victim in ("_gate_launch.py", "concept-gate.py"):
+            with self.subTest(victim=victim):
+                original = (hooks / victim).read_text(encoding="utf-8")
+                (hooks / victim).write_text("def (:\n", encoding="utf-8")
+                try:
+                    r = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
+                finally:
+                    (hooks / victim).write_text(original, encoding="utf-8")
+                self.assertIs(r.get("hooks-compile"), False, msg="a syntax error in %s" % victim)
+                self.assertTrue(any(victim in f for f in r.get("compile-failures", [])),
+                                msg="the failing file is named: %r" % r.get("compile-failures"))
+                self.assertIs(r["ready"], False, msg="not ready")
+        (hooks / "concept-gate.py").unlink()
+        r = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
+        self.assertTrue(any("concept-gate.py" in c for c in r.get("unresolved-commands", [])),
+                        msg="a gate argument that names no file is unresolved: %r" % r.get("unresolved-commands"))
+        self.assertIs(r["ready"], False, msg="not ready")
+
+    def test_unrewritten_gate_argument_blocks_loudly(self):
+        self.real_launcher_project()
+        row = {"type": "command", "command": "py",
+               "args": ["-3", self.LAUNCHER_PROJECT, "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py"]}
+        write_json(self.settings_path(), {"hooks": {"PreToolUse": [{"matcher": "Edit|Write", "hooks": [row]}]}})
+        # the plugin variable expands to the plugin's folder, which is not the launcher's folder
+        proc = self.launch_written(["py"] + row["args"], plugin_root=self.plugin)
+        self.assertEqual(proc.returncode, 2, msg="exit 2, never 0 or 1: %r %r" % (proc.stdout, proc.stderr))
+        self.assertIn("launcher misregistered", proc.stderr, msg="the banner names the cause")
+        self.assertIn("auto_improve_finish_install.py", proc.stderr, msg="and the fix")
+        self.assertNotIn("GATE RAN", proc.stdout, msg="the gate is never run silently from the wrong folder")
 
 
 class TestInterpreterSwap(Base):
@@ -2403,25 +2527,25 @@ class TestPlanHash(Base):
         self.make_vendored()
         sha = self.preview_sha()
         before = snapshot(self.tmp)
-        result = self.apply(sha, skip=["concept-gate.py"])
+        result = self.apply(sha, skip=["gate-launch.py"])
         self.assertRefused(result, "changed-since-preview", "the operator confirmed 17 registrations, not 16")
         self.assertTreeSame(before, "nothing is written")
 
     def test_a_skip_at_preview_that_is_dropped_at_apply_time_is_refused(self):
         self.make_vendored()
-        sha = self.preview_sha(skip=["concept-gate.py"])
+        sha = self.preview_sha(skip=["gate-launch.py"])
         before = snapshot(self.tmp)
         self.assertRefused(self.apply(sha), "changed-since-preview", "the operator confirmed 16, not 17")
         self.assertTreeSame(before, "nothing is written")
 
     def test_the_same_skip_at_preview_and_apply_succeeds_in_either_order(self):
         self.make_vendored()
-        sha = self.preview_sha(skip=["concept-gate.py", "memory-pager.py"])
-        result = self.apply(sha, skip=["memory-pager.py", "concept-gate.py"])
+        sha = self.preview_sha(skip=["gate-launch.py", "memory-pager.py"])
+        result = self.apply(sha, skip=["memory-pager.py", "gate-launch.py"])
         self.assertEqual(result.get("status"), "applied", msg="POSITIVE CONTROL: same flags, same hash; got %r" % result)
         names = [n for _e, _m, n, _x, _h in flat_registrations(self.read_settings())]
         self.assertEqual(len(names), 15, msg="17 minus two skipped hooks")
-        self.assertNotIn("concept-gate.py", names, msg="the skipped hook is left out")
+        self.assertNotIn("gate-launch.py", names, msg="the skipped hook is left out")
 
     def test_a_user_or_local_layer_change_between_preview_and_apply_is_refused(self):
         registers_bash_gate = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
@@ -2449,10 +2573,10 @@ class TestPlanHash(Base):
                                  msg="16: the user-registered bash-gate.py is not added again")
 
     def test_a_source_hooks_json_change_between_preview_and_apply_is_refused(self):
-        self.make_vendored(own_hooks_json=hooks_json_obj(only={"concept-gate.py", "bash-gate.py"}))
+        self.make_vendored(own_hooks_json=hooks_json_obj(only={"gate-launch.py", "bash-gate.py"}))
         sha = self.preview_sha()
         (self.project / ".claude/hooks/hooks.json").write_text(
-            json.dumps(hooks_json_obj(only={"concept-gate.py"})), encoding="utf-8")
+            json.dumps(hooks_json_obj(only={"gate-launch.py"})), encoding="utf-8")
         before = snapshot(self.tmp)
         self.assertRefused(self.apply(sha), "changed-since-preview", "the source of the registrations changed")
         self.assertTreeSame(before, "nothing is written")
@@ -2583,7 +2707,7 @@ class TestReadiness(Base):
         self.install_plugin()
         self.assertIs(self.report().get("duplicate-vendored-registration"), False, msg="none yet")
         write_json(self.settings_path(), {"hooks": {"PreToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [
-            {"type": "command", "command": "py", "args": ["-3", "/x/hooks/concept-gate.py"]}]}]}})
+            {"type": "command", "command": "py", "args": ["-3", "/x/hooks/gate-launch.py", "/x/hooks/concept-gate.py"]}]}]}})
         r = self.report()
         self.assertIs(r.get("duplicate-vendored-registration"), True, msg="the same key registered twice")
 
@@ -2638,7 +2762,7 @@ class TestReadiness(Base):
         self.install_plugin()
         write_json(self.project / ".claude/settings.local.json", {"hooks": {"PreToolUse": [{
             "matcher": "Edit|Write|MultiEdit", "hooks": [
-                {"type": "command", "command": "py", "args": ["-3", "/x/hooks/concept-gate.py"]}]}]}})
+                {"type": "command", "command": "py", "args": ["-3", "/x/hooks/gate-launch.py", "/x/hooks/concept-gate.py"]}]}]}})
         r = self.report()
         self.assertIs(r.get("duplicate-vendored-registration"), True,
                       msg="the same key registered in the LOCAL layer runs every hook twice")
