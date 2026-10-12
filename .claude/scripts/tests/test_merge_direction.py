@@ -255,6 +255,15 @@ class CrossRepositoryTests(MDCase):
         self.assert_verdict(self.md(TASK, "dev", env_extra={"GH_REPO": "other/second"}), 11,
                             "cross-repo-base-not-default")
 
+    def test_unreadable_acting_directory_identity_refuses_while_the_session_repository_reads(self):
+        # t8 F9 [kill M14b]: the acting directory is a checkout of another repository whose `gh repo view`
+        # fails, the session repository's succeeds, and there is no -R.
+        self.assert_verdict(self.md(TASK, "trunk", cwd=self.w.second.main), 0)  # control: readable, so an allow
+        view = gh_config(self.w)["repo_view"]
+        view["by_cwd"][str(self.w.second.main)] = {"fail": True}
+        self.tools.set_gh(repo_view=view)
+        self.assert_verdict(self.md(TASK, "trunk", cwd=self.w.second.main), 10, "repository-unreadable")
+
     def test_the_other_repositorys_default_is_not_this_repositorys(self):
         # control: `trunk` is not the session repository's default, so the same call into the session
         # repository is judged by R-1 (the sub-task's base is the parent) and refused.
@@ -443,9 +452,12 @@ class GateCase(MDCase):
     def blocked(proc: Proc) -> bool:
         return proc.rc == 2 and MARKER in proc.err
 
-    def assert_blocked(self, proc: Proc, label: str) -> None:
+    def assert_blocked(self, proc: Proc, label: str, reason: str) -> None:
+        """BLOCK means exit 2, the marker AND the reason word (t8 F7): a call refused for another reason, or a
+        crash of the check, must not pass as the refusal under test."""
         self.assertTrue(self.blocked(proc),
                         msg=f"{label}: must BLOCK with exit 2 and '{MARKER}' on stderr: {proc.describe()}")
+        self.assertIn(reason, proc.err, msg=f"{label}: the banner must name the reason {reason!r}: {proc.describe()}")
 
     def assert_allowed(self, proc: Proc, label: str) -> None:
         self.assertEqual(proc.rc, 0, msg=f"{label}: must be let through (exit 0): {proc.describe()}")
@@ -460,24 +472,25 @@ class MergeDirectionGateTests(GateCase):
             "6": {"number": 6, "headRefName": TASK, "baseRefName": self.w.default, "state": "OPEN", "url": "u"},
             "7": {"number": 7, "headRefName": TASK, "baseRefName": PARENT, "state": "OPEN", "url": "u"}})
 
+    #: (command, the reason word its banner must carry): every one targets the default branch for a sub-task.
     WRONG = [
-        "gh pr create --title t --body b",
-        "gh pr create --base master --title t --body b",
-        "gh pr create --base=master --title t --body b",
-        "gh pr create -B master --title t --body b",
-        "gh pr create -Bmaster --title t --body b",
-        "gh pr edit 5 -B master",
-        "gh pr edit 5 --base master",
-        "gh pr merge 6 --squash",
+        ("gh pr create --title t --body b", "sub-task-targets-default"),
+        ("gh pr create --base master --title t --body b", "sub-task-targets-default"),
+        ("gh pr create --base=master --title t --body b", "sub-task-targets-default"),
+        ("gh pr create -B master --title t --body b", "sub-task-targets-default"),
+        ("gh pr create -Bmaster --title t --body b", "sub-task-targets-default"),
+        ("gh pr edit 5 -B master", "sub-task-targets-default"),
+        ("gh pr edit 5 --base master", "sub-task-targets-default"),
+        ("gh pr merge 6 --squash", "sub-task-targets-default"),
     ]
     RIGHT = "gh pr create --base feature/460-parent --title t --body b"
 
     def test_a_wrong_target_is_blocked_in_bash_and_powershell_and_a_correct_one_is_not(self):
-        rows = [(tool, cmd) for tool in ("Bash", "PowerShell") for cmd in self.WRONG]
-        results = self.launch_all(rows)
-        for (tool, cmd), proc in zip(rows, results):
+        rows = [(tool, cmd, reason) for tool in ("Bash", "PowerShell") for cmd, reason in self.WRONG]
+        results = self.launch_all([(tool, cmd) for tool, cmd, _reason in rows])
+        for (tool, cmd, reason), proc in zip(rows, results):
             with self.subTest(tool=tool, command=cmd):
-                self.assert_blocked(proc, f"{tool}: {cmd}")
+                self.assert_blocked(proc, f"{tool}: {cmd}", reason)
         # ALLOW counts only after a same-run BLOCK sibling: the correct create, in both tools.
         self.assertTrue(any(self.blocked(p) for p in results),
                         msg="no BLOCK row confirmed: an allow here would prove nothing")
@@ -487,7 +500,7 @@ class MergeDirectionGateTests(GateCase):
 
     def test_gh_pr_merge_of_a_pull_request_with_the_right_base_is_not_blocked(self):
         blocked = self.launch("Bash", "gh pr merge 6 --squash")
-        self.assert_blocked(blocked, "gh pr merge 6 (base is the default branch)")
+        self.assert_blocked(blocked, "gh pr merge 6 (base is the default branch)", "sub-task-targets-default")
         self.assert_allowed(self.launch("Bash", "gh pr merge 7 --squash"), "gh pr merge 7 (base is the parent)")
 
     def test_keyword_positions_in_bash(self):
@@ -501,7 +514,7 @@ class MergeDirectionGateTests(GateCase):
         )]
         for (tool, cmd), proc in zip(rows, self.launch_all(rows)):
             with self.subTest(command=cmd):
-                self.assert_blocked(proc, cmd)
+                self.assert_blocked(proc, cmd, "sub-task-targets-default")
 
     def test_keyword_positions_in_powershell(self):
         wrong = "gh pr create --base master --title t --body b"
@@ -512,13 +525,131 @@ class MergeDirectionGateTests(GateCase):
         )]
         for (tool, cmd), proc in zip(rows, self.launch_all(rows)):
             with self.subTest(command=cmd):
-                self.assert_blocked(proc, cmd)
+                self.assert_blocked(proc, cmd, "sub-task-targets-default")
+
+    def test_attached_base_spellings_on_create_are_read_like_the_separate_ones(self):
+        # t8 F5 [kill M26, M27]: `--base=dev` and `-Bdev` must be READ as a base. The other repository's default
+        # is `master` here, so an unread base (the default is filled in) would be let through as a default.
+        view = gh_config(self.w)["repo_view"]
+        view["by_name"]["other/second"] = repo_answer("other/second", "master")
+        self.tools.set_gh(repo_view=view)
+        blocks = [
+            ("gh pr create --base=dev", "base-differs-from-declared"),
+            ("gh pr create -Bdev", "base-differs-from-declared"),
+            ("gh pr create --base=dev -R other/second", "cross-repo-base-not-default"),
+            ("gh pr create -Bdev -R other/second", "cross-repo-base-not-default"),
+        ]
+        results = self.launch_all([("Bash", cmd) for cmd, _reason in blocks])
+        for (cmd, reason), proc in zip(blocks, results):
+            with self.subTest(command=cmd):
+                self.assert_blocked(proc, cmd, reason)
+        self.assertTrue(any(self.blocked(p) for p in results), msg="no BLOCK row confirmed: an allow proves nothing")
+        for cmd in (f"gh pr create --base={PARENT}", f"gh pr create -B{PARENT}"):
+            with self.subTest(command=cmd):
+                self.assert_allowed(self.launch("Bash", cmd), cmd)
 
     def test_the_check_is_not_run_for_other_gh_commands(self):
-        self.assert_blocked(self.launch("Bash", "gh pr create --base master --title t --body b"), "sibling block")
+        self.assert_blocked(self.launch("Bash", "gh pr create --base master --title t --body b"), "sibling block",
+                            "sub-task-targets-default")
         self.assert_allowed(self.launch("Bash", "gh pr view 5"), "gh pr view is not a create, edit or merge")
         self.assert_allowed(self.launch("Bash", "gh pr list"), "gh pr list")
         self.assert_allowed(self.launch("Bash", "gh pr edit 5 --title new"), "gh pr edit without a base option")
+
+
+class GhSpellingGateTests(GateCase):
+    """Four gh spellings the guard misreads and must refuse (contract amendment notes, round 8). Each row is
+    RED today: it is either let through, or blocked without the reason text the refusal must carry. The
+    parent-branch folder has an OPEN child, so a parent opening into the default branch is refused anyway
+    (the control row), which is why those rows can only be told apart by their reason text."""
+
+    SEPARATELY = "write each option separately"
+    TWICE = "given more than once"
+    ACTION_FIRST = "write `gh pr <action>` first"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.parent_wt = add_worktree(cls.w.main, cls.w.main / ".claude" / "worktrees" / "20261007-parent-460", PARENT)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.tools.set_gh(
+            sub_issues={"460": [{"number": 473, "state": "OPEN"}]},
+            pr_view={"5": {"number": 5, "headRefName": PARENT, "baseRefName": self.w.default, "state": "OPEN", "url": "u"}})
+
+    def cwd_of(self, key: str):
+        return {"parent": self.parent_wt, "task": self.w.task_wt}[key]
+
+    def run_rows(self, rows: list) -> None:
+        """rows: (folder key, command, reason text). One BLOCK each, in Bash; the control row first proves the
+        fixture refuses a parent opening early, so an allow below it counts."""
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(lambda r: self.launch("Bash", r[1], cwd=self.cwd_of(r[0])), rows))
+        for (key, cmd, text), proc in zip(rows, results):
+            with self.subTest(folder=key, command=cmd):
+                self.assert_blocked(proc, f"{key}: {cmd}", text)
+
+    def control_refusal(self) -> None:
+        self.assert_blocked(self.launch("Bash", "gh pr create --base master --title t", cwd=self.parent_wt),
+                            "control: the parent opening into the default branch with an open child",
+                            "parent-opened-early")
+
+    def test_attached_equals_and_option_clusters_are_refused_with_the_write_separately_text(self):
+        self.control_refusal()
+        self.run_rows([
+            ("parent", "gh pr create -B=master", self.SEPARATELY),
+            ("parent", "gh pr create -dBmaster", self.SEPARATELY),
+            ("parent", "gh pr create -dB master", self.SEPARATELY),
+            ("task", f"gh pr create -H={TASK} --base master", self.SEPARATELY),
+            ("task", "gh pr create -R other/second -dBdev", self.SEPARATELY),
+            ("task", "gh pr edit 5 -B=master", self.SEPARATELY),
+            ("task", "gh pr merge 5 -R=other/second", self.SEPARATELY),
+            ("task", "gh pr merge 5 -dR other/second", self.SEPARATELY),
+        ])
+
+    def test_a_base_head_or_repository_given_twice_is_refused_with_the_more_than_once_text(self):
+        self.control_refusal()
+        self.run_rows([
+            ("parent", "gh pr create --base dev -B master", self.TWICE),
+            ("task", f"gh pr create --base {PARENT} -B master", self.TWICE),
+            ("task", f"gh pr create -H {TASK} --head {PARENT}", self.TWICE),
+            ("task", "gh pr edit 5 --base dev -B master", self.TWICE),
+            ("task", "gh pr merge 5 --repo acme/app -R other/second", self.TWICE),
+        ])
+
+    def test_an_option_before_the_action_word_is_refused_with_the_action_first_text(self):
+        self.control_refusal()
+        self.run_rows([
+            ("parent", "gh pr --base master create", self.ACTION_FIRST),
+            ("parent", "gh --base master pr create", self.ACTION_FIRST),
+            ("parent", "gh pr -R acme/app create", self.ACTION_FIRST),
+            ("task", "gh -R other/second pr create --base dev", self.ACTION_FIRST),
+            ("task", "gh pr --base master edit 5", self.ACTION_FIRST),
+            ("task", "gh pr -d merge 5", self.ACTION_FIRST),
+        ])
+
+    def test_two_and_three_options_before_pr_are_refused_with_the_action_first_text(self):
+        self.control_refusal()
+        self.run_rows([
+            ("parent", "gh --title t --base master pr create", self.ACTION_FIRST),
+            ("parent", "gh --title t --body b --base master pr create", self.ACTION_FIRST),
+            ("task", "gh -R other/second -B dev pr create", self.ACTION_FIRST),
+            ("task", "gh -R other/second -d -B dev pr create", self.ACTION_FIRST),
+            ("task", "gh --title t -B master pr edit 5", self.ACTION_FIRST),
+            ("task", "gh -R acme/app --title t -B master pr edit 5", self.ACTION_FIRST),
+            ("task", "gh -R other/second --subject s pr merge 5", self.ACTION_FIRST),
+            ("task", "gh -R other/second --subject s --body b pr merge 5", self.ACTION_FIRST),
+        ])
+
+    def test_an_option_after_the_action_word_and_a_plain_delete_branch_stay_allowed(self):
+        self.control_refusal()  # an allow below counts only after this confirmed refusal
+        self.assert_allowed(self.launch("Bash", f"gh pr create -d -B {PARENT}", cwd=self.w.task_wt),
+                            "gh pr create -d -B <parent> from the task folder")
+        self.assert_allowed(self.launch("Bash", "gh pr view --json headRefName", cwd=self.parent_wt),
+                            "an option after the action word stays allowed")
+        self.tools.set_gh(pr_view={"5": {"number": 5, "headRefName": TASK, "baseRefName": PARENT, "state": "OPEN", "url": "u"}})
+        self.assert_allowed(self.launch("Bash", "gh pr merge 5 -d", cwd=self.w.task_wt),
+                            "gh pr merge 5 -d where pull request 5 is the task into its parent")
 
 
 class MergeDirectionScriptMissingTests(GateCase):
@@ -542,11 +673,13 @@ class MergeDirectionScriptMissingTests(GateCase):
         wrong = "gh pr create --base master --title t --body b"
         right = "gh pr create --base feature/460-parent --title t --body b"
         # control: the copied layout works -- the wrong target is refused for its direction
-        self.assert_blocked(self.launch("Bash", wrong, hooks_dir=full), "control: full copy, wrong target")
+        self.assert_blocked(self.launch("Bash", wrong, hooks_dir=full), "control: full copy, wrong target",
+                            "sub-task-targets-default")
         self.assert_allowed(self.launch("Bash", right, hooks_dir=full), "control: full copy, correct target")
         # the check cannot run: a missing script is a refusal, never an allow
-        self.assert_blocked(self.launch("Bash", right, hooks_dir=gone), "merge_direction.py renamed away")
-        self.assert_blocked(self.launch("PowerShell", right, hooks_dir=gone), "merge_direction.py renamed away (PowerShell)")
+        self.assert_blocked(self.launch("Bash", right, hooks_dir=gone), "merge_direction.py renamed away", "is missing")
+        self.assert_blocked(self.launch("PowerShell", right, hooks_dir=gone), "merge_direction.py renamed away (PowerShell)",
+                            "is missing")
 
 
 if __name__ == "__main__":

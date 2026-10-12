@@ -287,7 +287,10 @@ class Tools:
 
     # -- gh -------------------------------------------------------------------------------------
     def install_gh(self, config: dict | None = None) -> None:
-        write_exe(self.bin, "gh", FAKE_GH_CODE)
+        # The executable is written ONCE per folder: rewriting a running executable made two tests of one
+        # class fail as fixture flakes (t8 F12). Each later call changes gh_config.json only.
+        if not (self.bin / ("gh.exe" if os.name == "nt" else "gh")).exists():
+            write_exe(self.bin, "gh", FAKE_GH_CODE)
         cfg = {"real_git": REAL_GIT}
         cfg.update(config or {})
         (self.bin / "gh_config.json").write_text(json.dumps(cfg), encoding="utf-8")

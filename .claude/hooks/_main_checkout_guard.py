@@ -559,8 +559,47 @@ def _parse_gh_pr(args: list[str]) -> tuple[list[str], dict]:
     return words, opts
 
 
+def _gh_misread_spellings(args: list[str]) -> None:
+    """Refuse the gh spellings the reader below would misjudge, without modelling gh's own parser."""
+    if "pr" not in args:
+        return
+    at = args.index("pr")
+    after = args[at + 1 : at + 2]
+    if any(a.startswith("-") for a in args[:at]) or (after and after[0].startswith("-")):
+        raise Block("gh pr", "an option sits before the action word: write `gh pr <action>` first, then its options",
+                    "", MD_MARKER)
+    action = after[0] if after else ""
+    value_opts = _PR_VALUE_OPTS.get(action)
+    if value_opts is None:
+        return
+
+    def refuse(reason: str) -> None:
+        raise Block("gh pr " + action, reason, "", MD_MARKER)
+
+    letters = {o[1] for o in value_opts if len(o) == 2}
+    groups = [g for g in (("-B", "--base"), ("-H", "--head"), ("-R", "--repo")) if g[0] in value_opts]
+    seen = {g: 0 for g in groups}
+    rest, i = args[at + 2 :], 0
+    while i < len(rest):
+        a = rest[i]
+        i += 1
+        if a in value_opts:
+            i += 1
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 2:
+            if a[:2] in value_opts and a[2] == "=":
+                refuse("%s has an attached `=`: write each option separately" % a[:2])
+            if a[:2] not in value_opts and any(c in letters for c in a[2:]):
+                refuse("%s joins several options: write each option separately" % a)
+        for g in groups:
+            if a in g or a.startswith(g[1] + "=") or (a.startswith(g[0]) and not a.startswith("--") and len(a) > 2):
+                seen[g] += 1
+                if seen[g] > 1:
+                    refuse("%s is given more than once" % g[1])
+
+
 def _merge_direction(ctx: Ctx, st: State, args: list[str], assigns: list[str]) -> None:
     """Run ``merge_direction.py`` for ``gh pr create``, ``gh pr edit --base`` and ``gh pr merge``."""
+    _gh_misread_spellings(args)
     words, opts = _parse_gh_pr(args)
     if words[:1] != ["pr"] or words[1:2] not in (["create"], ["edit"], ["merge"]):
         return
