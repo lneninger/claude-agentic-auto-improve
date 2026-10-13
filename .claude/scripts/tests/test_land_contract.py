@@ -3946,5 +3946,62 @@ class TestStageRegenerateArmChecksExitCodes(StageCase):
         self.assertEqual(git(st.worktree, "status", "--porcelain"), "", "the merge was aborted, tree clean")
 
 
+# ===========================================================================
+# Issue #614: P3 reads the EFFECTIVE review verdict, not every record's raw verdict
+# ===========================================================================
+FIRST_REPORT = ".claude/reviews/%s/t1-backend-first-review.md" % SLUG
+RE_REPORT = ".claude/reviews/%s/t2-frontend-re-review.md" % SLUG
+CONTRACT_WITH_REREVIEW = (CONTRACT_TEXT.replace("- src/Foo.cs\n", "- src/Foo.cs\n- %s\n" % FIRST_REPORT)
+                          .replace("- src/Bar.cs\n", "- src/Bar.cs\n- %s\n" % RE_REPORT))
+
+
+def review_report(verdict):
+    return "# Review\n\n**Verdict:** %s\n" % verdict
+
+
+def gate_json(supersedes):
+    return json.dumps({"supersedes": supersedes, "checklist": []})
+
+
+class TestStageP3ReadsTheEffectiveReviewVerdict(StageCase):
+    """#614: a blocked review that a later report supersedes must not halt the landing."""
+
+    def rereview_stage(self, first_verdict, second_verdict, supersedes, subdir):
+        parent_files = dict(self.src_change(), **{
+            FIRST_REPORT: review_report(first_verdict),
+            RE_REPORT: review_report(second_verdict),
+            RE_REPORT[:-3] + ".gate.json": gate_json(supersedes),
+        })
+        return self.stage(subdir=subdir, parent_files=parent_files,
+                          base_files={".claude/concepts/%s.md" % SLUG: CONTRACT_WITH_REREVIEW},
+                          verdicts={"t1-backend": first_verdict, "t2-frontend": second_verdict})
+
+    def test_a_blocked_review_superseded_by_a_passing_re_review_does_not_halt_p3(self):
+        for second in ("pass", "pass-with-findings"):
+            with self.subTest(second=second):
+                st = self.rereview_stage("blocked", second, ["t1-backend-first-review.md"], "sup-" + second)
+                self.assertOutcome(st.run(), "landed",
+                                   "the Gate Output of the re-review supersedes the blocked report, so the "
+                                   "only effective verdict is a pass")
+
+    def test_control_a_blocked_review_nobody_supersedes_still_halts_p3(self):
+        st = self.rereview_stage("blocked", "pass", [], "no-supersede")
+        report = st.run()
+        self.assertOutcome(report, "blocked-verdict", "no Gate Output supersedes it, so it stays effective")
+        self.assertIn("t1-backend", report["detail"], "the blocked sub-task is named")
+        self.assertEqual(st.count("gh_pr_merge"), 0, "a halt never merges")
+
+    def test_a_superseding_report_that_is_itself_blocked_halts_and_names_only_it(self):
+        st = self.rereview_stage("blocked", "blocked", ["t1-backend-first-review.md"], "sup-blocked")
+        report = st.run()
+        self.assertOutcome(report, "blocked-verdict", "the effective report is the re-review, and it is blocked")
+        self.assertIn("t2-frontend", report["detail"], "the effective blocked sub-task is named")
+        self.assertNotIn("t1-backend", report["detail"], "the superseded one is not reported as the cause")
+
+    def test_control_a_supersedes_entry_naming_no_report_leaves_the_blocked_review_blocking(self):
+        st = self.rereview_stage("blocked", "pass", ["no-such-report.md"], "sup-missing")
+        self.assertOutcome(st.run(), "blocked-verdict", "supersession needs a real target in the review folder")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
