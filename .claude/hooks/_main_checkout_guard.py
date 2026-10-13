@@ -4,7 +4,7 @@
 ``("allow", "")`` or ``("block", banner)``. It refuses edits, file writes and tree-changing git or
 gh commands aimed at the session's main checkout. It reads the filesystem and the hook's own
 environment only, with one exception: for ``gh pr create``, ``gh pr edit`` with a base option and
-``gh pr merge`` it runs ``../scripts/merge_direction.py`` as a subprocess (Extension Point 2) and
+a pull-request merge it runs ``../scripts/merge_direction.py`` as a subprocess (Extension Point 2) and
 blocks on any non-zero exit, a missing script or a timeout (marker ``MERGE DIRECTION``). The gate
 launcher (``_gate_launch.py``) calls it before either gate is loaded and runs no subprocess itself.
 
@@ -598,7 +598,7 @@ def _gh_misread_spellings(args: list[str]) -> None:
 
 
 def _merge_direction(ctx: Ctx, st: State, args: list[str], assigns: list[str]) -> None:
-    """Run ``merge_direction.py`` for ``gh pr create``, ``gh pr edit --base`` and ``gh pr merge``."""
+    """Run ``merge_direction.py`` for ``gh pr create``, ``gh pr edit --base`` and a pull-request merge."""
     _gh_misread_spellings(args)
     words, opts = _parse_gh_pr(args)
     if words[:1] != ["pr"] or words[1:2] not in (["create"], ["edit"], ["merge"]):
