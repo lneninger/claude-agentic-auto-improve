@@ -1071,6 +1071,30 @@ GATE_ORDER: Tuple[Tuple[str, str], ...] = (
 )
 
 
+def blocked_review_verdicts(records: Dict[str, Dict[str, Any]],
+                            review_files: Dict[str, List[str]],
+                            readings: Dict[str, Dict[str, Any]]) -> List[Tuple[str, Any]]:
+    """P3 (issue #614): ``(task id, verdict)`` for each record whose review verdict is not a pass,
+    unless the review layer says every report that task wrote is superseded.
+
+    ``readings`` is ``pr_merged.read_review_set(...)["readings"]``: the one place that decides which
+    report is effective, so the supersession graph is never reimplemented here. A task with no
+    report in the review folder, or whose report is still effective, keeps its raw verdict, so a
+    review nobody supersedes still blocks and an unreadable folder relaxes nothing.
+    """
+    superseded = {name for name, reading in readings.items() if not reading.get("effective", True)}
+    blocked: List[Tuple[str, Any]] = []
+    for tid, rec in sorted(records.items()):
+        verdict = rec.get("review_verdict")
+        if verdict is None or verdict in PASS_VERDICTS:
+            continue
+        names = [path.replace("\\", "/").rsplit("/", 1)[-1] for path in review_files.get(tid, [])]
+        if names and all(name in superseded for name in names):
+            continue
+        blocked.append((tid, verdict))
+    return blocked
+
+
 def evaluate_gates(facts: Dict[str, Any]) -> Optional[str]:
     """The first halt over P3 to P14, in gate order (the order is the enforcement)."""
     for key, outcome in GATE_ORDER:
@@ -1750,8 +1774,13 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
 
     # ---- P3 review verdicts -----------------------------------------------------------------------
     phase("p3")
-    blocked = [(tid, rec.get("review_verdict")) for tid, rec in sorted(records.items())
-               if rec.get("review_verdict") is not None and rec.get("review_verdict") not in PASS_VERDICTS]
+    review_files_by_task = {t.id: [f for f in getattr(t, "files", []) if f.startswith(".claude/reviews/")]
+                            for t in classification.sub_tasks}
+    rc_ls, listing = _git(wt, "ls-tree", "--name-only", parent_ref, ".claude/reviews/%s/" % slug)
+    review_readings = (pr_merged.read_review_set(listing.splitlines(),
+                                                 lambda path: git_show(parent_ref, path, cwd=wt))["readings"]
+                       if rc_ls == 0 else {})
+    blocked = blocked_review_verdicts(records, review_files_by_task, review_readings)
     facts["p3_blocked_verdict"] = bool(blocked)
     details["blocked-verdict"] = "blocked review verdict: " + ", ".join("%s=%s" % b for b in blocked)
     gate_check("P3")
