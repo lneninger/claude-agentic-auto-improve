@@ -118,6 +118,8 @@ Do not dig beyond what is necessary to design the contract. You are not debuggin
 
 ### Step 4 — Draft the contract
 
+The contract's size budget, and the rule for revising a contract without growing it, are in `.claude/templates/concept-contract.md`; follow them.
+
 Copy `.claude/templates/concept-contract.md` to the target path and fill every section:
 
 1. **Business Concept** — describe the feature in the user's vocabulary. Link to existing VOCABULARY.md terms. Propose new terms (with proposed definitions) or flag as Open Questions if ambiguous.

@@ -40,7 +40,7 @@ Two things to carry into every C# change:
 - **Correctness outranks speed** under every root named by the `safety-critical.roots` slot of the project profile. Never optimize by weakening a test or deleting a guard — if a guard is the bottleneck, say so and escalate.
 
 ## Database safety (HARD rules)
-- NEVER run `dotnet ef database drop` against the configured dev database — the one the application's own settings file names.
+- The EF database-removal command is run by hand, never by an agent: Claude Code's permissions refuse it. Verify migrations with `tools\db-protection\verify-migration.cmd`, and never point anything at the configured dev database — the one the application's own settings file names.
 - Verify migrations only via `tools\db-protection\verify-migration.cmd` (disposable DB).
 - Generate migrations with `dotnet ef migrations add <Name> -p <the project owning `migration.root`> -s <the startup project>`, both resolved from the project profile.
 - API DLL lock during build = VS debugger attached, NOT a code error.

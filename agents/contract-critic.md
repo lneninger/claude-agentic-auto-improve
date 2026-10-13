@@ -100,6 +100,8 @@ Work through the checklist in order. For each item, either record a finding (BLO
 
 ### Step 5 — Append the Critique section
 
+The contract budget, and where a superseded critique round goes, are in `.claude/templates/concept-contract.md`; follow them.
+
 Use `Edit` to append (NOT replace) a `## Critique` section at the END of the contract file. The section MUST follow this exact shape so downstream readers (user, `/design-first` Step 5, `fullstack-code-reviewer`, future critics) can parse it identically every time:
 
 ```markdown

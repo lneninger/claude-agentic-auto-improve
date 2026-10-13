@@ -2134,29 +2134,50 @@ def case10_project_alias_matching(env) -> None:
 # ---------------------------------------------------------------------------
 # INV-10 -- prove no real tree was touched.
 # ---------------------------------------------------------------------------
+def _sentinel_paths_for(claude_dir: Path, home: Path) -> list[Path]:
+    """The sentinel list, parameterised on ``claude_dir``/``home`` so the
+    positive control below (case_inv10c) can exercise the SAME watch list
+    shape against a throwaway sandbox tree, never the real one.
+
+    ``accuracy.jsonl`` (project and home) was added here per the t8 code
+    review's WARN "blind safety check": the hook-latency contract
+    (.claude/concepts/2026-09-25-hook-latency.md, INV-A1) re-routes every
+    routine accuracy verdict from errors.jsonl to accuracy.jsonl, so a script
+    that started writing into the real accuracy ledger's log would previously
+    have gone unnoticed here -- only errors.jsonl was ever watched.
+    """
+    return [
+        claude_dir / "contract-accuracy.json",
+        claude_dir / "logs" / "errors.jsonl",
+        claude_dir / "logs" / "accuracy.jsonl",
+        claude_dir / "area-mapping.json",
+        home / ".claude" / "contract-accuracy.json",
+        home / ".claude" / "logs" / "errors.jsonl",
+        home / ".claude" / "logs" / "accuracy.jsonl",
+    ]
+
+
 def _sentinel_paths() -> list[Path]:
     # The home path here is a NEGATIVE guard, not resolution (INV-1 exempt).
     # _real_home(), not Path.home(): Path.home() is fabricated for this
     # process, and the point of the sentinel is to watch the REAL file.
     home = _real_home()
-    return [
-        _CLAUDE_DIR / "contract-accuracy.json",
-        _CLAUDE_DIR / "logs" / "errors.jsonl",
-        _CLAUDE_DIR / "area-mapping.json",
-        home / ".claude" / "contract-accuracy.json",
-        home / ".claude" / "logs" / "errors.jsonl",
-    ]
+    return _sentinel_paths_for(_CLAUDE_DIR, home)
 
 
-def snapshot_real_trees() -> dict:
+def _snapshot_paths(paths: list[Path]) -> dict:
     snap = {}
-    for p in _sentinel_paths():
+    for p in paths:
         try:
             st = p.stat()
             snap[str(p)] = (True, st.st_size, st.st_mtime_ns)
         except OSError:
             snap[str(p)] = (False, -1, -1)
     return snap
+
+
+def snapshot_real_trees() -> dict:
+    return _snapshot_paths(_sentinel_paths())
 
 
 def case11_same_answer_from_any_directory() -> None:
@@ -2352,6 +2373,82 @@ def case_inv10_no_real_writes(before: dict) -> None:
     )
 
 
+def case_inv10c_accuracy_sentinel_watches_and_fires() -> None:
+    """Positive control for the accuracy.jsonl watch added to
+    :func:`_sentinel_paths_for` (t8 code review, WARN "blind safety check"):
+    accuracy events now route to accuracy.jsonl (hook-latency contract,
+    INV-A1), so INV-10's snapshot-diff watch must cover it too -- and this
+    proves the watch actually FIRES on a change, without ever touching the
+    real ``.claude/logs/accuracy.jsonl``. The earlier INV-10 checks above only
+    ever watched errors.jsonl; a write into the real accuracy.jsonl would have
+    gone completely unnoticed by them.
+
+    Runs entirely against a throwaway sandbox tree that mirrors the real
+    layout's SHAPE (a ``.claude/logs/`` folder under a fake project root and a
+    fake home) -- the same throwaway-sandbox technique
+    test_hook_exec_launch.py and test_accuracy_audit_log.py use, never the
+    live repository or the live home directory.
+    """
+    print("\ncase_inv10c -- accuracy.jsonl sentinel watch, positive control on a sandbox copy")
+    with tempfile.TemporaryDirectory(prefix="pathres_acc_sentinel_") as tmp:
+        sandbox_claude = Path(tmp) / "repo" / ".claude"
+        sandbox_home = Path(tmp) / "home"
+        (sandbox_claude / "logs").mkdir(parents=True, exist_ok=True)
+        sandbox_home.mkdir(parents=True, exist_ok=True)
+
+        paths = _sentinel_paths_for(sandbox_claude, sandbox_home)
+        acc_path = sandbox_claude / "logs" / "accuracy.jsonl"
+        home_acc_path = sandbox_home / ".claude" / "logs" / "accuracy.jsonl"
+        check(
+            "case_inv10c: the extended sentinel list watches accuracy.jsonl, "
+            "project-local and home",
+            acc_path in paths and home_acc_path in paths,
+            f"paths watched: {paths}",
+        )
+
+        # nit N9: the ORIGINAL version of this control only ever wrote
+        # accuracy.jsonl from ABSENT to PRESENT -- the one shape probe S2
+        # (forcing every snapshot entry to a constant ``(True, 0, 0)``) still
+        # catches, because existence itself still flips. Today's real
+        # accuracy.jsonl does not exist yet, so that is a faithful case for
+        # now -- but once the critic tracker has written it (which it will,
+        # after merge), a leak becomes an APPEND to an EXISTING file, and
+        # that shape was never exercised: seed the file first, snapshot,
+        # THEN append, so this control also fails if size/mtime go dark.
+        acc_path.write_text(
+            '{"ts":0,"hook":"accuracy","event":"clean","file":"sandbox-seed.md","details":{}}\n',
+            encoding="utf-8",
+        )
+        before = _snapshot_paths(paths)
+        acc_path.write_text(
+            acc_path.read_text(encoding="utf-8")
+            + '{"ts":1,"hook":"accuracy","event":"clean","file":"sandbox.md","details":{}}\n',
+            encoding="utf-8",
+        )
+        after = _snapshot_paths(paths)
+
+        key = str(acc_path)
+        check(
+            "case_inv10c: a line APPENDED to an already-existing sandbox "
+            "accuracy.jsonl changes its own snapshot entry (N9: the file "
+            "existed before and after -- only its size and mtime moved -- "
+            "so a snapshot that zeroes size/time, not just existence, is "
+            "needed to catch this)",
+            after.get(key) != before.get(key),
+            f"before={before.get(key)} after={after.get(key)}",
+        )
+
+        unrelated_changes = [
+            k for k in before if k != key and before[k] != after.get(k)
+        ]
+        check(
+            "case_inv10c: no OTHER sandbox sentinel path moved when only "
+            "accuracy.jsonl was written",
+            not unrelated_changes,
+            f"unexpectedly changed: {unrelated_changes}",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fixture assembly + entry point.
 # ---------------------------------------------------------------------------
@@ -2534,6 +2631,7 @@ def main() -> int:
         case10_project_alias_matching(env)
         case11_same_answer_from_any_directory()
         case_inv10_no_real_writes(before)
+        case_inv10c_accuracy_sentinel_watches_and_fires()
 
         print()
         print("-" * 60)

@@ -86,14 +86,16 @@ If any `Persistence/Migrations/*.cs` file was created or modified:
    - Does it match the entity change you intended?
    - Does it include a sensible `Down()` for rollback?
    - Are there any `DROP COLUMN` / `ALTER COLUMN` / `DROP INDEX` operations that need a data backfill first?
-2. Run the migration against a local dev DB:
+2. Verify the migration on a disposable copy of the newest backup, never on the dev database:
    ```bash
-   dotnet ef database update --project <the project owning migration.root> --startup-project <the startup project>
+   tools/db-protection/verify-migration.cmd --from-backup
    ```
+   The script restores the newest backup into a throwaway `_MigrationVerify_` copy, applies the pending migrations there with the EF update tool (not the idempotent full-chain script), and removes the copy. It prints the newest migration id in the copy before and after the apply. When the backup already has the newest schema the apply changes nothing, the two ids are equal, and the final line still says "applied cleanly": read the before and after lines. To rehearse a real apply, pass an OLDER backup file as the last argument (`verify-migration.cmd --from-backup <file>`). If the EF tool is missing the script exits 2 before restoring anything: run `dotnet tool restore` once. In a worktree session invoke the script by its path, as above; the worktree-isolation guard blocks `cmd //c`.
+   An agent never applies a migration to the dev database. A person does that, in their own terminal, with `tools\db-protection\update-dev-database.cmd` (it backs up first). The hook blocks an agent that tries.
 3. Step 5.5 will enforce that `migration-safety-reviewer` was invoked on the current diff — do not bypass it for schema modifications.
 
 **Halt conditions:**
-- Migration fails to apply (syntax, FK, constraint violation).
+- Migration fails to apply to the disposable copy (syntax, FK, constraint violation).
 - Migration drops a column or table without a data migration plan.
 - Migration modifies a table with > 1M rows without a plan for online reindex / locking.
 

@@ -22,7 +22,7 @@ from a project name.
 - Any file under `migration.root` — particularly the newest one
 - The `DbContext` owning that migration root, and the `IEntityTypeConfiguration<T>` files that drove the migration
 - The prior migration(s) to understand the cumulative shape of the table
-- The application startup file under `backend.roots` — specifically the `db.Database.Migrate()` startup call (auto-apply implications)
+- The application startup file under `backend.roots` — specifically the start-up schema gate (`ApiSchemaStartupGate`), which refuses to start while migrations are pending
 
 You do NOT write migrations. You review them.
 
@@ -74,11 +74,12 @@ You do NOT write migrations. You review them.
 - `Down()` actually reverses `Up()` — not a partial revert
 - For destructive `Up()` (dropping a column), `Down()` must recreate the column, even if the data is gone
 
-### Startup auto-apply (`db.Database.Migrate()`)
+### Applying migrations (never at start)
 
-- Project convention: migrations auto-apply on API startup
-- Implication: a bad migration crashes the API on startup, no rollback
-- Implication: multi-instance deploys race on the migration bootloader — SQL Server handles this, but long migrations extend startup time
+- Project convention: migrations never apply at API start. The server refuses to start while any are pending and names `tools\db-protection\update-dev-database.cmd`, which a person runs in their own terminal (it refuses a missing dev database with exit 3, checks the EF tool, backs up, then applies with `--connection` bound to the checked secret value, and accepts no argument).
+- Flag any change that reintroduces `Migrate`, `MigrateAsync` or `EnsureCreated` under `src/` outside `Migrations/`, or that tells an agent to apply a migration to the dev database.
+- A migration is rehearsed on a disposable copy: `tools\db-protection\verify-migration.cmd --from-backup`. Check that the evidence names that run. It restores the newest backup into a `_MigrationVerify_` copy and applies the pending migrations with the EF update tool (not the idempotent full-chain script, which fails on a current backup); when the backup already has the newest schema the apply is a no-op, so a pass proves the route, not the new migration alone. The script prints the newest migration id before and after the apply (read them: the last line says "applied cleanly" even when empty), and takes an older backup file as the last argument to force a non-empty apply. A backup is a disposable copy for inspection, not a runnable way back over an existing dev database.
+- Other environments apply migrations as an explicit, person-run deployment step (an EF update with an explicit `--connection`, or an EF migrations bundle).
 - Flag migrations whose expected runtime > 30s as needing a maintenance window
 
 ### Seed data
