@@ -79,8 +79,8 @@ py -3 "$PRM" --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
-by 484 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
-`unittest` summary line reads `Ran 484 tests ... OK` (exit code 0) — and has been mutation-probed. **Read its
+by 525 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
+`unittest` summary line reads `Ran 525 tests ... OK` (exit code 0) — and has been mutation-probed. **Read its
 answer. Do not recompute it from the contract**, or there are two implementations of the same
 rules and they will disagree.
 
