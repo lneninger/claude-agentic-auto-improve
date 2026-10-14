@@ -12499,6 +12499,75 @@ class TestAdvanceFromTheMainCheckout(_WorktreeWorldCase):
 
 
 # --------------------------------------------------------------------------
+# dispatch_name -- the name a plugin agent is dispatched under (contract 2026-10-12-dedupe-claude-config,
+# Reused Mechanisms "Next Command / dispatch packet"). When the repository stops carrying copies of the plugin's
+# agents, Claude Code loads them from the installed plugin under the namespaced name
+# ``agentic-auto-improve:<agent>``. The pure function ``dispatch_name(agent, project_root)`` returns:
+#   * the bare name when <project_root>/.claude/agents/<agent>.md exists (the project's own agent wins);
+#   * ``agentic-auto-improve:<agent>`` when only the installed plugin root ships the agent;
+#   * the bare name otherwise (nothing ships it, so no namespace can be claimed).
+# ---------------------------------------------------------------------------
+class TestDispatchName(unittest.TestCase):
+
+    def setUp(self):
+        import shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="dispatch-name-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
+        self.project = self.tmp / "project"
+        self.plugin = self.tmp / "plugin"
+        self.config = self.tmp / "config"
+        for d in (self.project, self.plugin, self.config):
+            d.mkdir()
+        (self.plugin / ".claude-plugin").mkdir()
+        (self.plugin / ".claude-plugin" / "plugin.json").write_text('{"name": "agentic-auto-improve"}', encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
+        env.update({"CLAUDE_CONFIG_DIR": str(self.config), "CLAUDE_PROJECT_DIR": str(self.project),
+                    "HOME": str(self.tmp / "home"), "USERPROFILE": str(self.tmp / "home")})
+        self._env = mock.patch.dict(os.environ, env, clear=True)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def ship_in_plugin(self, agent):
+        (self.plugin / "agents").mkdir(exist_ok=True)
+        (self.plugin / "agents" / (agent + ".md")).write_text("# agent\n", encoding="utf-8")
+        os.environ["CLAUDE_PLUGIN_ROOT"] = str(self.plugin)
+
+    def ship_in_project(self, agent):
+        (self.project / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
+        (self.project / ".claude" / "agents" / (agent + ".md")).write_text("# agent\n", encoding="utf-8")
+
+    def name(self, agent):
+        fn = _fn("dispatch_name")
+        self.assertIsNotNone(fn, "pr_merged.dispatch_name does not exist yet (missing symbol)")
+        return fn(agent, self.project)
+
+    def test_a_project_file_gives_the_bare_name(self):
+        self.ship_in_project("senior-test-engineer")
+        self.ship_in_plugin("senior-test-engineer")
+        self.assertEqual(self.name("senior-test-engineer"), "senior-test-engineer",
+                         "the project's own agent file wins, even when the plugin ships the same agent")
+
+    def test_an_agent_only_the_plugin_ships_gives_the_namespaced_name(self):
+        self.ship_in_plugin("senior-test-engineer")
+        self.assertEqual(self.name("senior-test-engineer"), "agentic-auto-improve:senior-test-engineer",
+                         "with no project file the plugin's agent is addressed by its namespaced name")
+
+    def test_an_agent_neither_side_ships_gives_the_bare_name(self):
+        self.ship_in_plugin("data-architect")
+        self.assertEqual(self.name("ibkr-api-architect"), "ibkr-api-architect",
+                         "nothing ships it, so no namespace can be claimed for it")
+
+    def test_with_no_installed_plugin_at_all_the_bare_name_is_returned(self):
+        self.assertEqual(self.name("senior-test-engineer"), "senior-test-engineer",
+                         "no project file and no installed plugin: the bare name, never a crash")
+
+    def test_the_namespace_follows_the_plugin_not_a_hard_coded_agent_list(self):
+        self.ship_in_plugin("brand-new-reviewer")
+        self.assertEqual(self.name("brand-new-reviewer"), "agentic-auto-improve:brand-new-reviewer",
+                         "any agent the installed plugin ships is namespaced")
+
+
+# --------------------------------------------------------------------------
 
 
 if __name__ == "__main__":
