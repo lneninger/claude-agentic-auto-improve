@@ -31,9 +31,11 @@ HOW THE FIXTURES WORK (no real machine state is read or written)
 * HOME, USERPROFILE, TEMP, TMP and TMPDIR all point at a fixture folder, so the session-start
   marker (condition (h)) lands in the fixture and the real home is never touched.
 * The session-start marker is written by the REAL writer (working-agreements.py), never invented by
-  the test, so the marker's file name is not assumed beyond what the contract says: a file named by
-  the payload's session_id in the system temporary folder. Rows that need a different marker find
-  that file by the session id in its name and rewrite its contents in the format the writer used.
+  the test. Its name is settled by decision 2 of the block 2 review: `auto-improve-session-start-<session_id>`
+  in the system temporary folder, holding the time as a number. Block 17's baseline file uses another
+  prefix (`auto-improve-changed-baseline-<session_id>`), so the two never collide; a row plants such a
+  baseline file with a misleading value and the guard must still read only the marker. Rows that need a
+  different marker select it by that prefix and rewrite its contents in the format the writer used.
 * Rows that need a broken helper edit the fixture copy of _project_paths.py. They find the deference
   functions by the substring "defer" in a top-level function name (case-insensitive). If the helper
   names its function something else, those rows fail with a message that says so; name it with
@@ -68,6 +70,9 @@ _EF_REMOVE = "dotnet ef database " + "dr" + "op" + " --force"
 _SQL_WRITE = 'sqlcmd -S "(localdb)\\fixture" -E -Q "' + "INS" + "ERT INTO Orders (Id) VALUES (1)" + '"'
 
 SESSION_ID = "sess-0001-fixture"
+#: Decision 2 (block 2 review): the session-start marker and block 17's baseline never share a name.
+MARKER_PREFIX = "auto-improve-session-start-"
+BASELINE_PREFIX = "auto-improve-changed-baseline-"
 
 
 def _rmtree(path: Path) -> None:
@@ -102,7 +107,9 @@ READONLY = GuardSpec("db-research-readonly-guard.py", "db-research-readonly-guar
 class World:
     """One plugin folder, one project folder and one fixture machine, all temporary."""
 
-    def __init__(self, spec: GuardSpec, plugin_timeout: int | None = None):
+    def __init__(self, spec: GuardSpec, plugin_timeout: "int | list | None" = None):
+        """plugin_timeout: one timeout for a single registration group, or a list of (matcher, timeout)
+        pairs, one group each (the real hooks.json registers the destructive guard in three groups)."""
         self.spec = spec
         self.tmp = Path(tempfile.mkdtemp(prefix="guard-deference-"))
         self.machine = self.tmp / "machine"
@@ -122,7 +129,7 @@ class World:
         self.registered_path = "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + spec.file_name
 
     # ----------------------------------------------------------------- build
-    def _build_plugin(self, plugin_timeout: int | None) -> None:
+    def _build_plugin(self, plugin_timeout) -> None:
         self.plugin_hooks.mkdir(parents=True)
         for src in HOOKS_SRC.iterdir():
             if src.is_file() and src.name != "hooks.json" and src.suffix in (".py", ".json"):
@@ -133,12 +140,18 @@ class World:
         agreements = PLUGIN_SRC / ".claude" / "agreements"
         if agreements.is_dir():
             shutil.copytree(agreements, self.plugin / ".claude" / "agreements")
-        entry = {"type": "command", "command": "py",
-                 "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/" + self.spec.file_name]}
-        if plugin_timeout is not None:
-            entry["timeout"] = plugin_timeout
-        hooks_json = {"hooks": {"PreToolUse": [
-            {"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell", "hooks": [entry]}]}}
+        if isinstance(plugin_timeout, list):
+            groups = plugin_timeout
+        else:
+            groups = [("Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell", plugin_timeout)]
+        built = []
+        for matcher, timeout in groups:
+            entry = {"type": "command", "command": "py",
+                     "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/" + self.spec.file_name]}
+            if timeout is not None:
+                entry["timeout"] = timeout
+            built.append({"matcher": matcher, "hooks": [entry]})
+        hooks_json = {"hooks": {"PreToolUse": built}}
         (self.plugin_hooks / "hooks.json").write_text(json.dumps(hooks_json, indent=2), encoding="utf-8")
 
     def _build_project(self) -> None:
@@ -237,12 +250,16 @@ class World:
 
     # -------------------------------------------------------------- marker
     def marker_files(self, session: str = SESSION_ID) -> list[Path]:
-        return [p for p in self.temp_dir.iterdir() if p.is_file() and session in p.name]
+        """The session-start marker: selected by its prefix and the session id (decision 2). A file that
+        merely contains the session id (block 17's baseline) is not a marker."""
+        return [p for p in self.temp_dir.iterdir() if p.is_file() and p.name == MARKER_PREFIX + session]
 
     def marker_value(self) -> float:
         files = self.marker_files()
         assert len(files) == 1, "expected exactly one session-start marker, found %r" % [f.name for f in files]
-        return float(files[0].read_text(encoding="utf-8").strip())
+        text = files[0].read_text(encoding="utf-8").strip()
+        assert re.fullmatch(r"\d+(\.\d+)?", text), "the marker must hold the time as a number, found %r" % text
+        return float(text)
 
     def rewrite_marker(self, value: float | str) -> None:
         files = self.marker_files()
@@ -496,6 +513,33 @@ class DeferenceRows:
         w.write_settings(w.settings_body(w.entry()))      # project timeout unset
         self.assert_acts(w, "D19 project unset, plugin 100000 above the default")
 
+    def test_d19_the_plugin_timeout_is_the_largest_among_the_groups_whose_matcher_covers_the_tool(self):
+        # Decision 3. The real hooks.json registers db-destructive-guard.py in three groups. The rule: take
+        # the registrations whose matcher covers the payload's tool, then the largest timeout among them.
+        groups = [("Edit|Write|MultiEdit", 900), ("Bash", 30), ("Bash|PowerShell", 100), ("PowerShell", 200)]
+        w = self.baseline(plugin_timeout=groups)       # a Bash payload: covering groups carry 30 and 100
+        w.write_settings(w.settings_body(w.entry(timeout=100)))
+        self.assert_defers(w, "project timeout equals the largest covering plugin timeout (100)")
+        w.clear_log()
+        w.write_settings(w.settings_body(w.entry(timeout=60)))
+        self.assert_acts(w, "D19 project timeout 60 is above the smallest covering plugin timeout (30) "
+                            "but below the largest (100)")
+
+    def test_d19_a_group_that_does_not_cover_the_tool_adds_nothing_to_the_plugin_timeout(self):
+        groups = [("Bash", 30), ("PowerShell", 500)]
+        w = self.baseline(plugin_timeout=groups)       # a Bash payload: only the 30 counts
+        w.write_settings(w.settings_body(w.entry(timeout=40)))
+        self.assert_defers(w, "project timeout 40 covers the only covering plugin group (30); the 500 is PowerShell's")
+
+    def test_d19_a_covering_group_with_no_timeout_counts_as_the_default_of_sixty(self):
+        groups = [("Bash", None), ("Bash|PowerShell", 30)]
+        w = self.baseline(plugin_timeout=groups)       # unset reads as 60, so 60 is the largest
+        w.write_settings(w.settings_body(w.entry(timeout=60)))
+        self.assert_defers(w, "project timeout 60 equals the unset group's default")
+        w.clear_log()
+        w.write_settings(w.settings_body(w.entry(timeout=45)))
+        self.assert_acts(w, "D19 project timeout 45 is below the unset group's default of 60")
+
     # ===================================================================
     # D15 -- a launched path that only contains or ends with the guard path
     # ===================================================================
@@ -597,11 +641,27 @@ class DeferenceRows:
         proc = w.start_session(source)
         self.assertEqual(proc.returncode, 0, "the session-start hook exits 0")
         self.assertEqual(len(w.marker_files()), 1,
-                         "D18: SessionStart with source=%s must write ONE marker file named by the session_id in "
-                         "the system temporary folder. Files there: %r" % (source, [p.name for p in w.temp_dir.iterdir()]))
+                         "D18: SessionStart with source=%s must write ONE marker file named %s<session_id> in "
+                         "the system temporary folder (decision 2). Files there: %r"
+                         % (source, MARKER_PREFIX, [p.name for p in w.temp_dir.iterdir()]))
         self.assertAlmostEqual(w.marker_value(), time.time(), delta=60,
                                msg="the marker holds the current time as a number")
         self.assert_defers(w, "round trip after source=%s" % source)
+
+    def test_d18_a_baseline_file_for_the_same_session_is_never_read_as_the_marker(self):
+        # Block 17's baseline is named by the same session id under another prefix (decision 2). Plant one
+        # holding a number far in the past: a guard that picked it up as the marker would see the settings
+        # file as modified after the session started and would act instead of deferring.
+        w = self.baseline()
+        (w.temp_dir / (BASELINE_PREFIX + SESSION_ID)).write_text("1", encoding="utf-8")
+        self.assertEqual(len(w.marker_files()), 1, "fixture: the real marker is still the only marker")
+        self.assert_defers(w, "a decoy baseline file named by the same session id sits beside the marker")
+
+    def test_d18_a_baseline_file_alone_is_not_a_marker_so_the_guard_acts(self):
+        w = self.world()
+        w.register()
+        (w.temp_dir / (BASELINE_PREFIX + SESSION_ID)).write_text(str(int(time.time())), encoding="utf-8")
+        self.assert_acts(w, "D18 only a baseline file exists for the session, no session-start marker")
 
     def test_d18_clear_and_compact_write_no_marker_so_the_guard_acts(self):
         for source in ("clear", "compact", ""):

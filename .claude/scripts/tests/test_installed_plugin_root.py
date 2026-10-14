@@ -135,6 +135,23 @@ class TestResolutionOrder(RootCase):
         self.assertRoot(self.resolve(CLAUDE_PROJECT_DIR=str(self.project).replace("\\", "/").lower()), scoped,
                         "a project path spelled with other slashes and other letter case is still this project")
 
+    def test_the_project_argument_names_the_project_and_defaults_to_claude_project_dir(self):
+        # Decision 7 of the block 2 review: installed_plugin_root(project=None). An explicit folder is the
+        # project to match; None means CLAUDE_PROJECT_DIR.
+        user, scoped = self.version_dir("0.8.1"), self.version_dir("0.7.1")
+        elsewhere = self.tmp / "work" / "Elsewhere"
+        elsewhere.mkdir(parents=True)
+        self.record({KEY: [self.entry("user", user), self.entry("project", scoped, str(elsewhere))]})
+        env = {k: v for k, v in self.env().items() if v is not None}
+        with mock.patch.dict(os.environ, env, clear=True):
+            fn = _resolver()
+            by_default = fn()
+            by_argument = fn(project=str(elsewhere))
+            by_positional = fn(str(elsewhere))
+        self.assertRoot(by_default, user, "with no argument the project is CLAUDE_PROJECT_DIR, which has no entry")
+        self.assertRoot(by_argument, scoped, "project=<folder> matches the entry scoped to that folder")
+        self.assertRoot(by_positional, scoped, "the project folder is the first parameter")
+
     def test_a_project_scope_entry_for_another_project_is_ignored(self):
         user, other = self.version_dir("0.8.1"), self.version_dir("0.7.1")
         self.record({KEY: [self.entry("project", other, str(self.tmp / "work" / "Another")),

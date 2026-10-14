@@ -335,16 +335,19 @@ class TestFinishInstallSkillIsNamed(DoctorCase):
 # plugin-side root folder is missing, or zero file pairs were compared). It never exits 0 when it could not
 # compare. --json carries `findings`, `compared` and `compared_addons`.
 #
-# SHAPES THE CONTRACT LEAVES OPEN (this suite fixes them; the implementer follows, or says so):
-#   * the --json envelope is {"findings": [{"kind", "path", "owner", ...}], "compared": N, "compared_addons": M};
-#     `path` is the project-relative path, or "<event>:<hook file>" for registered-twice;
+# SHAPES SETTLED BY THE BLOCK 2 REVIEW (decisions 4 to 6 and 9 of the contract's "Interface decisions" section):
+#   * the --json envelope is {"findings": [{"kind", "path", "owner"}], "compared": N, "compared_addons": M};
+#     `path` is the project-relative path, or "<event>:<hook file>" for registered-twice. A run that could not
+#     compare (exit 4) still prints the report, with an `error` field and `compared` 0 (decision 4);
 #   * sync-config `plugin_delivered` is a list of {"path", "plugin_path"} objects (the same two names the synced
-#     trees use); `repo_owned` is a list of project-relative file paths; `project_enforced_hooks` is a list of hook
-#     file names; `addons` maps an add-on name to the list of its hook file names;
-#   * a plugin add-on lives at <plugin>/.claude/addons/<name>/ with addon.json and hooks/<file>;
+#     trees use); `repo_owned` is a list of paths from the project root; `project_enforced_hooks` is a list of
+#     hook file names (decision 5);
+#   * dispatcher members are read statically, from the literal CHECKS list in the hook's source; a hook module
+#     is never imported (decision 6), so the fixture dispatchers below are SOURCE TEXT;
 #   * a project-side hook is registered in settings.json as "${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>", a
-#     plugin-side one in <plugin>/.claude/hooks/hooks.json as "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/<file>".
-# Every such choice is stated again in the hand-off. None of them is an assertion about HOW the check is built.
+#     plugin-side one in <plugin>/.claude/hooks/hooks.json as "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/<file>";
+#   * add-on drift is NOT pinned here (decision 9): block 16 tests it and block 18 builds it. This suite
+#     pins only the baseline `compared_addons == 0` when no add-on is declared.
 
 import os  # noqa: E402
 import subprocess  # noqa: E402
@@ -549,6 +552,16 @@ class TestDriftBaseline(DriftCase):
         self.assertEqual(data.get("compared"), 3,
                          "compared = declared vendored files present on both sides (a.py, b.py, s.py)")
         self.assertEqual(data.get("compared_addons"), 0, "no add-on is declared, so no add-on file is compared")
+        self.assertEqual(sorted(data), ["compared", "compared_addons", "findings"],
+                         "decision 4: the envelope carries exactly findings, compared and compared_addons "
+                         "when the comparison ran")
+
+    def test_every_finding_carries_exactly_kind_path_and_owner(self):
+        self.w.project_put(".claude/hooks/b.py", "# b changed here\n")
+        rc, data = self.drift()
+        self.assertEqual(len(_findings(data)), 1, "fixture: one finding")
+        self.assertEqual(sorted(_findings(data)[0]), ["kind", "owner", "path"],
+                         "decision 4: a finding is {kind, path, owner} and nothing else")
 
     def test_the_plugin_delivered_agents_and_skills_never_count_as_compared(self):
         self.w.plugin_put("agents/y.md", "# y\n")
@@ -810,12 +823,33 @@ class TestDriftRegisteredTwice(DriftCase):
         self.assertKinds(data, ["registered-twice"], "the plugin's two launcher rows for one gate are counted once")
 
     def test_a_dispatcher_whose_member_list_cannot_be_read_is_unreadable_registration(self):
-        # CHECKS is declared but is built at run time, so no static reader can know its members.
-        self.w.plugin_put(".claude/hooks/odd-dispatcher.py", "import sys\nCHECKS = [n for n in sys.argv]\n")
+        # Decision 6: members are read statically from a literal CHECKS list. The fixture is SOURCE TEXT
+        # whose CHECKS is built by a call at run time, so it is not a literal. An implementation that
+        # imported the module would obtain a list here and report nothing, which is the wrong answer.
+        self.w.plugin_put(".claude/hooks/odd-dispatcher.py",
+                          "def _members():\n    return ['m1.py', 'm2.py']\n\nCHECKS = _members()\n")
         self.w.plugin_register("PostToolUse", "odd-dispatcher.py")
+        self.w.project_register("PostToolUse", "m1.py")
         rc, data = self.drift()
         self.assertEqual(rc, 1, "an unreadable registration is a counted finding")
-        self.assertKinds(data, ["unreadable-registration"], "a dispatcher member list that cannot be read")
+        self.assertKinds(data, ["unreadable-registration"],
+                         "a dispatcher member list that is not a literal cannot be read statically, so m1.py is "
+                         "NOT reported as registered twice")
+
+    def test_a_dispatcher_module_is_never_imported_to_read_its_members(self):
+        # Decision 6. The dispatcher's source writes a witness file the moment it is imported or run, then
+        # carries a literal CHECKS list. The members must still be read (m1.py is a double registration)
+        # and the witness must never appear.
+        witness = self.w.tmp / "witness-dispatcher-ran"
+        source = ("import pathlib\npathlib.Path(%r).write_text('ran')\n\nCHECKS = [\n    \"m1.py\",\n]\n"
+                  % str(witness))
+        self.w.plugin_put(".claude/hooks/post-edit-dispatcher.py", source)
+        self.w.plugin_register("PostToolUse", "post-edit-dispatcher.py")
+        self.w.project_register("PostToolUse", "m1.py")
+        rc, data = self.drift()
+        self.assertKinds(data, ["registered-twice"], "the literal list is read from the source text")
+        self.assertFalse(witness.exists(),
+                         "the check must read CHECKS from the source text and never import or run a hook module")
 
 
 class TestDriftRepoOwned(DriftCase):
@@ -854,16 +888,36 @@ class TestDriftRepoOwned(DriftCase):
 
 
 class TestDriftCannotCompare(DriftCase):
+    def assertReportedAsNotCompared(self, out, data, why):
+        """Decision 4: exit 4 still prints the report, with an `error` field and `compared` 0."""
+        self.assertIsNotNone(data, why + ": exit 4 still prints one JSON document; stdout=%r" % out[-300:])
+        self.assertTrue(isinstance(data.get("error"), str) and data["error"],
+                        why + ": the report carries a non-empty `error` text; got %r" % data.get("error"))
+        self.assertEqual(data.get("compared"), 0, why + ": a run that could not compare reports compared 0")
+        self.assertEqual(data.get("findings"), [], why + ": and no findings")
+
+    def _raw_run(self):
+        argv = [sys.executable, "-B", str(DOCTOR), "--drift", "--project", str(self.w.project),
+                "--plugin", str(self.w.plugin), "--json"]
+        out = subprocess.run(argv, capture_output=True, text=True, env=self.w.env(), timeout=120)
+        try:
+            data = json.loads(out.stdout)
+        except ValueError:
+            data = None
+        return out, data
+
     def test_a_missing_plugin_side_folder_of_a_vendored_pair_exits_4(self):
         shutil.rmtree(self.w.plugin / ".claude" / "scripts")
-        rc = self.w.run()[0]
+        rc, out, err, data = self.w.run()
         self.assertEqual(rc, 4, "the plugin has no .claude/scripts folder, so nothing under it can be compared")
+        self.assertReportedAsNotCompared(out, data, "missing vendored folder")
 
     def test_a_missing_plugin_side_folder_of_a_plugin_delivered_pair_exits_4(self):
         shutil.rmtree(self.w.plugin / "agents")
         rc, out, err, data = self.w.run()
         self.assertEqual(rc, 4, "plugin_delivered pairs are held to the same rule; out=%r err=%r" % (out[-200:], err[-200:]))
         self.assertIn("agents", out + err, "the message names the missing folder")
+        self.assertReportedAsNotCompared(out, data, "missing plugin-delivered folder")
 
     def test_an_empty_plugin_side_folder_is_not_missing(self):
         shutil.rmtree(self.w.plugin / "agents")
@@ -882,68 +936,31 @@ class TestDriftCannotCompare(DriftCase):
             tree["files"] = []
         rc, out, err, data = self.w.run()
         self.assertEqual(rc, 4, "a comparison that covered zero file pairs never exits 0; out=%r" % out[-200:])
-        self.assertIsNotNone(data, "the JSON document is still printed: stdout=%r" % out[-200:])
-        self.assertEqual(data.get("compared"), 0)
+        self.assertReportedAsNotCompared(out, data, "zero file pairs")
 
     def test_the_plugin_root_equal_to_the_project_root_exits_4(self):
         rc, out, err, data = self.w.run(plugin=str(self.w.project))
         self.assertEqual(rc, 4, "comparing a tree with itself would always look clean; out=%r" % out[-200:])
+        self.assertReportedAsNotCompared(out, data, "plugin root equals project root")
 
     def test_no_plugin_found_exits_4(self):
         rc, out, err, data = self.w.run(plugin=None)
         self.assertEqual(rc, 4, "no --plugin, nothing recorded and nothing cached: it cannot compare; out=%r" % out[-200:])
+        self.assertReportedAsNotCompared(out, data, "no plugin found")
 
     def test_an_unparseable_settings_file_exits_4(self):
         self.w.write_all()
         (self.w.project / ".claude" / "settings.json").write_text("{ not json", encoding="utf-8")
-        argv = [sys.executable, "-B", str(DOCTOR), "--drift", "--project", str(self.w.project),
-                "--plugin", str(self.w.plugin), "--json"]
-        out = subprocess.run(argv, capture_output=True, text=True, env=self.w.env(), timeout=120)
+        out, data = self._raw_run()
         self.assertEqual(out.returncode, 4, "a registration file that does not parse must not read as 'no registrations'")
+        self.assertReportedAsNotCompared(out.stdout, data, "unparseable settings")
 
     def test_an_unparseable_sync_config_exits_4(self):
         self.w.write_all()
         (self.w.project / ".claude" / ".sync-config.json").write_text("{ not json", encoding="utf-8")
-        argv = [sys.executable, "-B", str(DOCTOR), "--drift", "--project", str(self.w.project),
-                "--plugin", str(self.w.plugin), "--json"]
-        out = subprocess.run(argv, capture_output=True, text=True, env=self.w.env(), timeout=120)
+        out, data = self._raw_run()
         self.assertEqual(out.returncode, 4, "a sync config that does not parse cannot be compared against")
-
-
-class TestDriftAddons(DriftCase):
-    def setUp(self):
-        super().setUp()
-        self.w.config["addons"] = {"codegraph": ["cg1.py", "cg2.py"]}
-        base = ".claude/addons/codegraph"
-        self.w.plugin_put(base + "/addon.json", json.dumps({"name": "codegraph", "hooks": ["cg1.py", "cg2.py"]}))
-        for f in ("cg1.py", "cg2.py"):
-            self.w.plugin_put("%s/hooks/%s" % (base, f), "# %s\n" % f)
-            self.w.project_put(".claude/hooks/" + f, "# %s\n" % f)
-
-    def test_identical_addon_files_count_in_compared_addons_and_never_in_compared(self):
-        rc, data = self.drift()
-        self.assertEqual(rc, 0)
-        self.assertEqual(data.get("compared_addons"), 2)
-        self.assertEqual(data.get("compared"), 3, "add-on files are counted apart from vendored files")
-
-    def test_an_addon_file_that_differs_is_content_differs_owned_by_the_plugin(self):
-        self.w.project_put(".claude/hooks/cg2.py", "# edited in the project\n")
-        rc, data = self.drift()
-        self.assertEqual(rc, 1)
-        self.assertKinds(data, ["content-differs"], "the installed add-on copy drifted")
-        self.assertEqual(_findings(data)[0].get("owner"), "plugin")
-        self.assertTrue(self.path_of(data, "content-differs")[0].endswith("cg2.py"))
-
-    def test_a_listed_addon_file_missing_on_one_side_is_one_sided(self):
-        self.w.project_remove(".claude/hooks/cg2.py")
-        rc, data = self.drift()
-        self.assertKinds(data, ["one-sided"], "listed for the add-on, absent from the project")
-        self.assertEqual(data.get("compared_addons"), 1)
-
-    def test_a_listed_addon_the_plugin_does_not_ship_exits_4(self):
-        self.w.config["addons"]["ghost"] = ["ghost.py"]
-        rc, out, err, data = self.w.run()
-        self.assertEqual(rc, 4, "an add-on folder or manifest missing in the plugin means it cannot compare")
+        self.assertReportedAsNotCompared(out.stdout, data, "unparseable sync config")
 
 
 class TestFindPluginRootDelegates(unittest.TestCase):

@@ -19,12 +19,14 @@ How the copies are found: every line under skills/**/*.md that contains "agentic
 line that searches the plugin cache. Today that search finds advance, pr-merged, flow, task and
 auto-improve-finish-install.
 
-How they are judged: the fenced bash block holding each such line is cut at the first line that runs
-the script (a line starting with py, python or $PY), then RUN in bash over a table of fixture setups.
-The variable the block assigns is read back and compared with the path the table expects, and with
-what installed_plugin_root() answers in the same environment. All copies must give the same answers,
-which is what "one snippet shared by every copy" means in behaviour. bash missing is a FAILURE, not a
-skip: this check has no meaning without a shell.
+How they are judged (decision 8 of the block 2 review): the fenced bash block holding each such line
+is cut at the FIRST line that runs the script, `py -3 "$VAR" ...`, and the variable named on that line
+is the one read back. No line inside the lookup (before that run line) may start with `py` or `python`,
+so a lookup that shells out to Python is a failure here, and so is a block with no such run line. The
+cut text is RUN in bash over a table of fixture setups; the variable is compared with the path the
+table expects, and with what installed_plugin_root() answers in the same environment. All copies must
+give the same answers, which is what "one snippet shared by every copy" means in behaviour. bash
+missing is a FAILURE, not a skip: this check has no meaning without a shell.
 
 Every case builds a throwaway Claude config directory and a throwaway project. Nothing real is read.
 
@@ -51,8 +53,10 @@ SKILLS = PLUGIN_ROOT / "skills"
 PLUGIN_NAME = "agentic-auto-improve"
 KEY = PLUGIN_NAME + "@auto-improve"
 NEEDLE = "agentic-auto-improve/*/"
-STOP_AT = re.compile(r"^\s*(?:py|python3?|\$PY)\b")
-ASSIGN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=")
+#: The line that runs the script: `py -3 "$VAR" ...` (or `${VAR}`). It ends the lookup and names the variable.
+RUN_LINE = re.compile(r'^\s*py\s+-3\s+"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"')
+#: A line inside the lookup that starts a Python process: not allowed (decision 8).
+PYTHON_LINE = re.compile(r"^\s*(?:py|python3?)\b")
 SCRIPT = re.compile(r"\.claude/scripts/([A-Za-z0-9_]+\.py)")
 
 
@@ -82,16 +86,18 @@ def snippets() -> list[dict]:
                     j += 1
                 block = lines[i + 1:j]
                 if any(NEEDLE in line for line in block):
-                    cut = []
+                    cut, var = [], None
                     for line in block:
-                        if cut and STOP_AT.match(line):
+                        run = RUN_LINE.match(line)
+                        if run:
+                            var = run.group(1)
                             break
                         cut.append(line)
                     text = textwrap.dedent("\n".join(cut)).strip("\n")
-                    var = next((m.group(1) for m in map(ASSIGN.match, text.splitlines()) if m), None)
                     script = next((m.group(1) for m in map(SCRIPT.search, text.splitlines()) if m), None)
+                    python_lines = [ln.strip() for ln in cut if PYTHON_LINE.match(ln)]
                     found.append({"file": path.relative_to(PLUGIN_ROOT).as_posix(), "start": i + 1,
-                                  "text": text, "var": var, "script": script})
+                                  "text": text, "var": var, "script": script, "python_lines": python_lines})
                 i = j
             i += 1
     return found
@@ -138,6 +144,9 @@ class World:
         return env
 
     def run_snippet(self, bash: str, snippet: dict, **extra_env) -> str:
+        if not snippet["var"]:
+            raise AssertionError("%s:%d has no run line of the form py -3 \"$VAR\" ..., so the variable to read "
+                                 "back is unknown" % (snippet["file"], snippet["start"]))
         # The sentinel separates the snippet's own output (a block may echo) from the value we read back.
         script = "cd '%s'\n%s\nprintf '\\n@@VALUE@@%%s' \"$%s\"\n" % (
             self.posix(self.project), snippet["text"], snippet["var"])
@@ -187,9 +196,30 @@ class TestSkillScriptLookup(unittest.TestCase):
                            "the search for %r must find at least one block under skills/ (it finds advance, "
                            "pr-merged, flow, task and auto-improve-finish-install today)" % NEEDLE)
         for s in self.snips:
-            self.assertTrue(s["var"] and s["script"],
-                            "%s:%d: the block must assign a variable to a .claude/scripts/ path (var=%r script=%r)"
-                            % (s["file"], s["start"], s["var"], s["script"]))
+            self.assertTrue(s["script"],
+                            "%s:%d: the lookup must name a .claude/scripts/ path (script=%r)"
+                            % (s["file"], s["start"], s["script"]))
+
+    def test_every_block_ends_its_lookup_at_a_line_that_runs_the_script_and_names_the_variable(self):
+        # Decision 8: the first `py -3 "$VAR" ...` line ends the lookup and names the variable to read.
+        # A block with no such line has no variable the test can read, so it fails here and not later.
+        self.assertGreater(len(self.snips), 0, "no snippet found to judge")
+        for s in self.snips:
+            with self.subTest(block="%s:%d" % (s["file"], s["start"])):
+                self.assertIsNotNone(s["var"],
+                                     "the block must carry a line of the form py -3 \"$VAR\" ... that runs the "
+                                     "script; the variable on that line is the one the lookup assigns")
+                self.assertRegex(s["text"], r"(?m)^\s*%s=" % re.escape(s["var"] or "VAR"),
+                                 "the lookup must assign the variable that the run line uses")
+
+    def test_no_line_inside_the_lookup_starts_with_py_or_python(self):
+        # Decision 8: the lookup is plain shell. A lookup that shells out to Python needs Python to find
+        # Python's own script and cannot be cut at the first run line.
+        self.assertGreater(len(self.snips), 0, "no snippet found to judge")
+        for s in self.snips:
+            with self.subTest(block="%s:%d" % (s["file"], s["start"])):
+                self.assertEqual(s["python_lines"], [],
+                                 "no line of the lookup may start with py or python; found %r" % s["python_lines"])
 
     def test_bash_is_available_because_this_check_has_no_meaning_without_it(self):
         self.assertIsNotNone(self.bash, "bash is missing: this is a failure, not a skip")
@@ -247,6 +277,53 @@ class TestSkillScriptLookup(unittest.TestCase):
             self.assertEqual(norm(got), self.expected_script(newest, snip),
                              "0.10.0 is newer than 0.9.0 (versions are numbers, not text); got %r" % got)
             self.assertEqual(norm(w.resolver_answer()), norm(newest))
+        self.each(check)
+
+    def test_a_cache_folder_whose_name_is_not_a_version_is_ignored(self):
+        # Mirrors the resolver row: 'latest' and 'backup' sort after digits in a version sort but are not
+        # versions, so a version sort in bash could put them ahead of 0.8.1.
+        w = self.world
+        real = w.version("0.8.1")
+        w.version("latest")
+        w.version("backup")
+
+        def check(snip):
+            got = w.run_snippet(self.bash, snip)
+            self.assertEqual(norm(got), self.expected_script(real, snip),
+                             "'latest' and 'backup' are not versions; 0.8.1 is the answer; got %r" % got)
+            self.assertEqual(norm(w.resolver_answer()), norm(real))
+        self.each(check)
+
+    def test_the_project_path_is_compared_with_case_and_slashes_folded(self):
+        # Mirrors the resolver row: the record spells the project upper-case with backslashes, the
+        # environment spells it lower-case with forward slashes. Still this project.
+        w = self.world
+        user, scoped = w.version("0.8.1"), w.version("0.7.1")
+        spelled = str(w.project).replace("/", "\\").upper()
+        w.record({KEY: [{"scope": "user", "installPath": str(user), "version": "0.8.1"},
+                        {"scope": "project", "projectPath": spelled, "installPath": str(scoped),
+                         "version": "0.7.1"}]})
+        project_env = w.posix(w.project).lower()
+
+        def check(snip):
+            got = w.run_snippet(self.bash, snip, CLAUDE_PROJECT_DIR=project_env)
+            self.assertEqual(norm(got), self.expected_script(scoped, snip),
+                             "a project path spelled with other slashes and letter case is still this project: %r" % got)
+            self.assertEqual(norm(w.resolver_answer(CLAUDE_PROJECT_DIR=project_env)), norm(scoped))
+        self.each(check)
+
+    def test_a_project_scope_entry_for_another_project_is_ignored(self):
+        w = self.world
+        user, other = w.version("0.8.1"), w.version("0.7.1")
+        w.record({KEY: [{"scope": "project", "projectPath": str(w.tmp / "Another"), "installPath": str(other),
+                         "version": "0.7.1"},
+                        {"scope": "user", "installPath": str(user), "version": "0.8.1"}]})
+
+        def check(snip):
+            got = w.run_snippet(self.bash, snip)
+            self.assertEqual(norm(got), self.expected_script(user, snip),
+                             "an entry scoped to a different project must not be used: %r" % got)
+            self.assertEqual(norm(w.resolver_answer()), norm(user))
         self.each(check)
 
     def test_the_recorded_user_install_path_beats_a_newer_cache_folder(self):

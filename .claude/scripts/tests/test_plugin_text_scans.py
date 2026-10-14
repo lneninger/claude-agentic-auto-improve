@@ -16,7 +16,9 @@ used to read the repository's copies move here, where the one copy lives:
   (3) Every subagent_type literal that names a plugin agent follows the dispatch rule: a plugin agent is
       dispatched as `agentic-auto-improve:<name>`, unless the project carries `.claude/agents/<name>.md`
       (in which case the line says so). A bare name in a literal addresses nothing once the project's copy
-      is gone.
+      is gone. The literal is read in the plain form (`subagent_type: x`) and the JSON-quoted form
+      (`"subagent_type": "x"`). A line that carries a bare name is exempt only when the namespaced form of
+      the same agent is also on it; naming `.claude/agents/<name>.md` alone does not exempt it.
 
 Every scan asserts that it read at least one file, and every scan has a POSITIVE CONTROL that proves it can
 fail. Phrases that look destructive are built from parts; this file never holds one literally.
@@ -76,16 +78,22 @@ def pointer_lines(text: str) -> list[str]:
     return [l for l in text.split("\n") if "templates/concept-contract.md" in l and "budget" in l.lower()]
 
 
-_SUBAGENT_RE = re.compile(r"""subagent_type\s*[:=]\s*["'`]?([A-Za-z0-9_][A-Za-z0-9_.:\-]*)""")
+#: `subagent_type: x`, `subagent_type="x"`, and the JSON-quoted `"subagent_type": "x"` (the key is quoted too).
+_SUBAGENT_RE = re.compile(r"""subagent_type["'`]?\s*[:=]\s*["'`]?([A-Za-z0-9_][A-Za-z0-9_.:\-]*)""")
 
 
 def dispatch_violations(text: str, plugin_agents: set[str]) -> list[str]:
-    """Lines whose subagent_type literal names a plugin agent by its bare name without the project exception."""
+    """Lines whose subagent_type literal names a plugin agent by its bare name.
+
+    A line is exempt only when the namespaced form `agentic-auto-improve:<name>` of that SAME agent is also
+    present on it: the line then names the default dispatch and the bare name is the stated alternative.
+    Merely mentioning `.claude/agents/` does not exempt a line.
+    """
     bad = []
     for line in text.splitlines():
         for m in _SUBAGENT_RE.finditer(line):
             value = m.group(1)
-            if value in plugin_agents and ".claude/agents/" not in line:
+            if value in plugin_agents and (NAMESPACE + ":" + value) not in line:
                 bad.append(line.strip())
     return bad
 
@@ -159,9 +167,26 @@ class TestSubagentTypeLiteralsFollowTheDispatchRule(unittest.TestCase):
                          "control: a placeholder names no agent")
         self.assertFalse(dispatch_violations("subagent_type: ibkr-api-architect", self.AGENTS_SET),
                          "control: an agent the plugin does not ship is not the plugin's to namespace")
-        self.assertFalse(dispatch_violations(
+
+    def test_matcher_control_json_quoted_form(self):
+        self.assertTrue(dispatch_violations('{"subagent_type": "contract-critic", "prompt": "x"}', self.AGENTS_SET),
+                        "control: the JSON-quoted form with a bare plugin agent name is a violation")
+        self.assertTrue(dispatch_violations("\"subagent_type\": 'data-architect'", self.AGENTS_SET),
+                        "control: the quoted key with a single-quoted value is read too")
+        self.assertFalse(dispatch_violations('{"subagent_type": "%s:contract-critic"}' % NAMESPACE, self.AGENTS_SET),
+                         "control: the JSON-quoted namespaced form follows the rule")
+
+    def test_matcher_control_exemption_needs_the_namespaced_form_of_the_same_agent_on_the_line(self):
+        both = ("subagent_type: %s:contract-critic (or `subagent_type: contract-critic` when the project carries "
+                ".claude/agents/contract-critic.md)" % NAMESPACE)
+        self.assertFalse(dispatch_violations(both, self.AGENTS_SET),
+                         "control: the namespaced form beside the stated bare alternative follows the rule")
+        self.assertTrue(dispatch_violations(
             "subagent_type: contract-critic (the project's .claude/agents/contract-critic.md when it has one)",
-            self.AGENTS_SET), "control: a line that states the project exception follows the rule")
+            self.AGENTS_SET), "control: naming the project path alone does not exempt a bare literal")
+        self.assertTrue(dispatch_violations(
+            "subagent_type: contract-critic, not %s:data-architect" % NAMESPACE, self.AGENTS_SET),
+            "control: the namespaced form of ANOTHER agent does not exempt this one")
 
     def test_every_literal_naming_a_plugin_agent_is_namespaced_or_states_the_project_exception(self):
         agents = plugin_agent_names()
