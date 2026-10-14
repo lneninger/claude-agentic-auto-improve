@@ -1538,6 +1538,24 @@ class TestContainmentScanner(LandCase):
         self.assert_found(".claude/scripts/f7.py", 'RUN = ("git", "push", "origin", "main")\n',
                           '("git", "push", "origin", "main")')
 
+    # --- the plugin's own layout (contract 2026-10-12-dedupe-claude-config, Reused Mechanisms "L-11 containment
+    # scanner"): the plugin keeps its agents and skills at its root, in agents/ and skills/, and Claude Code loads
+    # exactly those. The scanner must read them, or a merge command placed there would travel unseen.
+    def test_8_a_merge_command_in_the_plugin_layout_agents_folder_is_found(self):
+        self.assert_found("agents/x.md", "Run gh pr merge 12 --merge when green.\n", "gh pr merge in agents/x.md")
+
+    def test_9_a_merge_command_in_the_plugin_layout_skills_folder_is_found(self):
+        self.assert_found("skills/y/SKILL.md", "```bash\ngh pr merge 12 --merge\n```\n", "gh pr merge in skills/y/SKILL.md")
+
+    def test_10_a_protected_branch_push_in_the_plugin_layout_is_found_too(self):
+        self.assert_found("skills/y/references/z.md", "git push origin master\n", "git push origin master in skills/")
+
+    def test_a_benign_file_in_the_plugin_layout_is_not_a_finding(self):
+        # PASSES TODAY BY DESIGN: the positive control for the three rows above. A scanner that flagged every
+        # file in agents/ and skills/ would make them pass for the wrong reason.
+        found = self.found_in_fixture("agents/benign.md", "Open a pull request; a person merges it.\n")
+        self.assertEqual(found, [], "positive control: a plain agent file is not a finding")
+
     def test_a_push_to_a_non_protected_branch_is_not_found(self):
         found = self.found_in_fixture(".claude/scripts/f8.sh", "git push origin HEAD:refs/heads/feature/p\n")
         self.assertEqual(found, [], "a push to a non-protected branch is not a finding")
