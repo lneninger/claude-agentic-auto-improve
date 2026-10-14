@@ -692,6 +692,50 @@ class DeferenceRows:
                          "the marker write adds no output: stdout is the same with and without it")
 
 
+    # ===================================================================
+    # Review round one -- a row that names the guard file but may not run, or cannot block
+    # ===================================================================
+    def test_a_row_with_a_key_outside_the_known_set_acts(self):
+        # A per-row `if` condition (or any key this code does not know) means the row may not run on every call.
+        def mutate(w):
+            row = w.entry()
+            row["if"] = "Bash(sqlcmd *)"
+            w.write_settings(w.settings_body(row))
+        self.mutate_and_expect_act("review: the row carries an `if` key", mutate)
+
+    def test_the_known_row_keys_still_defer(self):
+        w = self.baseline()
+        row = w.entry(timeout=120, async_=False)
+        row["statusMessage"] = "checking"
+        row["shell"] = "bash"
+        w.write_settings(w.settings_body(row))
+        self.assert_defers(w, "type, command, args, timeout, async, statusMessage and shell are all known keys")
+
+    def test_a_shell_form_row_holding_a_shell_operator_acts(self):
+        for label, tail in (("or-true", " || true"), ("exit zero", " ; exit 0"), ("pipe", " | cat"),
+                            ("redirect out", " > out.txt"), ("redirect in", " < in.txt"),
+                            ("background", " &"), ("backtick", " `true`")):
+            with self.subTest(operator=label):
+                def mutate(w, tail=tail):
+                    row = {"type": "command", "command": 'py -3 "%s"%s' % (w.registered_path, tail)}
+                    w.write_settings(w.settings_body(row))
+                self.mutate_and_expect_act("review: shell form with %s" % label, mutate)
+
+    def test_an_exec_form_row_whose_command_is_not_a_python_launcher_acts(self):
+        def mutate(w):
+            row = {"type": "command", "command": "echo", "args": [w.registered_path]}
+            w.write_settings(w.settings_body(row))
+        self.mutate_and_expect_act("review: exec form launched by echo", mutate)
+
+    def test_known_python_launchers_still_defer(self):
+        for launcher in ("py", "py.exe", "python", "python3", "python3.exe", "PY"):
+            with self.subTest(launcher=launcher):
+                w = self.baseline()
+                row = {"type": "command", "command": launcher, "args": ["-3", w.registered_path]}
+                w.write_settings(w.settings_body(row))
+                self.assert_defers(w, "launcher %s" % launcher)
+
+
 class DestructiveGuardDeferenceTests(DeferenceRows, unittest.TestCase):
     """The rows for db-destructive-guard.py."""
     SPEC = DESTRUCTIVE

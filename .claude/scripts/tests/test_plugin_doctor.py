@@ -963,6 +963,54 @@ class TestDriftCannotCompare(DriftCase):
         self.assertReportedAsNotCompared(out.stdout, data, "unparseable sync config")
 
 
+class TestDriftOSErrorIsNotACrash(DriftCase):
+    """Review round one: an OSError while reading is a failed comparison (exit 4 and a report), never a traceback."""
+
+    def _in_process(self, *patchers, remove_config=False):
+        import contextlib
+        import io
+        from unittest import mock
+
+        import plugin_doctor
+
+        self.w.write_all()
+        if remove_config:
+            (self.w.project / ".claude" / ".sync-config.json").unlink()
+        argv = ["plugin_doctor.py", "--drift", "--project", str(self.w.project), "--plugin", str(self.w.plugin),
+                "--json"]
+        buf = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+            for p in patchers:
+                p.start()
+            try:
+                rc = plugin_doctor.main()
+            finally:
+                mock.patch.stopall()
+        return rc, json.loads(buf.getvalue())
+
+    def test_an_oserror_reading_a_declared_file_exits_4_with_a_report(self):
+        from unittest import mock
+        real = Path.read_bytes
+
+        def deny(self_, *a, **k):
+            if self_.name == "b.py":
+                raise OSError("denied")
+            return real(self_, *a, **k)
+
+        rc, data = self._in_process(mock.patch.object(Path, "read_bytes", deny))
+        self.assertEqual(rc, 4, "an unreadable file means the comparison could not run")
+        self.assertTrue(isinstance(data.get("error"), str) and data["error"], "the report carries an error text")
+        self.assertEqual(data.get("compared"), 0)
+        self.assertEqual(data.get("findings"), [])
+
+    def test_an_oserror_listing_a_folder_exits_4_with_a_report(self):
+        from unittest import mock
+        rc, data = self._in_process(mock.patch("os.listdir", side_effect=OSError("denied")), remove_config=True)
+        self.assertEqual(rc, 4, "no sync config reads the folders by presence; a listing that fails cannot compare")
+        self.assertTrue(isinstance(data.get("error"), str) and data["error"])
+        self.assertEqual(data.get("compared"), 0)
+
+
 class TestFindPluginRootDelegates(unittest.TestCase):
     """find_plugin_root() with no explicit path and no template of its own returns installed_plugin_root()."""
 

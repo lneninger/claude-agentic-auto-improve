@@ -61,6 +61,8 @@ BYTES_PER_LIMIT_CHARACTER = 4
 FORGED_LABEL = re.compile(r"[(\[] *from +the[^)\]]*[)\]]?", re.IGNORECASE)
 ALWAYS_KEPT_SLUG = "plain-language"
 OFF_VALUES = {"off", "0", "false", "no"}
+#: Set once per run from the rules file; empty means nothing extra is delivered.
+DISPATCH_RULE = ""
 
 OPENING = (
     "Working agreements for this session. These are the user's standing rules for how "
@@ -175,6 +177,22 @@ def load_max_characters() -> int:
     except Exception as exc:
         log("rules-load-failed error=%s; built-in default %d used" % (exc, DEFAULT_MAX_CHARACTERS))
         return DEFAULT_MAX_CHARACTERS
+
+
+def load_dispatch_rule() -> str:
+    """The dispatch rule text, or an empty string. Read from the same rules file as the limit and
+    fail soft in the same way; the rules-load failure itself is already logged by load_max_characters."""
+    try:
+        data = json.loads((Path(__file__).resolve().parent / RULES_NAME).read_text(encoding="utf-8-sig"))
+        value = data.get("dispatch_rule") if isinstance(data, dict) else None
+        return value.strip() if isinstance(value, str) else ""
+    except Exception:
+        return ""
+
+
+def opening_text() -> str:
+    """The opening paragraph, followed by the dispatch rule when the rules file carries one."""
+    return OPENING + ("\n\n" + DISPATCH_RULE if DISPATCH_RULE else "")
 
 
 def is_plugin_install(plugin_root: Path) -> bool:
@@ -335,7 +353,7 @@ def closing_line(dropped: list[Agreement], compact: bool = False) -> str:
 
 
 def assemble(delivered: list[Agreement], dropped: list[Agreement], compact: bool = False) -> str:
-    parts = [OPENING] + [a.part for a in delivered]
+    parts = [opening_text()] + [a.part for a in delivered]
     if dropped:
         parts.append(closing_line(dropped, compact))
     return "\n\n".join(parts)
@@ -350,7 +368,7 @@ def fit(shipped: list[Agreement], project: list[Agreement], limit: int) -> tuple
     everyone = shipped + project
     # Drop order: project in reverse name order, then shipped (not always-kept) in reverse name order.
     drop_order = list(reversed(project)) + [a for a in reversed(shipped) if not a.always_kept]
-    total = ulen(OPENING) + sum(a.size for a in everyone)
+    total = ulen(opening_text()) + sum(a.size for a in everyone)
     dropped: list[Agreement] = []
     dropped_ids: set[int] = set()
     closing_size = 0
@@ -411,11 +429,28 @@ def emit(text: str) -> None:
 # run
 # --------------------------------------------------------------------------
 
+def record_session_start(payload: dict) -> None:
+    """Write the session-start marker that the database guards' deference reads (condition (h)).
+
+    Its own catch-all: a failure writes no marker, so the guards act, and it never adds output or
+    an exit path. It runs before the off switch, because the marker has nothing to do with whether
+    agreements are delivered.
+    """
+    try:
+        writer = getattr(pp, "write_session_start_marker", None) if _PATHS_OK else None
+        if writer is not None:
+            writer(payload)
+    except BaseException:  # noqa: BLE001 -- a SessionStart hook must never fail a session
+        pass
+
+
 def run() -> int:
+    payload = read_payload()
+    record_session_start(payload)
+
     if is_disabled():
         return 0
 
-    payload = read_payload()
     session_id = str(payload.get("session_id") or "")
     source = str(payload.get("source") or "")
 
@@ -427,6 +462,8 @@ def run() -> int:
 
     limit = load_max_characters()
     max_bytes = limit * BYTES_PER_LIMIT_CHARACTER
+    global DISPATCH_RULE
+    DISPATCH_RULE = load_dispatch_rule()
 
     shipped_dir = hooks_dir.parent / "agreements"
     proj = project_dir()

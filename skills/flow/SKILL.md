@@ -135,10 +135,25 @@ reason: two implementations of one rule will disagree.
 already documents, reused rather than restated as a second copy:
 
 ```bash
-PRM=$(ls .claude/scripts/pr_merged.py \
-         "$CLAUDE_PLUGIN_ROOT/.claude/scripts/pr_merged.py" \
-         ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/pr_merged.py \
-         2>/dev/null | head -1)
+PRM=
+S=.claude/scripts/pr_merged.py
+if [ -f "$S" ]; then PRM=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then PRM=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  PRM=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$PRM" --contract <slug> --status --json
 ```
 
 **If `PRM` comes back empty, stop and say so** — the same halt `/advance` takes, for the same
@@ -188,10 +203,24 @@ into the contract is licensed here.
       way:
 
       ```bash
-      VPL=$(ls .claude/scripts/verify_parent_link.py \
-               "$CLAUDE_PLUGIN_ROOT/.claude/scripts/verify_parent_link.py" \
-               ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/verify_parent_link.py \
-               2>/dev/null | head -1)
+      VPL=
+      S=.claude/scripts/verify_parent_link.py
+      if [ -f "$S" ]; then VPL=$S
+      elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then VPL=$CLAUDE_PLUGIN_ROOT/$S
+      else
+        # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+        CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+        ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+        REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+        MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+          P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+          [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+        done)
+        NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+        VPL=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+          [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+        done)
+      fi
       py -3 "$VPL" --sub <stored issue> --parent <the parent issue number> --json
       ```
 
@@ -207,10 +236,24 @@ into the contract is licensed here.
       resolved the same way:
 
       ```bash
-      VPL=$(ls .claude/scripts/verify_parent_link.py \
-               "$CLAUDE_PLUGIN_ROOT/.claude/scripts/verify_parent_link.py" \
-               ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/verify_parent_link.py \
-               2>/dev/null | head -1)
+      VPL=
+      S=.claude/scripts/verify_parent_link.py
+      if [ -f "$S" ]; then VPL=$S
+      elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then VPL=$CLAUDE_PLUGIN_ROOT/$S
+      else
+        # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+        CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+        ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+        REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+        MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+          P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+          [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+        done)
+        NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+        VPL=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+          [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+        done)
+      fi
       py -3 "$VPL" --sub <brief's issue id> --parent <the parent issue number> --json
       ```
 

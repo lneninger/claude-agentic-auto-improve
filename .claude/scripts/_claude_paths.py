@@ -89,6 +89,7 @@ logs_dir = _pp.logs_dir
 hook_file = _pp.hook_file
 tree_kind = _pp.tree_kind
 main_checkout_root = _pp.main_checkout_root
+installed_plugin_root = _pp.installed_plugin_root
 
 __all__ = [
     "claude_roots",
@@ -109,4 +110,5 @@ __all__ = [
     "hook_file",
     "tree_kind",
     "main_checkout_root",
+    "installed_plugin_root",
 ]

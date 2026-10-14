@@ -39,21 +39,24 @@ the places **in this order** and keep the first hit. Do not use `ls` on all thre
 
 ```bash
 FI=
-if   [ -f ".claude/scripts/auto_improve_finish_install.py" ]; then
-  FI=".claude/scripts/auto_improve_finish_install.py"
-elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/.claude/scripts/auto_improve_finish_install.py" ]; then
-  FI="$CLAUDE_PLUGIN_ROOT/.claude/scripts/auto_improve_finish_install.py"
+S=.claude/scripts/auto_improve_finish_install.py
+if [ -f "$S" ]; then FI=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then FI=$CLAUDE_PLUGIN_ROOT/$S
 else
-  # The provider cache under the Claude home (CLAUDE_CONFIG_DIR when set, else ~/.claude).
-  # Newest version first (a version sort, so 0.10.0 beats 0.9.0).
-  for d in $(ls -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sort -rV); do
-    if [ -f "${d}.claude/scripts/auto_improve_finish_install.py" ]; then
-      FI="${d}.claude/scripts/auto_improve_finish_install.py"
-      break
-    fi
-  done
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  FI=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
 fi
-echo "FI=$FI"
+py -3 "$FI" --help   # macOS and Linux: python3 "$FI" --help
 ```
 
 **If `FI` is empty, stop and say so.** Say that the script was not found in the project, in
