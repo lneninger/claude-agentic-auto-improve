@@ -56,12 +56,12 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 484 cases over
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 525 cases over
 identity, parsing, block classification, verdicts, records, releases, conflict detection, the
 Hand-Resolved Summary (including the unread-commit count and its single-fetch walk), the
 cross-repository pull-request path, the `GH_REPO` refusal, the Next Command and the Sub-Task
 Cycle. Measured by running `py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own
-`unittest` summary line: `Ran 484 tests ... OK` (exit code 0). They were mutation-probed: disabling the
+`unittest` summary line: `Ran 525 tests ... OK` (exit code 0). They were mutation-probed: disabling the
 verification check, reading a missing dependency line as none, and counting scope notes as
 sub-tasks each turn the suite red.
 
@@ -86,8 +86,7 @@ A sub-task's life runs: implement, test, review, verify, commit, open a pull req
 completion releases, and returns that set to whoever called it. Choosing what runs next, and
 starting it, belongs to the loop.
 
-That separation is the point. If this skill also decided what to run next, there would be two
-things competing to drive iteration, and they would disagree the moment either changed.
+Background and history: `references/background.md`. It holds no rules, so reading it is optional.
 
 ### Two ways it is invoked
 
@@ -392,69 +391,7 @@ phase checks it, and the operator no longer has to.
 
 ## When a sub-task cannot be delivered
 
-A pull request closed without merging is not a skip. It means the sub-task could not be
-delivered as the contract specified it. So does an implementer that halts because the tests
-cannot be made to pass.
-
-**That is evidence about the design, not only about the code.** A sub-task nobody can build
-means the decomposition was wrong. It goes to the architect, not to a failure report.
-
-### Write a failure record, in the channel that already exists
-
-The escalation channel is `contract_impact` with `requires_architect`, inherited from the
-removed design because the shape was right. Use it rather than inventing a second path.
-
-```yaml
-status: failed
-commit: null
-tests_passed: unknown
-tests_verified_by: none
-contract_impact:
-  requires_architect: true
-  severity: <high | medium | low>
-  description: <why this sub-task could not be delivered, in one or two sentences>
-completed_by: pr-merged
-pull_request: <url of the closed pull request>
-verified: github
-```
-
-**Severity is about the blast radius on the contract, not on the sub-task.** High means other
-sub-tasks are built on an assumption this failure disproves. Medium means this sub-task needs
-respecifying and the rest stand. Low means the approach was wrong but the specification holds.
-
-### Release nothing
-
-**A failed sub-task releases none of its dependents.** They were going to build on work that
-does not exist. Leave them blocked, and name the failed sub-task as what blocks them.
-
-This is the one case where the blocked state is correct and must not be cleared by a person
-calling this phase again. It clears when the contract is amended.
-
-### Hand back an escalation, not a released set
-
-The return is different in shape. Say that the sub-task failed, give the severity and the
-description, and name every sub-task now blocked behind it.
-
-The loop routes that to architect re-entry and pauses. A person is told the contract needs
-amending, and that `/design-first` is where that happens.
-
-### The three things the architect can decide
-
-**The decomposition was wrong.** The contract is amended, the sub-tasks are respecified, and
-the failure record stays as history explaining why.
-
-**The sub-task was unnecessary.** It becomes a `no-work-required` completion, which releases
-its dependents normally. The failure record is superseded, never deleted.
-
-**The specification was right and the approach was wrong.** The same sub-task is retried. The
-failure record stays, so a second failure on the same sub-task is visible as a pattern rather
-than read as a first attempt.
-
-### Tests that cannot pass never reach this phase
-
-No pull request merges, so nothing calls it. That failure surfaces from the implementer
-halting during `/tdd-first`. The record shape above is the same, and whoever is driving writes
-it. This phase owns the closed-pull-request path only.
+When a sub-task cannot be delivered (its pull request was closed unmerged, or its implementer halted) applies, read `references/undeliverable-sub-task.md` in full before continuing. If it cannot be read, stop and report the missing file; do not continue from memory.
 
 ## Step 6: Offer to clean up
 
@@ -546,14 +483,7 @@ State what was skipped as plainly as what succeeded.
 
 ## Refusal: `GH_REPO` is set in the environment
 
-The script reads `GH_REPO` exactly once, before touching the contract, git or `gh` at all, and
-only to refuse: with a non-empty `GH_REPO` set and the invocation naming `--pr` or `--dispatch`,
-it prints `{"error": "gh-repo-set", ...}` and exits **8**. Nothing is read, written or closed.
-
-`GH_REPO` retargets every `gh` call a process makes, including `gh issue close` — the exact
-hazard this whole contract closes for a link. The script never sets it itself. The remedy is to
-unset `GH_REPO` in that shell and run the command again; a pull request in **another** repository
-is passed as its `https://` link, never through `GH_REPO`.
+When `GH_REPO` is set in the environment applies, read `references/gh-repo-refusal.md` in full before continuing. If it cannot be read, stop and report the missing file; do not continue from memory.
 
 ## The stores, and the design that defined them
 
@@ -567,9 +497,6 @@ never written to once. Both readers invented success when they found nothing.
 The store names are kept because the design behind them was right: a plan of sub-tasks, one
 durable record per finished sub-task, and a working position rebuilt from those records. This
 phase is the producer that store never had.
-
-Its design record stays under `.claude/orchestrator/`, with a README saying plainly that it is
-a record rather than running code.
 
 **Do not model this phase's dependency check on the removed one.** That gate failed open: the
 executor named a branch with a date appended, the lookup omitted the date, and on the miss it
