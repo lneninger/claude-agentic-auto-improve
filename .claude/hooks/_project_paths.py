@@ -945,6 +945,30 @@ def _row_timeout(entry: dict) -> float | None:
     return float(value)
 
 
+#: Keys a hook row may carry and still count for deference. Any other key (a per-row ``if`` condition,
+#: for instance) means the row may not run on every call, so the plugin copy acts.
+KNOWN_ROW_KEYS = frozenset({"type", "command", "args", "timeout", "async", "statusMessage", "shell"})
+#: Interpreters that run a guard script. An exec-form row launched by anything else (``echo``) cannot block.
+_PYTHON_LAUNCHERS = frozenset({"py", "python", "python3"})
+#: A shell operator can end, bypass or hide the guard's exit code (``|| true``, ``; exit 0``, a pipe).
+_SHELL_OPERATOR_RE = re.compile(r"[|&;<>`\r\n]")
+
+
+def _row_can_block(row: dict) -> bool:
+    """True when a project row that names the guard file would really run it and keep its exit code."""
+    if not set(row) <= KNOWN_ROW_KEYS:
+        return False
+    command = row.get("command")
+    if not isinstance(command, str):
+        return False
+    if isinstance(row.get("args"), list):
+        launcher = posixpath.basename(command.replace("\\", "/")).casefold()
+        if launcher.endswith(".exe"):
+            launcher = launcher[:-4]
+        return launcher in _PYTHON_LAUNCHERS
+    return _SHELL_OPERATOR_RE.search(command) is None
+
+
 def _plugin_guard_timeout(guard_file: str, tool: str) -> float:
     """The plugin's own effective timeout for a guard (decision 3): among its ``hooks.json``
     registrations whose matcher covers ``tool``, the largest. Raises when ``hooks.json`` is unusable."""
@@ -1024,7 +1048,8 @@ def _project_registration_stands(guard_file: str, payload: object, running_file:
             return False  # (f)
         rows = _matching_rows(settings, tool, launches_project_copy)  # (d)
         usable = [row for row in rows
-                  if row.get("async") in (None, False)  # (g) an async row cannot block
+                  if _row_can_block(row)
+                  and row.get("async") in (None, False)  # (g) an async row cannot block
                   and (_row_timeout(row) or 0.0) >= plugin_timeout]
         if not usable:
             return False

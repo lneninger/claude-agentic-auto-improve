@@ -461,7 +461,15 @@ def _walk_files(base: Path) -> List[str]:
 
 def compute_drift(project: Path, plugin: Path) -> Dict[str, Any]:
     """Compare ``project`` with ``plugin``. Returns ``{"findings", "compared", "compared_addons"}``
-    (findings as ``DriftFinding`` objects). Raises ``DriftError`` when it cannot compare."""
+    (findings as ``DriftFinding`` objects). Raises ``DriftError`` when it cannot compare, and that
+    includes any ``OSError`` while reading: an unreadable file is a failed comparison, not a crash."""
+    try:
+        return _compute_drift(project, plugin)
+    except OSError as exc:
+        raise DriftError("a file or folder could not be read (%s)" % exc)
+
+
+def _compute_drift(project: Path, plugin: Path) -> Dict[str, Any]:
     if os.path.normcase(os.path.realpath(project)) == os.path.normcase(os.path.realpath(plugin)):
         raise DriftError("the plugin root is the project root (%s); comparing a tree with itself "
                          "would always look clean" % project)
