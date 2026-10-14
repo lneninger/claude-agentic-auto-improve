@@ -346,8 +346,9 @@ class TestFinishInstallSkillIsNamed(DoctorCase):
 #     is never imported (decision 6), so the fixture dispatchers below are SOURCE TEXT;
 #   * a project-side hook is registered in settings.json as "${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>", a
 #     plugin-side one in <plugin>/.claude/hooks/hooks.json as "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/<file>";
-#   * add-on drift is NOT pinned here (decision 9): block 16 tests it and block 18 builds it. This suite
-#     pins only the baseline `compared_addons == 0` when no add-on is declared.
+#   * add-on drift (decision 9) is built by block 18 and tested by block 16: the TestDriftAddons classes at the
+#     end of this file pin it (the `addons` object, `compared_addons`, the presence rule). The baseline
+#     `compared_addons == 0` when no add-on is declared stays pinned by TestDriftBaseline.
 
 import os  # noqa: E402
 import subprocess  # noqa: E402
@@ -1046,6 +1047,179 @@ class TestFindPluginRootDelegates(unittest.TestCase):
         self.assertEqual(os.path.normcase(os.path.realpath(out.stdout.strip() or "none")),
                          os.path.normcase(os.path.realpath(str(installed))),
                          "find_plugin_root delegates its cache step to installed_plugin_root()")
+
+
+# ===========================================================================
+# Add-on drift (dedupe contract, Revision 3, block 16): the sync config's `addons` object and the presence rule
+# ===========================================================================
+# The config object is add-on name -> the add-on hook files present in this project's .claude/hooks/. Each is
+# compared with <plugin>/.claude/addons/<add-on>/hooks/<file> by the content-differs rule; a listed file
+# missing on either side is one-sided; the owner is `plugin`. These files count in `compared_addons`, never in
+# `compared`. A listed add-on whose plugin folder or manifest is missing is exit 4, like a missing root folder.
+# A project with NO sync config (a plain plugin install) is read by presence instead: an add-on counts as
+# installed when any of its manifest's hook files exists in .claude/hooks/.
+#
+# The manifest field names come from _addon_fixture's constants, the one seam shared with the other suites.
+sys.path.insert(0, str(HOOKS_DIR / "tests"))
+import _addon_fixture as af  # noqa: E402
+
+
+def add_addon(world, name, files, *, project=True, plugin=True, manifest=True, folder=True, listed=True):
+    """Build one add-on on the plugin side (manifest + hook files) and, optionally, the project's copies."""
+    if folder:
+        base = world.plugin / ".claude" / "addons" / name
+        (base / "hooks").mkdir(parents=True, exist_ok=True)
+        if manifest:
+            rows = [{af.ROW_EVENT: "PreToolUse", af.ROW_MATCHER: "Bash", af.ROW_HOOK: f} for f in files]
+            (base / "addon.json").write_text(json.dumps({
+                af.KEY_HOOKS: list(files), af.KEY_HELPERS: [], af.KEY_ROWS: rows, af.KEY_PREREQUISITES: [],
+                af.KEY_KILL_SWITCHES: [], af.KEY_INSTALL_SKILL: "auto-improve-%s-install" % name}), encoding="utf-8")
+        if plugin:
+            for f in files:
+                (base / "hooks" / f).write_text("# add-on hook %s\n" % f, encoding="utf-8")
+    if project:
+        for f in files:
+            world.project_put(".claude/hooks/" + f, "# add-on hook %s\n" % f)
+    if listed:
+        world.config["addons"][name] = list(files)
+
+
+def run_without_config(world, *flags):
+    """The real command line against a project with NO sync config. Returns (rc, stdout, stderr, json)."""
+    world.write_all()
+    (world.project / ".claude" / ".sync-config.json").unlink()
+    argv = [sys.executable, "-B", str(DOCTOR), "--drift", "--project", str(world.project), "--plugin",
+            str(world.plugin), "--json"] + list(flags)
+    out = subprocess.run(argv, capture_output=True, text=True, env=world.env(), cwd=str(world.tmp), timeout=120)
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        data = None
+    return out.returncode, out.stdout, out.stderr, data
+
+
+class TestDriftAddons(DriftCase):
+    GATE = ".claude/hooks/bash-gate.py"
+
+    def test_an_identical_add_on_file_is_counted_in_compared_addons_and_not_in_compared(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"])
+        rc, data = self.drift()
+        self.assertEqual(rc, 0, "an identical add-on file is no drift")
+        self.assertKinds(data, [], "nothing differs")
+        self.assertEqual(data.get("compared_addons"), 1, "one add-on file was compared")
+        self.assertEqual(data.get("compared"), 3, "add-on files count in compared_addons, never in compared")
+
+    def test_an_add_on_file_whose_content_differs_is_content_differs_with_owner_plugin(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"])
+        self.w.project_put(self.GATE, "# the project edited its installed copy\n")
+        rc, data = self.drift()
+        self.assertEqual(rc, 1, "a counted finding exits 1")
+        self.assertKinds(data, ["content-differs"], "the installed copy differs from the plugin's")
+        self.assertEqual(self.path_of(data, "content-differs"), [self.GATE])
+        self.assertEqual(_findings(data)[0].get("owner"), "plugin", "an add-on file's owner is the plugin")
+        self.assertEqual(data.get("compared_addons"), 1, "a differing pair was still compared")
+        self.assertEqual(data.get("compared"), 3, "and still not counted in compared")
+
+    def test_line_endings_and_a_byte_order_mark_alone_give_no_add_on_finding(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"])
+        self.w.project_put(self.GATE, "# add-on hook bash-gate.py\n", eol="\r\n", bom=True)
+        rc, data = self.drift()
+        self.assertEqual(rc, 0, "the same rule as the vendored trees")
+        self.assertKinds(data, [], "CRLF and a BOM are not drift")
+        self.assertEqual(data.get("compared_addons"), 1, "the pair was compared and found equal")
+
+    def test_a_listed_file_missing_in_the_project_is_one_sided(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], project=False)
+        rc, data = self.drift()
+        self.assertEqual(rc, 1)
+        self.assertKinds(data, ["one-sided"], "the config lists a file the project does not have")
+        self.assertEqual(self.path_of(data, "one-sided"), [self.GATE])
+        self.assertEqual(_findings(data)[0].get("owner"), "plugin")
+        self.assertEqual(data.get("compared_addons"), 0, "a one-sided file has no second copy, so it is not compared")
+
+    def test_a_listed_file_missing_in_the_plugin_is_one_sided(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], plugin=False)
+        rc, data = self.drift()
+        self.assertEqual(rc, 1)
+        self.assertKinds(data, ["one-sided"], "the project lists a file the plugin's add-on folder lacks")
+        self.assertEqual(self.path_of(data, "one-sided"), [self.GATE])
+        self.assertEqual(_findings(data)[0].get("owner"), "plugin")
+
+    def test_compared_addons_counts_the_files_of_all_three_add_ons(self):
+        add_addon(self.w, "angular-tailwind", ["angular-tailwind-advisor.py"])
+        add_addon(self.w, "codegraph", ["codegraph-first-guard.py", "codegraph-turn-reset.py",
+                                        "codegraph-turn-tracker.py"])
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"])
+        rc, data = self.drift()
+        self.assertEqual(rc, 0, "five identical add-on files")
+        self.assertEqual(data.get("compared_addons"), 5, "1 + 3 + 1 add-on files were compared")
+        self.assertEqual(data.get("compared"), 3, "the vendored count is unchanged")
+
+    def test_a_file_the_config_does_not_list_is_a_local_asset_even_when_the_plugin_has_it_as_an_add_on(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], listed=False)
+        self.w.project_put(self.GATE, "# an unlisted, different file\n")
+        rc, data = self.drift()
+        self.assertEqual(rc, 0, "a file no list names is never compared")
+        self.assertKinds(data, [], "no finding for an unlisted file")
+        self.assertEqual(data.get("compared_addons"), 0, "and nothing was compared")
+
+    def test_a_listed_add_on_whose_plugin_folder_is_missing_exits_4_and_names_it(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], folder=False)
+        rc, out, err, data = self.w.run()
+        self.assertEqual(rc, 4, "a listed add-on with no folder in the plugin cannot be compared; out=%r" % out[-300:])
+        self.assertIn("strict-shell-gate", out + err, "the message names the add-on")
+        self.assertIsNotNone(data, "exit 4 still prints one JSON document")
+        self.assertTrue(isinstance(data.get("error"), str) and data["error"], "with a non-empty error field")
+        self.assertEqual(data.get("compared"), 0, "a run that could not compare reports compared 0")
+        self.assertEqual(data.get("findings"), [], "and no findings")
+
+    def test_a_listed_add_on_whose_manifest_is_missing_exits_4_and_names_it(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], manifest=False)
+        rc, out, err, data = self.w.run()
+        self.assertEqual(rc, 4, "a listed add-on with no manifest cannot be compared; out=%r" % out[-300:])
+        self.assertIn("strict-shell-gate", out + err, "the message names the add-on")
+        self.assertIsNotNone(data, "exit 4 still prints one JSON document")
+        self.assertEqual(data.get("compared"), 0, "compared 0")
+
+    def test_control_the_same_world_with_the_manifest_present_compares(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"])
+        rc, out, err, data = self.w.run()
+        self.assertEqual(rc, 0, "control for the two exit-4 rows above: with folder and manifest it compares")
+        self.assertEqual(data.get("compared_addons"), 1, "and the add-on file was counted")
+
+
+class TestDriftAddonsPresence(DriftCase):
+    """No sync config: an add-on counts as installed when any of its manifest's hook files is in .claude/hooks/."""
+    GATE = ".claude/hooks/bash-gate.py"
+
+    def test_an_add_on_with_no_file_in_the_project_is_not_installed_and_not_compared(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], project=False, listed=False)
+        rc, out, err, data = run_without_config(self.w)
+        self.assertEqual(rc, 0, "an add-on nobody installed is no drift; out=%r err=%r" % (out[-300:], err[-300:]))
+        self.assertKinds(data, [], "no finding for an add-on that is not installed")
+        self.assertEqual(data.get("compared_addons"), 0, "and nothing was compared")
+
+    def test_an_installed_identical_add_on_file_is_compared(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], listed=False)
+        rc, out, err, data = run_without_config(self.w)
+        self.assertEqual(rc, 0, "identical; out=%r err=%r" % (out[-300:], err[-300:]))
+        self.assertEqual(data.get("compared_addons"), 1, "read by presence: the installed file was compared")
+
+    def test_an_installed_add_on_file_that_differs_is_content_differs(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], listed=False)
+        self.w.project_put(self.GATE, "# edited after the install\n")
+        rc, out, err, data = run_without_config(self.w)
+        self.assertEqual(rc, 1, "a counted finding exits 1; out=%r err=%r" % (out[-300:], err[-300:]))
+        self.assertKinds(data, ["content-differs"], "found by presence, with no sync config")
+        self.assertEqual(self.path_of(data, "content-differs"), [self.GATE])
+        self.assertEqual(_findings(data)[0].get("owner"), "plugin")
+
+    def test_control_with_a_sync_config_that_lists_no_add_on_the_same_file_is_not_compared(self):
+        add_addon(self.w, "strict-shell-gate", ["bash-gate.py"], listed=False)
+        self.w.project_put(self.GATE, "# edited after the install\n")
+        rc, data = self.drift()
+        self.assertEqual(rc, 0, "with a config the presence rule does not apply: an unlisted file is a local asset")
+        self.assertKinds(data, [], "so the finding above came from the presence rule")
 
 
 if __name__ == "__main__":

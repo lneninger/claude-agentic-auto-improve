@@ -12476,21 +12476,21 @@ class TestAdvanceFromTheMainCheckout(_WorktreeWorldCase):
 
         def gate(command):
             data = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(wt)}).encode("utf-8")
-            return wt_run([sys.executable, "-B", str(hooks / "gate-launch.py"), str(hooks / "bash-gate.py")],
+            return wt_run([sys.executable, "-B", str(hooks / "gate-launch.py"), str(hooks / "concept-gate.py")],
                           cwd=wt, env=self.env(), stdin=data)
 
-        # Plugin copy (contract 2026-10-07-worktree-isolation-by-default, round-7 amendment): the plugin ships and
-        # registers no bash-gate.py (cut by 2026-09-28-hook-server-modes, INV-O1), so only this gate-launching
-        # part of the case is skipped; steps 1 to 5 and 7 still run.
-        if (hooks / "bash-gate.py").is_file():
-            without_head = gate("gh pr create --base %s --title t --body b" % world.default)
-            self.assertTrue(without_head.rc == 2 and "MERGE DIRECTION" in without_head.err,
-                            "control: with no --head a detached HEAD cannot be judged, so the create is refused "
-                            "(unverifiable): " + without_head.describe())
-            with_head = gate("gh pr create --head %s --base %s --title t --body b" % (WT_PARENT, world.default))
-            self.assertEqual(with_head.rc, 0, "the same create with --head <parent> is judged on that head and allowed: "
-                             + with_head.describe())
-            self.assertNotIn("MERGE DIRECTION", with_head.err)
+        # The default shell row: gate-launch.py concept-gate.py, run from the tests' own hooks folder.
+        without_head = gate("gh pr create --base %s --title t --body b" % world.default)
+        self.assertTrue(without_head.rc == 2 and "MERGE DIRECTION" in without_head.err,
+                        "control: with no --head a detached HEAD cannot be judged, so the create is refused "
+                        "(unverifiable): " + without_head.describe())
+        self.assertNotIn("guard degraded", without_head.err,
+                         "the refusal is the merge-direction check's own, not the launcher's degraded rule: "
+                         + without_head.describe())
+        with_head = gate("gh pr create --head %s --base %s --title t --body b" % (WT_PARENT, world.default))
+        self.assertEqual(with_head.rc, 0, "the same create with --head <parent> is judged on that head and allowed: "
+                         + with_head.describe())
+        self.assertNotIn("MERGE DIRECTION", with_head.err)
         # 7. the main checkout never moved: HEAD, index, the dirty file, and its own local branch
         self.assertEqual(snapshot(main), before, "AC2: the main checkout's HEAD, index and dirty file are byte-identical")
         self.assertEqual(git(main, "rev-parse", WT_PARENT), local_parent,

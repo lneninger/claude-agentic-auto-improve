@@ -1871,26 +1871,26 @@ class TestMerge(Base):
         self.assertEqual(len(self.need(self.plan(), "to-add")), 17,
                          msg="found through the plugin root, never a guessed path")
 
-    def test_the_real_plugin_hooks_json_yields_exactly_its_twelve_registrations(self):
+    def test_the_real_plugin_hooks_json_yields_exactly_its_fourteen_registrations(self):
         # Amended by sub-task 23 (hook-server-modes amendment 2026-10-09, INV-O1): the real hooks.json now
-        # registers twelve entries, in exec form. The matcher is part of the comparison, because the
+        # registers twelve entries, in exec form (fourteen after the dedupe contract, Revision 3: the shell launcher row and plan-question-advisor.py are added, the Stop row becomes the Stop dispatcher). The matcher is part of the comparison, because the
         # database guards appear on several matchers of one event and must stay distinct entries.
         real = json.loads((SCRIPT_ROOT / ".claude/hooks/hooks.json").read_text(encoding="utf-8"))
         expected = sorted((event, g.get("matcher") or "", key_of(h)[0], key_of(h)[1])
                           for event, groups in real["hooks"].items()
                           for g in groups for h in g.get("hooks", []))
-        self.assertEqual(len(expected), 12,
-                         msg="independent parse of the REAL hooks.json: 12 registrations")
+        self.assertEqual(len(expected), 14,
+                         msg="independent parse of the REAL hooks.json: 14 registrations")
         self.make_vendored()  # every hook file named by the real hooks.json exists in the project
         # the fake plugin holds 16 hook files; the real one also holds the session-start hook and the dispatcher
-        for extra_hook in ("working-agreements.py", "post-edit-dispatcher.py"):
+        for extra_hook in ("working-agreements.py", "post-edit-dispatcher.py", "stop-dispatcher.py"):
             (self.project / ".claude/hooks" / extra_hook).write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
         for _e, _m, name, _x in expected:
             self.assertTrue((self.project / ".claude/hooks" / name).is_file(),
                             msg="fixture sanity: the temp project holds %s" % name)
         plan = fi.plan_hooks(self.project, "win32", claude_home=self.home, plugin_root=SCRIPT_ROOT)
         added = self.need(plan, "to-add", "registrations read from the real plugin's hooks.json")
-        self.assertEqual(len(added), 12, msg="all 12 real registrations are missing and to be added")
+        self.assertEqual(len(added), 14, msg="all 14 real registrations are missing and to be added")
         got = []
         for r in added:
             parsed = parse_registration_key(str(r.get("registration-key")))
@@ -2830,14 +2830,15 @@ class TestReadiness(Base):
                 self.assertIn(word, text, msg="%s: the list names the session load, the trust prompt "
                                               "and the imports" % label)
             note = self.need(report, "code-search-first-note")
-            # Amended by sub-task 24 (hook-server-modes contract, amendment 2026-10-09): the code-search-first
-            # check is cut from the plugin, so the note says it was retired and no longer names its bypass.
-            for needle in ("CodeGraph", "retired", "block"):
-                self.assertIn(needle, note, msg="%s: the code-search-first note must mention %s" % (label, needle))
+            # Amended by the dedupe contract, block 16: the code-search-first guard is the codegraph ADD-ON now, so
+            # the note names the add-on and its install skill, and says nothing was retired.
+            for needle in ("codegraph", "add-on", "auto-improve-codegraph-install"):
+                self.assertIn(needle, note.lower(), msg="%s: the code-search-first note must mention %s" % (label, needle))
             self.assertNotIn("CLAUDE_SKIP_CG", note,
-                             msg="%s: the retired check's switch is no longer a thing to tell the operator" % label)
-            self.assertRegex(note.lower(), r"no longer blocks|nothing to bypass",
-                             msg="%s: and say the plugin no longer blocks source reads" % label)
+                             msg="%s: the guard's switch belongs to the add-on, not to this note" % label)
+            self.assertNotIn("retired", note.lower(), msg="%s: nothing is retired any more" % label)
+            self.assertNotRegex(note.lower(), r"no longer blocks",
+                                msg="%s: and the note does not say the plugin no longer blocks" % label)
 
 
 # ======================================================================================
@@ -3325,6 +3326,378 @@ class TestRoundThreeStrictReadsOnThePluginPath(Base):
         self.assertIs(verdict.get("enabled"), True, msg="enabledPlugins[%s] is true" % key)
         report = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
         self.assertIs(report.get("ready"), True, msg="and the report is ready; got %r" % report)
+
+
+# ======================================================================================
+# 11. Add-ons (dedupe contract, Revision 3, block 16): `addon --name <add-on>` preview and apply
+# ======================================================================================
+# An add-on is a hook file the plugin ships under .claude/addons/<add-on>/hooks/ and does not register.
+# The subcommand copies the add-on's hook files, and the helpers its addon.json names (only when the project
+# lacks them, never over an existing one), into the project's .claude/hooks/ (and .claude/scripts/), and writes
+# the manifest's registration rows into the project's settings.json in exec form, reusing the script's
+# preview, plan hash, backup, symbolic-link refusal and exec-form row writer. It never removes a row or a
+# file and never overwrites a differing file.
+#
+# THE FAKE ADD-ONS are built inside the fake plugin (build_fake_addons). The manifest field names are read
+# from _addon_fixture's constants, the one seam shared with the other add-on suites.
+#
+# Narrow readings (the contract leaves them open):
+#   * the subcommand's flags are --name, --project, --json, --apply, --expect-sha256 and --claude-home, as
+#     the other subcommands spell them; the written interpreter is whatever the platform gives
+#     (py -3 or python3), so rows are checked for the project-folder path, not for the interpreter;
+#   * "the user's Claude configuration file" is read from <home>/.claude.json, where home is the user's home
+#     directory OR the Claude config directory (CLAUDE_CONFIG_DIR): the positive cases write both, so either
+#     reading passes, and the negative case leaves both without a codegraph entry;
+#   * a missing manifest is a refusal with exit class 3 (no particular code name is pinned).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hooks" / "tests"))
+import _addon_fixture as af  # noqa: E402
+
+ADDON_SPECS = {
+    "angular-tailwind": {
+        "hooks": ["angular-tailwind-advisor.py"],
+        "helpers": [".claude/hooks/_project_paths.py"],
+        "rows": [("UserPromptSubmit", None, "angular-tailwind-advisor.py", [])],
+        "prerequisites": [],
+        "kill": ["CLAUDE_ARCH_ADVISOR"],
+    },
+    "codegraph": {
+        "hooks": ["codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py"],
+        "helpers": [".claude/hooks/_project_paths.py", ".claude/hooks/_error_log.py"],
+        "rows": [("PreToolUse", "Read|Grep|Glob", "codegraph-first-guard.py", []),
+                 ("UserPromptSubmit", None, "codegraph-turn-reset.py", []),
+                 ("PostToolUse", "mcp__codegraph__.*", "codegraph-turn-tracker.py", [])],
+        "prerequisites": [{"kind": "mcp-server", "name": "codegraph"}],
+        "kill": ["CLAUDE_SKIP_CG"],
+    },
+    "strict-shell-gate": {
+        "hooks": ["bash-gate.py"],
+        "helpers": [".claude/hooks/_project_paths.py", ".claude/hooks/_shell_write_targets.py",
+                    ".claude/scripts/_contract_index.py"],
+        "rows": [("PreToolUse", "Bash", "bash-gate.py", [])],
+        "prerequisites": [],
+        "kill": ["CLAUDE_BASH_GATE"],
+    },
+}
+
+
+def build_fake_addons(root):
+    """Add the three add-ons, and the default-tree helpers they name, to a fake plugin root."""
+    root = Path(root)
+    for rel, text in ((".claude/hooks/_shell_write_targets.py", "# the shell parser\n"),
+                      (".claude/hooks/_error_log.py", "# the error log\n"),
+                      (".claude/scripts/_contract_index.py", "# the contract index\n")):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    for name, spec in ADDON_SPECS.items():
+        folder = root / ".claude" / "addons" / name
+        (folder / "hooks").mkdir(parents=True, exist_ok=True)
+        for hook in spec["hooks"]:
+            (folder / "hooks" / hook).write_text("# fake add-on hook %s\nimport sys\nsys.exit(0)\n" % hook,
+                                                 encoding="utf-8")
+        rows = []
+        for event, matcher, hook, args in spec["rows"]:
+            row = {af.ROW_EVENT: event, af.ROW_HOOK: hook, af.ROW_ARGS: list(args)}
+            if matcher is not None:
+                row[af.ROW_MATCHER] = matcher
+            rows.append(row)
+        manifest = {af.KEY_HOOKS: list(spec["hooks"]), af.KEY_HELPERS: list(spec["helpers"]), af.KEY_ROWS: rows,
+                    af.KEY_PREREQUISITES: list(spec["prerequisites"]), af.KEY_KILL_SWITCHES: list(spec["kill"]),
+                    af.KEY_INSTALL_SKILL: "auto-improve-%s-install" % name}
+        (folder / "addon.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+class TestAddonInstall(Base):
+    def setUp(self):
+        super().setUp()
+        build_fake_addons(self.plugin)
+        self.install_plugin()
+        self.user_home = self.tmp / "fakeuser"
+
+    # --- helpers --------------------------------------------------------------------
+    def addon_argv(self, name, apply=False, sha=None, project=None):
+        argv = ["addon", "--name", name, "--project", str(project or self.project), "--json",
+                "--claude-home", str(self.home)]
+        if apply:
+            argv += ["--apply", "--expect-sha256", sha or ""]
+        return argv
+
+    def preview(self, name, project=None):
+        rc, out, parsed = self.cli(self.addon_argv(name, project=project))
+        self.assertIsNotNone(parsed, msg="--json prints the plan; got %r" % out)
+        self.assertEqual(rc, 0, msg="a plan is exit 0: %r" % (parsed,))
+        self.assertEqual(parsed.get("status"), "plan", msg="a plan: %r" % (parsed,))
+        self.assertRegex(str(parsed.get("plan-sha256")), HEX64, msg="the preview carries the plan hash")
+        return parsed
+
+    def apply(self, name, sha, project=None):
+        return self.cli(self.addon_argv(name, apply=True, sha=sha, project=project))
+
+    def install_addon(self, name):
+        if name == "codegraph":
+            self.configure_mcp("project")
+        plan = self.preview(name)
+        rc, out, parsed = self.apply(name, plan["plan-sha256"])
+        self.assertEqual(rc, 0, msg="the apply writes and exits 0: %r" % (parsed or out,))
+        self.assertEqual((parsed or {}).get("status"), "applied", msg="reported as applied: %r" % (parsed,))
+        return plan, parsed
+
+    def configure_mcp(self, where, name="codegraph"):
+        servers = {name: {"command": "codegraph", "args": ["serve"]}}
+        if where == "project":
+            write_json(self.project / ".mcp.json", {"mcpServers": servers})
+        elif where == "user":
+            for folder in (self.user_home, self.home):
+                write_json(folder / ".claude.json", {"mcpServers": servers})
+        elif where == "user-project-entry":
+            for folder in (self.user_home, self.home):
+                write_json(folder / ".claude.json", {"projects": {str(self.project): {"mcpServers": servers},
+                                                                   str(self.project).replace("\\", "/"):
+                                                                       {"mcpServers": servers}}})
+        else:
+            raise AssertionError(where)
+
+    def source_file(self, name, hook):
+        return self.plugin / ".claude" / "addons" / name / "hooks" / hook
+
+    def assert_installed(self, name, parsed_settings=True):
+        spec = ADDON_SPECS[name]
+        for hook in spec["hooks"]:
+            installed = self.project / ".claude" / "hooks" / hook
+            self.assertTrue(installed.is_file(), msg="%s must be copied into the project's .claude/hooks/" % hook)
+            self.assertEqual(installed.read_bytes(), self.source_file(name, hook).read_bytes(),
+                             msg="%s must be a byte-for-byte copy of the plugin's add-on file" % hook)
+        for helper in spec["helpers"]:
+            self.assertTrue((self.project / helper).is_file(), msg="helper %s must be present" % helper)
+        if not parsed_settings:
+            return
+        regs = flat_registrations(self.read_settings())
+        for event, matcher, hook, args in spec["rows"]:
+            found = [r for r in regs if r[2] == hook and r[0] == event]
+            self.assertEqual(len(found), 1, msg="exactly one %s row for %s; settings hold %r" % (event, hook, regs))
+            _e, got_matcher, _h, _extras, entry = found[0]
+            self.assertEqual(got_matcher, matcher, msg="the row for %s keeps the manifest's matcher" % hook)
+            self.assertIsInstance(entry.get("args"), list, msg="exec form: args is a list, no shell parses it")
+            self.assertIn(entry.get("command"), ("py", "python3"), msg="exec form: the interpreter is the command")
+            self.assertIn("${CLAUDE_PROJECT_DIR}/.claude/hooks/" + hook, entry["args"],
+                          msg="the row points into the PROJECT's hooks folder, never the plugin's")
+            self.assertNotIn("CLAUDE_PLUGIN_ROOT", json.dumps(entry), msg="and never at ${CLAUDE_PLUGIN_ROOT}")
+
+    # --- preview and apply ----------------------------------------------------------------
+    def test_a_preview_writes_nothing_and_carries_a_plan_hash_for_each_add_on(self):
+        self.configure_mcp("project")
+        for name in ADDON_SPECS:
+            with self.subTest(add_on=name):
+                before = snapshot(self.tmp)
+                plan = self.preview(name)
+                self.assertTreeSame(before, "a preview writes nothing")
+                self.assertTrue(plan.get("to-add") or plan.get("files") or plan.get("hooks"),
+                                msg="and says what it would add: %r" % (plan,))
+
+    def test_an_apply_copies_the_hook_files_and_helpers_and_writes_exec_form_rows(self):
+        self.configure_mcp("project")
+        for name in ADDON_SPECS:
+            with self.subTest(add_on=name):
+                self.install_addon(name)
+                self.assert_installed(name)
+
+    def test_an_apply_keeps_every_existing_row_and_takes_a_backup(self):
+        existing = {"model": "opus", "hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/mine.py"]}]}]}}
+        write_json(self.settings_path(), existing)
+        original = self.settings_path().read_bytes()
+        self.install_addon("strict-shell-gate")
+        settings = self.read_settings()
+        self.assertEqual(settings.get("model"), "opus", msg="unrelated settings survive")
+        mine = [r for r in flat_registrations(settings) if r[2] == "mine.py"]
+        self.assertEqual(len(mine), 1, msg="the project's own row is never removed")
+        backups = [p for p in (self.project / ".claude").iterdir() if ".bak-" in p.name]
+        self.assertEqual(len(backups), 1, msg="the apply takes one timestamped backup of settings.json")
+        self.assertEqual(backups[0].read_bytes(), original, msg="holding the bytes it replaced")
+
+    def test_an_apply_twice_writes_nothing_the_second_time(self):
+        self.install_addon("strict-shell-gate")
+        before = snapshot(self.tmp)
+        rc0, out0, plan = self.cli(self.addon_argv("strict-shell-gate"))
+        self.assertEqual(rc0, 0, msg="a second preview is exit 0: %r" % (plan or out0,))
+        rc, out, parsed = self.apply("strict-shell-gate", (plan or {}).get("plan-sha256") or "")
+        self.assertEqual(rc, 0, msg="nothing to do is still exit 0: %r" % (parsed or out,))
+        self.assertEqual((parsed or {}).get("status"), "nothing-to-do", msg="the second apply has nothing to do")
+        self.assertTreeSame(before, "the second apply writes nothing: no file, no row, no backup")
+        self.assertEqual(len([r for r in flat_registrations(self.read_settings()) if r[2] == "bash-gate.py"]), 1,
+                         msg="and the row was not written twice")
+
+    def test_an_existing_identical_hook_file_is_not_rewritten(self):
+        hook = self.project / ".claude" / "hooks" / "bash-gate.py"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_bytes(self.source_file("strict-shell-gate", "bash-gate.py").read_bytes())
+        os.utime(str(hook), ns=(1_000_000_000_000_000_000, 1_000_000_000_000_000_000))
+        stamp = hook.stat().st_mtime_ns
+        self.install_addon("strict-shell-gate")
+        self.assertEqual(hook.stat().st_mtime_ns, stamp, msg="an identical file is left alone, not rewritten")
+        self.assert_installed("strict-shell-gate")
+
+    def test_a_missing_helper_is_copied_and_an_existing_one_is_never_overwritten(self):
+        mine = self.project / ".claude" / "hooks" / "_project_paths.py"
+        mine.parent.mkdir(parents=True, exist_ok=True)
+        mine.write_text("# the project's own copy of the helper\n", encoding="utf-8")
+        self.install_addon("strict-shell-gate")
+        self.assertEqual(mine.read_text(encoding="utf-8"), "# the project's own copy of the helper\n",
+                         msg="an existing helper is never overwritten, even when it differs from the plugin's")
+        parser = self.project / ".claude" / "hooks" / "_shell_write_targets.py"
+        self.assertEqual(parser.read_bytes(), (self.plugin / ".claude/hooks/_shell_write_targets.py").read_bytes(),
+                         msg="a missing helper is copied from the plugin's default tree")
+        index = self.project / ".claude" / "scripts" / "_contract_index.py"
+        self.assertEqual(index.read_bytes(), (self.plugin / ".claude/scripts/_contract_index.py").read_bytes(),
+                         msg="and a scripts helper goes into the project's .claude/scripts/")
+
+    # --- refusals -------------------------------------------------------------------------
+    def test_an_unknown_add_on_is_refused(self):
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("no-such-add-on"))
+        self.assertRefused(parsed, "addon-unknown", "the name matches no folder under .claude/addons/")
+        self.assertEqual(rc, 2, msg="a correctable refusal is exit 2")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_the_plugins_own_checkout_is_refused(self):
+        before = snapshot(self.plugin)
+        rc, out, parsed = self.cli(self.addon_argv("strict-shell-gate", project=self.plugin))
+        self.assertRefused(parsed, "plugin-source-checkout", "the project is the plugin's own checkout")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertEqual(snapshot(self.plugin), before, msg="the checkout is untouched")
+
+    def test_a_missing_manifest_is_an_environment_refusal_with_exit_3(self):
+        (self.plugin / ".claude" / "addons" / "strict-shell-gate" / "addon.json").unlink()
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("strict-shell-gate"))
+        self.assertIsNotNone(parsed, msg="a refusal is printed as JSON; got %r" % out)
+        self.assertEqual(parsed.get("status"), "refused", msg="refused, not crashed: %r" % (parsed,))
+        self.assertIn(parsed.get("code"), REFUSAL_CODES, msg="from the closed set")
+        self.assertEqual(rc, 3, msg="a missing manifest is exit 3")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_codegraph_is_refused_when_no_mcp_server_is_configured_and_the_message_names_all_three_places(self):
+        write_json(self.project / ".mcp.json", {"mcpServers": {"something-else": {"command": "x"}}})
+        write_json(self.user_home / ".claude.json", {"projects": {
+            str(self.tmp / "another-project"): {"mcpServers": {"codegraph": {"command": "codegraph"}}}}})
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertRefused(parsed, "codegraph-mcp-not-configured",
+                           "no codegraph server in the project, the user file or this project's entry (a "
+                           "codegraph entry under ANOTHER project's path does not count)")
+        self.assertEqual(rc, 2, msg="exit 2")
+        message = parsed["message"]
+        self.assertIn(".mcp.json", message, msg="the message names the project's .mcp.json")
+        self.assertIn(".claude.json", message, msg="and the user's Claude configuration file")
+        self.assertRegex(message.lower(), r"projects?\b.*\bentry|entry.*\bproject",
+                         msg="and that file's entry for this project")
+        self.assertRegex(message.lower(), r"block.*source|source.*block",
+                         msg="and says a gate installed without the server blocks every source read")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_codegraph_is_accepted_when_the_server_is_configured_in_each_of_the_three_places(self):
+        for where in ("project", "user", "user-project-entry"):
+            with self.subTest(where=where):
+                for leftover in (self.project / ".mcp.json", self.user_home / ".claude.json",
+                                 self.home / ".claude.json"):
+                    if leftover.exists():
+                        leftover.unlink()
+                refused_first = self.cli(self.addon_argv("codegraph"))[2]
+                self.assertRefused(refused_first, "codegraph-mcp-not-configured",
+                                   "control: with none of the three places set the same command is refused")
+                self.configure_mcp(where)
+                self.preview("codegraph")
+
+    def test_the_other_add_ons_need_no_mcp_server(self):
+        for name in ("angular-tailwind", "strict-shell-gate"):
+            with self.subTest(add_on=name):
+                self.preview(name)
+
+    def test_a_differing_hook_file_is_refused_and_never_overwritten(self):
+        hook = self.project / ".claude" / "hooks" / "bash-gate.py"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("# the project's own, edited, bash-gate\n", encoding="utf-8")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("strict-shell-gate"))
+        self.assertRefused(parsed, "addon-file-differs", "the project's file differs from the plugin's add-on file")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertIn("bash-gate.py", parsed["message"], msg="the message names the file")
+        self.assertTreeSame(before, "nothing is written and the differing file is untouched")
+
+    def test_a_settings_file_that_changed_since_the_preview_is_refused(self):
+        write_json(self.settings_path(), {"model": "opus"})
+        plan = self.preview("strict-shell-gate")
+        write_json(self.settings_path(), {"model": "sonnet"})
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply("strict-shell-gate", plan["plan-sha256"])
+        self.assertRefused(parsed, "changed-since-preview", "settings.json changed after the preview")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_hook_file_added_since_the_preview_is_refused(self):
+        plan = self.preview("strict-shell-gate")
+        hook = self.project / ".claude" / "hooks" / "bash-gate.py"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("# appeared after the preview\n", encoding="utf-8")
+        rc, out, parsed = self.apply("strict-shell-gate", plan["plan-sha256"])
+        self.assertIn(parsed.get("code"), ("changed-since-preview", "addon-file-differs"),
+                      msg="a differing file that appeared after the preview is never overwritten: %r" % (parsed,))
+        self.assertEqual(hook.read_text(encoding="utf-8"), "# appeared after the preview\n",
+                         msg="and is byte-identical afterwards")
+
+    def test_a_wrong_hash_is_refused_as_changed_since_preview(self):
+        self.preview("strict-shell-gate")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply("strict-shell-gate", "0" * 64)
+        self.assertRefused(parsed, "changed-since-preview", "the hash is not the previewed plan's")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_symbolic_link_settings_file_is_write_failed(self):
+        real = self.tmp / "elsewhere" / "real-settings.json"
+        write_json(real, {"model": "opus"})
+        link = self.settings_path()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(str(real), str(link))
+        except (OSError, NotImplementedError, AttributeError) as exc:
+            # Same policy as TestRoundThreeSymbolicLinkSettings.linked_settings: an account that cannot create
+            # symbolic links cannot run this row, so it is skipped (the only skip this block adds).
+            self.skipTest("this account cannot create symbolic links: %s" % exc)
+        plan = self.preview("strict-shell-gate")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply("strict-shell-gate", plan["plan-sha256"])
+        self.assertRefused(parsed, "write-failed", "settings.json is a symbolic link")
+        self.assertRegex(parsed.get("message", ""), r"(?i)symbolic link", msg="and the message says so")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertTrue(os.path.islink(str(link)), msg="the link is still a link")
+        self.assertEqual(real.read_bytes(), json.dumps({"model": "opus"}, indent=2).encode("utf-8") + b"\n",
+                         msg="the target is byte-identical")
+        self.assertTreeSame(before, "nothing is written")
+
+    # --- the command line and the readiness report -------------------------------------------------
+    def test_the_parser_has_the_addon_subcommand_with_the_contract_flags(self):
+        try:
+            ns = fi.build_parser().parse_args(["addon", "--name", "codegraph", "--project", "p", "--json",
+                                               "--apply", "--expect-sha256", "h", "--claude-home", "c"])
+        except SystemExit:
+            self.fail("the parser has no 'addon' subcommand with those flags")
+        self.assertEqual((ns.command, ns.name, ns.apply, ns.json, ns.expect_sha256),
+                         ("addon", "codegraph", True, True, "h"),
+                         msg="addon: --name --project --json --apply --expect-sha256 --claude-home")
+
+    def test_the_readiness_report_no_longer_says_the_bash_gate_and_code_search_guard_were_retired(self):
+        report = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
+        self.assertIn("ready", report, msg="fixture: a readiness report")
+        text = json.dumps(report).lower()
+        self.assertNotIn("retired", text, msg="the 0.7.0 'retired' notes are gone: the hooks are add-ons now")
+        self.assertNotIn("0.7.0", text, msg="and so is the version they were retired in")
+
+    def test_the_readiness_report_names_the_three_add_ons_and_their_skills(self):
+        report = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
+        text = json.dumps(report)
+        for name in ADDON_SPECS:
+            self.assertIn(name, text, msg="the report names the %s add-on" % name)
+            self.assertIn("auto-improve-%s-install" % name, text, msg="and its install skill")
 
 
 if __name__ == "__main__":

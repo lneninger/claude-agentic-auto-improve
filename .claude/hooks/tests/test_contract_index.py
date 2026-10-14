@@ -70,16 +70,20 @@ import uuid
 from pathlib import Path
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _addon_fixture as af  # noqa: E402  (the shared add-on finder and installer)
+
 CLAUDE_DIR = HOOKS_DIR.parent
 SCRIPTS_DIR = CLAUDE_DIR / "scripts"
 REPO_ROOT = CLAUDE_DIR.parent
 SELF = Path(__file__).resolve()
 INDEX_MODULE = SCRIPTS_DIR / "_contract_index.py"
 
-# PLUGIN PORT (sub-task 23, INV-O7): bash-gate.py is cut and is not shipped by the plugin, so its half of
-# this repository's suite cannot be ported. GATES names the one gate that remains; every case that loops
-# over it, and every verdict, is this repository's, unchanged.
-GATES = ("concept",)
+# The strict shell gate (bash-gate.py) is an add-on: the plugin does not register it. Its half of this suite
+# runs the gate directly, as the add-on registers it, from a sandbox project that _addon_fixture.install
+# built (the hook file plus the helpers its manifest names). It is never launched through gate-launch.py.
+GATES = ("concept", "bash")
 VARIANT = {"concept": "concept-shared", "bash": "bash"}
 GATE_FILE = {"concept": "concept-gate.py", "bash": "bash-gate.py"}
 
@@ -181,6 +185,15 @@ HOOK_FILES = ("concept-gate.py", "_error_log.py", "_project_paths.py")
 SCRIPT_FILES = ("_contract_files.py", "_contract_index.py")
 
 _SANDBOXES: list[Path] = []
+_ADDON_FAILURE_RECORDED: list[bool] = []
+
+
+def _record_addon_failure(exc: Exception) -> None:
+    """One failing check, once per process, naming why the strict gate cannot be tested."""
+    if not _ADDON_FAILURE_RECORDED:
+        _ADDON_FAILURE_RECORDED.append(True)
+        check("the strict-shell-gate add-on installs into a sandbox project (its hook, manifest and helpers "
+              "exist)", False, str(exc))
 
 
 class Sandbox:
@@ -205,6 +218,18 @@ class Sandbox:
             src = SCRIPTS_DIR / name
             if src.exists():
                 shutil.copyfile(src, self.scripts / name)
+        # The strict add-on, installed exactly as its install subcommand would. A failure here is the
+        # fixture's own failure: it is recorded once, and any run of the bash gate in this sandbox raises it.
+        self.addon_error: Exception | None = None
+        if "bash" in GATES:
+            try:
+                af.install("strict-shell-gate", self.root)
+            except af.AddonFixtureError as exc:
+                self.addon_error = exc
+                _record_addon_failure(exc)
+            else:
+                if not with_index:
+                    (self.scripts / "_contract_index.py").unlink(missing_ok=True)
 
     # -- layout ------------------------------------------------------------
     def concepts_of(self, kind: str) -> Path:
@@ -288,6 +313,8 @@ class Sandbox:
 
     def run(self, gate: str, target: str, *, mode: str | None = "trace", env=None,
             cwd=None, project_dir=None, hooks_dir=None, script=None) -> Run:
+        if gate == "bash" and self.addon_error is not None:
+            raise self.addon_error
         e = dict(env or {})
         if mode is not None and "CLAUDE_CONTRACT_INDEX" not in e:
             e["CLAUDE_CONTRACT_INDEX"] = mode
@@ -307,6 +334,8 @@ class Sandbox:
         return self.run(gate, target, mode="off", **kw)
 
     def popen(self, gate: str, target: str, mode: str = "trace") -> subprocess.Popen:
+        if gate == "bash" and self.addon_error is not None:
+            raise self.addon_error
         p = subprocess.Popen(
             [sys.executable, str(self.hooks / GATE_FILE[gate])],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
