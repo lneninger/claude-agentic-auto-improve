@@ -187,6 +187,7 @@ approval. This table lists exactly the variables the hooks read, and a test (INV
 | `CLAUDE_WORKING_AGREEMENTS=off` | skip the working agreements at session start |
 | `CLAUDE_ACTIVE_CONTRACT=<path>` | approval pin: pin one approved contract |
 | `CLAUDE_DESTRUCTIVE_DB_OK=1` | one-shot approval for a destructive database operation |
+| `CLAUDE_CONFIG_DIR=<path>` | where Claude Code keeps its configuration; the installed-plugin lookup reads `plugins/installed_plugins.json` and `plugins/cache/` there (default `~/.claude`) |
 
 An `off` switch also accepts `0`, `false` and `no`. Beside the table, `CLAUDE_CONTRACT_INDEX=off`
 turns the contract-lookup index off for concept-gate, which then reads every contract file itself.

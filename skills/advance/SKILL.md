@@ -217,7 +217,9 @@ For the one being started:
    decomposition already splits red and green across two separate sub-tasks (Non-Goals), so
    `cycle` in practice carries exactly one stage — but the loop reads however many the contract
    declares, never a fixed count this prose assumes. For each stage, launch a **fresh subagent**
-   of `stage["agent"]` — never this session — and give it exactly four things: the contract path
+   of `stage["agent"]` — never this session — addressed by the name in `packet["dispatch_as"]`
+   (the namespaced `agentic-auto-improve:<agent>` when only the plugin ships that agent, the bare
+   name when the project carries its own), and give it exactly four things: the contract path
    (`packet["contract"]`), the packet's own pre-written TASK block (`packet["task_block"]`), the
    packet's file list (`packet["files"]`), and the branch (`packet["branch"]`).
    `stage["isolation"]` is always the constant `fresh-subagent`: that constant IS the isolation
