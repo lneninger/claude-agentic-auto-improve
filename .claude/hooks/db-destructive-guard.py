@@ -75,11 +75,34 @@ _pp_checkout_equivalent_path = (
     getattr(_pp_log, "checkout_equivalent_path", None) if _pp_log is not None else None
 )
 
+#: Guard deference (contract 2026-10-12-dedupe-claude-config, Value Objects "Project guard
+#: registration"): bound at import time via ``getattr``, like the function above. A helper that is
+#: missing, stale or raising is treated as "do not defer", so this guard acts exactly as it did
+#: before deference existed (invariant I-D3).
+_pp_should_defer = (
+    getattr(_pp_log, "should_defer_to_project_guard", None) if _pp_log is not None else None
+)
+GUARD_FILE_NAME = "db-destructive-guard.py"
+
 AUDIT_LOG = (
     (_pp_log.logs_dir() / "db-guard.log") if _pp_log
     else Path.home() / ".claude" / "logs" / "db-guard.log"
 )
 AUDIT_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB rotation threshold
+
+
+def _defers_to_project_copy(payload: dict) -> bool:
+    """True when the PROJECT registers its own copy of this guard for this event and tool.
+
+    The helper checks conditions (a) to (h) and writes the ``deferred`` decision itself. Anything
+    other than a clean ``True`` -- a missing helper, an error, a stale answer -- means act.
+    """
+    if _pp_should_defer is None:
+        return False
+    try:
+        return _pp_should_defer(GUARD_FILE_NAME, payload, __file__, HOOK_NAME) is True
+    except Exception:  # noqa: BLE001 -- every failure resolves toward acting
+        return False
 
 #: The full path this hook's copy of ``_project_paths.py`` would live at, used
 #: only to name the missing helper in a fallback-mode block banner (INV-5).
@@ -1642,6 +1665,10 @@ def main() -> int:
 
     tool_name = payload.get("tool_name") or ""
     if tool_name not in {"Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit"}:
+        return 0
+
+    # Guard deference: after the payload is read, before anything is classified.
+    if _defers_to_project_copy(payload):
         return 0
 
     raw_text = _extract_text(payload)

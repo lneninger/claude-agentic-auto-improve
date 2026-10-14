@@ -17,8 +17,14 @@ per-session state are machine-level, not repository content.
 
 from __future__ import annotations
 
+import datetime as _dt
+import json
 import os
+import posixpath
 import re
+import shlex
+import tempfile
+import time
 from pathlib import Path
 
 HOME = Path.home()
@@ -673,3 +679,394 @@ def resolve_target(text: str, acting_dir: str | None, reading: str) -> tuple[str
         return "path", os.path.normpath(os.path.join(real, *tail)) if tail else real
     except (OSError, ValueError):
         return "unresolvable", None
+
+
+# ---------------------------------------------------------------------------
+# The installed plugin root (contract 2026-10-12-dedupe-claude-config, Business Concept
+# "Installed plugin root").
+#
+# ONE locator for "the plugin version this project runs". The order is fixed and the shell
+# snippet every skill carries (see test_skill_script_lookup.py) answers the same way:
+#
+#   1. the folder named by CLAUDE_PLUGIN_ROOT (the running version);
+#   2. the installPath that installed_plugins.json records: an entry scoped to THIS project
+#      first (path compared with case and slashes folded), then the user-scope entry;
+#   3. the newest version folder in the plugin cache, compared as numbers, never as text.
+#
+# A recorded path that no longer exists falls through to the next step. A cache folder whose
+# name is not a version is ignored. CLAUDE_CONFIG_DIR is honoured, else the home .claude is
+# read. Nothing found gives None.
+# ---------------------------------------------------------------------------
+
+#: The plugin's name: its cache folders and its installed_plugins.json keys carry it.
+PLUGIN_NAME = "agentic-auto-improve"
+_VERSION_FOLDER_RE = re.compile(r"^\d+(?:\.\d+)*$")
+
+
+def _config_dir() -> Path:
+    """Claude Code's configuration folder: ``CLAUDE_CONFIG_DIR`` when set, else ``~/.claude``."""
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return Path(raw) if raw else Path.home() / ".claude"
+
+
+def _fold_path(text: object) -> str:
+    """A path with its slashes unified and its letter case folded, for equality tests only."""
+    return posixpath.normpath(str(text).replace("\\", "/")).casefold()
+
+
+def _recorded_install_paths(config: Path, project_text: str) -> list[Path]:
+    """The ``installPath`` values ``installed_plugins.json`` records for this plugin.
+
+    Entries scoped to ``project_text`` come first, then the user-scope entries, each group in the
+    order the file lists them. An unreadable record gives an empty list.
+    """
+    try:
+        data = json.loads((config / "plugins" / "installed_plugins.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return []
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        return []
+    for_project: list[Path] = []
+    for_user: list[Path] = []
+    for key, entries in plugins.items():
+        if not (isinstance(key, str) and key.split("@", 1)[0] == PLUGIN_NAME and isinstance(entries, list)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            install = entry.get("installPath")
+            if not isinstance(install, str) or not install.strip():
+                continue
+            scope = entry.get("scope")
+            if scope == "project":
+                recorded = entry.get("projectPath")
+                if (project_text and isinstance(recorded, str) and recorded.strip()
+                        and _fold_path(recorded) == _fold_path(project_text)):
+                    for_project.append(Path(install))
+            elif scope == "user":
+                for_user.append(Path(install))
+    return for_project + for_user
+
+
+def _newest_cached_version(config: Path) -> Path | None:
+    """The cache folder with the highest version number, over every marketplace folder."""
+    best: Path | None = None
+    best_key: tuple[int, ...] | None = None
+    try:
+        markets = [m for m in (config / "plugins" / "cache").iterdir() if m.is_dir()]
+    except OSError:
+        return None
+    for market in markets:
+        try:
+            versions = list((market / PLUGIN_NAME).iterdir())
+        except OSError:
+            continue
+        for folder in versions:
+            if not (folder.is_dir() and _VERSION_FOLDER_RE.match(folder.name)):
+                continue
+            key = tuple(int(part) for part in folder.name.split("."))
+            if best_key is None or key > best_key:
+                best, best_key = folder, key
+    return best
+
+
+def installed_plugin_root(project: "str | os.PathLike[str] | None" = None) -> Path | None:
+    """The folder of the plugin version this project runs, or ``None`` when none is installed.
+
+    ``project`` names the project to match a project-scope record against; ``None`` means
+    ``CLAUDE_PROJECT_DIR``. See the block comment above for the fixed order.
+    """
+    named = os.environ.get("CLAUDE_PLUGIN_ROOT", "").strip()
+    if named and Path(named).is_dir():
+        return Path(named)
+    config = _config_dir()
+    project_text = str(project) if project else os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    for recorded in _recorded_install_paths(config, project_text):
+        if recorded.is_dir():
+            return recorded
+    return _newest_cached_version(config)
+
+
+# ---------------------------------------------------------------------------
+# Guard deference (contract 2026-10-12-dedupe-claude-config, Value Objects "Project guard
+# registration", conditions (a) to (h), invariants I-D1 to I-D3).
+#
+# The plugin registers both database guards. A project that registers its OWN copy of the same
+# guard for the same event and tool would run the guard twice, so the plugin's copy stands down
+# ("defers") when, and only when, EVERY condition below holds. Any failure or error resolves
+# toward ACTING: the worst outcome of a wrong "act" is a guard that runs twice, never a call
+# that no guard checks. This is not a guard that turns itself off: the project's copy is the one
+# that then blocks, and a deferral is written to the project's db-guard.log so a clean exit with
+# no log line is never read as one.
+#
+# Only ONE top-level function here has "defer" in its name; the guards bind it with getattr and
+# fall back to acting when it is missing, stale or raises (test_guard_deference.py D8, D9).
+# ---------------------------------------------------------------------------
+
+#: Claude Code's default timeout for a command hook, in seconds. An unset ``timeout`` on either
+#: side is read as this value (contract decision 3 of the block 2 review, row D19). It is the
+#: value Claude Code's hooks reference documents for a command hook with no ``timeout``.
+DEFAULT_HOOK_TIMEOUT_SECONDS = 60
+#: Prefix of the session-start marker file. Block 17's changed-file baseline uses another prefix
+#: (``auto-improve-changed-baseline-``) so the two never collide (decision 2).
+SESSION_MARKER_PREFIX = "auto-improve-session-start-"
+#: The SessionStart sources that write a marker. ``clear`` and ``compact`` write none.
+SESSION_MARKER_SOURCES = ("startup", "resume")
+#: A settings file must be at least this many seconds older than the marker (condition (h)).
+SETTINGS_SETTLE_SECONDS = 2.0
+#: The only event a database guard is registered for.
+GUARD_EVENT = "PreToolUse"
+#: A session id is used in a file name, so it may hold only these characters.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_MARKER_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+#: Rotate the project's db-guard.log at this size, like the guard's own audit writer does.
+DEFERRAL_LOG_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _marker_path(session_id: object) -> Path | None:
+    """The marker file of a session in the system temporary folder, or ``None`` for an unusable id."""
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        return None
+    return Path(tempfile.gettempdir()) / (SESSION_MARKER_PREFIX + session_id)
+
+
+def write_session_start_marker(payload: object) -> bool:
+    """Record the start of a session: a file named by ``session_id`` holding the time as a number.
+
+    Written only when the payload's ``source`` is ``startup`` or ``resume``. Returns whether a
+    marker was written. It never raises and prints nothing; a failure leaves no marker, which
+    makes the guards act (condition (h)).
+    """
+    if not isinstance(payload, dict) or payload.get("source") not in SESSION_MARKER_SOURCES:
+        return False
+    path = _marker_path(payload.get("session_id"))
+    if path is None:
+        return False
+    scratch = path.with_name(path.name + ".tmp-%d" % os.getpid())
+    try:
+        scratch.write_text("%.6f" % time.time(), encoding="utf-8")
+        os.replace(scratch, path)
+        return True
+    except OSError:
+        try:
+            scratch.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _read_session_start(session_id: object) -> float | None:
+    """The time a session's marker records, or ``None`` when it is missing, unreadable or not a number."""
+    path = _marker_path(session_id)
+    if path is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return float(text) if _MARKER_NUMBER_RE.fullmatch(text) else None
+
+
+def _read_json_object(path: Path) -> dict:
+    """A JSON file that must hold an object. Raises when it cannot be read or is not one."""
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("%s does not hold a JSON object" % path)
+    return data
+
+
+def _launched_script(entry: dict) -> str | None:
+    """The script a hook row launches: the first ``args`` element that does not start with ``-``
+    (exec form), or the first token after the interpreter that ends in ``.py`` (shell form)."""
+    args = entry.get("args")
+    if isinstance(args, list):
+        for arg in args:
+            if isinstance(arg, str) and arg and not arg.startswith("-"):
+                return arg
+        return None
+    command = entry.get("command")
+    if not isinstance(command, str):
+        return None
+    try:
+        tokens = shlex.split(command, posix=False)
+    except ValueError:
+        return None
+    for token in tokens[1:]:
+        token = token.strip("\"'")
+        if token.lower().endswith(".py"):
+            return token
+    return None
+
+
+def _matcher_covers(matcher: object, tool: str) -> bool:
+    """A hook group's matcher against a tool name, as a whole-string regular expression.
+    An empty or missing matcher, or ``*``, matches every tool."""
+    if matcher is None or matcher in ("", "*"):
+        return True
+    if not isinstance(matcher, str):
+        return False
+    try:
+        return re.fullmatch(matcher, tool) is not None
+    except re.error:
+        return False
+
+
+def _matching_rows(settings: object, tool: str, launches) -> list[dict]:
+    """The ``PreToolUse`` command rows of a settings (or ``hooks.json``) body whose group matcher
+    covers ``tool`` and whose launched script satisfies ``launches``."""
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    groups = hooks.get(GUARD_EVENT) if isinstance(hooks, dict) else None
+    rows: list[dict] = []
+    if not isinstance(groups, list):
+        return rows
+    for group in groups:
+        if not isinstance(group, dict) or not _matcher_covers(group.get("matcher"), tool):
+            continue
+        entries = group.get("hooks")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") != "command":
+                continue
+            script = _launched_script(entry)
+            if script is not None and launches(script):
+                rows.append(entry)
+    return rows
+
+
+def _row_timeout(entry: dict) -> float | None:
+    """A row's effective timeout in seconds; unset is the default; an unusable value is ``None``."""
+    value = entry.get("timeout")
+    if value is None:
+        return float(DEFAULT_HOOK_TIMEOUT_SECONDS)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def _plugin_guard_timeout(guard_file: str, tool: str) -> float:
+    """The plugin's own effective timeout for a guard (decision 3): among its ``hooks.json``
+    registrations whose matcher covers ``tool``, the largest. Raises when ``hooks.json`` is unusable."""
+    body = _read_json_object(Path(__file__).resolve().parent / "hooks.json")
+    wanted = guard_file.casefold()
+    rows = _matching_rows(body, tool, lambda script: posixpath.basename(script.replace("\\", "/")).casefold() == wanted)
+    timeouts = [_row_timeout(row) for row in rows]
+    if any(t is None for t in timeouts):
+        raise ValueError("a plugin registration of %s has an unusable timeout" % guard_file)
+    return max(timeouts) if timeouts else float(DEFAULT_HOOK_TIMEOUT_SECONDS)
+
+
+def _git_top_level(start: object) -> Path | None:
+    """The nearest folder at or above ``start`` that holds a ``.git`` entry (folder or file)."""
+    if not isinstance(start, str) or not start.strip():
+        return None
+    try:
+        folder = Path(start).resolve()
+    except (OSError, ValueError):
+        return None
+    for candidate in (folder, *folder.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _candidate_settings(project: Path, payload: dict) -> list[Path]:
+    """Settings files whose rows run in this session: the project's, and the top level of the git
+    working tree the payload's ``cwd`` sits in when that is a different folder (a session that
+    entered a worktree keeps the main checkout as its project dir but runs the worktree's rows).
+    A working tree that CONTAINS the project (a monorepo) is not a worktree switch."""
+    candidates = [project / ".claude" / "settings.json"]
+    top = _git_top_level(payload.get("cwd"))
+    if top is not None:
+        try:
+            resolved = project.resolve()
+        except OSError:
+            resolved = project
+        if _fold_path(top) != _fold_path(resolved) and top not in resolved.parents:
+            candidates.append(top / ".claude" / "settings.json")
+    return candidates
+
+
+def _project_registration_stands(guard_file: str, payload: object, running_file: str) -> bool:
+    """True when conditions (a) to (h) all hold. Raises on any unexpected error."""
+    project_text = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()  # (b)
+    if not project_text or not isinstance(payload, dict):
+        return False
+    tool = payload.get("tool_name")
+    if not isinstance(tool, str) or not tool:
+        return False
+    project = Path(project_text)
+    project_copy = project / ".claude" / "hooks" / guard_file
+    if os.path.normcase(os.path.realpath(running_file)) == os.path.normcase(os.path.realpath(str(project_copy))):
+        return False  # (a) I-D1: a copy never defers to itself
+    if not project_copy.is_file():
+        return False  # (e)
+    started = _read_session_start(payload.get("session_id"))  # (h) needs the marker
+    if started is None:
+        return False
+    plugin_timeout = _plugin_guard_timeout(guard_file, tool)
+    resolved_text = str(project.resolve())
+    wanted = {_fold_path(project_text + "/.claude/hooks/" + guard_file),
+              _fold_path(resolved_text + "/.claude/hooks/" + guard_file)}
+
+    def launches_project_copy(script: str) -> bool:
+        expanded = script.replace("${CLAUDE_PROJECT_DIR}", project_text).replace("$CLAUDE_PROJECT_DIR", project_text)
+        return _fold_path(expanded) in wanted
+
+    for settings_path in _candidate_settings(project, payload):  # (c)
+        if not settings_path.is_file():
+            return False
+        settings = _read_json_object(settings_path)
+        local_path = settings_path.with_name("settings.local.json")
+        local = _read_json_object(local_path) if local_path.is_file() else {}
+        if settings.get("disableAllHooks") or local.get("disableAllHooks"):
+            return False  # (f)
+        rows = _matching_rows(settings, tool, launches_project_copy)  # (d)
+        usable = [row for row in rows
+                  if row.get("async") in (None, False)  # (g) an async row cannot block
+                  and (_row_timeout(row) or 0.0) >= plugin_timeout]
+        if not usable:
+            return False
+        if settings_path.stat().st_mtime > started - SETTINGS_SETTLE_SECONDS:
+            return False  # (h) the row may have been added after Claude Code fixed its hook set
+    return True
+
+
+def _record_deferral(hook_name: str, guard_file: str, payload: dict) -> bool:
+    """Write the ``deferred`` decision to the project's db-guard.log (I-D2). Raises on failure."""
+    record = {
+        "ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "hook": hook_name,
+        "session": payload.get("session_id") or "",
+        "tool": payload.get("tool_name") or "",
+        "decision": "deferred",
+        "reason": "project-registers-own-copy",
+        "project_copy": str(Path(os.environ.get("CLAUDE_PROJECT_DIR", "").strip()) / ".claude" / "hooks" / guard_file),
+    }
+    log = logs_dir() / "db-guard.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if log.exists() and log.stat().st_size > DEFERRAL_LOG_MAX_BYTES:
+        rotated = log.with_suffix(log.suffix + ".1")
+        if rotated.exists():
+            rotated.unlink()
+        log.rename(rotated)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return True
+
+
+def should_defer_to_project_guard(guard_file: str, payload: object, running_file: str, hook_name: str) -> bool:
+    """True when the plugin's copy of a database guard should stand down for this call.
+
+    ``guard_file`` is the guard's file name, ``running_file`` the file now running (the guard's own
+    ``__file__``) and ``hook_name`` the name its log records carry. When this returns True it has
+    already written the ``deferred`` decision to the project's db-guard.log. Every failure of any
+    condition, and every error, returns False: the caller acts as it does today.
+    """
+    try:
+        if not _project_registration_stands(guard_file, payload, running_file):
+            return False
+        return _record_deferral(hook_name, guard_file, payload)  # type: ignore[arg-type]
+    except Exception:
+        return False

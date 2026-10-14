@@ -1279,7 +1279,9 @@ def next_command_for_outcome(outcome: str, slug: str, **facts: Any) -> Dict[str,
 # ---------------------------------------------------------------------------
 # L-11 containment scanner
 # ---------------------------------------------------------------------------
-SCAN_ROOTS: Tuple[str, ...] = (".claude/scripts", ".claude/hooks", ".claude/agents", ".claude/skills", "tools")
+#: ``agents`` and ``skills`` are the plugin's own layout (it keeps them at its root, and Claude Code loads exactly those).
+SCAN_ROOTS: Tuple[str, ...] = (".claude/scripts", ".claude/hooks", ".claude/agents", ".claude/skills", "tools",
+                               "agents", "skills")
 SCAN_EXTENSIONS: Tuple[str, ...] = (".py", ".ps1", ".cmd", ".sh", ".md", ".json")
 SCAN_SKIP_DIRS = frozenset({"tests", "__pycache__", "node_modules", ".git"})
 MERGE_ADMITTED_PATH = ".claude/scripts/land_contract.py"

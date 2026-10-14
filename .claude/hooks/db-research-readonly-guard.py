@@ -54,6 +54,14 @@ try:  # project-local logs when available
     import _project_paths as _pp_log
 except Exception:  # pragma: no cover
     _pp_log = None
+
+#: Guard deference (contract 2026-10-12-dedupe-claude-config, Value Objects "Project guard
+#: registration"): bound at import time via ``getattr``. A helper that is missing, stale or raising
+#: is treated as "do not defer", so this guard acts exactly as it did before deference existed.
+_pp_should_defer = (
+    getattr(_pp_log, "should_defer_to_project_guard", None) if _pp_log is not None else None
+)
+GUARD_FILE_NAME = "db-research-readonly-guard.py"
 AUDIT_LOG = (
     (_pp_log.logs_dir() / "db-research.log") if _pp_log
     else Path.home() / ".claude" / "logs" / "db-research.log"
@@ -264,6 +272,20 @@ def _truncate(s: str, n: int = 240) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
+def _defers_to_project_copy(payload: dict) -> bool:
+    """True when the PROJECT registers its own copy of this guard for this event and tool.
+
+    The helper checks conditions (a) to (h) and writes the ``deferred`` decision itself. Anything
+    other than a clean ``True`` -- a missing helper, an error, a stale answer -- means act.
+    """
+    if _pp_should_defer is None:
+        return False
+    try:
+        return _pp_should_defer(GUARD_FILE_NAME, payload, __file__, HOOK_NAME) is True
+    except Exception:  # noqa: BLE001 -- every failure resolves toward acting
+        return False
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read()
@@ -274,6 +296,10 @@ def main() -> int:
 
     tool_name = payload.get("tool_name") or ""
     if tool_name not in {"Bash", "PowerShell"}:
+        return 0
+
+    # Guard deference: after the payload is read, before anything is classified.
+    if _defers_to_project_copy(payload):
         return 0
 
     text = _extract_text(payload)

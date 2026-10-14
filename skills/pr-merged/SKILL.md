@@ -27,10 +27,28 @@ The script ships with the plugin **and** with a vendored copy, but it sits at a 
 place in each. Resolve it once, then use the result:
 
 ```bash
-PRM=$(ls .claude/scripts/pr_merged.py          "$CLAUDE_PLUGIN_ROOT/.claude/scripts/pr_merged.py"          ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/pr_merged.py          2>/dev/null | head -1)
+PRM=
+S=.claude/scripts/pr_merged.py
+if [ -f "$S" ]; then PRM=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then PRM=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  PRM=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$PRM" --contract <slug|path> --status --json   # read-only
 ```
 
-A vendored project finds the first. A plugin install finds one of the others. **If `PRM` comes
+A vendored project finds its own copy first. A plugin install finds the running version through `$CLAUDE_PLUGIN_ROOT`, then the install `installed_plugins.json` records, then the newest cache folder by version number. **If `PRM` comes
 back empty, stop and say so** — the loop's every rule lives in that file, and a skill that
 cannot find it can only guess at what it says.
 
@@ -56,12 +74,12 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 525 cases over
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 530 cases over
 identity, parsing, block classification, verdicts, records, releases, conflict detection, the
 Hand-Resolved Summary (including the unread-commit count and its single-fetch walk), the
 cross-repository pull-request path, the `GH_REPO` refusal, the Next Command and the Sub-Task
 Cycle. Measured by running `py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own
-`unittest` summary line: `Ran 525 tests ... OK` (exit code 0). They were mutation-probed: disabling the
+`unittest` summary line: `Ran 530 tests ... OK` (exit code 0). They were mutation-probed: disabling the
 verification check, reading a missing dependency line as none, and counting scope notes as
 sub-tasks each turn the suite red.
 

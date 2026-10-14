@@ -36,7 +36,7 @@ The `contract-critic` agent refuses to run against non-draft contracts (see `.cl
 
 ## Step 3: Spawn contract-critic
 
-Launch the `contract-critic` Agent (via the `Agent` tool, `subagent_type: contract-critic`) with:
+Launch the `contract-critic` Agent (via the `Agent` tool, `subagent_type: agentic-auto-improve:contract-critic`; use the bare `subagent_type: contract-critic` only when the project carries its own `.claude/agents/contract-critic.md`) with:
 
 ```
 TASK: critique the draft contract (manual /critique-now invocation)

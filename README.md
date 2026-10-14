@@ -141,6 +141,16 @@ What the plugin registers. Every entry is in exec form (`"command": "py"`, `"arg
   guard now runs on the edit group, `Bash` and `PowerShell`; the read-only guard runs on `Bash`
   and `PowerShell` and **has left the edit group**. Before 0.7.0 the guards ran on
   `Bash|Edit|Write|MultiEdit` and never on PowerShell.
+  **A project that registers its own copy of a guard makes the plugin's copy stand down.** The
+  plugin copy exits without acting, and writes a `deferred` line to the project's
+  `db-guard.log`, only when all of these hold: the project's `settings.json` (and, when the
+  session runs in a git worktree, that worktree's) has a `PreToolUse` row for the same tool
+  that launches `<project>/.claude/hooks/<guard>` by that exact path; that file exists; the
+  row is not `"async": true` and its timeout is at least the plugin's own; neither settings
+  file sets `disableAllHooks`; and the row was in place when the session started. The last
+  condition is read from a marker that the plugin's `SessionStart` hook writes for `startup`
+  and `resume`. If any of this is in doubt, or anything fails, the plugin copy acts as it did
+  before. The worst result is a guard that runs twice, never a call that no guard checks.
 - **`plain-language-guard`** checks that the assistant's prose reads plainly.
 - **`post-edit-dispatcher`** runs four small checks after an edit inside one process, in this
   order: `integration-check.py`, `critic-verdict-tracker.py`, `contract-status-watcher.py` and
@@ -313,11 +323,14 @@ What was actually missing was a way for a skill to *find* them. A skill citing
 `.claude/scripts/<name>.py` is naming a path inside **your** repository, which exists when you
 vendor and does not when you install.
 
-Skills that call a script now resolve it first, trying the vendored path, then
-`$CLAUDE_PLUGIN_ROOT`, then the provider's cache. `/advance` and `/pr-merged` do this, and any
-skill added later should copy the pattern rather than assume a vendored layout.
-`/auto-improve-finish-install` does it with an explicit ordered test, because `ls` on several
-paths sorts them and so loses the order.
+Skills that call a script now resolve it first, in one fixed order: the vendored path, then
+`$CLAUDE_PLUGIN_ROOT`, then the install that `installed_plugins.json` records (the entry for
+this project first, then the user entry), then the newest cache folder, compared as numbers so
+`0.10.0` beats `0.9.0`. Every skill that needs a script carries the same shell snippet for
+this, and `test_skill_script_lookup.py` runs each copy against a table of cases. A skill added
+later should copy the snippet rather than assume a vendored layout. The same order is
+available to Python as `installed_plugin_root()` in `.claude/hooks/_project_paths.py`, which
+`.claude/scripts/_claude_paths.py` re-exports.
 
 The templates still need copying by hand under an install, because a concept contract is a
 file **in** your repository rather than one read from the plugin.
@@ -498,6 +511,10 @@ recommendations instead of question batches.
   gives a count per folder; the log names every dropped agreement. The shipped plain-language
   agreement is never dropped. A project file that links outside its folder, or is larger than
   four times the limit, is skipped without being read in full.
+- **One dispatch rule travels with the opening paragraph.** `working-agreements.rules.json`
+  carries a `dispatch_rule` text: a subagent the plugin ships is dispatched as
+  `agentic-auto-improve:<name>`, and the bare name is for a project that carries its own
+  `.claude/agents/<name>.md`. Empty or missing, it adds nothing.
 - **Plugin installs only.** A vendored copy of the hook prints nothing in this version.
 - **Guidance, not a check.** Nothing blocks when an agreement is ignored. A new agreement
   takes effect in the next session. Switch the hook off with `CLAUDE_WORKING_AGREEMENTS=off`.
@@ -636,7 +653,16 @@ Rather than working through the steps above by hand, run:
 ```bash
 py -3 .claude/scripts/plugin_doctor.py                # report what is missing
 py -3 .claude/scripts/plugin_doctor.py --fix          # create what is safe
+py -3 .claude/scripts/plugin_doctor.py --drift        # compare the project with the installed plugin
 ```
+
+`--drift` reads and never writes. It compares the files the project's `.sync-config.json`
+declares with the installed plugin's, and it reports a hook registered by both sides. It exits
+`0` when the comparison ran and nothing counted, `1` when something did, and `4` when it could
+not compare (no plugin found, a folder missing, a file that does not parse, or no file pair
+compared). `--json` adds the `compared` count, so a caller can tell an empty comparison from a
+clean one, and `--ignore-repo-owned` prints a repository-owned finding as `reported` instead of
+counting it.
 
 It creates the directories, copies the templates and registries out of the plugin, and
 scaffolds the configuration files. It is safe to re-run: a second pass finds nothing to do.

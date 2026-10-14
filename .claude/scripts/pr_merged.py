@@ -1122,6 +1122,38 @@ def _declared_review_verdict_file(task: SubTask) -> Optional[str]:
     return next((f for f in task.files if f.startswith(".claude/reviews/")), None)
 
 
+#: The namespace Claude Code gives the plugin's agents once the project no longer carries a copy of them.
+PLUGIN_AGENT_NAMESPACE = "agentic-auto-improve"
+
+
+def dispatch_name(agent: str, project_root: Any) -> str:
+    """The name a sub-task's agent is dispatched under (contract 2026-10-12-dedupe-claude-config).
+
+    The bare name when ``<project_root>/.claude/agents/<agent>.md`` exists (the project's own agent
+    wins); ``agentic-auto-improve:<agent>`` when only the installed plugin root ships the agent; the
+    bare name otherwise, because nothing ships it and no namespace can be claimed for it. Pure apart
+    from the file system, and it never raises: no installed plugin gives the bare name.
+    """
+    if not isinstance(agent, str) or not agent:
+        return agent
+    if (Path(project_root) / ".claude" / "agents" / (agent + ".md")).is_file():
+        return agent
+    try:
+        from _claude_paths import installed_plugin_root
+        plugin_root = installed_plugin_root(project_root)
+    except Exception:  # noqa: BLE001 -- an unresolvable plugin root means "no namespace can be claimed"
+        return agent
+    if plugin_root is not None and (Path(plugin_root) / "agents" / (agent + ".md")).is_file():
+        return "%s:%s" % (PLUGIN_AGENT_NAMESPACE, agent)
+    return agent
+
+
+def _dispatch_project_root() -> Path:
+    """The project the dispatch is for: ``CLAUDE_PROJECT_DIR`` when set, else the working folder."""
+    named = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    return Path(named) if named else Path.cwd()
+
+
 def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
                    block_body: str, issue: Optional[int] = None,
                    base: Optional[str] = None, brief: Optional[str] = None,
@@ -1175,6 +1207,8 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
         "sub_task": task.id,
         "branch": branch_for(contract_slug, task.id),
         "agent": task.agent,
+        #: The name to put in the dispatch call: namespaced when only the plugin ships the agent.
+        "dispatch_as": dispatch_name(task.agent, _dispatch_project_root()) if task.agent else None,
         "files": task.files,
         "contract": contract_path,
         "task_block": block,
