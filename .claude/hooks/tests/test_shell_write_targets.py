@@ -196,7 +196,7 @@ class HelperShapeTests(unittest.TestCase):
                          msg="_strip_quoted keeps offsets: every quoted segment becomes spaces of the same length")
         self.assertNotIn(">", blanked, msg="a '>' inside quotes must be hidden")
 
-    def test_the_helper_uses_only_the_standard_library_re_and_pathlib(self):
+    def test_the_helper_uses_only_the_standard_library(self):
         self.assertTrue(HELPER.is_file(), msg="%s does not exist yet" % HELPER)
         tree = ast.parse(HELPER.read_text(encoding="utf-8"))
         imported = set()
@@ -205,9 +205,10 @@ class HelperShapeTests(unittest.TestCase):
                 imported.update(a.name.split(".")[0] for a in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imported.add((node.module or "").split(".")[0])
-        self.assertTrue(imported <= {"re", "pathlib", "__future__"},
-                        msg="the helper must import only re and pathlib so it can never fail to load "
-                            "for a missing sibling; it imports %s" % sorted(imported))
+        stdlib = set(getattr(sys, "stdlib_module_names", ())) | {"re", "pathlib", "__future__"}
+        self.assertTrue(imported <= stdlib,
+                        msg="the helper must import only the standard library so it can never fail to load "
+                            "for a missing sibling; it imports %s" % sorted(imported - stdlib))
 
     def test_the_helper_is_never_registered_as_a_hook(self):
         hooks_json = HOOKS_DIR / "hooks.json"

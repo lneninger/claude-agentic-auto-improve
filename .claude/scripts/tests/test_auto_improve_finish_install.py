@@ -1871,26 +1871,26 @@ class TestMerge(Base):
         self.assertEqual(len(self.need(self.plan(), "to-add")), 17,
                          msg="found through the plugin root, never a guessed path")
 
-    def test_the_real_plugin_hooks_json_yields_exactly_its_twelve_registrations(self):
+    def test_the_real_plugin_hooks_json_yields_exactly_its_fourteen_registrations(self):
         # Amended by sub-task 23 (hook-server-modes amendment 2026-10-09, INV-O1): the real hooks.json now
-        # registers twelve entries, in exec form. The matcher is part of the comparison, because the
+        # registers twelve entries, in exec form (fourteen after the dedupe contract, Revision 3: the shell launcher row and plan-question-advisor.py are added, the Stop row becomes the Stop dispatcher). The matcher is part of the comparison, because the
         # database guards appear on several matchers of one event and must stay distinct entries.
         real = json.loads((SCRIPT_ROOT / ".claude/hooks/hooks.json").read_text(encoding="utf-8"))
         expected = sorted((event, g.get("matcher") or "", key_of(h)[0], key_of(h)[1])
                           for event, groups in real["hooks"].items()
                           for g in groups for h in g.get("hooks", []))
-        self.assertEqual(len(expected), 12,
-                         msg="independent parse of the REAL hooks.json: 12 registrations")
+        self.assertEqual(len(expected), 14,
+                         msg="independent parse of the REAL hooks.json: 14 registrations")
         self.make_vendored()  # every hook file named by the real hooks.json exists in the project
         # the fake plugin holds 16 hook files; the real one also holds the session-start hook and the dispatcher
-        for extra_hook in ("working-agreements.py", "post-edit-dispatcher.py"):
+        for extra_hook in ("working-agreements.py", "post-edit-dispatcher.py", "stop-dispatcher.py"):
             (self.project / ".claude/hooks" / extra_hook).write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
         for _e, _m, name, _x in expected:
             self.assertTrue((self.project / ".claude/hooks" / name).is_file(),
                             msg="fixture sanity: the temp project holds %s" % name)
         plan = fi.plan_hooks(self.project, "win32", claude_home=self.home, plugin_root=SCRIPT_ROOT)
         added = self.need(plan, "to-add", "registrations read from the real plugin's hooks.json")
-        self.assertEqual(len(added), 12, msg="all 12 real registrations are missing and to be added")
+        self.assertEqual(len(added), 14, msg="all 14 real registrations are missing and to be added")
         got = []
         for r in added:
             parsed = parse_registration_key(str(r.get("registration-key")))
@@ -2830,14 +2830,15 @@ class TestReadiness(Base):
                 self.assertIn(word, text, msg="%s: the list names the session load, the trust prompt "
                                               "and the imports" % label)
             note = self.need(report, "code-search-first-note")
-            # Amended by sub-task 24 (hook-server-modes contract, amendment 2026-10-09): the code-search-first
-            # check is cut from the plugin, so the note says it was retired and no longer names its bypass.
-            for needle in ("CodeGraph", "retired", "block"):
-                self.assertIn(needle, note, msg="%s: the code-search-first note must mention %s" % (label, needle))
+            # Amended by the dedupe contract, block 16: the code-search-first guard is the codegraph ADD-ON now, so
+            # the note names the add-on and its install skill, and says nothing was retired.
+            for needle in ("codegraph", "add-on", "auto-improve-codegraph-install"):
+                self.assertIn(needle, note.lower(), msg="%s: the code-search-first note must mention %s" % (label, needle))
             self.assertNotIn("CLAUDE_SKIP_CG", note,
-                             msg="%s: the retired check's switch is no longer a thing to tell the operator" % label)
-            self.assertRegex(note.lower(), r"no longer blocks|nothing to bypass",
-                             msg="%s: and say the plugin no longer blocks source reads" % label)
+                             msg="%s: the guard's switch belongs to the add-on, not to this note" % label)
+            self.assertNotIn("retired", note.lower(), msg="%s: nothing is retired any more" % label)
+            self.assertNotRegex(note.lower(), r"no longer blocks",
+                                msg="%s: and the note does not say the plugin no longer blocks" % label)
 
 
 # ======================================================================================
@@ -3659,7 +3660,9 @@ class TestAddonInstall(Base):
         try:
             os.symlink(str(real), str(link))
         except (OSError, NotImplementedError, AttributeError) as exc:
-            self.fail("this account cannot create symbolic links, so the row cannot run: %s" % exc)
+            # Same policy as TestRoundThreeSymbolicLinkSettings.linked_settings: an account that cannot create
+            # symbolic links cannot run this row, so it is skipped (the only skip this block adds).
+            self.skipTest("this account cannot create symbolic links: %s" % exc)
         plan = self.preview("strict-shell-gate")
         before = snapshot(self.tmp)
         rc, out, parsed = self.apply("strict-shell-gate", plan["plan-sha256"])

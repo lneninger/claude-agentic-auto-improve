@@ -570,6 +570,11 @@ class OutcomeTests(Base):
         self.assertStopped(self.p.run_check(), a)
         self.p.write("src/" + b)
         res = self.p.run_check()
+        # OPEN CONTRACT QUESTION (flagged for the architect): the contract says the earlier files go "in one
+        # noted line". This row asserts the earlier file is NEVER named on stderr, on the narrowest reading of
+        # "lists only the new file": a stop is exit 2, and Claude Code ignores stdout JSON (the systemMessage
+        # channel) on exit 2, so stderr is the only channel and the noted line cannot ride on stdout. If the
+        # architect decides the noted line belongs on stderr, this assertion changes; it is not loosened here.
         self.assertStopped(res, b, absent=(a,))
 
     def test_a_set_made_only_of_files_already_stopped_for_is_noted(self):
@@ -668,6 +673,8 @@ class FailOpenTests(Base):
         res = self.p.run_check()
         self.assertEqual(res.rc, 0, msg="its own exception must exit 0, never hold a session: " + res.describe())
         self.assertNotIn("Traceback", res.err, msg="and must not print a traceback: " + res.describe())
+        self.assertEqual(len(self.p.error_lines()), 1,
+                         msg="and logs exactly one error line (hook concept-changed-check): %r" % self.p.error_lines())
 
     def test_garbage_input_exits_0(self):
         res = self.p.run_check(stdin=b"{ this is not json")

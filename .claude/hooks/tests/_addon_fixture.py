@@ -54,6 +54,10 @@ PROJECT_ROOT = HOOKS_DIR.parent.parent
 
 #: The three add-ons the plugin ships.
 ADDONS = ("angular-tailwind", "codegraph", "strict-shell-gate")
+#: A hook file each add-on is known by. The manifest search uses it to look BESIDE the source before the
+#: manifest (and so the full hook list) has been read.
+KNOWN_HOOKS = {"angular-tailwind": "angular-tailwind-advisor.py", "codegraph": "codegraph-first-guard.py",
+               "strict-shell-gate": "bash-gate.py"}
 
 #: Manifest field names (the Add-on manifest, Data Shapes of the contract).
 KEY_HOOKS = "hooks"
@@ -98,7 +102,7 @@ def plugin_root() -> Path:
     except Exception as exc:  # noqa: BLE001 - any failure is the fixture's own failure
         raise AddonFixtureError(
             "no plugin root: this folder is not the plugin and the Installed plugin root could not be "
-            "resolved (%s: %s)" % (type(exc).__name__, exc))
+            "resolved (%s)" % exc)
     if not found or not Path(found).is_dir():
         raise AddonFixtureError(
             "no plugin root: this folder is not the plugin and no Installed plugin root was found")
@@ -124,7 +128,10 @@ def source(add_on: str, file: str) -> Path:
 
 
 def manifest_path(add_on: str, file: str | None = None) -> Path:
-    """The add-on's ``addon.json``: beside the source, then its parent, then the plugin's add-on folder."""
+    """The add-on's ``addon.json``: this project's own add-on folder, beside the source, the source's parent,
+    then the plugin's add-on folder (the order in the module docstring). ``file`` defaults to the add-on's
+    known hook file."""
+    file = file or KNOWN_HOOKS.get(add_on)
     candidates: list[Path] = [PROJECT_ROOT / ".claude" / "addons" / add_on / "addon.json"]
     if file is not None:
         try:
@@ -133,6 +140,7 @@ def manifest_path(add_on: str, file: str | None = None) -> Path:
         except AddonFixtureError:
             pass
     candidates.append(addon_dir(add_on) / "addon.json")
+    candidates = list(dict.fromkeys(candidates))
     for candidate in candidates:
         if candidate.is_file():
             return candidate
@@ -155,7 +163,7 @@ def manifest(add_on: str, file: str | None = None) -> dict:
 
 def hook_files(add_on: str) -> list[str]:
     """The hook file names the manifest lists."""
-    names = manifest(add_on).get(KEY_HOOKS)
+    names = manifest(add_on, KNOWN_HOOKS.get(add_on)).get(KEY_HOOKS)
     if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
         raise AddonFixtureError("manifest of %r has no %r list of file names" % (add_on, KEY_HOOKS))
     return list(names)
@@ -163,7 +171,7 @@ def hook_files(add_on: str) -> list[str]:
 
 def helper_paths(add_on: str) -> list[str]:
     """The helper paths (plugin default tree, relative to the plugin root) the manifest lists."""
-    names = manifest(add_on).get(KEY_HELPERS)
+    names = manifest(add_on, KNOWN_HOOKS.get(add_on)).get(KEY_HELPERS)
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise AddonFixtureError("manifest of %r has no %r list of paths" % (add_on, KEY_HELPERS))
     return list(names)
@@ -171,7 +179,7 @@ def helper_paths(add_on: str) -> list[str]:
 
 def registrations(add_on: str) -> list[dict]:
     """The registration rows the manifest lists."""
-    rows = manifest(add_on).get(KEY_ROWS)
+    rows = manifest(add_on, KNOWN_HOOKS.get(add_on)).get(KEY_ROWS)
     if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
         raise AddonFixtureError("manifest of %r has no %r list of rows" % (add_on, KEY_ROWS))
     return list(rows)

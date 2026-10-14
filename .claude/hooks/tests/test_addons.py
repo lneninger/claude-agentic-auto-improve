@@ -117,7 +117,19 @@ class AngularTailwindAddonTests(AddonCase):
         self.write(".claude/hooks/architecture-guard.rules.json", json.dumps({
             "frontend_projects_root": "apps",
             "reference_documents": ["docs/FIXTURE_UI_RULES.md"]}))
-        run = self.run_hook(self.HOOK, {"prompt": "please design the dashboard component layout and its styles"})
+        # ORDER: a plugin copy whose rules file names a DIFFERENT document is on CLAUDE_PLUGIN_ROOT. The
+        # project's file must win, so the project's document appears and the plugin's does not.
+        plugin_copy = Path(tempfile.mkdtemp(prefix="addon-plugin-copy-"))
+        self.addCleanup(__import__("shutil").rmtree, plugin_copy, True)
+        rules = plugin_copy / ".claude" / "hooks"
+        rules.mkdir(parents=True)
+        (rules / "architecture-guard.rules.json").write_text(json.dumps({
+            "frontend_projects_root": "other", "reference_documents": ["docs/PLUGIN_TEMPLATE_RULES.md"]}),
+            encoding="utf-8")
+        run = self.run_hook(self.HOOK, {"prompt": "please design the dashboard component layout and its styles"},
+                            extra_env={"CLAUDE_PLUGIN_ROOT": str(plugin_copy)})
+        self.assertNotIn("docs/PLUGIN_TEMPLATE_RULES.md", run.out,
+                         msg="the plugin copy's rules file must lose to the project's: " + run.describe())
         self.assertEqual(run.rc, 0, msg="an advisor never blocks: " + run.describe())
         out = json.loads(run.out) if run.out.strip() else {}
         context = (out.get("hookSpecificOutput") or {}).get("additionalContext", "")
@@ -273,6 +285,10 @@ class PlanQuestionAdvisorTests(unittest.TestCase):
                       msg="the pointer is the plugin skill, namespaced: " + context[:300])
         self.assertNotIn("~/.claude/skills", context,
                          msg="the old home-folder pointer must be gone (a plugin install has no such folder)")
+        flat = context.replace("\\", "/")
+        self.assertNotIn(".claude/skills", flat,
+                         msg="nor the same folder spelled out: an expanded home path (%s) or a bare "
+                             ".claude/skills pointer" % str(self.dir).replace("\\", "/"))
 
     def test_outside_plan_mode_it_says_nothing(self):
         in_plan = self._run('{"text": "Plan mode is active"}\n')
