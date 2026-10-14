@@ -56,15 +56,9 @@ LAUNCHER = HOOKS_DIR / "gate-launch.py"
 LAUNCHER_BODY = HOOKS_DIR / "_gate_launch.py"
 GUARD = HOOKS_DIR / "_main_checkout_guard.py"
 CONCEPT_GATE = HOOKS_DIR / "concept-gate.py"
-BASH_GATE = HOOKS_DIR / "bash-gate.py"
-# Plugin copy (contract 2026-10-07-worktree-isolation-by-default, round-7 amendment): the plugin ships and
-# registers no bash-gate.py, so a case that launches it cannot run here. Only those cases are skipped.
-BASH_GATE_SKIP_REASON = ("the plugin does not register bash-gate (cut by 2026-09-28-hook-server-modes, "
-                         "INV-O1)")
-
-
-def needs_missing_bash_gate(gate) -> bool:
-    return Path(gate) == BASH_GATE and not BASH_GATE.is_file()
+# A shell payload is launched with concept-gate.py, the setup the plugin registers by default
+# (gate-launch.py concept-gate.py on Bash|PowerShell). The launcher accepts only a gate in its own
+# folder, and the plugin's hooks folder holds no bash-gate.py, so no case launches that pair.
 
 MARKER = "MAIN CHECKOUT"
 IS_WINDOWS = os.name == "nt"
@@ -300,8 +294,7 @@ class Case:
         self.project, self.extra_env, self.contains = project, extra_env, tuple(contains)
         self.hooks_dir = hooks_dir or HOOKS_DIR
         if gate is None:
-            tool = payload.get("tool_name") if isinstance(payload, dict) else None
-            gate = BASH_GATE if tool in ("Bash", "PowerShell") else CONCEPT_GATE
+            gate = CONCEPT_GATE
         self.gate = gate
 
 
@@ -352,11 +345,6 @@ class GuardTestCase(unittest.TestCase):
         self.assertNotIn(MARKER, res.err, msg="an allowed call must not carry the guard banner")
 
     def run_cases(self, cases: list[Case]) -> None:
-        for case in cases:
-            if needs_missing_bash_gate(case.gate):
-                with self.subTest(case.name):
-                    self.skipTest(BASH_GATE_SKIP_REASON)
-        cases = [c for c in cases if not needs_missing_bash_gate(c.gate)]
         ordered = sorted(cases, key=lambda c: 0 if c.expect == "block" else 1)
 
         def one(case: Case) -> Result:
@@ -925,8 +913,6 @@ class BlockBannerTests(GuardTestCase):
             sh("gh pr checkout in main", "Bash", "gh pr checkout 5", FX.main, FX.main, "block"),
             sh("unresolvable target", "Bash", "echo x > $UNSET_ZZ_VARIABLE/x.md", FX.wt, FX.main, "block"),
         ]
-        if any(needs_missing_bash_gate(c.gate) for c in cases):
-            self.skipTest(BASH_GATE_SKIP_REASON)
         results = [launch(c.payload, gate=c.gate, project=c.project) for c in cases]
         for case, res in zip(cases, results):
             with self.subTest(case.name):

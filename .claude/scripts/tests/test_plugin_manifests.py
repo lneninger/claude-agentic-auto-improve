@@ -49,9 +49,14 @@ THE INVARIANTS
          file is registered in hooks.json or named in the post-edit dispatcher's
          constant list. Both directions: an unresolvable command is a
          crash, an unregistered hook is a file nothing runs.
-  INV-O1 (hook-server-modes contract, amendment 2026-10-09, sub-task 23) hooks.json
-         registers exactly the twelve entries of the contract's table, exec form;
-         the version obeys the merge-base rule with origin/master.
+  INV-O1 (hook-server-modes contract, amendment 2026-10-09, sub-task 23; widened by the
+         dedupe contract, Revision 3, block 16) hooks.json registers exactly the fourteen
+         entries of the contract's table, exec form; the version obeys the merge-base rule
+         with origin/master.
+  INV-O2 (dedupe contract, Revision 3, block 16) the three add-ons under .claude/addons/ each
+         have a manifest that parses, names files that exist, writes exec-form rows, names no
+         default hook, and whose hook files are in no dispatcher and not in hooks.json; the
+         three install skills exist.
   INV-9  A LICENSE exists and every manifest that declares one agrees with it.
          The repository is public; without this it is legally unreusable and
          Cursor's marketplace will not review it.
@@ -166,6 +171,9 @@ check("the Claude manifest's hooks path exists: %s" % rel_hooks,
 
 PLUGIN_ROOT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/"
 DISPATCHER_REL = ".claude/hooks/post-edit-dispatcher.py"
+#: Both dispatchers (dedupe contract, Revision 3): a hook file named in either one's CHECKS list is run.
+STOP_DISPATCHER_REL = ".claude/hooks/stop-dispatcher.py"
+DISPATCHER_RELS = (DISPATCHER_REL, STOP_DISPATCHER_REL)
 
 
 def registrations_of(cfg: dict) -> list:
@@ -187,9 +195,23 @@ def exec_relative(hook: dict):
 
 
 def dispatcher_names(source: str) -> set:
-    """Hook file names the dispatcher's source names as quoted literals (its constant list), helpers excluded."""
-    return {n for n in re.findall(r"""["']([\w][\w-]*\.py)["']""", source)
-            if not n.startswith("_") and n != "post-edit-dispatcher.py"}
+    """The members of a dispatcher's ``CHECKS`` list, read as a literal (never imported), helpers excluded.
+
+    Read statically the way the drift check reads it: a dispatcher whose source declares no ``CHECKS`` list
+    contributes nothing, so a hook it was supposed to run shows up as unregistered."""
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "CHECKS" for t in node.targets):
+            try:
+                value = ast.literal_eval(node.value)
+            except ValueError:
+                return set()
+            return {n for n in value if isinstance(n, str) and not n.startswith("_")}
+    return set()
 
 
 def coverage_problems(on_disk: set, registered: set, dispatched: set) -> list:
@@ -222,12 +244,21 @@ registered |= {pathlib.Path(a).name for _e, _m, h in _real_regs for a in (h.get(
 on_disk = {p.name for p in (ROOT / ".claude" / "hooks").glob("*.py")
            if not p.name.startswith("_")}
 _dispatcher_file = ROOT / DISPATCHER_REL
-check("the post-edit dispatcher exists (its constant list names the trackers hooks.json does not)",
+check("the post-edit dispatcher exists (its CHECKS list names the trackers hooks.json does not)",
       _dispatcher_file.is_file(), "missing: %s" % DISPATCHER_REL)
-dispatched = (dispatcher_names(_dispatcher_file.read_text(encoding="utf-8", errors="replace"))
-              if _dispatcher_file.is_file() else set())
+_stop_dispatcher_file = ROOT / STOP_DISPATCHER_REL
+check("the Stop dispatcher exists (its CHECKS list names the two Stop members)",
+      _stop_dispatcher_file.is_file(), "missing: %s" % STOP_DISPATCHER_REL)
+dispatched = set()
+for _d in (_dispatcher_file, _stop_dispatcher_file):
+    if _d.is_file():
+        dispatched |= dispatcher_names(_d.read_text(encoding="utf-8", errors="replace"))
+check("the two dispatchers' CHECKS lists name at least the six members the contract assigns them",
+      {"integration-check.py", "critic-verdict-tracker.py", "contract-status-watcher.py",
+       "journal-post-approval-tracker.py", "plain-language-guard.py", "concept-changed-check.py"} <= dispatched,
+      "read %s" % sorted(dispatched))
 _cov = coverage_problems(on_disk, registered, dispatched)
-check("no hook file is left unregistered: each is in hooks.json or in the dispatcher's constant list",
+check("no hook file is left unregistered: each is in hooks.json or in a dispatcher's CHECKS list",
       not _cov, "; ".join(_cov))
 check("control: a tracker named neither in hooks.json nor in the dispatcher is reported",
       bool(coverage_problems({"a.py", "stray-tracker.py"}, {"a.py"}, set())))
@@ -237,9 +268,11 @@ check("control: a tracker named only in hooks.json is accepted",
       coverage_problems({"a.py", "tracker.py"}, {"a.py", "tracker.py"}, set()) == [])
 check("control: a file named but absent from disk is reported",
       bool(coverage_problems({"a.py"}, {"a.py", "ghost.py"}, set())))
-check("control: the dispatcher scan reads quoted names and ignores helpers and its own name",
-      dispatcher_names('CHECKS = ["one.py", "two-x.py"]\nHELPER = "_inprocess_hook.py"\nME = "post-edit-dispatcher.py"')
-      == {"one.py", "two-x.py"})
+check("control: the dispatcher scan reads the CHECKS literal and ignores helpers and other constants",
+      dispatcher_names('CHECKS = ["one.py", "two-x.py", "_helper.py"]\nHELPER = "_inprocess_hook.py"\n'
+                       'ME = "other-hook.py"') == {"one.py", "two-x.py"})
+check("control: a dispatcher that declares no CHECKS list contributes nothing",
+      dispatcher_names('MEMBERS = ["one.py"]') == set())
 
 print("\nINV-9  the licence is present and consistent")
 license_path = ROOT / "LICENSE"
@@ -475,7 +508,7 @@ check("control: the count scan reads a stated number",
 check("control: the count scan treats a README without a count as nothing stated",
       stated_case_count("no count is given here") is None)
 
-print("\nINV-O1  hooks.json registers exactly the twelve entries of the contract's table, in exec form")
+print("\nINV-O1  hooks.json registers exactly the fourteen entries of the contract's table, in exec form")
 # Contract 2026-09-28-hook-server-modes (ScalpingMachine repository), amendment 2026-10-09 "Plugin is the
 # source of its hooks; fewer gates", INV-O1 and sub-task 23. It REPLACES sub-task 1's "INV-P1 hooks.json
 # registers one hook" block (plugin pull request #32), which pinned the dropped registration writer.
@@ -488,12 +521,17 @@ ANY_EVENT = "*any*"  # the matcher slot of an event that takes none: absent, emp
 STOP_STATUS = "Checking the message reads plainly..."
 OWN = PLUGIN_ROOT_PREFIX + ".claude/hooks/"
 
+SHELL_GROUP = "Bash|PowerShell"
 EXPECTED_TABLE = [
     # event, matcher, script, extras, async
     ("SessionStart", None, "working-agreements.py", (), False),
     # Amended by contract 2026-10-07-worktree-isolation-by-default, block 6: the concept gate is launched
     # through the gate launcher, which takes the gate as its extra argument.
     ("PreToolUse", EDIT_GROUP, "gate-launch.py", (PLUGIN_ROOT_PREFIX + ".claude/hooks/concept-gate.py",), False),
+    # Dedupe contract, Revision 3 (B) and Revision 4 (D): the default shell row. The launcher runs the
+    # main-checkout guard and the merge-direction check; the gate half (concept-gate.py) allows any tool that
+    # is not an edit. It is NOT paired with bash-gate.py: no installation registers that pair.
+    ("PreToolUse", SHELL_GROUP, "gate-launch.py", (PLUGIN_ROOT_PREFIX + ".claude/hooks/concept-gate.py",), False),
     ("PreToolUse", EDIT_GROUP, "architecture-guard.py", (), False),
     ("PreToolUse", EDIT_GROUP, "db-destructive-guard.py", (), False),
     ("PreToolUse", "Bash", "db-destructive-guard.py", (), False),
@@ -501,11 +539,14 @@ EXPECTED_TABLE = [
     ("PreToolUse", "PowerShell", "db-destructive-guard.py", (), False),
     ("PreToolUse", "PowerShell", "db-research-readonly-guard.py", (), False),
     ("UserPromptSubmit", ANY_EVENT, "plain-language-guard.py", ("--carry-forward",), False),
+    ("UserPromptSubmit", ANY_EVENT, "plan-question-advisor.py", (), False),
     ("PostToolUse", "Edit|Write|MultiEdit", "post-edit-dispatcher.py", (), True),
-    ("Stop", ANY_EVENT, "plain-language-guard.py", (), False),
+    # The Stop row of plain-language-guard.py is replaced by the Stop dispatcher (not async, same status
+    # message); the guard is now its first member.
+    ("Stop", ANY_EVENT, "stop-dispatcher.py", (), False),
     ("Stop", ANY_EVENT, "memory-pager.py", (), True),
 ]
-assert len(EXPECTED_TABLE) == 12
+assert len(EXPECTED_TABLE) == 14
 
 
 def entry_key(event, group_matcher, hook):
@@ -538,8 +579,8 @@ def table_problems(cfg: dict) -> list:
     for k in keys:
         if k not in EXPECTED_TABLE and k[2] is not None:
             problems.append("an entry outside the table: %r" % (k,))
-    if len(regs) != 12:
-        problems.append("it registers %d entries, not twelve" % len(regs))
+    if len(regs) != 14:
+        problems.append("it registers %d entries, not fourteen" % len(regs))
     seen = {}
     for k in keys:
         if k[2] is not None:
@@ -548,8 +589,10 @@ def table_problems(cfg: dict) -> list:
         if n > 1:
             problems.append("%s registered %d times for the same event and matcher: %r" % (k[2], n, k[:2]))
     for (e, m, h), k in zip(regs, keys):
-        if k[2] == "plain-language-guard.py" and e == "Stop" and h.get("statusMessage") != STOP_STATUS:
-            problems.append("the Stop plain-language entry lost its statusMessage: %r" % h.get("statusMessage"))
+        if k[2] == "stop-dispatcher.py" and e == "Stop" and h.get("statusMessage") != STOP_STATUS:
+            problems.append("the Stop dispatcher entry lost its statusMessage: %r" % h.get("statusMessage"))
+        if k[2] == "plain-language-guard.py" and e == "Stop":
+            problems.append("plain-language-guard.py must not keep its own Stop row (the Stop dispatcher runs it)")
     return problems
 
 
@@ -560,7 +603,7 @@ def good_cfg() -> dict:
         entry = {"type": "command", "command": "py", "args": ["-3", OWN + script] + list(extras)}
         if is_async:
             entry["async"] = True
-        if event == "Stop" and script == "plain-language-guard.py":
+        if event == "Stop" and script == "stop-dispatcher.py":
             entry["statusMessage"] = STOP_STATUS
         group = {"hooks": [entry]}
         if matcher not in (None, ANY_EVENT):
@@ -569,13 +612,16 @@ def good_cfg() -> dict:
     return {"hooks": hooks}
 
 
-check("hooks.json is exactly the twelve entries of the table (events, matchers, scripts, extras, async)",
+check("hooks.json is exactly the fourteen entries of the table (events, matchers, scripts, extras, async)",
       not table_problems(_hooks_cfg),
       "\n".join(table_problems(_hooks_cfg)))
-check("hooks.json registers exactly twelve entries in total", len(registrations_of(_hooks_cfg)) == 12,
+check("hooks.json registers exactly fourteen entries in total", len(registrations_of(_hooks_cfg)) == 14,
       "it registers %d" % len(registrations_of(_hooks_cfg)))
-CUT_HOOKS = {"bash-gate.py", "codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py",
-             "architecture-advisor.py", "plan-question-advisor.py"}
+# The hooks that must NEVER be in hooks.json: the five add-on hook files (a project gets them only through an
+# install skill) and the old name of the advisor (renamed angular-tailwind-advisor.py when it became an add-on).
+ADDON_HOOK_FILES = {"bash-gate.py", "codegraph-first-guard.py", "codegraph-turn-reset.py",
+                    "codegraph-turn-tracker.py", "angular-tailwind-advisor.py"}
+CUT_HOOKS = ADDON_HOOK_FILES | {"architecture-advisor.py"}
 DB_GUARDS = (".claude/hooks/db-destructive-guard.py", ".claude/hooks/db-research-readonly-guard.py")
 
 
@@ -585,8 +631,9 @@ def fact_async(cfg) -> bool:
 
 
 def fact_status_message(cfg) -> bool:
-    return any(h.get("statusMessage") == STOP_STATUS for e, m, h in registrations_of(cfg)
-               if e == "Stop" and exec_relative(h) == ".claude/hooks/plain-language-guard.py")
+    return any(h.get("statusMessage") == STOP_STATUS and h.get("async") is not True
+               for e, m, h in registrations_of(cfg)
+               if e == "Stop" and exec_relative(h) == STOP_DISPATCHER_REL)
 
 
 def fact_dispatcher_matcher(cfg) -> bool:
@@ -608,13 +655,21 @@ def fact_no_cut_hook(cfg) -> bool:
     return not any(name in text for name in CUT_HOOKS)
 
 
+def fact_shell_row(cfg) -> bool:
+    """Exactly one launcher row on Bash|PowerShell, and its gate is concept-gate.py."""
+    rows = [(m, h.get("args")) for e, m, h in registrations_of(cfg)
+            if e == "PreToolUse" and exec_relative(h) == ".claude/hooks/gate-launch.py" and m == SHELL_GROUP]
+    return rows == [(SHELL_GROUP, ["-3", OWN + "gate-launch.py", OWN + "concept-gate.py"])]
+
+
 FACTS = [
     ("the dispatcher and memory-pager.py carry async: true; nothing else does", fact_async),
-    ("the Stop plain-language-guard.py entry keeps its statusMessage (%r)" % STOP_STATUS, fact_status_message),
+    ("the Stop dispatcher entry is not async and keeps the statusMessage (%r)" % STOP_STATUS, fact_status_message),
     ("the dispatcher keeps today's matcher Edit|Write|MultiEdit", fact_dispatcher_matcher),
     ("each database guard is on the edit group (destructive only), Bash and PowerShell", fact_db_guard_places),
-    ("no cut hook is registered (bash-gate, codegraph-first-guard, codegraph-turn-reset, codegraph-turn-tracker, "
-     "architecture-advisor, plan-question-advisor)", fact_no_cut_hook),
+    ("no add-on hook is registered (bash-gate, codegraph-first-guard, codegraph-turn-reset, codegraph-turn-tracker, "
+     "angular-tailwind-advisor) and neither is architecture-advisor", fact_no_cut_hook),
+    ("the shell row launches the gate launcher with concept-gate.py, never with bash-gate.py", fact_shell_row),
 ]
 for _label, _fact in FACTS:
     check(_label, _fact(_hooks_cfg))
@@ -650,7 +705,36 @@ _c["hooks"]["PostToolUse"][0]["hooks"][0].pop("async")
 check("control: a dispatcher that is not async is rejected", bool(table_problems(_c)))
 _c = good_cfg()
 _c["hooks"]["Stop"][0]["hooks"][0].pop("statusMessage")
-check("control: a Stop plain-language entry without its statusMessage is rejected", bool(table_problems(_c)))
+check("control: a Stop dispatcher entry without its statusMessage is rejected", bool(table_problems(_c)))
+_c = good_cfg()
+_c["hooks"]["Stop"][0]["hooks"][0]["async"] = True
+check("control: a Stop dispatcher that is async is rejected", bool(table_problems(_c)) or not fact_status_message(_c))
+_c = good_cfg()
+_c["hooks"]["Stop"].append({"hooks": [{"type": "command", "command": "py", "args": ["-3", OWN + "plain-language-guard.py"]}]})
+check("control: plain-language-guard.py kept as its own Stop row is rejected", bool(table_problems(_c)))
+_c = good_cfg()
+_c["hooks"]["PreToolUse"] = [g for g in _c["hooks"]["PreToolUse"] if g.get("matcher") != SHELL_GROUP]
+check("control: the table without the shell launcher row is rejected",
+      bool(table_problems(_c)) and not fact_shell_row(_c))
+_c = good_cfg()
+for _g in _c["hooks"]["PreToolUse"]:
+    if _g.get("matcher") == SHELL_GROUP:
+        _g["hooks"][0]["args"][2] = OWN + "bash-gate.py"
+check("control: the shell launcher row paired with bash-gate.py is rejected",
+      bool(table_problems(_c)) and not fact_shell_row(_c) and not fact_no_cut_hook(_c))
+_c = good_cfg()
+for _g in _c["hooks"]["PreToolUse"]:
+    if _g.get("matcher") == SHELL_GROUP:
+        _g["matcher"] = "Bash"
+check("control: a shell launcher row on Bash alone is rejected", bool(table_problems(_c)) and not fact_shell_row(_c))
+_c = good_cfg()
+_c["hooks"]["UserPromptSubmit"] = [g for g in _c["hooks"]["UserPromptSubmit"]
+                                   if exec_relative(g["hooks"][0]) != ".claude/hooks/plan-question-advisor.py"]
+check("control: the table without plan-question-advisor.py is rejected", bool(table_problems(_c)))
+_c = good_cfg()
+_c["hooks"]["PreToolUse"].append({"matcher": "Read|Grep|Glob", "hooks": [
+    {"type": "command", "command": "py", "args": ["-3", OWN + "angular-tailwind-advisor.py"]}]})
+check("control: a registered add-on hook is rejected by the cut-hook fact", not fact_no_cut_hook(_c))
 _c = good_cfg()
 _c["hooks"]["PreToolUse"][0]["matcher"] = "Edit|Write|MultiEdit"
 check("control: an edit group without NotebookEdit is rejected", bool(table_problems(_c)))
@@ -662,6 +746,194 @@ check("control: the matcher '.*' on Stop is read as no matcher (Claude Code igno
                                 "Stop": [{**g, "matcher": ".*"} for g in good_cfg()["hooks"]["Stop"]]}}) == [],
       "\n".join(table_problems({"hooks": {**good_cfg()["hooks"],
                                           "Stop": [{**g, "matcher": ".*"} for g in good_cfg()["hooks"]["Stop"]]}})))
+
+print("\nINV-O2  the three add-ons: manifests parse, name real files, write exec-form rows, name no default hook")
+# Dedupe contract, Revision 3 (B): an add-on is a hook file the plugin ships under .claude/addons/<add-on>/hooks/
+# and does NOT register. addon.json is its manifest. The field names are read through _addon_fixture's
+# constants (the one seam), so a change to them is made in one place.
+sys.path.insert(0, str(ROOT / ".claude" / "hooks" / "tests"))
+import _addon_fixture as af  # noqa: E402
+
+ADDONS_DIR = ROOT / ".claude" / "addons"
+EXPECTED_ADDON_HOOKS = {
+    "angular-tailwind": ["angular-tailwind-advisor.py"],
+    "codegraph": ["codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py"],
+    "strict-shell-gate": ["bash-gate.py"],
+}
+#: (event, matcher) of every registration row, per file. A matcher of None is an event that takes none.
+EXPECTED_ADDON_ROWS = {
+    "angular-tailwind-advisor.py": ("UserPromptSubmit", None),
+    "codegraph-first-guard.py": ("PreToolUse", "Read|Grep|Glob"),
+    "codegraph-turn-reset.py": ("UserPromptSubmit", None),
+    "codegraph-turn-tracker.py": ("PostToolUse", "mcp__codegraph__.*"),
+    "bash-gate.py": ("PreToolUse", "Bash"),
+}
+
+
+def default_hook_names(root: pathlib.Path) -> set:
+    return {p.name for p in (root / ".claude" / "hooks").glob("*.py") if not p.name.startswith("_")}
+
+
+def addon_problems(name: str, data, root: pathlib.Path, default_hooks: set, dispatched: set) -> list:
+    """Every way an add-on manifest breaks the contract's Add-on manifest invariants; [] means it holds."""
+    problems = []
+    if not isinstance(data, dict):
+        return ["%s: the manifest is not a JSON object" % name]
+    hooks = data.get(af.KEY_HOOKS)
+    if not isinstance(hooks, list) or not hooks or not all(isinstance(h, str) for h in hooks):
+        return ["%s: %r is not a non-empty list of file names" % (name, af.KEY_HOOKS)]
+    for hook in hooks:
+        if not (root / ".claude" / "addons" / name / "hooks" / hook).is_file():
+            problems.append("%s: hook file %s does not exist under .claude/addons/%s/hooks/" % (name, hook, name))
+        if hook in default_hooks:
+            problems.append("%s: %s is a default hook of the plugin; a manifest names no default hook" % (name, hook))
+        if hook in dispatched:
+            problems.append("%s: %s is a dispatcher member; an add-on hook is in no dispatcher" % (name, hook))
+    helpers = data.get(af.KEY_HELPERS)
+    if not isinstance(helpers, list) or not all(isinstance(h, str) for h in helpers):
+        problems.append("%s: %r is not a list of plugin paths" % (name, af.KEY_HELPERS))
+    else:
+        for helper in helpers:
+            if not (root / helper).is_file():
+                problems.append("%s: helper %s does not exist in the plugin's default tree" % (name, helper))
+            if pathlib.PurePosixPath(helper).name in hooks or "/addons/" in helper.replace("\\", "/"):
+                problems.append("%s: helper %s is not a default-tree file" % (name, helper))
+    rows = data.get(af.KEY_ROWS)
+    if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
+        problems.append("%s: %r is not a non-empty list of rows" % (name, af.KEY_ROWS))
+        return problems
+    row_hooks = []
+    for row in rows:
+        text = json.dumps(row)
+        hook = row.get(af.ROW_HOOK)
+        row_hooks.append(hook)
+        if hook not in hooks:
+            problems.append("%s: a row names %r, which is not one of the manifest's hook files" % (name, hook))
+        if hook in default_hooks:
+            problems.append("%s: a row names default hook %s" % (name, hook))
+        if not isinstance(row.get(af.ROW_EVENT), str) or not row.get(af.ROW_EVENT):
+            problems.append("%s: a row for %s has no event" % (name, hook))
+        args = row.get(af.ROW_ARGS, [])
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            problems.append("%s: the row for %s has args that are not a list of strings (exec form)" % (name, hook))
+        if "command" in row:
+            problems.append("%s: the row for %s carries a command; the install writes it in exec form, so the "
+                            "manifest holds the hook file and its extra arguments only" % (name, hook))
+        if "py -3" in text or "&&" in text or "CLAUDE_PLUGIN_ROOT" in text:
+            problems.append("%s: the row for %s is shell form or points into the plugin; a project row is exec "
+                            "form on ${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>" % (name, hook))
+        if af.ROW_ASYNC in row and not isinstance(row[af.ROW_ASYNC], bool):
+            problems.append("%s: the row for %s has a non-boolean async" % (name, hook))
+    for hook in hooks:
+        if hook not in row_hooks:
+            problems.append("%s: hook file %s has no registration row" % (name, hook))
+    for key in (af.KEY_KILL_SWITCHES,):
+        switches = data.get(key)
+        if not isinstance(switches, list) or not all(isinstance(s, str) and s.startswith("CLAUDE_") for s in switches):
+            problems.append("%s: %r is not a list of CLAUDE_* variable names" % (name, key))
+    if data.get(af.KEY_INSTALL_SKILL) != "auto-improve-%s-install" % name:
+        problems.append("%s: %r is %r, not auto-improve-%s-install" % (name, af.KEY_INSTALL_SKILL,
+                                                                        data.get(af.KEY_INSTALL_SKILL), name))
+    if af.KEY_PREREQUISITES not in data or not isinstance(data.get(af.KEY_PREREQUISITES), list):
+        problems.append("%s: %r is not a list" % (name, af.KEY_PREREQUISITES))
+    return problems
+
+
+_default_hooks = default_hook_names(ROOT)
+check("the add-on folder holds exactly the three add-ons",
+      ADDONS_DIR.is_dir() and sorted(p.name for p in ADDONS_DIR.iterdir() if p.is_dir()) == sorted(EXPECTED_ADDON_HOOKS),
+      "found %s" % (sorted(p.name for p in ADDONS_DIR.iterdir()) if ADDONS_DIR.is_dir() else "no .claude/addons folder"))
+_all_addon_hook_files = set()
+for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
+    _manifest_path = ADDONS_DIR / _name / "addon.json"
+    try:
+        _data = json.loads(_manifest_path.read_text(encoding="utf-8"))
+        check("%s: addon.json parses" % _name, True)
+    except (OSError, ValueError) as _exc:
+        check("%s: addon.json parses" % _name, False, "%s: %s" % (_manifest_path, _exc))
+        continue
+    check("%s: the manifest lists exactly the hook files %s" % (_name, _expected_hooks),
+          isinstance(_data, dict) and _data.get(af.KEY_HOOKS) == _expected_hooks, "lists %r" % (
+              _data.get(af.KEY_HOOKS) if isinstance(_data, dict) else _data))
+    _problems = addon_problems(_name, _data, ROOT, _default_hooks, dispatched)
+    check("%s: the manifest names real files, exec-form rows, no default hook, no dispatcher member" % _name,
+          not _problems, "\n".join(_problems))
+    if isinstance(_data, dict) and isinstance(_data.get(af.KEY_ROWS), list):
+        _rows = {r.get(af.ROW_HOOK): (r.get(af.ROW_EVENT), r.get(af.ROW_MATCHER) or None)
+                 for r in _data[af.KEY_ROWS] if isinstance(r, dict)}
+        check("%s: the rows register each hook on the contract's event and matcher" % _name,
+              _rows == {h: EXPECTED_ADDON_ROWS[h] for h in _expected_hooks}, "rows %r" % (_rows,))
+        _all_addon_hook_files |= set(_data.get(af.KEY_HOOKS) or [])
+    if _name == "codegraph":
+        check("codegraph: the manifest names the CodeGraph MCP server as a prerequisite",
+              "mcp-server" in json.dumps(_data.get(af.KEY_PREREQUISITES)) and
+              "codegraph" in json.dumps(_data.get(af.KEY_PREREQUISITES)),
+              "prerequisites: %r" % _data.get(af.KEY_PREREQUISITES))
+    if _name == "strict-shell-gate":
+        _helper_names = [pathlib.PurePosixPath(h.replace("\\", "/")).name for h in _data.get(af.KEY_HELPERS) or []]
+        check("strict-shell-gate: the helpers are _project_paths.py, _shell_write_targets.py and "
+              ".claude/scripts/_contract_index.py",
+              sorted(h.replace("\\", "/") for h in _data.get(af.KEY_HELPERS) or []) == sorted([
+                  ".claude/hooks/_project_paths.py", ".claude/hooks/_shell_write_targets.py",
+                  ".claude/scripts/_contract_index.py"]), "helpers %r" % (_data.get(af.KEY_HELPERS),))
+check("the add-on manifests together name exactly the five add-on hook files that hooks.json must never register",
+      _all_addon_hook_files == ADDON_HOOK_FILES, "named %s" % sorted(_all_addon_hook_files))
+check("no add-on hook file sits in the default hooks folder (a project gets it only through an install skill)",
+      not (ADDON_HOOK_FILES & default_hook_names(ROOT)),
+      "found in .claude/hooks/: %s" % sorted(ADDON_HOOK_FILES & default_hook_names(ROOT)))
+
+for _name in EXPECTED_ADDON_HOOKS:
+    _skill = ROOT / "skills" / ("auto-improve-%s-install" % _name) / "SKILL.md"
+    _fm = read_frontmatter(_skill) if _skill.is_file() else {}
+    check("skill auto-improve-%s-install exists, its frontmatter name equals its folder and it is user-invocable"
+          % _name,
+          _skill.is_file() and _fm.get("name") == "auto-improve-%s-install" % _name
+          and _fm.get("user_invocable") == "true", "frontmatter %r" % (_fm,))
+
+# Controls: the problem finder must be able to fail. A throwaway plugin root holds one good add-on.
+with tempfile.TemporaryDirectory(prefix="addon-controls-") as _ctl_name:
+    _ctl = pathlib.Path(_ctl_name)
+    (_ctl / ".claude" / "hooks").mkdir(parents=True)
+    (_ctl / ".claude" / "hooks" / "_project_paths.py").write_text("", encoding="utf-8")
+    (_ctl / ".claude" / "hooks" / "concept-gate.py").write_text("", encoding="utf-8")
+    (_ctl / ".claude" / "addons" / "demo" / "hooks").mkdir(parents=True)
+    (_ctl / ".claude" / "addons" / "demo" / "hooks" / "demo-hook.py").write_text("", encoding="utf-8")
+
+    def _good() -> dict:
+        return {af.KEY_HOOKS: ["demo-hook.py"], af.KEY_HELPERS: [".claude/hooks/_project_paths.py"],
+                af.KEY_ROWS: [{af.ROW_EVENT: "PreToolUse", af.ROW_MATCHER: "Bash", af.ROW_HOOK: "demo-hook.py"}],
+                af.KEY_PREREQUISITES: [], af.KEY_KILL_SWITCHES: ["CLAUDE_DEMO"],
+                af.KEY_INSTALL_SKILL: "auto-improve-demo-install"}
+
+    def _ctl_problems(data, dispatched_members=frozenset()):
+        return addon_problems("demo", data, _ctl, default_hook_names(_ctl), set(dispatched_members))
+
+    check("control: a well-formed manifest has no problem", _ctl_problems(_good()) == [], str(_ctl_problems(_good())))
+    _m = _good()
+    _m[af.KEY_HOOKS] = ["missing-hook.py"]
+    _m[af.KEY_ROWS][0][af.ROW_HOOK] = "missing-hook.py"
+    check("control: a hook file that does not exist is reported", bool(_ctl_problems(_m)))
+    _m = _good()
+    _m[af.KEY_HOOKS] = ["concept-gate.py"]
+    _m[af.KEY_ROWS][0][af.ROW_HOOK] = "concept-gate.py"
+    check("control: a manifest that names a default hook is reported", bool(_ctl_problems(_m)))
+    check("control: a hook file that a dispatcher runs is reported", bool(_ctl_problems(_good(), {"demo-hook.py"})))
+    _m = _good()
+    _m[af.KEY_ROWS][0]["command"] = 'py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/demo-hook.py"'
+    check("control: a shell-form row is reported", bool(_ctl_problems(_m)))
+    _m = _good()
+    _m[af.KEY_ROWS][0][af.ROW_ARGS] = ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/demo-hook.py"]
+    check("control: a row that points into the plugin is reported", bool(_ctl_problems(_m)))
+    _m = _good()
+    _m[af.KEY_HELPERS] = [".claude/hooks/_not_there.py"]
+    check("control: a helper that is not in the default tree is reported", bool(_ctl_problems(_m)))
+    _m = _good()
+    _m[af.KEY_ROWS] = []
+    check("control: a hook file with no registration row is reported", bool(_ctl_problems(_m)))
+    _m = _good()
+    _m[af.KEY_INSTALL_SKILL] = "something-else"
+    check("control: a wrong install skill name is reported", bool(_ctl_problems(_m)))
+    check("control: a manifest that is not an object is reported", bool(_ctl_problems(["not", "an", "object"])))
 
 print("\nINV-O1  the version is bumped exactly when the tree differs from its merge base with origin/master")
 # Amended from sub-task 1's "every version declaration exceeds origin's version": a branch whose tree

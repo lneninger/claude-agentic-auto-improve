@@ -50,7 +50,7 @@ import tempfile  # noqa: E402
 
 MERGE_DIRECTION = SCRIPTS_DIR / "merge_direction.py"
 LAUNCHER = HOOKS_DIR / "gate-launch.py"
-BASH_GATE = HOOKS_DIR / "bash-gate.py"
+CONCEPT_GATE = HOOKS_DIR / "concept-gate.py"
 MARKER = "MERGE DIRECTION"
 
 SLUG = "2026-10-07-acme-fixture"
@@ -431,17 +431,15 @@ def payload(tool: str, command: str, cwd) -> dict:
     return {"tool_name": tool, "tool_input": {"command": command}, "cwd": str(cwd)}
 
 
-# Plugin copy (contract 2026-10-07-worktree-isolation-by-default, round-7 amendment): the gate cases launch
-# bash-gate.py, which the plugin does not ship. Only those cases are skipped.
-@unittest.skipUnless(BASH_GATE.is_file(),
-                     "the plugin does not register bash-gate (cut by 2026-09-28-hook-server-modes, INV-O1)")
+# The gate cases launch the default shell row, gate-launch.py concept-gate.py. The launcher accepts only a gate
+# in its own folder; the plugin's hooks folder holds no bash-gate.py and no case pairs the launcher with it.
 class GateCase(MDCase):
     hooks_dir = HOOKS_DIR
 
     def launch(self, tool: str, command: str, *, hooks_dir: Path | None = None, cwd=None) -> Proc:
         hooks = hooks_dir or self.hooks_dir
         data = json.dumps(payload(tool, command, cwd or self.w.task_wt)).encode("utf-8")
-        return run([sys.executable, "-B", str(hooks / "gate-launch.py"), str(hooks / "bash-gate.py")],
+        return run([sys.executable, "-B", str(hooks / "gate-launch.py"), str(hooks / "concept-gate.py")],
                    cwd=self.w.task_wt, env=self.env(), stdin=data)
 
     def launch_all(self, rows: list) -> list:
@@ -458,6 +456,9 @@ class GateCase(MDCase):
         self.assertTrue(self.blocked(proc),
                         msg=f"{label}: must BLOCK with exit 2 and '{MARKER}' on stderr: {proc.describe()}")
         self.assertIn(reason, proc.err, msg=f"{label}: the banner must name the reason {reason!r}: {proc.describe()}")
+        self.assertNotIn("guard degraded", proc.err,
+                         msg=f"{label}: the refusal must be the merge-direction check's own, not the launcher's "
+                             f"degraded rule (the guard crashed and the rule blocked): {proc.describe()}")
 
     def assert_allowed(self, proc: Proc, label: str) -> None:
         self.assertEqual(proc.rc, 0, msg=f"{label}: must be let through (exit 0): {proc.describe()}")
