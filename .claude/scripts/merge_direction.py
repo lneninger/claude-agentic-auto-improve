@@ -133,6 +133,8 @@ def _open_children(brief_id: str) -> List[int]:
     except json.JSONDecodeError:
         payload = None
     children = payload.get("subIssues") if isinstance(payload, dict) else None
+    if isinstance(children, dict):  # gh 2.96 answers {"nodes": [...], "totalCount": n}; older gh a bare list
+        children = children.get("nodes")
     if not isinstance(children, list):
         raise Verdict(False, "unverifiable", "the sub-issues of #%s could not be read" % brief_id)
     open_numbers: List[int] = []
