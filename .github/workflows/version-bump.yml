@@ -1,0 +1,15 @@
+name: version-bump
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Plugin version is raised when shipped files change
+        run: python3 .claude/scripts/check_version_bump.py --base origin/${{ github.base_ref }}
