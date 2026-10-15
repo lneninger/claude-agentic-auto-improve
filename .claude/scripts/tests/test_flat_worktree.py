@@ -214,6 +214,9 @@ if sub == ["issue", "view"]:
     number = next((a for a in args[2:] if re.fullmatch(r"\d+", a)), None)
     fields = opt("--json") or ""
     if "subIssues" in fields:
+        raw = cfg.get("sub_issues_raw", {})
+        if str(number) in raw:  # a payload shape the test dictates verbatim (gh 2.96 answers an object)
+            out({"subIssues": raw[str(number)]})
         out({"subIssues": cfg.get("sub_issues", {}).get(str(number), [])})
     if "state" in fields:
         out({"state": cfg.get("issue_state", {}).get(str(number), "OPEN")})

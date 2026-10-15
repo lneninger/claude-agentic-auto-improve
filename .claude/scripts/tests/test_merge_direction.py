@@ -209,6 +209,25 @@ class MergeDirectionRuleTests(MDCase):
         self.tools.set_gh(fail_commands=["issue view", "api", "pr list"])
         self.assert_verdict(self.md(PARENT, self.w.default), 10, "unverifiable")
 
+    # gh 2.96 answers `subIssues` as {"nodes": [...], "totalCount": n}, not a bare list (issue #47)
+    def test_object_shaped_sub_issues_with_none_allow_the_parent(self):
+        self.tools.set_gh(sub_issues_raw={"460": {"nodes": [], "totalCount": 0}})
+        self.assert_verdict(self.md(PARENT, self.w.default), 0)
+
+    def test_object_shaped_sub_issues_with_one_open_refuse_the_parent(self):
+        self.tools.set_gh(sub_issues_raw={"460": {"nodes": [{"number": 473, "state": "OPEN"}], "totalCount": 1}})
+        self.assert_verdict(self.md(PARENT, self.w.default), 11, "parent-opened-early")
+
+    def test_object_shaped_sub_issues_with_one_closed_allow_the_parent(self):
+        self.tools.set_gh(sub_issues_raw={"460": {"nodes": [{"number": 473, "state": "CLOSED"}], "totalCount": 1}})
+        self.assert_verdict(self.md(PARENT, self.w.default), 0)
+
+    def test_an_unrecognised_sub_issues_payload_is_unverifiable_never_an_allow(self):
+        for raw in ({"totalCount": 0}, {"nodes": "x"}, "x", None):
+            with self.subTest(raw=raw):
+                self.tools.set_gh(sub_issues_raw={"460": raw})
+                self.assert_verdict(self.md(PARENT, self.w.default), 10, "unverifiable")
+
     def test_pr_number_takes_head_and_base_from_the_pull_request(self):
         self.tools.set_gh(pr_view={"6": {"number": 6, "headRefName": TASK, "baseRefName": self.w.default,
                                          "state": "OPEN", "url": "u"},
