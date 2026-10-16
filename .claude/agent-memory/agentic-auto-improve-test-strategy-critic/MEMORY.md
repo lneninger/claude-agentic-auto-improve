@@ -1,0 +1,1 @@
+- [Concept gate blocks scratch harness](concept-gate-blocks-scratch-harness.md) — no .py scratch files; mutation verdicts by reading, stated as not executed

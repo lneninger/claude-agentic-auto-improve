@@ -206,6 +206,8 @@ if sub == ["pr", "list"]:
          if (not base or p.get("baseRefName") == base) and (not head or p.get("headRefName") == head)])
 if sub == ["pr", "view"]:
     number = next((a for a in args[2:] if re.fullmatch(r"\d+", a)), None)
+    if number is None:  # a pull request URL, the form pr_merged.gh_pr passes for a recorded pull_request
+        number = next((re.search(r"/pull/(\d+)", a).group(1) for a in args[2:] if re.search(r"/pull/(\d+)", a)), None)
     pr = cfg.get("pr_view", {}).get(str(number))
     if pr is None:
         fail("fake gh: no such pull request")
@@ -238,6 +240,8 @@ if sub == ["issue", "develop"]:
         fail(r.stderr)
     print("https://github.com/acme/app/tree/" + name)
     sys.exit(0)
+with open(os.path.join(HERE, "gh_calls.jsonl"), "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"args": args, "cwd": os.getcwd(), "unexpected": True}) + "\n")  # a suite may assert that nothing fell through to here
 fail("fake gh: unexpected command %r" % (args,))
 '''
 
@@ -739,6 +743,63 @@ class MainCheckoutUntouchedTests(FlatWorktreeCase):
                             msg="positive control: the snapshot must see a real checkout, or the tests above prove nothing")
         git(self.main, "checkout", "-q", self.world.default)
         self.assertEqual(snapshot(self.main), before, msg="control: going back restores the identical snapshot")
+
+
+class WorktreeEntriesLockedKeyTests(TempWorldCase):
+    """Delivery cleanup (issue #50, contract 2026-10-15-auto-cleanup-delivered-worktrees): ``worktree_entries``
+    also records ``locked`` from the porcelain listing, default false. The cleanup leaves a locked worktree
+    alone (reason ``locked``), so it must be able to see the lock.
+
+    RED today: the entries carry only path, head, branch and detached, so the ``locked`` key is missing.
+    """
+
+    def entries(self, cwd) -> list:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import flat_worktree  # noqa: WPS433 -- the module under test, imported late on purpose
+        finally:
+            sys.path.pop(0)
+        return flat_worktree.worktree_entries(str(cwd))
+
+    def by_path(self, entries: list) -> dict:
+        return {real(e["path"]): e for e in entries}
+
+    def test_every_entry_carries_a_locked_key_that_defaults_to_false(self):
+        wt = add_worktree(self.main, self.main / ".claude" / "worktrees" / "20261015-x-plain", "-b", "plain", "HEAD")
+        entries = self.entries(self.main)
+        self.assertGreaterEqual(len(entries), 2, msg="fixture sanity: the main checkout and one linked worktree")
+        for entry in entries:
+            self.assertIn("locked", entry,
+                          msg=f"the entry for {entry.get('path')} must carry a 'locked' key (default false), "
+                              f"got keys {sorted(entry)}")
+            self.assertIs(entry["locked"], False,
+                          msg=f"{entry.get('path')} is not locked, so 'locked' must be False (a bool), not missing or None")
+        self.assertIn(real(wt), self.by_path(entries), msg="fixture sanity: the linked worktree is listed")
+
+    def test_a_locked_worktree_reads_locked_true_and_its_sibling_stays_false(self):
+        locked = add_worktree(self.main, self.main / ".claude" / "worktrees" / "20261015-x-locked", "-b", "lk", "HEAD")
+        free = add_worktree(self.main, self.main / ".claude" / "worktrees" / "20261015-x-free", "-b", "fr", "HEAD")
+        git(self.main, "worktree", "lock", "--reason", "in use elsewhere", str(locked))
+
+        found = self.by_path(self.entries(self.main))
+
+        self.assertIs(found[real(locked)].get("locked"), True,
+                      msg="a worktree locked with `git worktree lock` must read locked True in the entries")
+        self.assertIs(found[real(free)].get("locked"), False,
+                      msg="control: the unlocked sibling must still read locked False, so the key is not a constant")
+        self.assertEqual(found[real(locked)]["branch"], "lk",
+                         msg="adding the key must not disturb the existing fields (branch is still the short name)")
+
+    def test_the_lock_reason_text_does_not_leak_into_the_branch_or_head_fields(self):
+        locked = add_worktree(self.main, self.main / ".claude" / "worktrees" / "20261015-x-locked2", "-b", "lk2", "HEAD")
+        git(self.main, "worktree", "lock", "--reason", "branch refs/heads/evil HEAD deadbeef", str(locked))
+
+        entry = self.by_path(self.entries(self.main))[real(locked)]
+
+        self.assertEqual(entry["branch"], "lk2", msg="a lock reason that looks like porcelain keys must not overwrite branch")
+        self.assertEqual(entry["head"], git(locked, "rev-parse", "HEAD"),
+                         msg="a lock reason that looks like porcelain keys must not overwrite head")
+        self.assertIs(entry.get("locked"), True, msg="and the entry still reads locked")
 
 
 if __name__ == "__main__":

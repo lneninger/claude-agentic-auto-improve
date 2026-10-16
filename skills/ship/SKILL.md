@@ -364,12 +364,11 @@ Commit the brief update on the branch so the record travels with the work.
 
 ## Step 6: Worktree lifecycle, after the merge
 
-Only after the pull request is merged, and only for a worktree this chain created:
-
-```bash
-git worktree remove .claude/worktrees/<wt>
-git worktree prune
-```
+Nothing to run here for a delivered work item. Its worktrees and merged branches are removed
+automatically by Delivery cleanup (`cleanup_delivered.py`), which `/pr-merged` and `/advance`
+run on every call once the contract reads `implemented` at the default branch. An abandoned
+worktree that was never delivered is removed with `git worktree remove <path>` alone, never with
+git's worktree `prune`, which would also remove other work items' stale entries.
 
 Never `rm -rf` the directory — that leaves stale metadata and git keeps the branch reserved.
 Do not remove a worktree the user entered by path for their own purposes.

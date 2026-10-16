@@ -413,6 +413,54 @@ code.
 The fix is to give the contract an `## Implementation Handoff` section with numbered sub-task
 blocks. `/design-first` is where that happens.
 
+## Step 2.5: Clean up, on every call
+
+**Run the cleanup at the end of EVERY `/advance` call, whatever the move was, and ask nothing.**
+`cleanup_delivered.py` (Delivery cleanup) decides for itself whether anything may go. It reads
+the contract and the records at `origin/<default>`; until the records pull request has merged it
+answers "not delivered yet" and removes nothing, and the first call after that merge removes the
+worktrees and merged branches of the work item. It never makes this skill's move any different:
+exit 5 (not delivered yet) is normal, exit 3 means some items were kept with a reason each, and
+exit 10 means nothing could be verified and nothing was touched.
+
+The lookup order is the plugin root, then the installed-plugin records and the newest cache
+folder, then the current worktree's own copy, made absolute before the `cd`. It never tries the
+main checkout's copy.
+
+```bash
+START="$PWD"
+CLN=
+S=.claude/scripts/cleanup_delivered.py
+if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then CLN=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  CLN=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+  if [ -z "$CLN" ] && [ -f "$PWD/.git" ] && [ -f "$PWD/$S" ]; then CLN=$PWD/$S; fi
+fi
+( cd "$(py -3 "$CLN" --print-main-root)" && py -3 "$CLN" --contract <slug> --from "$START" [--remove-remote] --json )
+```
+
+The `cd` runs in a subshell on purpose: the session's own shell stays in the folder it started in, so Step 3's `--status` call still sees the start tree, and a failed `cd` cannot be followed by a script call from the wrong folder. The current folder's own copy is taken only in a linked worktree (its `.git` is a file), never in the main checkout, whose copy may be stale. If `CLN` comes back empty, stop this step, do not run the line above, and say so in the report: nothing was removed.
+
+**`remove-remote` is a parameter of this skill**, for example `/advance <contract> remove-remote`.
+It is off by default. When given, pass `--remove-remote` to the script and nothing else; without
+it the script never changes a remote branch.
+
+Print the script's `line` as the report's `- Cleanup:` entry, verbatim and never composed. When
+the line ends with `finish: <command>`, a session stood in a tree it had to remove: that tree
+was left untouched, and the next call from a shell outside it clears it. Print that one command
+and nothing more.
+
 ## Step 3: Report, in the same shape every time
 
 **First, make one more call to the script — read-only, and AFTER the move this skill just
@@ -440,6 +488,7 @@ prints it verbatim, exactly as `pr_merged.py`'s own human-readable output does.
 - Waiting on: <the merge this now needs, or nothing>
 - Completion: <the FINAL call's completion line, verbatim>
 - Next command: <the FINAL call's next_command.commands, joined by ", then ", or "none — <reason>". After a landing, the Landing Report's own next_command>
+- Cleanup: <Step 2.5's cleanup script `line`, verbatim>
 ```
 
 The `completion:` line comes from the same final read-only call: `completion.verdict` and the first entry of `completion.reasons`. Because that call is read-only it shows `not-evaluated` and the dry-run command, never a flip. The flip belongs to `/pr-merged`.
@@ -483,6 +532,7 @@ that would start work the script did not release.
 - **Reading `nothing-planned` as complete.** That is the defect this whole design exists to
   avoid.
 - **Declaring the contract finished** because the last sub-task closed. For a contract without a parent branch, verification decides. With one, the Landing Report decides.
+- **Skipping Step 2.5** because the move was not `complete`, or hand-running `git branch -d`, a worktree removal or git's worktree `prune`. The cleanup runs on every call and the script owns the rules.
 - **Launching the landing in the foreground,** or running the landing worktree's copy of the script. A foreground call is capped at ten minutes, and only the operator checkout's copy is the launcher.
 - **Launching before `--status`,** or launching a second landing beside a live one.
 - **Reading the landing's result from stdout through a pipe** instead of `report.json` for the launch's `run_id`.
@@ -504,6 +554,7 @@ that would start work the script did not release.
 ## Skill integrations
 
 - **Reads** `.claude/scripts/pr_merged.py`, which owns the rules and the tests.
+- **Runs** `.claude/scripts/cleanup_delivered.py` at the end of every call (Step 2.5), which removes the worktrees and merged branches of a delivered work item.
 - **Launches** `.claude/scripts/land_contract.py` in the background on a completed contract with a parent branch. That script owns the landing's gates and its own tests.
 - **Dispatches** each stage of the packet's `cycle` as a fresh subagent, then runs `/ship` for its pull request.
 - **Paired with** `/pr-merged`, which closes a sub-task and wakes this skill.

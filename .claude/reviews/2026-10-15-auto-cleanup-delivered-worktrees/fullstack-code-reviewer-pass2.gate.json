@@ -1,0 +1,13 @@
+{
+  "supersedes": ["fullstack-code-reviewer.md"],
+  "checklist": [
+    {"item": "Implementation matches Data Shapes exactly", "outcome": "partly-met"},
+    {"item": "Reused Mechanisms are actually reused (no parallel implementations introduced)", "outcome": "met"},
+    {"item": "New Mechanisms (if any) promoted to `MECHANISMS.md`", "outcome": "met"},
+    {"item": "New vocabulary terms promoted to `VOCABULARY.md`", "outcome": "met"},
+    {"item": "Integration surfaces reflected on both backend and frontend sides", "outcome": "not-applicable"},
+    {"item": "`INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced", "outcome": "not-applicable"},
+    {"item": "No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)", "outcome": "not-applicable"},
+    {"item": "`Status` flipped to `implemented`", "outcome": "not-met"}
+  ]
+}

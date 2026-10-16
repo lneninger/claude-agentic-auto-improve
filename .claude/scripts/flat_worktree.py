@@ -142,7 +142,7 @@ def _git(cwd: str, *args: str) -> Tuple[int, str, str]:
 
 
 def worktree_entries(cwd: str) -> List[Dict[str, Any]]:
-    """``git worktree list --porcelain`` as dicts: path, head, branch (short name or None), detached.
+    """``git worktree list --porcelain`` as dicts: path, head, branch (short name or None), detached, locked.
 
     The first entry is the main worktree.
     """
@@ -159,13 +159,15 @@ def worktree_entries(cwd: str) -> List[Dict[str, Any]]:
             continue
         key, _, value = line.partition(" ")
         if key == "worktree":
-            current = {"path": value, "head": None, "branch": None, "detached": False}
+            current = {"path": value, "head": None, "branch": None, "detached": False, "locked": False}
         elif current is not None and key == "HEAD":
             current["head"] = value
         elif current is not None and key == "branch":
             current["branch"] = value[len("refs/heads/"):] if value.startswith("refs/heads/") else value
         elif current is not None and key == "detached":
             current["detached"] = True
+        elif current is not None and key == "locked":
+            current["locked"] = True
     return entries
 
 

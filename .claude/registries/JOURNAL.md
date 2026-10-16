@@ -121,6 +121,48 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract delivers text into the model's context through a hook and depends on a size limit the host does not fully document
 - **Tags:** `host-cap, utf-16, session-start, trial, size-budget`
 
+### 2026-10-15 — A cleanup wired to run before its own trigger event has fired never runs
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-auto-cleanup-delivered-worktrees.md`
+- **Lesson:** Do not wire an automatic step to a moment when the thing it checks is still pending (here: the records pull request is unmerged). Make the step safe to repeat and run it on every call, so the first call after the event does the work.
+- **Apply when:** a contract adds an automatic step that depends on a merge, approval or status that lands after the step's trigger point
+- **Tags:** `trigger-timing, idempotent, cleanup, pr-merged, advance`
+
+### 2026-10-15 — Locate a script from the plugin root, never from the main checkout after moving there
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-auto-cleanup-delivered-worktrees.md`
+- **Lesson:** A relative script path resolved after `cd` to the main checkout can run a stale or missing copy. Resolve the script absolutely, plugin root first, before changing directory.
+- **Apply when:** a skill runs a repo script after moving the shell to another checkout
+- **Tags:** `script-path, plugin-root, vendoring, cd, stale-copy`
+
+### 2026-10-15 — Reuse the existing brief-linkage reader; a second one misses edge cases
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-auto-cleanup-delivered-worktrees.md`
+- **Lesson:** A new reader that links a brief to a contract duplicates `find_linked_brief` and misses briefs with `contract: none`. Call the existing reader and add a fallback on the brief's branch.
+- **Apply when:** a contract needs to map a work item brief to a contract, branch or worktree
+- **Tags:** `brief-lookup, find_linked_brief, duplicate-parser, contract-none`
+
+### 2026-10-15 — A fallback that finds "the brief" by the caller's own branch must prove the brief belongs to this contract
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-15-auto-cleanup-delivered-worktrees.md`
+- **Lesson:** When an ownership lookup falls back to the starting tree's branch (or to any name-shaped match such as a prefix-matched advance-worktree name), check that the found item names this contract (its `contract:` is unset or this slug; the name was actually truncated) before treating it as owned. Otherwise a destructive step run from another work item's tree adopts that item's branch and worktree.
+- **Apply when:** a contract derives a set of things to delete or mutate from the caller's current branch, folder name or a prefix match, rather than from a field that names the contract
+- **Tags:** `ownership, brief-lookup, fallback, destructive, cross-item`
+
+### 2026-10-16 — An unset ownership field is not proof of ownership
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-15-auto-cleanup-delivered-worktrees.md`
+- **Lesson:** When a destructive step adopts an item through a fallback, accept it only when a field positively names this contract. "Unset" (`contract: none`, a placeholder) must reject the candidate, or the step must be limited to evidence that is GitHub-verified for this contract (recorded pull request heads), never the caller's current branch.
+- **Apply when:** an ownership rule reads "the field is unset OR names this contract", and the item feeds a delete, a remote push or any other mutation
+- **Tags:** `ownership, contract-none, fallback, destructive, placeholder`
+
+### 2026-10-16 — A skill step that moves the shell must come after every later step that reads the working tree
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-15-auto-cleanup-delivered-worktrees.md`
+- **Lesson:** If a skill step runs `cd <other checkout>` in the session's persistent shell, every later step that resolves a script by a relative path or reads files relative to the working directory now reads the other checkout. Run such a step in a subshell `( cd ... && ... )`, or make it the very last command of the skill.
+- **Apply when:** a skill text inserts a `cd` into a step that is followed by other steps (a final status call, a report built from a script run)
+- **Tags:** `cd, shell-state, skill-ordering, relative-path, stale-read`
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
