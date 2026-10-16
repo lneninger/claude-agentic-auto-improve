@@ -314,10 +314,9 @@ into the contract is licensed here.
      be closed is not this step's call to make on a local belief about the contract's current
      shape; report it and let the operator decide.
 
-   **Finding sub-issues in the issue list.** A sub-issue title reads
-   `[EFFORT] P:#<parent> ST:<subtask> - <Title>`. Print the legend from
-   `.claude/work-item-conventions.json` → `issueTitle.subIssue.legend` (`P` is the parent issue,
-   `ST` the sub-task's position in the parent's plan); do not restate it from memory.
+   **Finding sub-issues in the issue list.** A sub-issue title carries
+   its parent reference. Print `issueTitle.subIssue.format` and `issueTitle.subIssue.legend` from
+   the project's `.claude/work-item-conventions.json`; do not restate either from memory.
 
    - Hide sub-issues from the list: `gh issue list --search "no:parent-issue"`.
    - List one parent's children: the `parentLink.parentListCommand` the conventions file

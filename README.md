@@ -567,7 +567,10 @@ would ship the part that can be wrong and leave behind the part that would say s
    `format`) from this repository's copy into yours. Until you do, `/task` Parent-aware mode
    refuses to open sub-issues (`conventions-missing`) rather than create a title without the
    parent. A vendoring project must also list `.claude/scripts/compose_subissue_title.py` in
-   its sync configuration's `files` array, or the helper is never delivered.
+   its sync configuration's `files` array, or the helper is never delivered. A project whose
+   conventions file was built by the doctor must also fill in `issueTitle.effortTypes`, which
+   the doctor scaffolds empty, until the follow-up lands (issue #51); an empty list makes every
+   effort tag fail `pattern-mismatch`.
 
 4. **Write `.claude/project-profile.md`: run `/auto-improve-finish-install`.** It looks at
    your repository, shows each proposed value next to the file that suggested it, and writes

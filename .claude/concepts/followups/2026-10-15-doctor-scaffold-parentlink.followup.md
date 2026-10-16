@@ -29,3 +29,7 @@ Add the `parentLink` block, copied from the plugin's conventions template, to th
   - Plugin registry ownership model (the conventions file is project-authored and scaffolded once)
 - **Journal entries to re-read when promoting:**
   - `2026-10-04 — Detect an install mode by what the sync actually delivers`
+
+## Added after the implementation review (2026-10-16)
+
+The same scaffold ships `issueTitle.effortTypes` as an empty list. The new sub-issue title helper checks the effort tag against that list, so a project built by the doctor refuses every sub-issue title as `pattern-mismatch` until the nine effort tags are filled in. Fix it together with the missing `parentLink` block: seed the scaffold with the nine tags from `.claude/work-item-conventions.json`, and add a test that runs the helper against the scaffold's own output.

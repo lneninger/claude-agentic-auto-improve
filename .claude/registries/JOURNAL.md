@@ -162,6 +162,7 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Lesson:** If a skill step runs `cd <other checkout>` in the session's persistent shell, every later step that resolves a script by a relative path or reads files relative to the working directory now reads the other checkout. Run such a step in a subshell `( cd ... && ... )`, or make it the very last command of the skill.
 - **Apply when:** a skill text inserts a `cd` into a step that is followed by other steps (a final status call, a report built from a script run)
 - **Tags:** `cd, shell-state, skill-ordering, relative-path, stale-read`
+
 ### 2026-10-15 — A script that reads a project-owned file must be told which project, not search for one
 - **Trigger:** pre-approval critic
 - **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
@@ -182,6 +183,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Lesson:** `test_skill_script_lookup.py` cuts every lookup block at its first `py -3 "$VAR"` line. Moving or extending a lookup block in a skill without listing that test in the run list lets a break through unseen.
 - **Apply when:** a contract moves, copies or extends a script-lookup block inside any skill or reference file
 - **Tags:** `skill-lookup, test-run-list, vendoring`
+
+### 2026-10-16 — A "missing project file" refusal must cover both the unset root and the set-but-absent file
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** The contract's guard refused only when the project directory variable was unset. With the variable set and no conventions file in that project, the shared locator still fell through to the plugin's own file and the helper composed a title from it. When a helper falls back from an explicit path, read exactly `<project root>/<file>` and refuse in both cases; never fall through to a multi-root locator. Also: a value a helper normalises (a parent written `#638`) must be passed on in its normalised form to every later command in the same block, and a block that creates a tracker record must print the new record's id before any step that can fail.
+- **Apply when:** a contract's invariant says "refuse when the project root cannot be determined" for a project-owned file, or a skill block validates an input and then runs a mutating command with it
+- **Tags:** `locator, plugin-install, fail-loud, contract-amendment, normalised-value, orphan-record`
 
 ---
 
