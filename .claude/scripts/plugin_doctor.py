@@ -101,7 +101,13 @@ SCAFFOLDS: Dict[str, str] = {
             "format": "[<EFFORT>] <Title>",
             "pattern": "^\\[(FEATURE|BUG|IMPROVEMENT|REFACTOR|PERF|SECURITY|DOCS|CHORE|SPIKE)\\] .+",
             "exactlyOne": True,
-            "effortTypes": []
+            "effortTypes": [],
+            "subIssue": {
+                "$comment": "Sub-issue title format, read by compose_subissue_title.py. "
+                            "The effort list and pattern stay in the outer issueTitle block.",
+                "legend": "P = parent issue, ST = sub-task (its position in the parent's plan)",
+                "format": "[<EFFORT>] P:#<parent> ST:<subtask> - <Title>"
+            }
         },
         "prTitle": {"map": [], "order": []},
         "issueLink": {

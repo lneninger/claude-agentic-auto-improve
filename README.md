@@ -562,6 +562,13 @@ would ship the part that can be wrong and leave behind the part that would say s
    `.project-tokens.json` is the one to fill in first: an unguarded outbound sync is how
    contamination spreads.
 
+   **Upgrading from before 0.9.1:** `work-item-conventions.json` is project-owned and sync
+   never rewrites it, so add the `issueTitle.subIssue` block (`$comment`, `legend` and
+   `format`) from this repository's copy into yours. Until you do, `/task` Parent-aware mode
+   refuses to open sub-issues (`conventions-missing`) rather than create a title without the
+   parent. A vendoring project must also list `.claude/scripts/compose_subissue_title.py` in
+   its sync configuration's `files` array, or the helper is never delivered.
+
 4. **Write `.claude/project-profile.md`: run `/auto-improve-finish-install`.** It looks at
    your repository, shows each proposed value next to the file that suggested it, and writes
    the slots that are still placeholders after one confirmation. It never overwrites a slot
