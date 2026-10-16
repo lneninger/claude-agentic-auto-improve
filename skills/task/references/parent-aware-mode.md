@@ -29,12 +29,18 @@ exists to draw one from, and the brief needs an `id:` that only the create can p
 1. **Classify the effort type**, using Step 2.5's matching procedure only — not its point 6 issue
    offer, which never fires in this mode (see below). Default the proposed type to the parent
    item's own `type:`, confirming with `AskUserQuestion` only when it cannot be derived that way.
-   This runs first because the create below interpolates `[<TYPE>]` into the sub-issue's title.
-2. **Create the sub-issue** (procedure below), titled from step 1's type, with a body taken from
-   the supplied `SUB_TASK` block verbatim — no brief exists yet at this point to draw a body from.
-3. **Verify the parent link** (procedure below).
-4. **Write the brief** (Step 2's template, extended by the keys listed below), because its `id:`
-   is the sub-issue number step 3 just confirmed `linked`.
+   This runs first because the sub-issue's title below is composed from step 1's type.
+2. **Find the scripts** (lookup block below), before the create, because step 3 needs the title
+   helper and step 5 needs the verifier.
+3. **Compose the title** with `compose_subissue_title.py` (procedure below). A `refused` result
+   halts here, names its cause, and creates nothing.
+4. **Create the sub-issue** (procedure below), titled with step 3's composed title, with a body
+   taken from the supplied `SUB_TASK` block verbatim — no brief exists yet at this point to draw
+   a body from.
+5. **Verify the parent link** (procedure below).
+6. **Write the brief** (Step 2's template, extended by the keys listed below), because its `id:`
+   is the sub-issue number step 5 just confirmed `linked`. The brief's `title:` stays the
+   **bare** sub-task name; the parent number lives only in `parent_issue:`.
 
 **The branch name is load-bearing — never improvise it.** The delivery loop maps a merged pull
 request back to its sub-task by matching its branch, exactly, against
@@ -82,17 +88,10 @@ mechanisms:**
 sub-issue is this mode's whole purpose — the invocation itself is the request, on the same
 pre-authorization terms Step 6 already grants the `/design-first` handoff. Never ask again.
 
-**Create the sub-issue, then verify — a create's exit code is a request, never a fact:**
-
-```
-gh issue create --parent <PARENT_ISSUE> --title "[<TYPE>] <bare title>" --body "<the supplied SUB_TASK block, verbatim — no brief exists yet at this point to draw a body from>"
-```
-
-exits `0` when the request was accepted, not when the link exists. Immediately read it back.
-
-**Finding the script, under either install mode.** The script ships with the plugin and with a
-vendored copy, the same as `/advance`'s `pr_merged.py` lookup — resolve it once, the same way,
-then use the result:
+**Find the scripts first, under either install mode.** The scripts ship with the plugin and with
+a vendored copy, the same as `/advance`'s `pr_merged.py` lookup — resolve `VPL` once, the same
+way, before the create, then use the result. The block's last line is the verifier's call and
+belongs to step 5: run everything above it now, and that last line only after the create.
 
 ```bash
 VPL=
@@ -119,6 +118,54 @@ py -3 "$VPL" --sub <sub> --parent <PARENT_ISSUE> --json
 **If `VPL` comes back empty, halt loud and say so.** The four-row table below is what this mode
 branches on, and an unresolvable path produces no verdict at all — that silence must never be
 read as `linked`, or as anything else.
+
+**Compose the title.** The title helper is `VPL`'s sibling in the same folder, never found by a
+second, independent search (that search could resolve to a different copy). If it is missing, an
+older vendored copy has `verify_parent_link.py` but was never given the helper: halt loud, name
+the missing path, and name the fix — list `.claude/scripts/compose_subissue_title.py` in the
+consuming project's sync configuration `files` array, then sync. Pass the project's conventions
+file explicitly with `--conventions`, so the plugin's own copy is never read in its place. The
+title shape is declared once in `.claude/work-item-conventions.json` → `issueTitle.subIssue`
+(its `legend` explains `P` and `ST`); it is not restated here. `<k>` is the sub-task's ordinal
+from its id in the handoff plan (`t16` gives `16`), and the bare title goes in through a quoted
+here-document so no character in it can alter the command.
+
+```bash
+CST=$(dirname "$VPL")/compose_subissue_title.py
+[ -f "$CST" ] || { echo "HALT: $CST is missing; list .claude/scripts/compose_subissue_title.py in the sync configuration files array and sync"; exit 2; }
+BARE=$(cat <<'EOF'
+<bare title>
+EOF
+)
+OUT=$(py -3 "$CST" --type <TYPE> --parent <PARENT_ISSUE> --subtask <k> --title "$BARE" --conventions .claude/work-item-conventions.json --json); RC=$?
+[ "$RC" -eq 0 ] || { printf '%s\n' "$OUT"; exit 2; }
+TITLE=$(printf '%s' "$OUT" | py -3 -c 'import json,sys; print(json.load(sys.stdin)["title"])')
+```
+
+Exit `0` is `composed`; exit `2` is `refused`, and nothing is created — never retry with a title
+that lacks the parent reference. The refusal's JSON carries `cause`, `reason` and `remediation`.
+The causes, in the order the helper checks them:
+
+| Cause | What it means |
+|---|---|
+| `conventions-missing` | the conventions file, its `issueTitle` block or `issueTitle.subIssue.format` is absent or unreadable (or the project root could not be determined) — add the block named in `remediation` |
+| `format-malformed` | the declared format lacks or repeats a placeholder, or is not led by the effort tag |
+| `parent-missing` | `PARENT_ISSUE` is empty |
+| `parent-not-positive-integer` | `PARENT_ISSUE` is not a positive integer (one leading `#` is allowed) |
+| `subtask-missing` | no sub-task ordinal was supplied |
+| `subtask-not-positive-integer` | the sub-task ordinal is not a positive integer (`16`, not `t16`) |
+| `bare-title-invalid` | the bare title is empty, spans lines, holds a control character, or already starts with an effort tag |
+| `pattern-mismatch` | the effort tag is not a declared one, or the composed title fails `issueTitle.pattern` |
+
+**Create the sub-issue, then verify — a create's exit code is a request, never a fact.** The
+title is the composed `$TITLE`, expanded inside double quotes:
+
+```bash
+gh issue create --parent <PARENT_ISSUE> --title "$TITLE" --body "<the supplied SUB_TASK block, verbatim — no brief exists yet at this point to draw a body from>"
+```
+
+exits `0` when the request was accepted, not when the link exists. Immediately read it back with
+the verifier line from the lookup block:
 
 ```bash
 py -3 "$VPL" --sub <sub> --parent <PARENT_ISSUE> --json

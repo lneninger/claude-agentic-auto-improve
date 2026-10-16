@@ -162,6 +162,26 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Lesson:** If a skill step runs `cd <other checkout>` in the session's persistent shell, every later step that resolves a script by a relative path or reads files relative to the working directory now reads the other checkout. Run such a step in a subshell `( cd ... && ... )`, or make it the very last command of the skill.
 - **Apply when:** a skill text inserts a `cd` into a step that is followed by other steps (a final status call, a report built from a script run)
 - **Tags:** `cd, shell-state, skill-ordering, relative-path, stale-read`
+### 2026-10-15 — A script that reads a project-owned file must be told which project, not search for one
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** Under a plugin install, a shared multi-root locator ranks the plugin's own `.claude` folder ahead of the consumer's when the project directory variable is unset, so a project-owned file the consumer has not updated is silently replaced by the plugin's copy and the intended "missing" refusal never fires. Pass the path explicitly from the skill, and refuse when it cannot be determined.
+- **Apply when:** a contract adds a helper that reads a project-authored file (conventions, rules, profile) through `work_item_conventions_path()` or another multi-root locator, and relies on a missing file or block producing a refusal
+- **Tags:** `locator, plugin-install, conventions, fail-loud, explicit-path`
+
+### 2026-10-15 — A new tracker-title field must be known before the issue exists
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** A title composed before the create call cannot contain the new issue's own number. When a user asks for "the sub-issue number" in the title, ask what it counts, and use a value known up front (the sub-task's position in the parent's plan) rather than a create-then-rename round trip.
+- **Apply when:** a contract changes a tracker title format that is built before the create call and the request mentions an identifier of the item being created
+- **Tags:** `tracker, title, ordinal, create-then-retitle`
+
+### 2026-10-15 — A skill that edits a block pinned by a lookup-block test must name that test
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** `test_skill_script_lookup.py` cuts every lookup block at its first `py -3 "$VAR"` line. Moving or extending a lookup block in a skill without listing that test in the run list lets a break through unseen.
+- **Apply when:** a contract moves, copies or extends a script-lookup block inside any skill or reference file
+- **Tags:** `skill-lookup, test-run-list, vendoring`
 
 ---
 
