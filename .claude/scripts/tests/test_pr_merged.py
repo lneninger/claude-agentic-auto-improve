@@ -12568,6 +12568,119 @@ class TestDispatchName(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# Delivery cleanup (issue #50): the at-ref record readers and the public advance-worktree alias
+# --------------------------------------------------------------------------
+class TestAtRefRecordReadersAndAdvanceAlias(unittest.TestCase):
+    """Contract 2026-10-15-auto-cleanup-delivered-worktrees, Extension Points: ``pr_merged.py`` gains
+    ``load_records_at(ref, slug)`` and ``load_delivery_at(ref, slug)`` next to ``load_records`` and
+    ``load_delivery`` (the same YAML parse, but read AT a ref, never from the working tree), and the public
+    alias ``is_advance_worktree = _is_advance_worktree``. INV-1: the Delivery Reading reads the records
+    at ``origin/<default>``, so a flip that exists only in the starting tree must never count.
+
+    RED today: none of the three names exists on ``pr_merged``.
+    """
+
+    SLUG = "2026-10-15-demo"
+    RESULTS = ".claude/orchestrator/results/2026-10-15-demo"
+    RECORD = "status: completed\nverified: github\nbase_ref: master\nbase_is_default: true\n"
+
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="atref_")))
+        self.addCleanup(rmtree_force, self.tmp)
+        self.addCleanup(os.chdir, os.getcwd())  # registered second, so it runs first: leave before the delete
+        self.world = make_world(self.tmp)
+        self.main = self.world.main
+        commit(self.main, {
+            f"{self.RESULTS}/t1-a.yaml": self.RECORD,
+            f"{self.RESULTS}/t2-b.yaml": self.RECORD.replace("completed", "completed\nreview_verdict: pass"),
+            f"{self.RESULTS}/contract-delivery.yaml": "status: completed\nverified: github\n"
+                                                      "delivered_by: contract-delivery\n",
+            ".claude/orchestrator/results/2026-10-15-nodelivery/t1-a.yaml": self.RECORD,
+            ".claude/orchestrator/results/2026-10-15-broken/contract-delivery.yaml": "key: [unclosed\n",
+        }, "records")
+        git(self.main, "push", "-q", "origin", "master")
+        os.chdir(str(self.main))
+
+    def need(self, name):
+        fn = getattr(pr_merged, name, None)
+        self.assertIsNotNone(fn, msg=f"pr_merged.{name} does not exist yet; the contract adds it (Extension Points)")
+        return fn
+
+    def test_load_records_at_reads_every_sub_task_record_at_the_ref_and_skips_the_delivery_record(self):
+        records = self.need("load_records_at")("origin/master", self.SLUG)
+
+        self.assertEqual(sorted(records), ["t1-a", "t2-b"],
+                         msg="one entry per completion record, keyed by file stem; the reserved "
+                             "contract-delivery record is never a sub-task's record")
+        self.assertEqual(records["t1-a"].get("status"), "completed", msg="the YAML is parsed, not returned as text")
+        self.assertEqual(records["t2-b"].get("review_verdict"), "pass", msg="every key of the record survives the parse")
+
+    def test_load_records_at_never_reads_the_working_tree(self):
+        reader = self.need("load_records_at")
+        (self.main / self.RESULTS / "t1-a.yaml").write_text("status: failed\n", encoding="utf-8")
+        (self.main / self.RESULTS / "t3-local-only.yaml").write_text(self.RECORD, encoding="utf-8")
+
+        records = reader("origin/master", self.SLUG)
+
+        self.assertEqual(records.get("t1-a", {}).get("status"), "completed",
+                         msg="INV-1: the ref's committed record wins over a locally edited one")
+        self.assertNotIn("t3-local-only", records,
+                         msg="INV-1: a record that exists only in the working tree (a local flip) must not be read")
+
+    def test_load_records_at_answers_empty_for_a_contract_with_no_records_folder(self):
+        self.assertEqual(self.need("load_records_at")("origin/master", "2026-10-15-unknown"), {},
+                         msg="like load_records: no folder means an empty mapping, never None or an exception")
+
+    def test_load_records_at_matches_load_records_when_the_working_tree_equals_the_ref(self):
+        reader = self.need("load_records_at")
+        self.assertEqual(reader("origin/master", self.SLUG), pr_merged.load_records(self.SLUG),
+                         msg="'the same YAML parse as load_records': identical result for identical content")
+
+    def test_load_delivery_at_reads_the_delivery_record_at_the_ref(self):
+        record = self.need("load_delivery_at")("origin/master", self.SLUG)
+
+        self.assertIsInstance(record, dict, msg="a present, readable delivery record is a mapping")
+        self.assertEqual(record.get("delivered_by"), "contract-delivery", msg="its keys are parsed")
+
+    def test_load_delivery_at_is_none_when_absent_and_empty_when_present_but_unreadable(self):
+        reader = self.need("load_delivery_at")
+
+        self.assertIsNone(reader("origin/master", "2026-10-15-nodelivery"),
+                          msg="like load_delivery: no record at the ref is None, so is_delivered falls back to the base flags")
+        self.assertEqual(reader("origin/master", "2026-10-15-broken"), {},
+                         msg="like load_delivery: a record that is present but unparseable is {} (not None, not a raise)")
+
+    def test_load_delivery_at_never_reads_the_working_tree(self):
+        reader = self.need("load_delivery_at")
+        local = self.main / ".claude/orchestrator/results/2026-10-15-nodelivery"
+        (local / "contract-delivery.yaml").write_text("status: completed\nverified: github\n", encoding="utf-8")
+
+        self.assertIsNone(reader("origin/master", "2026-10-15-nodelivery"),
+                          msg="INV-1: a delivery record written locally but absent at the ref does not exist for the gate")
+
+    def test_load_delivery_at_matches_load_delivery_when_the_working_tree_equals_the_ref(self):
+        reader = self.need("load_delivery_at")
+        self.assertEqual(reader("origin/master", self.SLUG), pr_merged.load_delivery(self.SLUG),
+                         msg="'the same YAML parse as load_delivery': identical result for identical content")
+
+    def test_is_advance_worktree_is_a_public_alias_with_the_private_behaviour(self):
+        alias = self.need("is_advance_worktree")
+        self.assertTrue(callable(alias), msg="the alias is a function")
+        for path, slug, expected in (
+            ("C:/r/.claude/worktrees/20261015-advance-2026-10-15-demo", "2026-10-15-demo", True),
+            ("C:/r/.claude/worktrees/20261015-advance-2026-10-15-demo-2", "2026-10-15-demo", True),
+            ("C:/r/.claude/worktrees/20261015-task-t1-a", "2026-10-15-demo", False),
+            ("C:/r/.claude/worktrees/20261015-advance-2026-10-15-other", "2026-10-15-demo", False),
+        ):
+            self.assertEqual(alias(path, slug), expected, msg=f"{path} against {slug}")
+            self.assertEqual(alias(path, slug), pr_merged._is_advance_worktree(path, slug),
+                             msg="the alias and the private function never disagree")
+        self.assertTrue(alias("C:/r/.claude/worktrees/20261015-advance-2026-10-15-demo", "2026-10-15-demo-feature"),
+                        msg="the prefix match the cleanup must guard with an ambiguity check (INV-2): a shorter "
+                            "advance name still 'matches' a longer slug")
+
+
+# --------------------------------------------------------------------------
 
 
 if __name__ == "__main__":

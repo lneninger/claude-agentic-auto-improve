@@ -54,7 +54,10 @@ PLUGIN_NAME = "agentic-auto-improve"
 KEY = PLUGIN_NAME + "@auto-improve"
 NEEDLE = "agentic-auto-improve/*/"
 #: The line that runs the script: `py -3 "$VAR" ...` (or `${VAR}`). It ends the lookup and names the variable.
-RUN_LINE = re.compile(r'^\s*py\s+-3\s+"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"')
+# Delivery cleanup runs in a subshell, `( cd "$(py -3 "$CLN" --print-main-root)" && py -3 "$CLN" ... )`
+# (pass-2 F1), so the run line may open with that subshell and the cd; the lookup is still cut before it.
+RUN_LINE = re.compile(r'^\s*(?:\(\s*cd\s+"\$\(py\s+-3\s+"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"[^)]*\)"\s*&&\s*)?'
+                      r'py\s+-3\s+"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"')
 #: A line inside the lookup that starts a Python process: not allowed (decision 8).
 PYTHON_LINE = re.compile(r"^\s*(?:py|python3?)\b")
 SCRIPT = re.compile(r"\.claude/scripts/([A-Za-z0-9_]+\.py)")
@@ -379,9 +382,14 @@ class TestSkillScriptLookup(unittest.TestCase):
             self.assertEqual(norm(w.resolver_answer(CLAUDE_PLUGIN_ROOT=w.posix(named))), norm(named))
         self.each(check)
 
+    #: Delivery cleanup (issue #50, decision 2): its script is looked up plugin first, the current
+    #: worktree's own copy LAST, and made absolute before the `cd` to the main root. Every other
+    #: script keeps the project-copy-first order this file pins.
+    PLUGIN_FIRST_VARS = ("CLN",)
+
     def test_a_project_copy_of_the_script_is_found_first(self):
         w = self.world
-        w.version("0.10.0")
+        installed = w.version("0.10.0")
         local_dir = w.project / ".claude" / "scripts"
         local_dir.mkdir(parents=True)
         for s in w.scripts:
@@ -389,10 +397,40 @@ class TestSkillScriptLookup(unittest.TestCase):
 
         def check(snip):
             got = w.run_snippet(self.bash, snip)
+            if snip["var"] in self.PLUGIN_FIRST_VARS:
+                self.assertEqual(norm(got), self.expected_script(installed, snip),
+                                 "%s looks up the plugin install before the current worktree's copy: %r"
+                                 % (snip["var"], got))
+                return
             self.assertEqual(norm(w.project / got) if not os.path.isabs(got) and not re.match(r"^[A-Za-z]:", got)
                              else norm(got), norm(local_dir / snip["script"]),
                              "a vendored project finds its own copy before any plugin install: %r" % got)
         self.each(check)
+
+    def test_the_plugin_first_lookup_falls_back_to_the_current_worktree_copy_as_an_absolute_path(self):
+        w = self.world
+        local_dir = w.project / ".claude" / "scripts"
+        local_dir.mkdir(parents=True)
+        for s in w.scripts:
+            (local_dir / s).write_text("# vendored\n", encoding="utf-8")
+        # W3: the current folder's copy is only for a LINKED worktree, whose `.git` is a file.
+        (w.project / ".git").write_text("gitdir: /elsewhere/.git/worktrees/proj\n", encoding="utf-8")
+        plugin_first = [s for s in self.snips if s["var"] in self.PLUGIN_FIRST_VARS]
+        self.assertGreater(len(plugin_first), 0, "the cleanup lookup (CLN) must be found under skills/")
+
+        for snip in plugin_first:
+            with self.subTest(block="%s:%d" % (snip["file"], snip["start"])):
+                got = w.run_snippet(self.bash, snip)
+                self.assertTrue(os.path.isabs(got) or re.match(r"^[A-Za-z]:", got),
+                                "the path is made absolute before the cd to the main root: %r" % got)
+                self.assertEqual(norm(got), norm(local_dir / snip["script"]),
+                                 "with no plugin install anywhere the current worktree's copy is used: %r" % got)
+
+    def test_a_pr_merged_style_lookup_still_prefers_the_project_copy(self):
+        # Guard for the order above: only the plugin-first variables may differ from project-copy-first.
+        others = [s for s in self.snips if s["var"] not in self.PLUGIN_FIRST_VARS]
+        self.assertGreater(len(others), 0, "the project-copy-first lookups (PRM and friends) must still exist")
+        self.assertIn("PRM", {s["var"] for s in others}, "the pr_merged lookup (PRM) keeps the project copy first")
 
     def test_nothing_found_gives_an_empty_value_so_the_skill_can_stop(self):
         w = self.world

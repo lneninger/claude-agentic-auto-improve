@@ -411,19 +411,62 @@ phase checks it, and the operator no longer has to.
 
 When a sub-task cannot be delivered (its pull request was closed unmerged, or its implementer halted) applies, read `references/undeliverable-sub-task.md` in full before continuing. If it cannot be read, stop and report the missing file; do not continue from memory.
 
-## Step 6: Offer to clean up
+## Step 6: Clean up, automatically, on every call
 
-A merged pull request leaves its branch and often a worktree behind. Offer once, and only for
-branches this run verified as merged:
+A delivered work item leaves worktrees and merged branches behind. **This step runs on every
+call, after Steps 3 to 5 and after any records pull request, and it asks nothing.** The script
+`cleanup_delivered.py` (Delivery cleanup) does the whole job and decides for itself whether
+anything may go: it reads the contract and the records at `origin/<default>`, and until the
+records pull request has merged it answers "not delivered yet" and removes nothing. The first
+call after that merge removes everything it safely can, and a later call removes whatever a
+standing session had held back.
+
+Resolve the script as `CLN` (absolute, before the `cd`), then run it from the main root. The
+lookup order is the plugin root, then the installed-plugin records and the newest cache folder,
+then the current worktree's own copy. It never tries the main checkout's copy.
 
 ```bash
-git worktree remove .claude/worktrees/<name>
-git worktree prune
-git branch -d <branch>
+START="$PWD"
+CLN=
+S=.claude/scripts/cleanup_delivered.py
+if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then CLN=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  CLN=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+  if [ -z "$CLN" ] && [ -f "$PWD/.git" ] && [ -f "$PWD/$S" ]; then CLN=$PWD/$S; fi
+fi
+( cd "$(py -3 "$CLN" --print-main-root)" && py -3 "$CLN" --contract <slug> --from "$START" [--remove-remote] --json )
 ```
 
-Never delete a worktree directory with a plain remove. That leaves stale metadata, and git
-keeps the branch reserved.
+The `cd` runs in a subshell on purpose: the session's own shell stays in the folder it started in, so
+the calls after this step still see the start tree, and a failed `cd` cannot be followed by a script
+call from the wrong folder. The current folder's own copy is taken only in a linked worktree (its `.git` is a file), never
+in the main checkout, whose copy may be stale. **If `CLN` comes back empty, stop this step, do
+not run the line above, and say so in the report's Cleanup line** — nothing was removed,
+and nothing else in this skill depends on it.
+
+- **Exit 5 is normal.** It means "not delivered yet": nothing was touched, and the script's
+  `line` says when it runs again. Exit 3 means some items were kept, each with its reason. Exit
+  10 means the delivery could not be verified and nothing was touched. None of these is a failure
+  of this skill.
+- **`remove-remote` is a parameter of this skill**, for example `/pr-merged 40 remove-remote`.
+  It is off by default. When it is given, pass `--remove-remote` to the script as shown, and
+  nothing else; without it the script never changes a remote branch and lists the ones still
+  present as `remote-kept`.
+- The script prints one `line`. **Step 7's `- Cleanup:` entry is that `line`, verbatim.** When
+  the line ends with `finish: <command>`, a session stood in a tree it had to remove: that tree
+  was left untouched, and the next call from a shell outside it clears it. Print that one command and nothing more.
+- Skip the step only when the run named no contract; there is no work item to clean up then.
 
 ## Step 7: Report
 
@@ -473,7 +516,7 @@ empty, `"none — " + report["next_command"]["reason"]`.
 - Still blocked: <sub-task — waiting on X>
 - Failed: <sub-task — severity, one-line reason, and what it now blocks | none>
 - Contract complete: <yes — the script's `next_command`, printed verbatim: `/verify-before-done` (no parent branch) or `/advance <slug>` (a parent branch: the landing script starts there and merges the parent pull request itself, after its children-closed gate) | no, N sub-tasks remain | blocked on architect re-entry>
-- Cleanup: <removed, or offered and declined>
+- Cleanup: <the cleanup script's own `line`, printed verbatim — never composed prose | no contract named | script not found>
 - Next command: <report["next_command"], rendered exactly as the rule above says>
 ```
 
@@ -567,6 +610,13 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
 - **Moving the completion hand-off push's no-prompt rule to other pushes.** It covers that one push
   only. Every other records push confirms once.
 - **Launching the landing from this phase.** `/advance` starts it, in the background.
+- **Hand-running `git branch -d` or `git branch -D`,** or removing a worktree with a manual line.
+  The cleanup script checks that the tip is in `origin/<default>` before it deletes anything.
+- **Running a global tidy of worktree metadata** (git's `prune` for worktrees). It would also
+  remove other work items' stale entries. The script never does it, and neither does this skill.
+- **Composing the cleanup line as prose.** Step 7 prints the script's `line` verbatim.
+- **Deleting a remote branch without `remove-remote`.** A remote deletion is outward-facing; it
+  happens only when the caller passed the parameter.
 - **Closing a sub-issue on a local belief that a pull request merged.** Step 1's GitHub
   verification must already have confirmed the merge before Step 2.5 runs.
 - **Closing a sub-issue without first reading the issue's own state.** I-10's read-before-close

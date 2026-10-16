@@ -891,6 +891,10 @@ def _is_advance_worktree(path: str, slug: str) -> bool:
     return False
 
 
+#: Public name of the advance-worktree test, for Delivery cleanup (it adds its own ambiguity check).
+is_advance_worktree = _is_advance_worktree
+
+
 def locate_parent(slug: str) -> Dict[str, Any]:
     """Where a contract's parent branch lives -- Parent location (I-10). Writes nothing but ``git fetch``.
 
@@ -2015,6 +2019,51 @@ def load_records(contract_slug: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def _tree_names_at(ref: str, folder: str) -> List[str]:
+    """File names directly inside ``folder`` as committed at ``ref``; ``[]`` when git cannot list it.
+
+    The ``<ref>:<folder>`` form is relative to the repository root, so the answer never depends on
+    the folder the process stands in.
+    """
+    code, out = _run(["git", "ls-tree", "--name-only", "%s:%s" % (ref, folder)])
+    return [n for n in out.splitlines() if n.strip()] if code == 0 and out else []
+
+
+def load_records_at(ref: str, contract_slug: str) -> Dict[str, Dict[str, Any]]:
+    """``load_records`` read AT ``ref`` (Delivery cleanup, INV-1): the committed records, never the working tree."""
+    folder = "%s/%s" % (RESULTS_DIR.as_posix(), contract_slug)
+    out: Dict[str, Dict[str, Any]] = {}
+    for name in _tree_names_at(ref, folder):
+        if not name.endswith(".yaml"):
+            continue
+        stem = name[:-len(".yaml")]
+        if stem == DELIVERY_RECORD_NAME:
+            continue  # the reserved Contract Delivery Record is never a sub-task's record
+        text = file_at_commit(ref, "%s/%s" % (folder, name))
+        if text is None:
+            continue
+        try:
+            import yaml
+            out[stem] = yaml.safe_load(text) or {}
+        except Exception:
+            continue
+    return out
+
+
+def load_delivery_at(ref: str, contract_slug: str) -> Optional[Dict[str, Any]]:
+    """``load_delivery`` read AT ``ref``: ``None`` when absent, ``{}`` when present but unreadable."""
+    path = "%s/%s/%s.yaml" % (RESULTS_DIR.as_posix(), contract_slug, DELIVERY_RECORD_NAME)
+    text = file_at_commit(ref, path)
+    if text is None:
+        return None
+    try:
+        import yaml
+        data = yaml.safe_load(text)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def write_record(contract_slug: str, subtask_id: str, record: Dict[str, Any]) -> Path:
     import yaml
     d = RESULTS_DIR / contract_slug
@@ -2308,6 +2357,12 @@ def _names_contract(value: Optional[str], slug: str) -> bool:
     return False
 
 
+def brief_header_path(contract_text: str) -> Optional[Path]:
+    """The path in the contract's own ``**Work Item Brief:**`` header, or None when it has none."""
+    m = re.search(r"^\*\*Work Item Brief:\*\*[ \t]*`?([^\s`]+)`?", contract_text, re.M)
+    return Path(m.group(1)) if m else None
+
+
 def find_linked_brief(contract_text: str, slug: str,
                       work_items_dir: Optional[Path] = None) -> Optional[Path]:
     """I-17: the brief linked to a contract, or None when there is none or more than one.
@@ -2315,9 +2370,8 @@ def find_linked_brief(contract_text: str, slug: str,
     First the contract's own ``**Work Item Brief:**`` path. Otherwise the ONE brief
     under the work items folder whose frontmatter ``contract:`` names this contract.
     """
-    m = re.search(r"^\*\*Work Item Brief:\*\*[ \t]*`?([^\s`]+)`?", contract_text, re.M)
-    if m:
-        header_path = Path(m.group(1))
+    header_path = brief_header_path(contract_text)
+    if header_path is not None:
         return header_path if header_path.is_file() else None
     folder = work_items_dir if work_items_dir is not None else WORK_ITEMS_DIR
     if not folder.is_dir():

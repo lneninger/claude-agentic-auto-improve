@@ -489,12 +489,7 @@ Verify a new tree's copy resolves before handing it off:
 py -3 -c "import json,pathlib,sys; h=pathlib.Path(sys.argv[1]); ws=json.load(open(next(h.glob('*.code-workspace')),encoding='utf-8')); [print(('OK   ' if (p if (p:=pathlib.Path(f['path'])).is_absolute() else h/p).exists() else 'BROKEN '), f['path']) for f in ws['folders']]" ".claude/worktrees/<wt>"
 ```
 
-**Lifecycle.** After `/ship` merges the PR:
-
-```bash
-git worktree remove .claude/worktrees/<wt>
-git worktree prune
-```
+**Lifecycle.** After `/ship` merges the PR, nothing is run by hand: Delivery cleanup (`cleanup_delivered.py`, run on every `/pr-merged` and `/advance` call) removes the worktrees and merged branches of a delivered work item. An abandoned worktree that was never delivered is removed with `git worktree remove <path>` alone, never with git's worktree `prune`.
 
 Never delete the directory by hand — that leaves stale worktree metadata behind and git keeps reserving the branch.
 
@@ -560,7 +555,7 @@ question; that notice governs, not the entry below. Every other entry applies to
 - **Seeding the worktree from the current feature branch.** The base is freshly-fetched `origin/master`, always, verified by SHA. A tree seeded from a half-finished branch inherits its commits, its bugs, and its review surface — and the isolation you asked for is gone.
 - **Creating a worktree and then implementing in the parent tree.** The branch ends up empty. Enter the worktree or hand its path to the implementer.
 - **Reaching for a worktree to escape uncommitted work you actually need.** Worktrees do not carry WIP. Commit it or finish it.
-- **`rm -rf` on a worktree directory.** Use `git worktree remove` then `git worktree prune`, or git keeps the branch reserved and the metadata stale.
+- **`rm -rf` on a worktree directory.** A delivered worktree is removed by Delivery cleanup; an abandoned one with `git worktree remove <path>` alone, or git keeps the branch reserved and the metadata stale. Never git's worktree `prune`, which would also remove other work items' stale entries.
 - **Routing an M-sized item to a direct edit** to save the contract. The `concept-gate.py` hook will block the write anyway.
 - **Stopping after Step 5 to ask whether to run `/design-first`.** Step 4 set the route and Step 6 pre-authorizes the handoff, so the question strands a clarified brief with no contract — and printing the command for the user to type themselves is the same failure with extra steps. Clarify in Step 3, then chain.
 - **Sizing an item before grading it against the north-stars.** Step 3.5 runs first for a reason: an XS/S route skips `/design-first`, and with it the only other place the register is ever read. Grade it, then size it.
