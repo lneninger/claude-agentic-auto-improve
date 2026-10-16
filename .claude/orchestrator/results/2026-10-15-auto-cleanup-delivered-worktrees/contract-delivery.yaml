@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/52
+number: 52
+head_ref: feature/50-auto-cleanup-delivered-worktrees
+base_ref: master
+base_is_default: true
+commit: 6c21866829cb96246397f3193db3656b5b4c8c38
+merged_at: '2026-10-16T22:19:19Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-10-16T22:22:38.489181+00:00'
+blocks_recorded:
+- t1-cleanup
+blocks_already_recorded: []
