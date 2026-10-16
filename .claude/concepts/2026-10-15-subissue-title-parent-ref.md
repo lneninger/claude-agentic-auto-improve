@@ -59,7 +59,7 @@ Not applicable. Reason: `Files to touch` has no Angular UI surface (component, t
 - **I-3** The format is read from the conventions file at call time. Changing the fixture's `format` changes the output, and a test proves this. `parent-aware-mode.md` names the block and the helper and does not restate the template.
 - **I-4** The helper is pure. It makes no `gh` call, writes no file and mutates no tracker record.
 - **I-5** The brief's `title:` stays the **bare** sub-task name. The parent number lives only in `parent_issue:`, as today. A brief written in Parent-aware mode therefore never carries the Parent reference into `/ship`'s pull request title. (A later no-parent `/task` run on a sub-issue keeps the `P:#n ST:k` remainder as the bare title, so there it does reach the pull request title; that is accepted and stated in Failure Modes.)
-- **I-6** The conventions file is read through `work_item_conventions_path()` (Two-layer Claude path resolution), never a literal path, so a test can redirect it. **Plugin-install guard:** Parent-aware mode passes `--conventions <project .claude/work-item-conventions.json>` explicitly. When `--conventions` is absent and `CLAUDE_PROJECT_DIR` is unset, the helper does not fall through to the plugin's own file: it refuses `conventions-missing` with the reason "project conventions root not determinable". A test covers that case.
+- **I-6** The conventions file is read from an explicit `--conventions` path that a test can redirect. **Plugin-install guard:** Parent-aware mode passes `--conventions <project .claude/work-item-conventions.json>` explicitly. When `--conventions` is absent, the helper reads exactly `<CLAUDE_PROJECT_DIR>/.claude/work-item-conventions.json` and never the shared multi-root locator, so it cannot fall through to the plugin's own file. It refuses `conventions-missing` with the reason "project conventions root not determinable" when `CLAUDE_PROJECT_DIR` is unset, and with the reason naming the missing path when it is set but the project has no such file. Tests cover both cases. *(Amended after implementation review, 2026-10-16: the first draft only covered the unset case; the reviewer showed the variable set with no project file still read the plugin's file. This replaces the use of `work_item_conventions_path()` for the helper's own fallback.)*
 
 ### Events
 
@@ -77,7 +77,7 @@ Not applicable. Reason: `Files to touch` has no Angular UI surface (component, t
 
 ## Reused Mechanisms
 
-- **Two-layer Claude path resolution** — consumed as-is. The helper imports `work_item_conventions_path` from `.claude/scripts/_claude_paths.py`, as `verify_parent_link.py` does at line 75. It needs no new locator.
+- **Two-layer Claude path resolution** — deliberately NOT used by the helper (amended after implementation review, 2026-10-16). `verify_parent_link.py` reads the conventions file through `work_item_conventions_path()`. The new helper cannot, because under a plugin install that locator ranks the plugin's own folder ahead of the consumer's when the project variable is unset or the project has no file, and the `conventions-missing` refusal would never fire. The helper reads an explicit `--conventions` path, or exactly `<CLAUDE_PROJECT_DIR>/.claude/work-item-conventions.json`.
 - **Conventions file as single source of truth** (`.claude/work-item-conventions.json`, `issueTitle` block, read by `/task` Step 2.5 and `/ship`) — **extended by** a nested `issueTitle.subIssue` block. Nesting it under `issueTitle` follows the `issueLink.parentLink` precedent: a nested block owns only what is new, and the outer block keeps the effort list and `pattern`. **Enum coverage check:** the effort tags are not touched, and `pattern` already accepts `[PERF] #638 - …` because `.+` follows the tag, and the same holds for `[PERF] P:#638 ST:16 - Fix Earnings Index (…)`. Verified by reading the regex.
 - **Fail-loud conventions read** (INV-9 of `verify_parent_link.py`: a missing block returns a named `conventions-missing` cause, never a hard-coded fallback) — consumed as-is, as a pattern. The helper copies the same rule and the same cause name.
 - **Parent-aware mode's script lookup** (the VPL resolution block in `parent-aware-mode.md`, handling either install mode) — **extended**, not duplicated. The block moves above the create, and the helper path is derived as the sibling of the resolved `VPL` in the same folder. A sibling that is missing (an older vendored copy) halts loud.
@@ -119,7 +119,7 @@ None. `compose_subissue_title.py` is a new **instance** of the shape `verify_par
 | Source Module | Target Module | Mechanism | Data Shape | Direction |
 |---------------|---------------|-----------|------------|-----------|
 | `/task` Parent-aware mode | `compose_subissue_title.py` | subprocess, JSON on stdout, exit code | Title composition request / result | skill → script → skill |
-| `compose_subissue_title.py` | `.claude/work-item-conventions.json` | file read via `work_item_conventions_path()` | Sub-issue title format | script reads config |
+| `compose_subissue_title.py` | `.claude/work-item-conventions.json` | file read from the explicit `--conventions` path, or `<CLAUDE_PROJECT_DIR>/.claude/work-item-conventions.json` | Sub-issue title format | script reads config |
 | `/task` Parent-aware mode | GitHub | `gh issue create --parent <n> --title <composed>` | issue title string | plugin → tracker |
 
 **Changes to existing integration surfaces:**
@@ -349,7 +349,7 @@ CONSTRAINTS:
     the legend states what P and ST mean in one line, and the /flow note, the refusal
     remediation and parent-aware-mode.md print it from there instead of restating it.
   - The helper is pure (I-4): no subprocess, no file writes. Read conventions only through
-    work_item_conventions_path() from _claude_paths, with a --conventions override for tests.
+    the explicit --conventions path, or exactly <CLAUDE_PROJECT_DIR>/.claude/work-item-conventions.json (never the shared locator).
     Refusal order and cause names exactly as the contract's Data Shapes. Exit 0 composed,
     2 refused. JSON keys: verdict, title (composed only), cause and remediation (refused only),
     reason.

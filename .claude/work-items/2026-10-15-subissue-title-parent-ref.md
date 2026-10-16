@@ -61,3 +61,17 @@ M - a new shared title-format rule in the conventions file, read by two skills, 
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+
+- 2026-10-16: Design approved (title shape `P:#<parent> ST:<k>` chosen by the user). Test-first stage and implementation done; the helper's test file passes every check and the neighbouring suites pass (doctor and manifests suites fail only the same tests as clean master).
+- Review stage failed three times and the retry budget is spent. Pass 1: version clash with master, shell variables lost between calls, unquoted placeholders, format copied into the flow note. Pass 2: a parent written `#638` crashed the verifier after the issue was created. Pass 3 (below).
+- Pass 3 findings still open:
+  - BLOCKER: master moved on (pull request #53 raised it to 0.9.1). Rebase onto the new master tip, raise all five version entries to 0.9.2, change the README note to "before 0.9.2", and update the contract lines that still say 0.9.1.
+  - Shell block trims whitespace everywhere in the parent number (`tr -d`); trim the ends only so the helper stays the one validator. Same in the repair block and for the sub-issue number.
+  - Helper crashes with a traceback when `effortTypes` is null or not a list; treat it as a named refusal.
+  - Placeholders for numbers and the effort tag should be single-quoted, not double-quoted.
+  - `${CLAUDE_PROJECT_DIR:-.}` in the block makes the helper's "root not determinable" refusal unreachable; amend the contract's I-6 wording or drop the fallback.
+  - Contract wording: three lines disagree about the `subIssue` keys (legend included); the `conventions-missing` row omits the missing-pattern case; I-1 holds only for the shipped format.
+  - Not recorded anywhere yet: the `parent-issue:` search qualifier returned 0 results on a real parent (#638) and was dropped from the flow note. Put that in the pull request description.
+- Next: one more fix round (tests for the cases above first), then the verification stage, commit and draft pull request. Nothing has been pushed to a pull request.

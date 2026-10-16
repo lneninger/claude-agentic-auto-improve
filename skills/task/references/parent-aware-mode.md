@@ -30,14 +30,14 @@ exists to draw one from, and the brief needs an `id:` that only the create can p
    offer, which never fires in this mode (see below). Default the proposed type to the parent
    item's own `type:`, confirming with `AskUserQuestion` only when it cannot be derived that way.
    This runs first because the sub-issue's title below is composed from step 1's type.
-2. **Find the scripts** (lookup block below), before the create, because step 3 needs the title
+2. **Find the scripts** (the first part of the one block below), before the create, because step 3 needs the title
    helper and step 5 needs the verifier.
-3. **Compose the title** with `compose_subissue_title.py` (procedure below). A `refused` result
+3. **Compose the title** with `compose_subissue_title.py` (same block). A `refused` result
    halts here, names its cause, and creates nothing.
-4. **Create the sub-issue** (procedure below), titled with step 3's composed title, with a body
+4. **Create the sub-issue** (same block), titled with step 3's composed title, with a body
    taken from the supplied `SUB_TASK` block verbatim — no brief exists yet at this point to draw
    a body from.
-5. **Verify the parent link** (procedure below).
+5. **Verify the parent link** (the block's last line; its verdict is branched on below).
 6. **Write the brief** (Step 2's template, extended by the keys listed below), because its `id:`
    is the sub-issue number step 5 just confirmed `linked`. The brief's `title:` stays the
    **bare** sub-task name; the parent number lives only in `parent_issue:`.
@@ -88,10 +88,13 @@ mechanisms:**
 sub-issue is this mode's whole purpose — the invocation itself is the request, on the same
 pre-authorization terms Step 6 already grants the `/design-first` handoff. Never ask again.
 
-**Find the scripts first, under either install mode.** The scripts ship with the plugin and with
-a vendored copy, the same as `/advance`'s `pr_merged.py` lookup — resolve `VPL` once, the same
-way, before the create, then use the result. The block's last line is the verifier's call and
-belongs to step 5: run everything above it now, and that last line only after the create.
+**One block does the find, the compose, the create and the verify.** The scripts ship with the
+plugin and with a vendored copy, the same as `/advance`'s `pr_merged.py` lookup, so the block
+resolves `VPL` itself with that same lookup and then derives everything else from it. Fill each
+placeholder in with its value (every one already sits inside double quotes; keep it there) and run
+the block once, whole, in a single Bash invocation: shell variables do not survive between
+invocations, and a block split in two is how a title ends up created without its parent
+reference. Every `HALT` below stops the run before anything further is created or claimed.
 
 ```bash
 VPL=
@@ -112,66 +115,93 @@ else
     [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
   done)
 fi
-py -3 "$VPL" --sub <sub> --parent <PARENT_ISSUE> --json
-```
-
-**If `VPL` comes back empty, halt loud and say so.** The four-row table below is what this mode
-branches on, and an unresolvable path produces no verdict at all — that silence must never be
-read as `linked`, or as anything else.
-
-**Compose the title.** The title helper is `VPL`'s sibling in the same folder, never found by a
-second, independent search (that search could resolve to a different copy). If it is missing, an
-older vendored copy has `verify_parent_link.py` but was never given the helper: halt loud, name
-the missing path, and name the fix — list `.claude/scripts/compose_subissue_title.py` in the
-consuming project's sync configuration `files` array, then sync. Pass the project's conventions
-file explicitly with `--conventions`, so the plugin's own copy is never read in its place. The
-title shape is declared once in `.claude/work-item-conventions.json` → `issueTitle.subIssue`
-(its `legend` explains `P` and `ST`); it is not restated here. `<k>` is the sub-task's ordinal
-from its id in the handoff plan (`t16` gives `16`), and the bare title goes in through a quoted
-here-document so no character in it can alter the command.
-
-```bash
+py -3 "$VPL" --help >/dev/null 2>&1 || { echo "HALT: verify_parent_link.py not found; no parent-link verdict is possible, so nothing is created"; exit 2; }
 CST=$(dirname "$VPL")/compose_subissue_title.py
-[ -f "$CST" ] || { echo "HALT: $CST is missing; list .claude/scripts/compose_subissue_title.py in the sync configuration files array and sync"; exit 2; }
-BARE=$(cat <<'EOF'
+[ -f "$CST" ] || { echo "HALT: compose_subissue_title.py not found next to verify_parent_link.py; list .claude/scripts/compose_subissue_title.py in the sync configuration files array and sync"; exit 2; }
+BARE=$(cat <<'BARE_TITLE_END'
 <bare title>
-EOF
+BARE_TITLE_END
 )
-OUT=$(py -3 "$CST" --type <TYPE> --parent <PARENT_ISSUE> --subtask <k> --title "$BARE" --conventions .claude/work-item-conventions.json --json); RC=$?
-[ "$RC" -eq 0 ] || { printf '%s\n' "$OUT"; exit 2; }
-TITLE=$(printf '%s' "$OUT" | py -3 -c 'import json,sys; print(json.load(sys.stdin)["title"])')
+P="<PARENT_ISSUE>"; P=$(printf %s "$P" | tr -d ' \t\r'); P=${P#\#}
+case "$P" in ''|*[!0-9]*) echo "HALT: PARENT_ISSUE must be an issue number such as 638 or #638; nothing is created"; exit 2;; esac
+OUT=$(py -3 -X utf8 "$CST" --type "<TYPE>" --parent "$P" --subtask "<k>" --title="$BARE" --conventions "${CLAUDE_PROJECT_DIR:-.}/.claude/work-item-conventions.json" --json); RC=$?
+if [ "$RC" -ne 0 ]; then
+  printf '%s\n' "$OUT"
+  if printf '%s' "$OUT" | py -3 -X utf8 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("verdict") == "refused" else 1)' >/dev/null 2>&1; then
+    echo "HALT: the title was refused (the cause is in the JSON above); nothing is created"
+  else
+    echo "HALT: the title helper failed (rc=$RC) without a refusal; nothing is created"
+  fi
+  exit 2
+fi
+TITLE=$(printf '%s' "$OUT" | py -3 -X utf8 -c 'import json,sys; print(json.load(sys.stdin)["title"])' 2>/dev/null | tr -d '\r')
+[ -n "$TITLE" ] || { printf '%s\n' "$OUT"; echo "HALT: the title helper failed (rc=$RC): its output is not a JSON title; nothing is created"; exit 2; }
+URL=$(gh issue create --parent "$P" --title "$TITLE" --body-file - <<'SUB_TASK_END'
+<the supplied SUB_TASK block, verbatim>
+SUB_TASK_END
+)
+GRC=$?
+[ "$GRC" -eq 0 ] || { printf '%s\n' "$URL"; echo "HALT: gh issue create failed (exit $GRC); look for a half-created sub-issue in the tracker, and never re-run this block"; exit 2; }
+LAST=$(printf '%s\n' "$URL" | tail -n 1 | tr -d '\r')
+SUB=${LAST##*/}
+case "$SUB" in ''|*[!0-9]*) printf '%s\n' "$URL"; echo "HALT: gh issue create returned no issue URL; there is nothing to verify, and the create block must never be re-run"; exit 2;; esac
+printf 'CREATED: #%s %s\n' "$SUB" "$LAST"
+py -3 "$VPL" --sub "$SUB" --parent "$P" --json
 ```
 
-Exit `0` is `composed`; exit `2` is `refused`, and nothing is created — never retry with a title
-that lacks the parent reference. The refusal's JSON carries `cause`, `reason` and `remediation`.
-The causes, in the order the helper checks them:
+The block's last line prints the verifier's verdict and is step 5; read its `verdict` as described
+below. The line before it, `CREATED: #<n> <url>`, is printed first so the new sub-issue's number
+survives whatever the verifier then says. If the lookup comes back empty the first `HALT` fires:
+the four-row verdict table below is what this mode branches on, and an unresolvable path produces
+no verdict at all — that silence must never be read as `linked`, or as anything else.
+
+**Before running the block, check the body against its delimiter.** The `SUB_TASK` text is pasted
+between the `SUB_TASK_END` lines, so if any line of that text is exactly equal to `SUB_TASK_END`
+(and likewise any line of the bare title is exactly equal to `BARE_TITLE_END`), the shell ends the
+here-document there and the rest runs as commands. Check that no body line is equal to its
+delimiter; if one is, halt and report it rather than editing the text.
+
+**The create block must never be re-run.** Once `CREATED:` has printed, the sub-issue exists; a
+second run of the create block makes a duplicate. Any follow-up — a repair, a retry of the verifier
+— uses the repair block below, with the number from the `CREATED:` line.
+
+How the block is built, and why:
+
+- **The helper is `VPL`'s sibling**, never found by a second, independent search (that search could
+  resolve to a different copy). If it is missing, an older vendored copy has
+  `verify_parent_link.py` but was never given the helper: the block halts loud, names the missing
+  helper, and names the fix — list `.claude/scripts/compose_subissue_title.py` in the consuming
+  project's sync configuration `files` array, then sync.
+- **The project's conventions file is passed explicitly** with `--conventions`, so the plugin's own
+  copy is never read in its place. The title shape is declared once, in that file's
+  `issueTitle.subIssue`; to see it, print `issueTitle.subIssue.format` and
+  `issueTitle.subIssue.legend` from there. This document does not restate either.
+- **`<k>` is the sub-task's ordinal** from its id in the handoff plan (`t16` gives `16`).
+- **The bare title and the body each enter through a quoted here-document**, each with its own
+  delimiter, so no character in either can alter the command. The title is handed over as
+  `--title="$BARE"`, one word, so a title that begins with dashes is still a value, not an option.
+  The body goes to `gh` with `--body-file -`, never inline as `--body`.
+- **Never retry with a title that lacks the parent reference.**
+
+Exit `0` is `composed`; exit `2` is `refused`, and nothing is created. The refusal's JSON carries
+`cause`, `reason` and `remediation`. The causes, in the order the helper checks them:
 
 | Cause | What it means |
 |---|---|
-| `conventions-missing` | the conventions file, its `issueTitle` block or `issueTitle.subIssue.format` is absent or unreadable (or the project root could not be determined) — add the block named in `remediation` |
+| `conventions-missing` | the conventions file, its `issueTitle` block, `issueTitle.subIssue.format`, or a present and valid `issueTitle.pattern` is absent or unreadable (or the project root could not be determined) — add the block named in `remediation` |
 | `format-malformed` | the declared format lacks or repeats a placeholder, or is not led by the effort tag |
-| `parent-missing` | `PARENT_ISSUE` is empty |
+| `parent-missing` | `PARENT_ISSUE` is empty (or only a `#`) |
 | `parent-not-positive-integer` | `PARENT_ISSUE` is not a positive integer (one leading `#` is allowed) |
 | `subtask-missing` | no sub-task ordinal was supplied |
 | `subtask-not-positive-integer` | the sub-task ordinal is not a positive integer (`16`, not `t16`) |
 | `bare-title-invalid` | the bare title is empty, spans lines, holds a control character, or already starts with an effort tag |
 | `pattern-mismatch` | the effort tag is not a declared one, or the composed title fails `issueTitle.pattern` |
 
-**Create the sub-issue, then verify — a create's exit code is a request, never a fact.** The
-title is the composed `$TITLE`, expanded inside double quotes:
+**The create is a request, never a fact.** `gh issue create` exits `0` when the request was
+accepted, not when the link exists — which is why the block reads the link back with the verifier
+immediately, using the sub-issue number it parsed from the created URL.
 
-```bash
-gh issue create --parent <PARENT_ISSUE> --title "$TITLE" --body "<the supplied SUB_TASK block, verbatim — no brief exists yet at this point to draw a body from>"
-```
-
-exits `0` when the request was accepted, not when the link exists. Immediately read it back with
-the verifier line from the lookup block:
-
-```bash
-py -3 "$VPL" --sub <sub> --parent <PARENT_ISSUE> --json
-```
-
-Branch on its `verdict`. The verdict set and the repair budget both live in
+Branch on the verifier's `verdict`. The verdict set and the repair budget both live in
 `.claude/work-item-conventions.json` → `issueLink` and its nested `parentLink` block, which is
 the single source of truth for both; where the table below and that file ever disagree, the
 conventions file governs. The table exists because the per-verdict *action* genuinely lives
@@ -180,9 +210,42 @@ nowhere else:
 | Verdict | What it means | What this mode does |
 |---|---|---|
 | `unverifiable` | the resolver itself could not be reached — `gh` missing, unauthenticated, or the query failed | Halt loud. The create command's own exit code is never read as the answer. |
-| `no-parent` | GitHub reports no parent for the new sub-issue | Repair, up to `issueLink.maxRepairAttempts` time(s) — read the count from the conventions file, never hardcode it here: `gh issue edit <sub> --parent <PARENT_ISSUE>`, then re-run the verifier, passing `--repair-attempted`. Still `no-parent` once the budget is spent → halt. |
+| `no-parent` | GitHub reports no parent for the new sub-issue | Run the repair block below, never the create block, up to `issueLink.maxRepairAttempts` time(s) — read the count from the conventions file, never hardcode it here. Still `no-parent` once the budget is spent → halt. |
 | `foreign-parent` | GitHub reports a parent, but it names a different issue | Halt. Never re-parent automatically — reassigning an issue's parent is a destructive tracker mutation with no undo. |
 | `linked` | GitHub reports the expected parent | Proceed to write the brief. |
+
+**The repair block** is for the `no-parent` verdict only. It looks the scripts up the same way,
+attaches the existing sub-issue to its parent with `gh issue edit`, and re-runs the verifier with
+`--repair-attempted`. Fill in the sub-issue number from the `CREATED:` line and the parent number;
+run it once per repair attempt, whole, in a single Bash invocation. It creates nothing.
+
+```bash
+VPL=
+S=.claude/scripts/verify_parent_link.py
+if [ -f "$S" ]; then VPL=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then VPL=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  VPL=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$VPL" --help >/dev/null 2>&1 || { echo "HALT: verify_parent_link.py not found; no parent-link verdict is possible, so nothing is repaired"; exit 2; }
+P="<PARENT_ISSUE>"; P=$(printf %s "$P" | tr -d ' \t\r'); P=${P#\#}
+case "$P" in ''|*[!0-9]*) echo "HALT: PARENT_ISSUE must be an issue number such as 638 or #638; nothing is repaired"; exit 2;; esac
+SUB="<sub>"; SUB=$(printf %s "$SUB" | tr -d ' \t\r'); SUB=${SUB#\#}
+case "$SUB" in ''|*[!0-9]*) echo "HALT: the sub-issue number must be digits (take it from the CREATED line); nothing is repaired"; exit 2;; esac
+gh issue edit "$SUB" --parent "$P" || { echo "HALT: gh issue edit failed; the parent link is not repaired"; exit 2; }
+py -3 "$VPL" --sub "$SUB" --parent "$P" --repair-attempted --json
+```
 
 **Fill in every frontmatter key the skipped steps would otherwise have set.** Steps 3, 3.5 and 4
 are skipped in this mode (below), and Step 5 creates nothing — which is exactly the set of steps
