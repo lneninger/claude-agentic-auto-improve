@@ -10,7 +10,7 @@ One Stop hook in place of two. It follows ``post-edit-dispatcher.py`` (one proce
 after another through ``_inprocess_hook.run_script``, in the order of its ``CHECKS`` list), with two
 differences forced by the Stop event: it is not asynchronous, and it exits 2 when any member exits 2,
 writing every member's error text in member order. Any other member code is ignored (fail open), and its
-own failure exits 0. Its members, in order: ``plain-language-guard.py``, then ``concept-changed-check.py``.
+own failure exits 0. Its members, in order: ``plain-language-guard.py``, then ``../scripts/concept_changed_check.py``.
 
 WHAT IS PINNED
 --------------
@@ -57,13 +57,13 @@ from pathlib import Path
 HOOKS_DIR = Path(__file__).resolve().parent.parent
 DISPATCHER = HOOKS_DIR / "stop-dispatcher.py"
 PLAIN = "plain-language-guard.py"
-CONCEPT = "concept-changed-check.py"
+CONCEPT = "../scripts/concept_changed_check.py"
 MEMBERS = [PLAIN, CONCEPT]
 
 STUB_SOURCE = '''\
 import json, os, sys
 
-NAME = os.path.basename(__file__)
+NAME = os.path.relpath(__file__, os.environ["STUB_HOOKS"]).replace(os.sep, "/")
 DATA = sys.stdin.read()
 CONFIG = json.loads(os.environ.get("STUB_CONFIG", "{}")).get(NAME, {})
 with open(os.environ["STUB_TRACE"], "a", encoding="utf-8") as fh:
@@ -106,6 +106,7 @@ class Workspace:
         self.temp = self.root / "temp"
         self.temp.mkdir()
         self.session_id = "s-stop-" + uuid.uuid4().hex
+        (self.root / "scripts").mkdir()  # the second member lives in the scripts folder beside hooks
         for name in MEMBERS:
             (self.hooks / name).write_text(STUB_SOURCE, encoding="utf-8")
 
@@ -116,7 +117,7 @@ class Workspace:
         payload = data if data is not None else json.dumps(
             {"session_id": self.session_id, "cwd": str(self.root), "stop_hook_active": False}).encode("utf-8")
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
-        env.update({"STUB_TRACE": str(self.trace), "STUB_CONFIG": json.dumps(config or {}),
+        env.update({"STUB_TRACE": str(self.trace), "STUB_HOOKS": str(self.hooks), "STUB_CONFIG": json.dumps(config or {}),
                     "HOME": str(self.home), "USERPROFILE": str(self.home),
                     "TEMP": str(self.temp), "TMP": str(self.temp), "TMPDIR": str(self.temp),
                     "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
@@ -151,7 +152,7 @@ class StopDispatcherTests(unittest.TestCase):
                 checks = ast.literal_eval(node.value)
         self.assertEqual(checks, MEMBERS,
                          msg="CHECKS (read as a literal, as the drift check reads it) must be "
-                             "plain-language-guard.py then concept-changed-check.py")
+                             "plain-language-guard.py then ../scripts/concept_changed_check.py")
 
     def test_members_run_in_order_in_the_dispatchers_own_process(self):
         pid, code, _out, err = self.ws.run()
@@ -335,6 +336,7 @@ class PlainLanguageGuardIdentityTests(unittest.TestCase):
         for item in HOOKS_DIR.iterdir():
             if item.is_file() and item.suffix in (".py", ".json") and item.name not in (CONCEPT, "bash-gate.py"):
                 shutil.copyfile(item, hooks / item.name)
+        (root / "scripts").mkdir(exist_ok=True)
         (hooks / CONCEPT).write_text("import sys\nsys.stdin.read()\nsys.exit(0)\n", encoding="utf-8")
         shutil.copyfile(DISPATCHER, hooks / "stop-dispatcher.py")
         return hooks

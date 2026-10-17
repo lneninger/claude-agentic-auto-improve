@@ -7,6 +7,8 @@ environment only, with one exception: for ``gh pr create``, ``gh pr edit`` with 
 a pull-request merge it runs ``../scripts/merge_direction.py`` as a subprocess (Extension Point 2) and
 blocks on any non-zero exit, a missing script or a timeout (marker ``MERGE DIRECTION``). The gate
 launcher (``_gate_launch.py``) calls it before either gate is loaded and runs no subprocess itself.
+It reads the write targets of a shell command with ``parse_redirect_targets`` from the default helper
+``_shell_write_targets.py`` beside it, never from the strict add-on's ``bash-gate.py``.
 
 The guard is not a sandbox: git spellings beyond the allow-list are ``mutating`` and blocked, a
 segment the parser cannot structure blocks when it names git or gh (fail closed), and programs that
@@ -747,11 +749,8 @@ def _child(st: State) -> State:
 def _redirects(ctx: Ctx, st: State, raw: str, reading: str) -> None:
     """Judge every write target ``parse_redirect_targets`` finds in one segment's text."""
     if ctx.bash_gate is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bash-gate.py")
-        spec = importlib.util.spec_from_file_location("bash_gate_for_guard", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        ctx.bash_gate = getattr(module, "parse_redirect_targets")
+        import _shell_write_targets  # by its plain name, like _project_paths; first needed for a shell command
+        ctx.bash_gate = _shell_write_targets.parse_redirect_targets
     for tool, target in ctx.bash_gate(raw):
         _judge(ctx, target, st.dir, reading, f"`{tool}` write target")
 

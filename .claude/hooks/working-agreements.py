@@ -30,6 +30,7 @@ Turn it off for one session with CLAUDE_WORKING_AGREEMENTS=off (also 0, false, n
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -444,9 +445,30 @@ def record_session_start(payload: dict) -> None:
         pass
 
 
+def record_changed_baseline(payload: dict) -> None:
+    """Record which files were already uncommitted when the session started (the Changed-file baseline).
+
+    The writer lives in ``../scripts/concept_changed_check.py``; this hook only loads and calls it, and
+    only when the payload's ``source`` is ``startup``. Its own catch-all, like the marker writer
+    above: a missing file or any failure writes no baseline, so the check counts every uncommitted
+    file (the stricter reading). It adds no output and no exit path.
+    """
+    try:
+        if payload.get("source") != "startup":
+            return
+        path = Path(__file__).resolve().parent.parent / "scripts" / "concept_changed_check.py"
+        spec = importlib.util.spec_from_file_location("concept_changed_check_for_baseline", str(path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.write_baseline(payload)
+    except BaseException:  # noqa: BLE001 -- a SessionStart hook must never fail a session
+        pass
+
+
 def run() -> int:
     payload = read_payload()
     record_session_start(payload)
+    record_changed_baseline(payload)
 
     if is_disabled():
         return 0

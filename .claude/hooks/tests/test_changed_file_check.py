@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""test_changed_file_check.py -- RED suite for ``concept-changed-check.py`` (the Changed-file check).
+"""test_changed_file_check.py -- RED suite for ``concept_changed_check.py`` (the Changed-file check).
 
 Contract: .claude/concepts/2026-10-12-dedupe-claude-config.md in the consuming repository, Revision 3
 (Data Shapes: Changed-file baseline; Commands: Check changed files) and Revision 4 (round-four findings 7
@@ -37,7 +37,7 @@ Narrow readings this file takes (the contract leaves them open):
     earlier one;
   * the check logs to ``<project>/.claude/logs/errors.jsonl`` with hook name ``concept-changed-check``.
 
-RED TODAY: ``concept-changed-check.py`` does not exist yet (block 17 adds it), so every row fails with a
+RED TODAY: ``concept_changed_check.py`` does not exist yet (block 17 adds it), so every row fails with a
 message that says so. Nothing is imported from it.
 
 Run:
@@ -60,7 +60,7 @@ from pathlib import Path
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = HOOKS_DIR.parent / "scripts"
-CHECK = "concept-changed-check.py"
+CHECK = "concept_changed_check.py"
 IS_WINDOWS = os.name == "nt"
 
 BASELINE_PREFIX = "auto-improve-changed-baseline-"
@@ -240,7 +240,7 @@ class Project:
         return env
 
     def check_path(self) -> Path:
-        path = self.hooks / CHECK
+        path = self.project / ".claude" / "scripts" / CHECK
         if not path.is_file():
             raise AssertionError("%s does not exist yet (block 17 adds the Changed-file check)" % path)
         return path

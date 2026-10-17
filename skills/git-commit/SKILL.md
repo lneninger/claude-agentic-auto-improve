@@ -152,6 +152,42 @@ Show the full drafted message to the user. Offer three actions:
 
 **Never proceed to commit without explicit approval.** Silence is not approval.
 
+## Step 5.5: Changed-file check on the staged files
+
+Once per commit, after the staged set is final and approved, ask the plugin's Changed-file check
+whether every staged file is covered by an approved contract. It judges the staged added, copied,
+modified and renamed files through the concept gate's own matcher. Find the script through the
+plugin only; a copy under the project's `.claude/` is never used, because a file there is trivial
+to both gates and could be forged.
+
+```bash
+S=.claude/scripts/concept_changed_check.py
+if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then CC=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  CC=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$CC" --staged   # macOS and Linux: python3 "$CC" --staged
+```
+
+If `CC` is empty, do not run the last line. Otherwise read its exit code:
+
+- **2:** refuse the commit. Show the files the check listed and its `/design-first` text, and tell the
+  user to run `/design-first` or pin the contract that covers them. Do not stage around it.
+- **0:** go on to Step 6.
+- **3, or `CC` empty:** say in one sentence that the check could not run (git missing, not a git
+  tree, a slow git call, or the plugin's script not found), then go on to Step 6.
+
 ## Step 6: Commit
 
 Use a single-quoted HEREDOC so `$variable`, backticks, and `!history` inside the message stay literal:
