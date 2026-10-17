@@ -12,9 +12,9 @@ branch: fix/57-own-repo-issue-closing
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261016-bug-plugin-not-closing-own-repo-issues
 north_stars: none
 contract: .claude/concepts/2026-10-16-recorded-issue-offer-outcome.md
-pr: UNKNOWN
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/58 (draft)
+issue_link: closes
+status: shipped
 created: 2026-10-16
 ---
 
