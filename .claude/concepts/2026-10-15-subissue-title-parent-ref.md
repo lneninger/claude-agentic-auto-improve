@@ -50,16 +50,16 @@ Not applicable. Reason: `Files to touch` has no Angular UI surface (component, t
 | **Sub-task ordinal input** | `raw` (string as supplied) | Trimmed, then digits only with an integer value ≥ 1. Accepted: `16`, ` 3 `. Refused: empty, `0`, `-1`, `t16`, `16.0`. The caller derives it from the sub-task id in the contract's handoff plan (`t16` gives `16`); the helper does not parse contracts. |
 | **Title composition request** | `effortTag` (enum, from Step 2.5's classification), `parent` (Parent reference input), `subTask` (Sub-task ordinal input), `bareTitle` (string, the sub-task name with no effort tag) | The helper's input. **Invariants:** `bareTitle` is trimmed; empty or whitespace-only, containing a line break or other control character, or already starting with an effort tag (`exactlyOne`) is refused as `bare-title-invalid`. `effortTag` is checked against `issueTitle.effortTypes` before rendering, and an undeclared tag is `pattern-mismatch`. The composed title is handed to `gh` through a shell variable filled from the helper's JSON and expanded inside double quotes (`--title "$TITLE"`), never spliced into the command text, so quotes, backticks and `$` in a bare title cannot alter the command. |
 | **Title composition result** | `verdict` (enum: `composed` \| `refused`), `title` (string, present only when `composed`), `cause` (enum, present only when `refused`), `reason` (string), `remediation` (string, optional) | The helper's JSON output. Parent-aware mode branches on `verdict`. |
-| **Refusal cause** (closed set, ordered — first match wins) | `conventions-missing` (file, `issueTitle` or `issueTitle.subIssue.format` absent/unreadable) → `format-malformed` (a placeholder missing or repeated, or not led by `[<EFFORT>]`) → `parent-missing` → `parent-not-positive-integer` → `subtask-missing` → `subtask-not-positive-integer` → `bare-title-invalid` → `pattern-mismatch` (the rendered title fails `issueTitle.pattern`, e.g. an undeclared tag) | Every refusal is named. No refusal path ever outputs a `title`. |
+| **Refusal cause** (closed set, ordered — first match wins) | `conventions-missing` (file, `issueTitle`, `issueTitle.pattern` missing or an invalid regular expression, `issueTitle.effortTypes` missing or not a list, or `issueTitle.subIssue.format` absent/unreadable) → `format-malformed` (a placeholder missing or repeated, or not led by `[<EFFORT>]`) → `parent-missing` → `parent-not-positive-integer` → `subtask-missing` → `subtask-not-positive-integer` → `bare-title-invalid` → `pattern-mismatch` (the rendered title fails `issueTitle.pattern`, e.g. an undeclared tag) | Every refusal is named. No refusal path ever outputs a `title`. |
 
 **Contract-wide invariants:**
 
-- **I-1** Every `composed` title contains `P:#<n>` and `ST:<k>`, where `n` is the normalised parent and `k` the validated sub-task ordinal, and matches `issueTitle.pattern`.
+- **I-1** Every `composed` title carries the normalised parent number and the validated sub-task ordinal, placed where the declared format puts them (`P:#<n>` and `ST:<k>` in the shipped format), and matches `issueTitle.pattern`. The helper enforces that each placeholder appears exactly once; the literal `P:#` and `ST:` belong to the shipped format only, because the format is editable (I-3).
 - **I-2** A refusal never comes with a title. Neither the helper nor Parent-aware mode falls back to the old `[<TYPE>] <bare title>` shape. A refusal halts the create, and nothing is created.
 - **I-3** The format is read from the conventions file at call time. Changing the fixture's `format` changes the output, and a test proves this. `parent-aware-mode.md` names the block and the helper and does not restate the template.
 - **I-4** The helper is pure. It makes no `gh` call, writes no file and mutates no tracker record.
 - **I-5** The brief's `title:` stays the **bare** sub-task name. The parent number lives only in `parent_issue:`, as today. A brief written in Parent-aware mode therefore never carries the Parent reference into `/ship`'s pull request title. (A later no-parent `/task` run on a sub-issue keeps the `P:#n ST:k` remainder as the bare title, so there it does reach the pull request title; that is accepted and stated in Failure Modes.)
-- **I-6** The conventions file is read from an explicit `--conventions` path that a test can redirect. **Plugin-install guard:** Parent-aware mode passes `--conventions <project .claude/work-item-conventions.json>` explicitly. When `--conventions` is absent, the helper reads exactly `<CLAUDE_PROJECT_DIR>/.claude/work-item-conventions.json` and never the shared multi-root locator, so it cannot fall through to the plugin's own file. It refuses `conventions-missing` with the reason "project conventions root not determinable" when `CLAUDE_PROJECT_DIR` is unset, and with the reason naming the missing path when it is set but the project has no such file. Tests cover both cases. *(Amended after implementation review, 2026-10-16: the first draft only covered the unset case; the reviewer showed the variable set with no project file still read the plugin's file. This replaces the use of `work_item_conventions_path()` for the helper's own fallback.)*
+- **I-6** The conventions file is read from an explicit `--conventions` path that a test can redirect. **Plugin-install guard:** Parent-aware mode passes `--conventions <project .claude/work-item-conventions.json>` explicitly. When `--conventions` is absent, the helper reads exactly `<CLAUDE_PROJECT_DIR>/.claude/work-item-conventions.json` and never the shared multi-root locator, so it cannot fall through to the plugin's own file. It refuses `conventions-missing` with the reason "project conventions root not determinable" when `CLAUDE_PROJECT_DIR` is unset, and with the reason naming the missing path when it is set but the project has no such file. Tests cover both cases. **Decided 2026-10-16 (third review):** the skill's block passes `--conventions "${CLAUDE_PROJECT_DIR:-.}/.claude/work-item-conventions.json"`, so when the variable is unset the caller uses the working directory, which is the project or its flat worktree and carries the tracked file. The helper's own refusal therefore guards direct callers only; this is accepted. An explicit empty `--conventions ""` is treated as absent. *(Amended after implementation review, 2026-10-16: the first draft only covered the unset case; the reviewer showed the variable set with no project file still read the plugin's file. This replaces the use of `work_item_conventions_path()` for the helper's own fallback.)*
 
 ### Events
 
@@ -97,7 +97,7 @@ None. `compose_subissue_title.py` is a new **instance** of the shape `verify_par
 
 ## Extension Points
 
-- `.claude/work-item-conventions.json` → add `issueTitle.subIssue` with `$comment` and `format`. The `$comment` names the helper as its reader and says that the effort list and pattern stay in the outer block.
+- `.claude/work-item-conventions.json` → add `issueTitle.subIssue` with `$comment`, `legend` and `format`. The `$comment` names the helper as its reader and says that the effort list and pattern stay in the outer block.
 - `.claude/scripts/plugin_doctor.py` → `SCAFFOLDS[".claude/work-item-conventions.json"]["issueTitle"]` gains the same `subIssue` block. This is the repository's second copy of the conventions shape (AC-7). Its separate missing-`parentLink` gap is deferred (see Adjacent Areas).
 - `skills/task/references/parent-aware-mode.md`:
   - "Order of operations" gains a step between classify and create: **compose the title**. A `refused` result halts, names the cause, and creates nothing.
@@ -110,7 +110,7 @@ None. `compose_subissue_title.py` is a new **instance** of the shape `verify_par
   - hide sub-issues: `gh issue list --search "no:parent-issue"`
   - list one parent's children: `gh issue list --search "parent-issue:<owner>/<repo>#<n>"`
   - or the `parentLink.parentListCommand` the conventions file already declares. The note cites it by name and does not restate it.
-- Manifests: `plugin.json`, `.claude-plugin/plugin.json`, `.cursor-plugin/plugin.json`, `.claude-plugin/marketplace.json` (two entries) → `0.9.1`.
+- Manifests: `plugin.json`, `.claude-plugin/plugin.json`, `.cursor-plugin/plugin.json`, `.claude-plugin/marketplace.json` (two entries) → `0.9.2` (master was at 0.9.1 when this branch was last rebased).
 
 ---
 
@@ -353,7 +353,7 @@ CONSTRAINTS:
     Refusal order and cause names exactly as the contract's Data Shapes. Exit 0 composed,
     2 refused. JSON keys: verdict, title (composed only), cause and remediation (refused only),
     reason.
-  - Conventions: add issueTitle.subIssue {"$comment", "format"} only. Do not restate the
+  - Conventions: add issueTitle.subIssue {"$comment", "legend", "format"} only. Do not restate the
     effort list or pattern. Mirror the same block into plugin_doctor.py's scaffold. Do NOT add
     parentLink there (follow-up stub).
   - parent-aware-mode.md: add the "compose the title" step to Order of operations, move the
@@ -366,7 +366,7 @@ CONSTRAINTS:
     (no:parent-issue; parent-issue:<owner>/<repo>#<n>; cite parentLink.parentListCommand by
     name). Before shipping, run the parent-issue: qualifier once read-only and record the result
     in the PR description; drop that line if it fails.
-  - Bump the version to 0.9.1 in all five manifest entries; check_version_bump.py must pass.
+  - Bump the version to 0.9.2 in all five manifest entries; check_version_bump.py must pass.
   - Run test_compose_subissue_title.py, test_verify_parent_link.py, test_plugin_doctor.py,
     test_check_version_bump.py and test_skill_script_lookup.py; all green. The moved lookup block
     must keep the VPL line as the FIRST `py -3 "$VAR"` line of its fenced block (that test cuts
