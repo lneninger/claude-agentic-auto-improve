@@ -239,6 +239,22 @@ gate failed open, releasing a sub-task whose parent had not merged.
 Do not reintroduce it to solve a scheduling problem. `/flow` and `/advance` do the same job
 through pull requests, which gives the review surface the removed design never had.
 
+## Step 3.6: Make sure a Work Item Brief links the contract
+
+When the user approves a contract, check that a Work Item Brief (the file under `.claude/work-items/` that records a change's branch, contract and pull request) is linked to it. The later `/pr-merged` step refuses to record a delivery, with guard G-1, unless the contract's own brief names the pull request by branch or link. A run started with `/design-first` directly, not through `/task`, has no such brief, so its merged pull request could never be recorded.
+
+1. Find the linked brief the way `pr_merged.find_linked_brief` does: the contract's `**Work Item Brief:**` header first, then the one brief whose `contract:` field names this contract. If one exists, do nothing.
+2. If none exists, write a minimal brief at `.claude/work-items/<contract-date>-<contract-slug>.md`, in the shape `/task` writes:
+   - `id: none`, `source: free-text`, `url: none`, `status: designing`, `created:` today
+   - `branch:` the branch you are on now (the branch the work will be delivered from), never the default branch
+   - `contract:` the contract's repository-relative path
+   - `pr: none`, `issue_link: none`, `north_stars: none`
+   - a short Problem statement and Acceptance criteria that point at the contract, which is authoritative
+3. Add the line `**Work Item Brief:** .claude/work-items/<file>.md` to the contract header, under `**Requested by:**`.
+4. Tell the user in one line that the brief was created, and why.
+
+Do not ask a question for this: it records facts already known (the branch and the contract path). If you are on the default branch, stop and enter a worktree first, because the brief's branch must be the one that will merge.
+
 ## Step 4: Hand off to implementer agents
 
 Read the `Implementation Handoff` section of the approved contract. For each handoff block, launch the named agent (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`) with the pre-written TASK block from the contract.
