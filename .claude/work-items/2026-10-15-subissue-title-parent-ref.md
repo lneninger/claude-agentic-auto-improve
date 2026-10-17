@@ -12,9 +12,9 @@ branch: feature/subissue-title-parent-ref
 worktree: .claude/worktrees/20261015-feature-subissue-title-parent-ref
 north_stars: none - the register holds no active thought
 contract: .claude/concepts/2026-10-15-subissue-title-parent-ref.md
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/55
+issue_link: none
+status: shipped
 created: 2026-10-15
 ---
 
@@ -74,4 +74,5 @@ non-trivial → /design-first
   - `${CLAUDE_PROJECT_DIR:-.}` in the block makes the helper's "root not determinable" refusal unreachable; amend the contract's I-6 wording or drop the fallback.
   - Contract wording: three lines disagree about the `subIssue` keys (legend included); the `conventions-missing` row omits the missing-pattern case; I-1 holds only for the shipped format.
   - Not recorded anywhere yet: the `parent-issue:` search qualifier returned 0 results on a real parent (#638) and was dropped from the flow note. Put that in the pull request description.
-- Next: one more fix round (tests for the cases above first), then the verification stage, commit and draft pull request. Nothing has been pushed to a pull request.
+- 2026-10-16 (resumed on the user's "continue"): rebased onto master, version raised to 0.9.2, all pass-3 findings fixed test-first. A fourth fresh review found one more real defect (Git Bash rewrites a title starting with `/`), fixed test-first and verified by my own full run; no further review pass was run after that last fix. Draft pull request opened: https://github.com/lneninger/claude-agentic-auto-improve/pull/55 (closing link: not applicable, no tracker issue).
+- Open for the operator: open draft #54 also claims 0.9.2 (whichever merges second bumps to 0.9.3); retitling the 37 existing StockToolScalpingMachine sub-issues (tracked in #51); promoting three vocabulary terms after merge.
