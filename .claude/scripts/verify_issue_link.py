@@ -121,6 +121,12 @@ UNVERIFIABLE_CAUSES = [
 REMEDIATION = {
     "gh-missing": "winget install --id GitHub.cli, then gh auth login.",
     "gh-unauthenticated": "Run gh auth login and retry.",
+    "graphql-unavailable": (
+        "GitHub GraphQL is blocked in this session (a Claude Code cloud session allows only REST), and a "
+        "pull request's resolved closing issue links are GraphQL-only. Confirm the link outside the session: "
+        "open the pull request on github.com and check that its Development sidebar lists the issue, "
+        "or run this verifier from a local checkout."
+    ),
     "query-failed": "Retry; if it persists, run the verifyCommand by hand and paste the output.",
     "pr-not-found": "Caller bug -- check the --pr argument against gh pr view.",
     "conventions-missing": (
@@ -798,6 +804,8 @@ def _gh_json(run_gh, args):
 
 def _classify_gh_failure(stderr):
     blob = (stderr or "").lower()
+    if "graphql" in blob and ("not available" in blob or "403" in blob):
+        return "graphql-unavailable"
     if "not logged" in blob or "authentication" in blob or "gh auth login" in blob:
         return "gh-unauthenticated"
     if "could not resolve to a pullrequest" in blob or "no pull requests found" in blob:
