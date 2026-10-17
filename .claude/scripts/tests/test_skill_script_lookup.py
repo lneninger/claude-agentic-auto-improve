@@ -11,8 +11,10 @@ WHAT IS PINNED DOWN
 -------------------
 Claude Code runs a skill's bash blocks in a shell. Each skill that needs one of the plugin's scripts
 (pr_merged.py, land_contract.py, verify_parent_link.py, auto_improve_finish_install.py) carries a block
-that finds it. The order is fixed: the project copy, then CLAUDE_PLUGIN_ROOT, then the installPath that
-installed_plugins.json records (an entry for this project first, then the user entry), then the newest
+that finds it. The order depends on the script. A script the project may override (pr_merged.py and its
+friends) tries the project copy first. The plugin-first variables and the plugin-only scripts
+(concept_changed_check.py) differ: they do not start with a project copy. The rest of the order is fixed:
+CLAUDE_PLUGIN_ROOT, then the installPath that installed_plugins.json records (an entry for this project first, then the user entry), then the newest
 cache folder compared as numbers.
 
 How the copies are found: every line under skills/**/*.md that contains "agentic-auto-improve/*/" is a
@@ -441,7 +443,8 @@ class TestSkillScriptLookup(unittest.TestCase):
                                  "with no plugin install anywhere the current worktree's copy is used: %r" % got)
 
     def test_a_pr_merged_style_lookup_still_prefers_the_project_copy(self):
-        # Guard for the order above: only the plugin-first variables may differ from project-copy-first.
+        # Guard for the order above: the plugin-first variables and the plugin-only scripts may differ from
+        # project-copy-first; every other lookup (PRM and friends) keeps the project copy first.
         others = [s for s in self.snips if s["var"] not in self.PLUGIN_FIRST_VARS]
         self.assertGreater(len(others), 0, "the project-copy-first lookups (PRM and friends) must still exist")
         self.assertIn("PRM", {s["var"] for s in others}, "the pr_merged lookup (PRM) keeps the project copy first")
