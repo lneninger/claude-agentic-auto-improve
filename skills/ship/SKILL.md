@@ -318,6 +318,14 @@ the link resolves.
 Open as a **draft** unless the user asked otherwise, and say that you did. A draft is
 reversible; a review request pinging five people is not.
 
+**In a Claude Code cloud session GitHub's GraphQL endpoint is blocked (HTTP 403), but REST works.**
+The scripts read through REST there. For the actions `gh` would send over GraphQL, use the CCR
+routes on `api.github.com` named in the 403 text instead of `gh pr ready` / `gh pr merge --auto`:
+`POST /repos/{owner}/{repo}/pulls/{n}/ccr/ready_for_review`, `POST .../ccr/convert_to_draft`,
+`PUT` or `DELETE .../ccr/auto_merge`. A pull request's resolved closing issue links are
+GraphQL-only, so Step 4d returns `unverifiable` with cause `graphql-unavailable` there: confirm the
+link on github.com or from a local checkout, and never accept the body text as proof.
+
 ### 4c. Capture the number
 
 ```bash

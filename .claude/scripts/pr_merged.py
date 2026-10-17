@@ -1657,6 +1657,105 @@ def _run(cmd: List[str], *, cwd: Optional[str] = None,
         return 1, ""
 
 
+_PULL_URL = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)")
+
+
+def _slug_from_url(url: str) -> Optional[Tuple[Optional[str], str]]:
+    """``(host or None, "owner/name")`` from a remote URL, scp form or ``owner/name`` text; else ``None``."""
+    text = url.strip()
+    if text.endswith(".git"):
+        text = text[:-4]
+    host: Optional[str] = None
+    m = re.match(r"^[a-z+]+://(?:[^@/]*@)?([^/:]+)(?::\d+)?/(.+)$", text)
+    if m:
+        host, text = m.group(1), m.group(2)
+    elif re.match(r"^[^@/]+@[^:/]+:", text):
+        host, text = text.split("@", 1)[1].split(":", 1)
+    parts = [p for p in text.strip("/").split("/") if p]
+    if len(parts) < 2:
+        return None
+    if host and host in ("127.0.0.1", "localhost"):
+        host = None  # the session's git proxy, not a GitHub host
+    return host, "%s/%s" % (parts[-2], parts[-1])
+
+
+def _gh_rest(path: str, *, host: Optional[str] = None, cwd: Optional[str] = None,
+             env: Optional[Dict[str, str]] = None) -> Any:
+    """One ``gh api`` read (REST), parsed; ``None`` on any failure. Never raises.
+
+    The REST routes work where GitHub's GraphQL endpoint is blocked (a Claude Code cloud session).
+    """
+    cmd = ["gh", "api"]
+    if host and host != "github.com":
+        cmd += ["--hostname", host]
+    cmd.append(path)
+    extra: Dict[str, Any] = {}
+    if cwd is not None:
+        extra["cwd"] = cwd
+    if env is not None:
+        extra["env"] = env
+    code, out = _run(cmd, **extra)
+    if code != 0 or not out:
+        return None
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return None
+
+
+def _own_slug(cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> Optional[Tuple[Optional[str], str]]:
+    """The checkout's own ``(host, "owner/name")``, from ``GH_REPO`` else the ``origin`` remote."""
+    gh_repo = (env if env is not None else os.environ).get("GH_REPO")
+    if gh_repo:
+        return _slug_from_url(gh_repo)
+    extra: Dict[str, Any] = {"cwd": cwd} if cwd is not None else {}
+    code, url = _run(["git", "remote", "get-url", "origin"], **extra)
+    return _slug_from_url(url) if code == 0 and url else None
+
+
+def _pr_from_rest(slug: Tuple[Optional[str], str], number: int) -> Optional[Dict[str, Any]]:
+    """A pull request in ``gh pr view``'s JSON shape, read through REST."""
+    host, name = slug
+    raw = _gh_rest("repos/%s/pulls/%d" % (name, number), host=host)
+    if not isinstance(raw, dict):
+        return None
+    merged = bool(raw.get("merged_at"))
+    state = "MERGED" if merged else str(raw.get("state") or "").upper()
+    head = raw.get("head") if isinstance(raw.get("head"), dict) else {}
+    base = raw.get("base") if isinstance(raw.get("base"), dict) else {}
+    commits_raw = _gh_rest("repos/%s/pulls/%d/commits?per_page=100" % (name, number), host=host)
+    commits = [{"oid": c.get("sha")} for c in commits_raw if isinstance(c, dict)] if isinstance(commits_raw, list) else []
+    rollup = None
+    if head.get("sha"):
+        runs = _gh_rest("repos/%s/commits/%s/check-runs" % (name, head["sha"]), host=host)
+        if isinstance(runs, dict) and isinstance(runs.get("check_runs"), list):
+            rollup = [{"conclusion": str(r.get("conclusion") or "").upper() or None} for r in runs["check_runs"]
+                      if isinstance(r, dict)]
+    return {"number": raw.get("number"), "title": raw.get("title"), "state": state,
+            "mergedAt": raw.get("merged_at"),
+            "mergeCommit": {"oid": raw["merge_commit_sha"]} if merged and raw.get("merge_commit_sha") else None,
+            "headRefName": head.get("ref"), "baseRefName": base.get("ref"), "url": raw.get("html_url"),
+            "commits": commits, "statusCheckRollup": rollup}
+
+
+def _gh_pr_rest(ref: "int | str") -> Optional[Dict[str, Any]]:
+    text = str(ref)
+    m = _PULL_URL.match(text)
+    if m:
+        host = None if m.group(1) == "github.com" else m.group(1)
+        return _pr_from_rest((host, "%s/%s" % (m.group(2), m.group(3))), int(m.group(4)))
+    slug = _own_slug()
+    if slug is None:
+        return None
+    if text.isdigit():
+        return _pr_from_rest(slug, int(text))
+    owner = slug[1].split("/")[0]  # a branch name: the newest pull request from it, in this repository
+    found = _gh_rest("repos/%s/pulls?state=all&head=%s:%s&per_page=1" % (slug[1], owner, text), host=slug[0])
+    if isinstance(found, list) and found and isinstance(found[0], dict) and isinstance(found[0].get("number"), int):
+        return _pr_from_rest(slug, found[0]["number"])
+    return None
+
+
 def gh_pr(ref: "int | str") -> Optional[Dict[str, Any]]:
     """Ask GitHub about one pull request -- Extension Point 5.
 
@@ -1664,15 +1763,18 @@ def gh_pr(ref: "int | str") -> Optional[Dict[str, Any]]:
     or an ``https://`` link, resolved by ``gh`` itself per call -- no
     ``--repo`` flag, and nothing written to the process environment. Either
     form is passed to ``gh pr view`` as its one positional argument.
+
+    ``gh pr view`` is GraphQL. Where that endpoint is blocked (a Claude Code cloud session) the
+    same pull request is read through REST and returned in the same shape.
     """
     code, out = _run(["gh", "pr", "view", str(ref), "--json",
                       "number,title,state,mergedAt,mergeCommit,headRefName,baseRefName,url,commits,statusCheckRollup"])
-    if code != 0 or not out:
-        return None
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return None
+    if code == 0 and out:
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            pass
+    return _gh_pr_rest(ref)
 
 
 def repo_view(name: Optional[str] = None, *, cwd: Optional[str] = None,
@@ -1706,18 +1808,34 @@ def repo_view(name: Optional[str] = None, *, cwd: Optional[str] = None,
     if env is not None:
         extra["env"] = env
     code, out = _run(cmd, **extra)
-    if code != 0 or not out:
-        return None
-    try:
-        payload = json.loads(out)
-    except json.JSONDecodeError:
-        return None
+    payload: Any = None
+    if code == 0 and out:
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError:
+            payload = None
     if not isinstance(payload, dict):
-        return None
+        return _repo_view_rest(name, cwd=cwd, env=env)
     default_branch = payload.get("defaultBranchRef")
     if isinstance(default_branch, dict):
         default_branch = default_branch.get("name")
     return {"nameWithOwner": payload.get("nameWithOwner"), "defaultBranchRef": default_branch}
+
+
+def _repo_view_rest(name: Optional[str], *, cwd: Optional[str] = None,
+                    env: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+    """``repo_view``'s fallback: the same answer through ``gh api repos/{owner}/{name}`` (REST).
+
+    ``gh repo view`` is GraphQL, which a Claude Code cloud session blocks. ``name`` absent resolves
+    the checkout's own repository from ``GH_REPO`` else its ``origin`` remote.
+    """
+    slug = _slug_from_url(name) if name else _own_slug(cwd, env)
+    if slug is None:
+        return None
+    raw = _gh_rest("repos/%s" % slug[1], host=slug[0], cwd=cwd, env=env)
+    if not isinstance(raw, dict) or not raw.get("full_name"):
+        return None
+    return {"nameWithOwner": raw.get("full_name"), "defaultBranchRef": raw.get("default_branch")}
 
 
 def git_combined_diff(sha: str) -> Tuple[List[str], Optional[int]]:
@@ -1838,12 +1956,16 @@ def _read_issue_state(issue: int) -> Optional[str]:
     read nothing.
     """
     code, out = _run(["gh", "issue", "view", str(issue), "--json", "state"])
-    if code != 0:
-        return None
-    try:
-        payload = json.loads(out)
-    except json.JSONDecodeError:
-        return None
+    payload: Any = None
+    if code == 0:
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError:
+            return None
+    else:  # gh issue view is GraphQL; a cloud session blocks it, so read the same state through REST
+        slug = _own_slug()
+        raw = _gh_rest("repos/%s/issues/%s" % (slug[1], issue), host=slug[0]) if slug else None
+        payload = {"state": raw.get("state")} if isinstance(raw, dict) else None
     if not isinstance(payload, dict):
         return None
     state = payload.get("state")
