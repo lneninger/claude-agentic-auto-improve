@@ -214,15 +214,27 @@ def dispatcher_names(source: str) -> set:
     return set()
 
 
-def coverage_problems(on_disk: set, registered: set, dispatched: set) -> list:
-    """Every non-helper hook file is registered or dispatched; nothing registered or dispatched is missing from disk."""
+def coverage_problems(on_disk: set, registered: set, dispatched: set, hooks_dir=None) -> list:
+    """Every non-helper hook file is registered or dispatched; nothing registered or dispatched is missing from disk.
+
+    RULE CHANGED (dedupe contract, Revision 8, I.3; block 27). A dispatcher member holding ``/`` is a path:
+    it is resolved against ``hooks_dir`` (the hooks folder) and that file must exist. It is not a hooks-folder
+    listing entry, so it is never compared with ``on_disk``. A bare name keeps the old rule: it is a file in
+    the hooks folder and must be in ``on_disk``. With no ``hooks_dir`` a path member cannot be resolved, so it
+    is reported."""
+    bare = {m for m in dispatched if "/" not in m}
+    paths = {m for m in dispatched if "/" in m}
     problems = []
-    if on_disk - registered - dispatched:
+    if on_disk - registered - bare:
         problems.append("on disk but neither registered nor named by the dispatcher: %s"
-                        % sorted(on_disk - registered - dispatched))
-    if (registered | dispatched) - on_disk:
+                        % sorted(on_disk - registered - bare))
+    if (registered | bare) - on_disk:
         problems.append("registered or named by the dispatcher but absent from disk: %s"
-                        % sorted((registered | dispatched) - on_disk))
+                        % sorted((registered | bare) - on_disk))
+    missing_paths = sorted(m for m in paths if hooks_dir is None or not (pathlib.Path(hooks_dir) / m).is_file())
+    if missing_paths:
+        problems.append("named by the dispatcher as a path, but no such file beside the hooks folder: %s"
+                        % missing_paths)
     return problems
 
 
@@ -255,9 +267,10 @@ for _d in (_dispatcher_file, _stop_dispatcher_file):
         dispatched |= dispatcher_names(_d.read_text(encoding="utf-8", errors="replace"))
 check("the two dispatchers' CHECKS lists name at least the six members the contract assigns them",
       {"integration-check.py", "critic-verdict-tracker.py", "contract-status-watcher.py",
-       "journal-post-approval-tracker.py", "plain-language-guard.py", "concept-changed-check.py"} <= dispatched,
+       "journal-post-approval-tracker.py", "plain-language-guard.py",
+       "../scripts/concept_changed_check.py"} <= dispatched,
       "read %s" % sorted(dispatched))
-_cov = coverage_problems(on_disk, registered, dispatched)
+_cov = coverage_problems(on_disk, registered, dispatched, ROOT / ".claude" / "hooks")
 check("no hook file is left unregistered: each is in hooks.json or in a dispatcher's CHECKS list",
       not _cov, "; ".join(_cov))
 check("control: a tracker named neither in hooks.json nor in the dispatcher is reported",
@@ -268,9 +281,35 @@ check("control: a tracker named only in hooks.json is accepted",
       coverage_problems({"a.py", "tracker.py"}, {"a.py", "tracker.py"}, set()) == [])
 check("control: a file named but absent from disk is reported",
       bool(coverage_problems({"a.py"}, {"a.py", "ghost.py"}, set())))
+import tempfile as _coverage_tempfile  # noqa: E402 - the controls below build a throwaway hooks/scripts pair
+
+with _coverage_tempfile.TemporaryDirectory() as _cov_tmp_name:
+    _cov_hooks = pathlib.Path(_cov_tmp_name) / "hooks"
+    _cov_scripts = pathlib.Path(_cov_tmp_name) / "scripts"
+    _cov_hooks.mkdir()
+    _cov_scripts.mkdir()
+    (_cov_scripts / "present.py").write_text("# stub\n", encoding="utf-8")
+    check("control (rule change I.3): a path member naming a file beside the hooks folder is accepted, and "
+          "is not asked to be in the hooks folder listing",
+          coverage_problems({"a.py"}, {"a.py"}, {"../scripts/present.py"}, _cov_hooks) == [],
+          "; ".join(coverage_problems({"a.py"}, {"a.py"}, {"../scripts/present.py"}, _cov_hooks)))
+    _cov_missing = coverage_problems({"a.py"}, {"a.py"}, {"../scripts/ghost.py"}, _cov_hooks)
+    check("control (rule change I.3): a path member naming a missing file is reported",
+          any("ghost.py" in p for p in _cov_missing), "; ".join(_cov_missing) or "no problem reported")
+    check("control (rule change I.3): a bare name is still a hooks-folder file (present.py lives in scripts, "
+          "so the bare spelling is reported) while the path spelling resolves",
+          bool(coverage_problems({"a.py"}, {"a.py"}, {"present.py"}, _cov_hooks))
+          and coverage_problems({"a.py"}, {"a.py"}, {"../scripts/present.py"}, _cov_hooks) == [],
+          "a bare name present.py must still be looked up in the hooks folder listing")
+    check("control (rule change I.3): with no hooks folder to resolve against, a path member is reported",
+          bool(coverage_problems({"a.py"}, {"a.py"}, {"../scripts/present.py"})))
+check("control: a bare name in the dispatcher's list keeps the hooks-folder rule (absent from disk is reported)",
+      bool(coverage_problems({"a.py"}, {"a.py"}, {"ghost-tracker.py"})))
 check("control: the dispatcher scan reads the CHECKS literal and ignores helpers and other constants",
       dispatcher_names('CHECKS = ["one.py", "two-x.py", "_helper.py"]\nHELPER = "_inprocess_hook.py"\n'
                        'ME = "other-hook.py"') == {"one.py", "two-x.py"})
+check("control: the dispatcher scan keeps a path member as written",
+      dispatcher_names('CHECKS = ["one.py", "../scripts/two_x.py"]') == {"one.py", "../scripts/two_x.py"})
 check("control: a dispatcher that declares no CHECKS list contributes nothing",
       dispatcher_names('MEMBERS = ["one.py"]') == set())
 

@@ -21,7 +21,11 @@ WHAT IS PINNED
   * ``plain-language-guard.py``'s exit code and its error text are BYTE-IDENTICAL to running it alone;
   * a member's ``systemMessage`` reaches the dispatcher's output (the Changed-file check's "noted" outcome
     is a systemMessage; a dispatcher that swallowed it would turn "noted" into silence);
-  * the dispatcher's own failure (it cannot load the in-process runner; empty input) exits 0.
+  * the dispatcher's own failure (it cannot load the in-process runner; empty input) exits 0;
+  * (Revision 8, I.5) a MISSING member fails open: exit 0 with no traceback, one error-log line (hook
+    ``stop-dispatcher``, event ``member-missing``), one notice per session naming the member (a
+    ``systemMessage`` on exit 0; one trailing stderr line after the members' own text on exit 2), and the
+    other members still run.
 
 HOW IT IS TESTED
 ----------------
@@ -47,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent
@@ -90,6 +95,17 @@ class Workspace:
         shutil.copyfile(DISPATCHER, self.hooks / "stop-dispatcher.py")
         if with_runner:
             shutil.copyfile(HOOKS_DIR / "_inprocess_hook.py", self.hooks / "_inprocess_hook.py")
+        # Revision 8, I.5 (the one sanctioned fixture change): the error-log helper and its path helper sit
+        # beside the dispatcher; HOME and USERPROFILE name a throwaway home whose .claude/logs exists, so a
+        # log line never reaches the developer's real home log; TEMP and TMP are fresh per Workspace and the
+        # session id is unique per Workspace, so the once-per-session marker never leaks between rows or reruns.
+        for helper in ("_error_log.py", "_project_paths.py"):
+            shutil.copyfile(HOOKS_DIR / helper, self.hooks / helper)
+        self.home = self.root / "home"
+        (self.home / ".claude" / "logs").mkdir(parents=True)
+        self.temp = self.root / "temp"
+        self.temp.mkdir()
+        self.session_id = "s-stop-" + uuid.uuid4().hex
         for name in MEMBERS:
             (self.hooks / name).write_text(STUB_SOURCE, encoding="utf-8")
 
@@ -98,9 +114,11 @@ class Workspace:
 
     def run(self, config: dict | None = None, data: bytes | None = None):
         payload = data if data is not None else json.dumps(
-            {"session_id": "s-stop", "cwd": str(self.root), "stop_hook_active": False}).encode("utf-8")
+            {"session_id": self.session_id, "cwd": str(self.root), "stop_hook_active": False}).encode("utf-8")
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
         env.update({"STUB_TRACE": str(self.trace), "STUB_CONFIG": json.dumps(config or {}),
+                    "HOME": str(self.home), "USERPROFILE": str(self.home),
+                    "TEMP": str(self.temp), "TMP": str(self.temp), "TMPDIR": str(self.temp),
                     "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
         proc = subprocess.Popen([sys.executable, "-B", str(self.hooks / "stop-dispatcher.py")],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
@@ -111,6 +129,13 @@ class Workspace:
         if not self.trace.is_file():
             return []
         return [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def error_log_rows(self) -> list[dict]:
+        """Every line the run wrote to the throwaway home's error log."""
+        log = self.home / ".claude" / "logs" / "errors.jsonl"
+        if not log.is_file():
+            return []
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 class StopDispatcherTests(unittest.TestCase):
@@ -136,7 +161,7 @@ class StopDispatcherTests(unittest.TestCase):
         self.assertEqual({r["pid"] for r in rows}, {pid},
                          msg="the members run in ONE process (the dispatcher's own), not one program start each")
         self.assertEqual(code, 0, msg="two silent members give exit 0: " + err[:300])
-        self.assertIn('"session_id": "s-stop"', rows[0]["stdin"],
+        self.assertIn('"session_id": "%s"' % self.ws.session_id, rows[0]["stdin"],
                       msg="each member gets the same input bytes it would have been given on its own")
         self.assertEqual(rows[0]["stdin"], rows[1]["stdin"], msg="both members get the same input")
 
@@ -198,6 +223,92 @@ class StopDispatcherTests(unittest.TestCase):
     def test_empty_input_exits_0(self):
         _pid, code, _out, err = self.ws.run(data=b"")
         self.assertEqual(code, 0, msg="empty input is not a failure: " + err[:300])
+
+
+def system_messages(stdout: str) -> list[str]:
+    """Every ``systemMessage`` value on the dispatcher's standard output (one JSON object per line)."""
+    found = []
+    for line in stdout.splitlines():
+        if line.strip():
+            payload = json.loads(line)
+            if isinstance(payload, dict) and isinstance(payload.get("systemMessage"), str):
+                found.append(payload["systemMessage"])
+    return found
+
+
+class MissingMemberTests(unittest.TestCase):
+    """Revision 8, I.5: a member whose file is missing is "could not check", never a crash (contract G).
+
+    Every row builds its own Workspace, so each has a fresh home, a fresh temporary folder and its own session
+    id. "The second member" and "the first member" are MEMBERS[1] and MEMBERS[0]: the rows never name a
+    member file themselves, so block 17's path-only repair of the member constant leaves them unchanged."""
+
+    def setUp(self) -> None:
+        self.ws = Workspace()
+        self.addCleanup(self.ws.close)
+        self.first, self.second = MEMBERS[0], MEMBERS[1]
+
+    def _remove_second(self) -> None:
+        (self.ws.hooks / self.second).unlink()
+
+    def test_a_missing_second_member_exits_0_with_no_traceback(self):
+        self._remove_second()
+        _pid, code, _out, err = self.ws.run()
+        self.assertEqual(code, 0, msg="a missing member is 'could not check', never exit 1 or 2: " + err[:300])
+        self.assertNotIn("Traceback", err,
+                         msg="the runner's missing-file traceback (_inprocess_hook.run_script) must not reach stderr")
+        self.assertEqual([r["member"] for r in self.ws.trace_rows()], [self.first],
+                         msg="the members that exist still run; only the missing one is skipped")
+
+    def test_a_missing_second_member_writes_exactly_one_member_missing_log_line(self):
+        self._remove_second()
+        self.ws.run()
+        rows = self.ws.error_log_rows()
+        self.assertEqual(len(rows), 1, msg="exactly one error-log line per missing member, in the throwaway "
+                                           "home's log: " + repr(rows))
+        self.assertEqual((rows[0].get("hook"), rows[0].get("event")), ("stop-dispatcher", "member-missing"),
+                         msg="the line names the hook stop-dispatcher and the event member-missing")
+        self.assertIn(self.second, json.dumps(rows[0], ensure_ascii=False),
+                      msg="the line carries the member string as written in CHECKS")
+
+    def test_on_exit_0_one_system_message_names_the_member_and_a_second_run_in_the_session_prints_none(self):
+        self._remove_second()
+        _pid, code, out, err = self.ws.run()
+        self.assertEqual(code, 0, msg=err[:300])
+        notices = system_messages(out)
+        self.assertEqual(len(notices), 1, msg="exactly one systemMessage on the first run: " + repr(out))
+        self.assertIn(self.second, notices[0], msg="the notice names the member that did not run")
+        _pid, code2, out2, err2 = self.ws.run()
+        self.assertEqual(code2, 0, msg=err2[:300])
+        self.assertEqual(system_messages(out2), [],
+                         msg="at most one notice per session: the second run in the same session prints none")
+        self.assertNotIn(self.second, out2, msg="and nothing else on stdout names the member either")
+
+    def test_on_exit_2_the_notice_follows_the_first_members_unchanged_text_and_is_not_repeated(self):
+        self._remove_second()
+        text = "PLAIN-STOP-TEXT\n"
+        _pid, code, out, err = self.ws.run({self.first: {"code": 2, "err": text}})
+        self.assertEqual(code, 2, msg="the first member's exit 2 still stops the turn: " + err[:300])
+        self.assertTrue(err.startswith(text),
+                        msg="the member's own bytes come first and are unchanged: " + repr(err[:200]))
+        trailing = err[len(text):].strip()
+        self.assertIn(self.second, trailing, msg="the notice naming the missing member follows that text")
+        self.assertEqual(len(trailing.splitlines()), 1, msg="exactly one notice line trails the member text")
+        self.assertEqual(system_messages(out), [], msg="on exit 2 the notice goes to stderr, not stdout")
+        _pid, code2, out2, err2 = self.ws.run()
+        self.assertEqual(code2, 0, msg="a later clean run in the same session exits 0: " + err2[:300])
+        self.assertNotIn(self.second, out2 + err2,
+                         msg="the marker was spent when the notice was written: no second notice")
+
+    def test_with_the_first_member_missing_the_second_still_runs_and_its_exit_2_still_stops_the_turn(self):
+        # Paired control, not a broken-rule target (round nine): it goes red if the check stops the loop at a
+        # missing member, but not when the check is removed.
+        (self.ws.hooks / self.first).unlink()
+        _pid, code, _out, err = self.ws.run({self.second: {"code": 2, "err": "CONCEPT-STOP-TEXT\n"}})
+        self.assertEqual([r["member"] for r in self.ws.trace_rows()], [self.second],
+                         msg="a missing first member must not stop the later member from running: " + err[:300])
+        self.assertEqual(code, 2, msg="the second member's exit 2 still stops the turn: " + err[:300])
+        self.assertIn("CONCEPT-STOP-TEXT", err, msg="its error text reaches stderr")
 
 
 class PlainLanguageGuardIdentityTests(unittest.TestCase):

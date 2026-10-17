@@ -25,8 +25,12 @@ is the one read back. No line inside the lookup (before that run line) may start
 so a lookup that shells out to Python is a failure here, and so is a block with no such run line. The
 cut text is RUN in bash over a table of fixture setups; the variable is compared with the path the
 table expects, and with what installed_plugin_root() answers in the same environment. All copies must
-give the same answers, which is what "one snippet shared by every copy" means in behaviour. bash
-missing is a FAILURE, not a skip: this check has no meaning without a shell.
+give the same answers, which is what "one snippet shared by every copy" means in behaviour, with ONE
+named exception (dedupe contract, Revision 8, I.4): a snippet for a script in PLUGIN_ONLY_SCRIPTS
+(concept_changed_check.py) is the plugin-only form. It leaves out the project-copy step, so it answers from
+the plugin install alone: when the project holds a copy too, the plugin's answer wins, and when there is
+no plugin install its value is empty. bash missing is a FAILURE, not a skip: this check has no meaning
+without a shell.
 
 Every case builds a throwaway Claude config directory and a throwaway project. Nothing real is read.
 
@@ -61,6 +65,9 @@ RUN_LINE = re.compile(r'^\s*(?:\(\s*cd\s+"\$\(py\s+-3\s+"\$\{?[A-Za-z_][A-Za-z0-
 #: A line inside the lookup that starts a Python process: not allowed (decision 8).
 PYTHON_LINE = re.compile(r"^\s*(?:py|python3?)\b")
 SCRIPT = re.compile(r"\.claude/scripts/([A-Za-z0-9_]+\.py)")
+#: Scripts whose snippet is the plugin-only form (dedupe contract, Revision 8, G and I.4): the project copy is
+#: never looked up, because a file under .claude/ is trivial to both gates and a project copy could be forged.
+PLUGIN_ONLY_SCRIPTS = {"concept_changed_check.py"}
 
 
 def find_bash() -> str | None:
@@ -402,6 +409,13 @@ class TestSkillScriptLookup(unittest.TestCase):
                                  "%s looks up the plugin install before the current worktree's copy: %r"
                                  % (snip["var"], got))
                 return
+            if snip["script"] in PLUGIN_ONLY_SCRIPTS:
+                # RULE CHANGED (Revision 8, I.4): "a vendored project finds its own copy first" no longer
+                # holds for a plugin-only script; the answer is the plugin's, never the project copy.
+                self.assertEqual(norm(got), self.expected_script(installed, snip),
+                                 "%s is a plugin-only script: the answer is the plugin install's copy, never "
+                                 "the project copy: %r" % (snip["script"], got))
+                return
             self.assertEqual(norm(w.project / got) if not os.path.isabs(got) and not re.match(r"^[A-Za-z]:", got)
                              else norm(got), norm(local_dir / snip["script"]),
                              "a vendored project finds its own copy before any plugin install: %r" % got)
@@ -431,6 +445,33 @@ class TestSkillScriptLookup(unittest.TestCase):
         others = [s for s in self.snips if s["var"] not in self.PLUGIN_FIRST_VARS]
         self.assertGreater(len(others), 0, "the project-copy-first lookups (PRM and friends) must still exist")
         self.assertIn("PRM", {s["var"] for s in others}, "the pr_merged lookup (PRM) keeps the project copy first")
+
+    def plugin_only_snippets(self) -> list[dict]:
+        return [s for s in self.snips if s["script"] in PLUGIN_ONLY_SCRIPTS]
+
+    def test_at_least_one_snippet_is_for_a_plugin_only_script(self):
+        # Non-vacuity (Revision 8, I.4): the plugin-only rows below loop over these snippets, and a loop over
+        # none passes. Red until block 17 puts the plugin-only snippet into /verify-before-done and /git-commit.
+        found = self.plugin_only_snippets()
+        self.assertGreater(len(found), 0,
+                           "no snippet under skills/ looks up one of %s, so the plugin-only rules are not "
+                           "exercised at all (searched %d snippets)" % (sorted(PLUGIN_ONLY_SCRIPTS), len(self.snips)))
+
+    def test_a_plugin_only_script_with_only_a_project_copy_and_no_plugin_install_gives_an_empty_value(self):
+        # Revision 8, I.4 (new row): the project copy is never a fallback for a plugin-only script.
+        w = self.world
+        local_dir = w.project / ".claude" / "scripts"
+        local_dir.mkdir(parents=True)
+        for s in w.scripts:
+            (local_dir / s).write_text("# vendored\n", encoding="utf-8")
+        self.assertIsNotNone(self.bash, "bash is missing: this is a failure, not a skip")
+
+        for snip in self.plugin_only_snippets():
+            with self.subTest(block="%s:%d" % (snip["file"], snip["start"])):
+                got = w.run_snippet(self.bash, snip)
+                self.assertEqual(got, "",
+                                 "a project copy with no plugin install must give an empty value for the "
+                                 "plugin-only script %s; got %r" % (snip["script"], got))
 
     def test_nothing_found_gives_an_empty_value_so_the_skill_can_stop(self):
         w = self.world
