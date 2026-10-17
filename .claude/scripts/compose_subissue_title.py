@@ -127,6 +127,12 @@ def _load_title_block(conventions_path):
     sub = block.get("subIssue")
     if not isinstance(sub, dict) or not isinstance(sub.get("format"), str) or not sub["format"].strip():
         return None, _refuse("conventions-missing", "no issueTitle.subIssue.format in %s" % path)
+    effort = block.get("effortTypes", [])
+    if not isinstance(effort, list) or not all(
+            isinstance(e, dict) and isinstance(e.get("tag"), str) for e in effort):
+        return None, _refuse(
+            "conventions-missing",
+            "issueTitle.effortTypes must be a list of objects each with a string 'tag' in %s" % path)
     pattern = block.get("pattern")
     try:
         re.compile(pattern)
@@ -174,7 +180,7 @@ def compose(effort_tag, parent, subtask, bare_title, conventions_path=None):
         return refusal
 
     title = (bare_title or "").strip()
-    tags = [t.get("tag") for t in block.get("effortTypes", []) if isinstance(t, dict) and t.get("tag")]
+    tags = [t["tag"] for t in block.get("effortTypes", []) if t["tag"]]
     if not title:
         return _refuse("bare-title-invalid", "The bare title is empty.")
     if any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in title):
@@ -236,6 +242,9 @@ def main(argv=None):
     parser.add_argument("--conventions", default=None, help="Path to work-item-conventions.json.")
     parser.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     args = parser.parse_args(argv)
+
+    if not args.json and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # human mode: UTF-8 whatever the locale
 
     result = compose(args.effort, args.parent, args.subtask, args.title, args.conventions)
 

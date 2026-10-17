@@ -677,7 +677,7 @@ def unquoted_placeholders(block: str) -> list[str]:
                 in_sq = not in_sq
             elif ch == '"' and not in_sq:
                 in_dq = not in_dq
-            elif ch == "<" and not in_dq:
+            elif ch == "<" and not in_dq and not in_sq:
                 m = PLACEHOLDER.match(line, i)
                 if m:
                     bad.append(m.group(0))
@@ -819,7 +819,7 @@ check("replay: ONE fenced bash block both composes the title and creates the iss
 
 union = "\n".join(compose_blocks[:1] + create_blocks[:1]) if one_block is None else one_block
 unq = unquoted_placeholders(union) if union.strip() else ["<no block>"]
-check("replay: every <PLACEHOLDER> on a shell line of the block sits inside double quotes", unq == [],
+check("replay: every <PLACEHOLDER> on a shell line of the block sits inside double quotes", unq == [],  # single OR double (third review W3); the four numeric/enum names must be single, see below
       f"unquoted: {sorted(set(unq))}")
 
 if one_block is not None:
@@ -1119,6 +1119,238 @@ with tempfile.TemporaryDirectory() as td7:
 src_text = SUBJECT.read_text(encoding="utf-8") if SUBJECT.is_file() else ""
 check("N1: helper holds no dead sys.path.insert for _claude_paths", "sys.path.insert" not in src_text,
       "compose_subissue_title.py still calls sys.path.insert")
+
+# ------------------------------------------------- third implementation review (RED cases)
+# Reuses replay_x / fill_x / verifier_calls / said_of / argval above. Placeholders that a case wants to
+# fill with a special value are replaced in the block text BEFORE replay_x, so fill_x never sees them.
+
+T3 = "third review"
+
+
+def with_values(block: str, **values: str) -> str:
+    """Pre-fill named placeholders (parent=<PARENT_ISSUE>, sub=<sub>, k=<k>) with literal text."""
+    names = {"parent": "<PARENT_ISSUE>", "sub": "<sub>", "k": "<k>"}
+    for key, val in values.items():
+        block = block.replace(names[key], val)
+    return block
+
+
+def creates_of(calls: list[dict]) -> list[dict]:
+    return [c for c in calls if c["tool"] == "gh" and c["argv"][:2] == ["issue", "create"]]
+
+
+def edits_of(calls: list[dict]) -> list[dict]:
+    return [c for c in calls if c["tool"] == "gh" and c["argv"][:2] == ["issue", "edit"]]
+
+
+def placeholder_quotes(block: str) -> list[tuple[str, str]]:
+    """(placeholder, 'sq'|'dq'|'none') for each <PLACEHOLDER> on a shell line (heredoc bodies, comments skipped)."""
+    found: list[tuple[str, str]] = []
+    heredoc_end = None
+    for line in block.splitlines():
+        if heredoc_end is not None:
+            if line.strip() == heredoc_end:
+                heredoc_end = None
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        hd = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
+        in_dq = in_sq = False
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and not in_sq:
+                i += 2
+                continue
+            if ch == "'" and not in_dq:
+                in_sq = not in_sq
+            elif ch == '"' and not in_sq:
+                in_dq = not in_dq
+            elif ch == "<":
+                m = PLACEHOLDER.match(line, i)
+                if m:
+                    found.append((m.group(0), "sq" if in_sq else "dq" if in_dq else "none"))
+                    i = m.end()
+                    continue
+            i += 1
+        if hd:
+            heredoc_end = hd.group(2)
+    return found
+
+
+def placeholder_class(token: str) -> str:
+    inner = token[1:-1].lower()
+    if "bare" in inner:
+        return "bare"
+    if "sub_task" in inner or "supplied" in inner:
+        return "sub_task"
+    if "parent" in inner:
+        return "parent"
+    if inner == "type" or "effort" in inner:
+        return "effort"
+    if inner in ("k", "ordinal") or "ordinal" in inner:
+        return "ordinal"
+    if inner.startswith("sub"):
+        return "sub"
+    return "other"
+
+
+# --- W1 (third review): the shell trims only the ends; internal whitespace halts
+SPLIT_PARENTS = (("6 38", "6 38"), ("spaced hash 6 38", " # 6 38 "))
+for label, pv in SPLIT_PARENTS:
+    n = f"W1[{T3}][create, parent {label!r}]"
+    if bash is None or one_block is None:
+        check(f"{n}: gh issue create not called and a named HALT is printed", bash is None, "no block or no bash")
+        continue
+    with tempfile.TemporaryDirectory() as rtd:
+        cp, calls = replay_x(bash, with_values(one_block, parent=pv), "Fix X", Path(rtd))
+        check(f"{n}: gh issue create not called and a named HALT is printed",
+              not creates_of(calls) and "HALT" in said_of(cp) and cp.returncode != 0,
+              f"rc={cp.returncode} creates={[c['argv'] for c in creates_of(calls)]!r} said={said_of(cp).strip()[-160:]!r}")
+for label, pv in (("two spaces and hash", "  #638  "), ("bare hash", "#638")):
+    n = f"W1[{T3}][create, parent {label!r}]"
+    if bash is None or one_block is None:
+        check(f"{n}: still produces gh issue create --parent 638", bash is None, "no block or no bash")
+        continue
+    with tempfile.TemporaryDirectory() as rtd:
+        cp, calls = replay_x(bash, with_values(one_block, parent=pv), "Fix X", Path(rtd))
+        cr = creates_of(calls)
+        check(f"{n}: still produces gh issue create --parent 638",
+              len(cr) == 1 and argval(cr[0]["argv"], "--parent") == "638",
+              f"rc={cp.returncode} creates={[c['argv'] for c in cr]!r}")
+for label, pv in SPLIT_PARENTS:
+    n = f"W1[{T3}][repair, parent {label!r}]"
+    if bash is None or repair_block is None:
+        check(f"{n}: gh issue edit not called and a named HALT is printed", bash is None, NOREP)
+        continue
+    with tempfile.TemporaryDirectory() as rtd:
+        cp, calls = replay_x(bash, with_values(repair_block, parent=pv), "Fix X", Path(rtd))
+        check(f"{n}: gh issue edit not called and a named HALT is printed",
+              not edits_of(calls) and "HALT" in said_of(cp) and cp.returncode != 0,
+              f"rc={cp.returncode} edits={[c['argv'] for c in edits_of(calls)]!r} said={said_of(cp).strip()[-160:]!r}")
+if bash is None or repair_block is None:
+    check(f"W1[{T3}][repair, sub-issue '9 9']: gh issue edit not called and a named HALT is printed", bash is None, NOREP)
+else:
+    with tempfile.TemporaryDirectory() as rtd:
+        cp, calls = replay_x(bash, with_values(repair_block, sub="9 9"), "Fix X", Path(rtd))
+        check(f"W1[{T3}][repair, sub-issue '9 9']: gh issue edit not called and a named HALT is printed",
+              not edits_of(calls) and "HALT" in said_of(cp) and cp.returncode != 0,
+              f"rc={cp.returncode} edits={[c['argv'] for c in edits_of(calls)]!r} said={said_of(cp).strip()[-160:]!r}")
+
+# --- W2 (third review): helper survives wrong JSON types in the conventions file
+with tempfile.TemporaryDirectory() as td_w2:
+    tdp = Path(td_w2)
+    bad_effort = (("null", None), ("number", 7), ("string", "PERF"), ("object", {"tag": "PERF"}),
+                  ("list of non-dicts [1, null]", [1, None]))
+    for label, val in bad_effort:
+        data = conventions()
+        data["issueTitle"]["effortTypes"] = val
+        proc = compose(write_conv(tdp, data, f"w2-effort-{slug(label)}.json"))
+        expect_refused(f"W2[{T3}]: effortTypes is {label}", proc, "conventions-missing", "effortTypes")
+        check(f"W2[{T3}]: effortTypes is {label}: no Python traceback", "Traceback" not in proc.stderr,
+              proc.stderr.strip()[-160:])
+    for label, kw in (("issueTitle.pattern is a number", {"pattern": 5}), ("issueTitle.pattern is null", {"pattern": None})):
+        proc = compose(write_conv(tdp, conventions(**kw), f"w2-{slug(label)}.json"))
+        expect_refused(f"W2[{T3}]: {label}", proc, "conventions-missing", "pattern")
+        check(f"W2[{T3}]: {label}: no Python traceback", "Traceback" not in proc.stderr, proc.stderr.strip()[-160:])
+    proc = compose(write_conv(tdp, conventions(fmt=5), "w2-format-number.json"))  # type: ignore[arg-type]
+    expect_refused(f"W2[{T3}]: subIssue.format is a number", proc, "conventions-missing", "format")
+    check(f"W2[{T3}]: subIssue.format is a number: no Python traceback", "Traceback" not in proc.stderr,
+          proc.stderr.strip()[-160:])
+    data = conventions()
+    data["issueTitle"]["subIssue"] = ["not", "a", "dict"]
+    proc = compose(write_conv(tdp, data, "w2-subissue-list.json"))
+    expect_refused(f"W2[{T3}]: subIssue itself is a list", proc, "conventions-missing", "subIssue")
+    check(f"W2[{T3}]: subIssue itself is a list: no Python traceback", "Traceback" not in proc.stderr,
+          proc.stderr.strip()[-160:])
+
+# --- W3 (third review): numeric/enum placeholders sit in SINGLE quotes; injection cannot run
+SINGLE_ONLY = {"create block": (one_block, ("parent", "effort", "ordinal")),
+               "repair block": (repair_block, ("parent", "sub"))}
+for bname, (blk, needed) in SINGLE_ONLY.items():
+    if blk is None:
+        for cls in needed:
+            check(f"W3[{T3}][{bname}]: every {cls} placeholder sits inside single quotes", False, "block missing")
+        continue
+    quotes = placeholder_quotes(blk)
+    for cls in needed:
+        mine = [(t, q) for t, q in quotes if placeholder_class(t) == cls]
+        check(f"W3[{T3}][{bname}]: every {cls} placeholder sits inside single quotes",
+              bool(mine) and all(q == "sq" for _, q in mine), f"occurrences={mine!r}")
+    free = [(t, q) for t, q in quotes if placeholder_class(t) in ("bare", "sub_task")]
+    check(f"W3[{T3}][{bname}]: free-text placeholders (bare / sub_task) are quoted or in a here-document",
+          all(q in ("sq", "dq") for _, q in free), f"occurrences={free!r}")
+for bname, blk, label in (("create block", one_block, "parent"), ("repair block", repair_block, "parent")):
+    if bash is None or blk is None:
+        check(f"W3[{T3}][{bname}]: parent `$(touch PWNED)` is not executed and the block halts with a named HALT",
+              bash is None, "no block or no bash")
+        continue
+    with tempfile.TemporaryDirectory() as rtd:
+        cp, calls = replay_x(bash, with_values(blk, parent="$(touch PWNED)"), "Fix X", Path(rtd))
+        pwned = list(Path(rtd).rglob("PWNED"))
+        check(f"W3[{T3}][{bname}]: parent `$(touch PWNED)` is not executed and the block halts with a named HALT",
+              not pwned and "HALT" in said_of(cp) and cp.returncode != 0 and not creates_of(calls) and not edits_of(calls),
+              f"rc={cp.returncode} pwned={[str(p) for p in pwned]!r} said={said_of(cp).strip()[-160:]!r}")
+
+# --- W4 (third review): the explicit-conventions decision is recorded
+CONV_FRAGMENT = '--conventions "${CLAUDE_PROJECT_DIR:-.}/.claude/work-item-conventions.json"'
+check(f"W4[{T3}]: the create block passes {CONV_FRAGMENT}", one_block is not None and CONV_FRAGMENT in one_block,
+      "exact --conventions fragment absent from the block")
+with tempfile.TemporaryDirectory() as td_w4:
+    proj_w4 = Path(td_w4) / "p"
+    (proj_w4 / ".claude").mkdir(parents=True)
+    write_conv(proj_w4 / ".claude", conventions(), "work-item-conventions.json")
+    base_args = ["--type", "PERF", "--parent", "638", "--subtask", "16", "--title", BARE, "--json"]
+    empty_with_root = run(base_args + ["--conventions", ""], env_extra={"CLAUDE_PROJECT_DIR": str(proj_w4)})
+    expect_composed(f"W4[{T3}]: explicit empty --conventions falls to CLAUDE_PROJECT_DIR", empty_with_root, EXPECTED)
+    empty_no_root = run(base_args + ["--conventions", ""])
+    expect_refused(f"W4[{T3}]: explicit empty --conventions with CLAUDE_PROJECT_DIR unset", empty_no_root,
+                   "conventions-missing", "root")
+
+# --- N5 (third review): leading zeros are normalised (contract: Parent reference accepts a digits-only
+# integer >= 1; "0638" is digits-only and >= 1, so it is the same number as 638 -- normalise, do not refuse)
+with tempfile.TemporaryDirectory() as td_n5:
+    expect_composed(f"N5[{T3}]: helper parent 0638 and sub-task 016",
+                    compose(write_conv(Path(td_n5), conventions()), parent="0638", subtask="016"), EXPECTED)
+if bash is None or one_block is None:
+    check(f"N5[{T3}][create]: parent 0638 -> gh --parent 638, verifier --parent 638, title ST:16", bash is None,
+          "no block or no bash")
+else:
+    with tempfile.TemporaryDirectory() as rtd:
+        cp, calls = replay_x(bash, with_values(one_block, parent="0638", k="016"), "Fix X", Path(rtd))
+        cr, vcs = creates_of(calls), verifier_calls(calls)
+        check(f"N5[{T3}][create]: parent 0638 -> gh --parent 638, verifier --parent 638, title ST:16",
+              len(cr) == 1 and argval(cr[0]["argv"], "--parent") == "638"
+              and (argval(cr[0]["argv"], "--title") or "").startswith("[PERF] P:#638 ST:16 - ")
+              and len(vcs) == 1 and argval(vcs[0]["argv"], "--parent") == "638",
+              f"rc={cp.returncode} creates={[c['argv'] for c in cr]!r} verifier={[c['argv'] for c in vcs]!r}")
+if bash is None or repair_block is None:
+    check(f"N5[{T3}][repair]: parent 0638 and sub 099 -> gh issue edit 99 --parent 638, verifier same", bash is None, NOREP)
+else:
+    with tempfile.TemporaryDirectory() as rtd:
+        cp, calls = replay_x(bash, with_values(repair_block, parent="0638", sub="099"), "Fix X", Path(rtd))
+        ed, vcs = edits_of(calls), verifier_calls(calls)
+        check(f"N5[{T3}][repair]: parent 0638 and sub 099 -> gh issue edit 99 --parent 638, verifier same",
+              len(ed) == 1 and ed[0]["argv"][2:3] == ["99"] and argval(ed[0]["argv"], "--parent") == "638"
+              and len(vcs) == 1 and argval(vcs[0]["argv"], "--sub") == "99"
+              and argval(vcs[0]["argv"], "--parent") == "638",
+              f"rc={cp.returncode} edits={[c['argv'] for c in ed]!r} verifier={[c['argv'] for c in vcs]!r}")
+
+# --- N6 (third review): human output mode prints non-ASCII bare titles under a cp1252 pipe
+with tempfile.TemporaryDirectory() as td_n6:
+    conv_n6 = write_conv(Path(td_n6), conventions())
+    for label, bare in (("em dash", "Fix — dash"), ("CJK", "修复指数")):
+        env6 = dict(os.environ)
+        env6.pop("CLAUDE_PROJECT_DIR", None)
+        env6["PYTHONIOENCODING"] = "cp1252"
+        raw = subprocess.run(
+            [sys.executable, str(SUBJECT), "--type", "PERF", "--parent", "638", "--subtask", "16", "--title", bare,
+             "--conventions", str(conv_n6)],
+            capture_output=True, env=env6, timeout=60)
+        want = f"[PERF] P:#638 ST:16 - {bare}".encode("utf-8")
+        check(f"N6[{T3}]: human output, {label} title, cp1252 pipe: exit 0 and the UTF-8 bytes of the title on stdout",
+              raw.returncode == 0 and want in raw.stdout,
+              f"rc={raw.returncode} stdout={raw.stdout[:80]!r} stderr={raw.stderr.decode('utf-8', 'replace').strip()[-120:]!r}")
 
 # ----------------------------------------------------------------- summary
 
