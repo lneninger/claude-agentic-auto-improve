@@ -578,13 +578,18 @@ def resolve_target(
     return False, reason, None
 
 
-def block(
+def block_message(
     reason: str,
     target: str,
     project: str | None,
     extras: list[str] | None = None,
-) -> None:
-    """Emit a block message and exit with code 2."""
+) -> str:
+    """The full text of a block: banner, target, reason, extras and the next steps.
+
+    The one place this text is written. ``block()`` prints it, and the Changed-file check
+    (``../scripts/concept_changed_check.py``) reuses it, so the two can never word the next steps
+    differently.
+    """
     project_hint = project or "<unknown project>"
     bar = "=" * 62
     message = [
@@ -621,11 +626,23 @@ def block(
         bar,
         "",
     ])
+    return "\n".join(message)
+
+
+def block(
+    reason: str,
+    target: str,
+    project: str | None,
+    extras: list[str] | None = None,
+) -> None:
+    """Emit a block message and exit with code 2."""
+    project_hint = project or "<unknown project>"
+    text = block_message(reason, target, project, extras)
     try:
         sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except Exception:
         pass
-    print("\n".join(message), file=sys.stderr)
+    print(text, file=sys.stderr)
     log_event(
         hook="concept-gate",
         event="block",
