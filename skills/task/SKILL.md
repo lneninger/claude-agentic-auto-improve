@@ -142,6 +142,7 @@ Write to `.claude/work-items/<YYYY-MM-DD>-<id-or-slug>.md`. Create the directory
 ```markdown
 ---
 id: <123 | ABC-1234 | none>
+issue_offer: pending
 title: <work item title, WITHOUT the [EFFORT] prefix>
 type: <FEATURE | BUG | IMPROVEMENT | REFACTOR | PERF | SECURITY | DOCS | CHORE | SPIKE>
 source: <github | jira | azure-devops | free-text>
@@ -216,6 +217,15 @@ paragraph rather than left to be inferred from the placeholder wording.
 
 Fields you could not resolve are written as `UNKNOWN` — never guessed, never left blank.
 
+**`issue_offer:` records what happened when the chain offered to open a tracker issue** (the
+offer is Step 2.5 point 6 below). It is written beside `id:`, and the template starts it at
+`pending`, which means "nobody has answered the offer yet". The allowed values and the reason
+values live in `.claude/work-item-conventions.json` → `issueLink` (the keys `offerOutcomeField`,
+`offerOutcomes`, `offerReasonField` and `offerReasons`) and are not restated here. A second field,
+`issue_offer_reason:`, is added **only** when the outcome is `unavailable`, and the template
+shows no such line by default. Keep both values to one word with no colon, because the brief
+parser reads any line with a colon as a new key.
+
 ## Step 2.5: Effort-type prefix
 
 Every issue title carries exactly one effort-type prefix: `[FEATURE] Add trailing-stop to close evaluator`.
@@ -252,14 +262,24 @@ The three canonical types are `[BUG]`, `[IMPROVEMENT]`, `[FEATURE]`; the file al
    omitted the closing line and the tracker never learned the work happened — 4 of the
    14 briefs in this repo, including PR #40's.
 
-   **Gate — both must hold:** the Brief Id Reading is `absent` — per the
-   `absentIdTokens` list in
+   **Gate — the id must read `absent`:** the Brief Id Reading (the normalized reading of
+   `id:`) is `absent` — per the `absentIdTokens` list in
    [.claude/work-item-conventions.json](../../work-item-conventions.json) →
-   `issueLink`, whose values are **not** restated here (INV-8) — **and** `gh` is
-   available and authenticated. Gate on the **id**, never
+   `issueLink`, whose values are **not** restated here (INV-8). Gate on the **id**, never
    on the `source:` string — that field is free prose in practice
    (`2026-08-26-trading-journal-recording-playback.md:5` reads
    `github (issue opened at intake from a free-text request)`).
+
+   **This point always writes the outcome into `issue_offer:`** (see Step 2), so the brief
+   can tell apart "the user said no", "the offer could not be made" and "nobody asked".
+   Never write `declined` unless the user answered the offer question in this run. An answer
+   you assumed, or a question you skipped, writes `pending` and never `declined`.
+
+   - If `gh` is missing or signed out, do not stay silent: write `issue_offer: unavailable`
+     and `issue_offer_reason: gh-missing` (or `gh-unauthenticated`), and continue.
+   - If the brief's problem statement is empty, write `issue_offer: unavailable` and
+     `issue_offer_reason: no-problem-statement`, and continue.
+   - Otherwise make the offer below.
 
    A brief whose id is `unresolved` (the `unresolvedIdTokens` list in `issueLink`)
    does **not** reach this offer. It is not
@@ -267,26 +287,29 @@ The three canonical types are `[BUG]`, `[IMPROVEMENT]`, `[FEATURE]`; the file al
    that may already have one is how duplicates get made.
 
    **Action.** One `AskUserQuestion`, asked once (INV-5), quoting the exact title and body
-   that would be created:
+   that would be created. Write the body (the problem statement, then the acceptance
+   criteria from the brief) to a file first and pass the file, never the text inline —
+   Git Bash can mangle free text that starts an argument:
 
    ```bash
-   gh issue create --title "[<TYPE>] <bare title>" --body "<problem statement + acceptance criteria from the brief>"
+   gh issue create --title "[<TYPE>] <bare title>" --body-file <path to the body file>
    ```
 
-   On accept, write `id:`, `url:` and `repo:` back into the brief — Step 5b's
-   `gh issue develop` then has a number to link the branch to, which is why this lands
-   here and not in Step 1d.
+   On accept, write `id:`, `url:` and `repo:` back into the brief and set
+   `issue_offer: opened` — Step 5b's `gh issue develop` then has a number to link the branch
+   to, which is why this lands here and not in Step 1d. If the create command fails, write
+   `issue_offer: unavailable` and `issue_offer_reason: create-failed`.
 
    **Invent nothing.** If the brief's problem statement is empty, the offer does not fire;
-   there is nothing honest to put in the issue body.
+   there is nothing honest to put in the issue body (see the `no-problem-statement` line above).
 
-   **On decline:** `id: none` stays and the run continues normally — declining is a
-   **success** path, not an error and not a warning. Note in the brief that `/ship`
-   Step 3.5 will ask once more at ship time.
+   **On decline:** write `issue_offer: declined`; `id: none` stays and the run continues
+   normally — declining is a **success** path, not an error and not a warning. A recorded
+   decline is final: `/ship` Step 3.5 does not ask again.
 
-   **This point and `/ship` Step 3.5 share their wording — one mechanism, two call
-   sites.** Creating an issue is modifying a shared artifact, so the same
-   ask-before-you-touch-it rule as point 4 governs it.
+   **This point, `/ship` Step 3.5 and `/design-first` Step 3.6 share their wording — one
+   mechanism, three call sites.** Creating an issue is modifying a shared artifact, so the
+   same ask-before-you-touch-it rule as point 4 governs it.
 
 **Exactly one prefix.** A change that is both a fix and an enhancement is two issues, not `[BUG][FEATURE]`. Multi-tagging belongs to PR titles (modules), never issue titles (effort).
 

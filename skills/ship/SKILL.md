@@ -59,7 +59,10 @@ brief written after the fact records what you did, not what was asked, and the a
 criteria are the only thing that makes the PR body checkable. Send the user to `/task`.
 
 Read and hold: `id`, `url`, `repo`, `title`, `type`, `branch`, `worktree`, `contract`,
-`partial`, `issue_link`, `status`, `base`.
+`partial`, `issue_link`, `status`, `base`, and the recorded outcome of the issue offer,
+`issue_offer` (with `issue_offer_reason` when it is `unavailable`). Their names and allowed
+values are the `offerOutcomeField`, `offerOutcomes`, `offerReasonField` and `offerReasons` keys
+in `work-item-conventions.json` → `issueLink`.
 
 **The declared base.** The brief's `base:` field, when present, is the declared base this
 whole skill measures against: what "commits ahead" is counted from, what the pull request is
@@ -199,7 +202,10 @@ Contract: <the brief's contract: path, or "none — <size> item, routed direct">
 
 ## Notes
 <anything a reviewer should not have to discover on their own — see the declared-base
- rule below for one thing that belongs here>
+ rule below for one thing that belongs here. When the brief has no issue, add one line:
+ "No issue: declined by the user", or "No issue: could not be opened (<reason>)" using the
+ brief's `issue_offer_reason:`, which at this point is `create-failed` or
+ `no-problem-statement`, the two reasons that stay valid at ship time>
 
 Closes #<id>
 ```
@@ -225,10 +231,15 @@ delivered and reopened a week later.
 
 ## Step 3.5: Offer to open an issue when there is none
 
-**Gate — all three must hold:** the brief's id reading is `absent` (the `absentIdTokens` list
+**Gate — all four must hold:** the brief's id reading is `absent` (the `absentIdTokens` list
 in `work-item-conventions.json` → `issueLink`, whose values are not restated here) **and**
 `gh` is available and authenticated **and** the brief's `parent_issue:` reading is `none` or
-the key is absent. Gate on the **id**, never on the `source:` string — that field is free
+the key is absent **and** the brief's `issue_offer:` outcome is not already a final answer.
+The final answers are `declined`, and `unavailable` with the reason `no-problem-statement`
+(there is still nothing honest to put in an issue body). Every other reading fires the gate:
+`pending`, a missing `issue_offer:` line, `unavailable` with a `gh-missing` or
+`gh-unauthenticated` reason (stale, because `gh` works now), and `unavailable` with
+`create-failed`. Gate on the **id**, never on the `source:` string — that field is free
 prose in practice. A resolved `parent_issue:` means this brief belongs to a Sub-Task Work
 Item whose own sub-issue was already created at intake time — this offer never fires for one,
 because offering to create a second issue for work that already has one is how duplicates get
@@ -238,20 +249,35 @@ tell the two cases apart, and it does so on the normalized reading, never on fre
 A brief whose id is `unresolved` never reaches this offer; Step 0 already halted on it.
 Offering to *create* an issue for work that may already have one is how duplicates get made.
 
-**This point and `/task` Step 2.5 point 6 share their wording — one mechanism, two call
-sites.** `/task` asked at intake; this is the second and last ask, at the moment the work
-becomes visible. One `AskUserQuestion`, asked once, quoting the exact title and body:
+**This point, `/task` Step 2.5 point 6 and `/design-first` Step 3.6 share their wording — one
+mechanism, three call sites.** `/task` asks at intake and `/design-first` asks when a run
+starts there; this is the last ask, at the moment the work becomes visible. One
+`AskUserQuestion`, asked once, quoting the exact title and body. Write the body (the problem
+statement, then the acceptance criteria) to a file first and pass the file, never the text
+inline — Git Bash can mangle free text that starts an argument:
 
 ```bash
-gh issue create --title "[<TYPE>] <bare title>" --body "<problem statement + acceptance criteria>"
+gh issue create --title "[<TYPE>] <bare title>" --body-file <path to the body file>
 ```
 
-On accept, write `id:`, `url:` and `repo:` back into the brief **before** Step 4 composes
-the body, so the closing line can reference it. On decline, `id: none` stays, the body
-carries no closing line, and Step 4d's verdict will be `not-applicable` — which resolves to
-`issue_link: none` and is a **success**, not a warning.
+Record the answer in the brief's `issue_offer:` line. Never write `declined` unless the user
+answered this question in this run. An assumed answer writes `pending` and never `declined`.
 
-**Invent nothing.** If the brief's problem statement is empty, the offer does not fire.
+- On accept, write `id:`, `url:` and `repo:` back into the brief **before** Step 4 composes
+  the body, so the closing line can reference it, and set `issue_offer: opened`. If the create
+  command fails, write `issue_offer: unavailable` and `issue_offer_reason: create-failed`.
+- On decline, write `issue_offer: declined`. `id: none` stays and the body carries no closing
+  line. With the recorded-offer requirement on, Step 4d's verdict is `offer-declined`; with it
+  off, the verdict is `not-applicable`. Both resolve to `issue_link: none` and are a
+  **success**, not a warning.
+- If `issue_offer: opened` is recorded but the id is absent, the issue has probably already been created and only the id was lost. First look for it: search the repository's issues by its exact title, and if one is found, write its id back into the brief (`id:`, `url:`, `repo:`). Only offer to create an issue when none is found.
+- If `gh` is not available here, write `issue_offer: unavailable` with the matching
+  `issue_offer_reason:`. That is not a final answer. Without `gh`, Step 4d halts earlier still,
+  with `unverifiable` and the cause `gh-missing` (or `gh-unauthenticated`), until `gh` works
+  again.
+
+**Invent nothing.** If the brief's problem statement is empty, the offer does not fire; write
+`issue_offer: unavailable` with `issue_offer_reason: no-problem-statement`.
 
 ## Step 4: Push and open the pull request
 
@@ -307,17 +333,20 @@ py -3 .claude/scripts/verify_issue_link.py --brief <brief path> --pr <n> --json
 ```
 
 The script performs **no mutation** of any GitHub object; it only reads. It returns a
-`verdict` from a closed set of sixteen. Branch on it:
+`verdict` from a closed set of nineteen. Branch on it:
 
 | Verdict | Meaning | Action |
 |---|---|---|
 | `deferred-close` | The declared base is not the default branch — either GitHub resolved the closing reference or the body carries one GitHub has not resolved; either way this base will not fire it on merge | Proceed. `issue_link: deferred`. `/pr-merged` owns the close, after confirming the merge. |
 | `linked` | GitHub reports a resolved closing reference | Success. `issue_link: closes` |
-| `not-applicable` | No issue to link (`id: none`), or no conventions data file | Success. `issue_link: none` |
+| `not-applicable` | No issue to link (`id: none`) and the recorded-offer requirement is off, or no conventions data file | Success. `issue_link: none` |
+| `offer-declined` | No issue, and the brief records that the user declined the offer | Success. `issue_link: none` |
+| `offer-unavailable` | No issue, and the brief records a reason the offer could not be made that still holds (`create-failed` or `no-problem-statement`) | Success. `issue_link: none` |
 | `exempt-partial` | `Refs #N` on a deliberately partial item | Success. `issue_link: refs` |
 | `absent-repairable` | No link, and the body can be repaired | **The one repairable row** — see below |
+| `offer-unrecorded` | No issue, and the brief records no decision about opening one (or records a reason that no longer holds) | HALT. Ask the Step 3.5 question, record the answer in `issue_offer:`, then re-run Step 4d. Do not create the pull request again: it is already open. If `issue_offer` is `opened`, first look for the issue already created, searching by its exact title, write its id back into the brief, and only offer to create one when none is found. |
 | `still-absent` | Repair was attempted and the link is still missing | HALT. `issue_link: unresolved` |
-| everything else | `unverifiable`, `malformed-id`, `unresolved-id`, `issue-unreachable`, `issue-already-closed`, `pr-not-open`, `foreign-closing-ref`, `unexpected-closing-ref`, `undeclared-target`, `refs-without-partial` | HALT. Report the `reason` and `remediation` verbatim |
+| everything else | `unverifiable` (including the cause `brief-path-unresolved`, which means pass the brief path as it exists from the current directory), `malformed-id`, `unresolved-id`, `issue-unreachable`, `issue-already-closed`, `pr-not-open`, `foreign-closing-ref`, `unexpected-closing-ref`, `undeclared-target`, `refs-without-partial` | HALT. Report the `reason` and `remediation` verbatim |
 
 **Whether a closing reference resolves at all from a non-default base is unsettled** — do not
 build a check on either reading of it. **What is settled: merging into a non-default base
@@ -408,6 +437,7 @@ Do not remove a worktree the user entered by path for their own purposes.
 - **Drives** `.claude/scripts/verify_issue_link.py` at Step 4d — the only production caller.
 - **Shares** `.claude/work-item-conventions.json` with `/task`: that file owns the effort
   tags, the module map and the `issueLink` keyword data, and neither skill restates them.
-- **Shares its Step 3.5 wording** with `/task` Step 2.5 point 6 — one mechanism, two call
-  sites, so a free-text item is offered an issue at intake and once more at ship time.
+- **Shares its Step 3.5 wording** with `/task` Step 2.5 point 6 and `/design-first` Step 3.6 —
+  one mechanism, three call sites, so a free-text item is offered an issue at intake (or at
+  design time) and once more at ship time unless the user already answered.
 - **Follows** `/git-commit`, which produces the commits this skill pushes.

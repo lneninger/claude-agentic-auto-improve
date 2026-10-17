@@ -572,6 +572,24 @@ would ship the part that can be wrong and leave behind the part that would say s
    the doctor scaffolds empty, until the follow-up lands (issue #51); an empty list makes every
    effort tag fail `pattern-mismatch`.
 
+   **Upgrading from before 0.9.4:** `/task`, `/design-first` and `/ship` now record the outcome
+   of the issue offer (the question "should this work get a tracker issue?") in the brief, in an
+   `issue_offer:` line. A new switch, `issueLink.requireRecordedOffer`, makes the link checker
+   (`verify_issue_link.py`) stop when a brief has no issue and no recorded answer. **This
+   repository's switch is `true`.** If you copy the `issueLink` block from this repository's
+   copy into yours, leave `requireRecordedOffer` at `false` unless you want that stop. Turning
+   it on needs the offer keys (`offerOutcomeField`, `offerOutcomes`, `offerReasonField`,
+   `offerReasons`) and the `verdicts` list in your own conventions file: the checker reads the
+   switch and those keys only from the conventions file in the same `.claude` folder as the
+   brief, never from another project, and a switch that is on with any of them missing stops
+   with `conventions-missing`. A missing switch or a missing file means off, so your projects
+   keep today's behavior until you opt in. A conventions file beside the brief that exists but
+   is not valid JSON stops the check even when the switch is off, because the switch cannot be
+   read. One change reaches projects with the switch off: a
+   brief with no issue that is found only through the work-items folder lookup, not at the path
+   you passed, now stops with `brief-path-unresolved`. Pass the brief path as it exists from
+   the current directory (`/ship` does).
+
 4. **Write `.claude/project-profile.md`: run `/auto-improve-finish-install`.** It looks at
    your repository, shows each proposed value next to the file that suggested it, and writes
    the slots that are still placeholders after one confirmation. It never overwrites a slot
