@@ -314,6 +314,14 @@ into the contract is licensed here.
      be closed is not this step's call to make on a local belief about the contract's current
      shape; report it and let the operator decide.
 
+   **Finding sub-issues in the issue list.** A sub-issue title carries
+   its parent reference. Print `issueTitle.subIssue.format` and `issueTitle.subIssue.legend` from
+   the project's `.claude/work-item-conventions.json`; do not restate either from memory.
+
+   - Hide sub-issues from the list: `gh issue list --search "no:parent-issue"`.
+   - List one parent's children: the `parentLink.parentListCommand` the conventions file
+     declares (cited by name, not restated here).
+
 **No new `status:` value.** Sub-issue creation sits between `designing` and `implementing` in
 the brief's lifecycle, but the state store already carries the finer-grained record, and a
 seventh status would need every consumer of the existing six updated for a distinction this file

@@ -163,6 +163,41 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a skill text inserts a `cd` into a step that is followed by other steps (a final status call, a report built from a script run)
 - **Tags:** `cd, shell-state, skill-ordering, relative-path, stale-read`
 
+### 2026-10-15 — A script that reads a project-owned file must be told which project, not search for one
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** Under a plugin install, a shared multi-root locator ranks the plugin's own `.claude` folder ahead of the consumer's when the project directory variable is unset, so a project-owned file the consumer has not updated is silently replaced by the plugin's copy and the intended "missing" refusal never fires. Pass the path explicitly from the skill, and refuse when it cannot be determined.
+- **Apply when:** a contract adds a helper that reads a project-authored file (conventions, rules, profile) through `work_item_conventions_path()` or another multi-root locator, and relies on a missing file or block producing a refusal
+- **Tags:** `locator, plugin-install, conventions, fail-loud, explicit-path`
+
+### 2026-10-15 — A new tracker-title field must be known before the issue exists
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** A title composed before the create call cannot contain the new issue's own number. When a user asks for "the sub-issue number" in the title, ask what it counts, and use a value known up front (the sub-task's position in the parent's plan) rather than a create-then-rename round trip.
+- **Apply when:** a contract changes a tracker title format that is built before the create call and the request mentions an identifier of the item being created
+- **Tags:** `tracker, title, ordinal, create-then-retitle`
+
+### 2026-10-15 — A skill that edits a block pinned by a lookup-block test must name that test
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** `test_skill_script_lookup.py` cuts every lookup block at its first `py -3 "$VAR"` line. Moving or extending a lookup block in a skill without listing that test in the run list lets a break through unseen.
+- **Apply when:** a contract moves, copies or extends a script-lookup block inside any skill or reference file
+- **Tags:** `skill-lookup, test-run-list, vendoring`
+
+### 2026-10-16 — A "missing project file" refusal must cover both the unset root and the set-but-absent file
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** The contract's guard refused only when the project directory variable was unset. With the variable set and no conventions file in that project, the shared locator still fell through to the plugin's own file and the helper composed a title from it. When a helper falls back from an explicit path, read exactly `<project root>/<file>` and refuse in both cases; never fall through to a multi-root locator. Also: a value a helper normalises (a parent written `#638`) must be passed on in its normalised form to every later command in the same block, and a block that creates a tracker record must print the new record's id before any step that can fail.
+- **Apply when:** a contract's invariant says "refuse when the project root cannot be determined" for a project-owned file, or a skill block validates an input and then runs a mutating command with it
+- **Tags:** `locator, plugin-install, fail-loud, contract-amendment, normalised-value, orphan-record`
+
+### 2026-10-16 — Never let free text start an argument handed to a native program from Git Bash
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** Git Bash turns an argument of the form `--option=/text` into a Windows path before a native program such as `py` sees it, so `/flow note` arrived as `C:/Program Files/Git/flow note` and a public issue title would have been silently corrupted. A test that passes the value as an argument list without a shell cannot show this; only a replay in the real shell can. Prefix free text with a character the receiver trims (one space) or send it through a file or standard input, and add a replay test with a title that starts with `/`.
+- **Apply when:** a skill's shell block passes free text (a title, a name, a message) to a native program as an argument on Windows
+- **Tags:** `git-bash, msys, path-conversion, free-text-argument, replay-test`
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

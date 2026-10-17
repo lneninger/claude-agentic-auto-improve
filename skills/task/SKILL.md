@@ -222,6 +222,8 @@ Every issue title carries exactly one effort-type prefix: `[FEATURE] Add trailin
 
 Read the canonical list from **`.claude/work-item-conventions.json`** → `issueTitle`. Do not hardcode the tag list here or in `/ship` — that file is the single source of truth, and duplicating it is how the two skills drift apart. If a tag is missing, add it there.
 
+A sub-issue opened in Parent-aware mode adds the parent reference to its title through `issueTitle.subIssue` (composed by `compose_subissue_title.py`, see `references/parent-aware-mode.md`); the brief's `title:` stays the bare sub-task name, and a later no-parent run on that sub-issue keeps the remainder after the tag as is.
+
 The three canonical types are `[BUG]`, `[IMPROVEMENT]`, `[FEATURE]`; the file also defines `[REFACTOR]`, `[PERF]`, `[SECURITY]`, `[DOCS]`, `[CHORE]`, `[SPIKE]`.
 
 ### Procedure

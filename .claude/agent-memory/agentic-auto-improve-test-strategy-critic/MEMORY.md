@@ -1,1 +1,2 @@
 - [Concept gate blocks scratch harness](concept-gate-blocks-scratch-harness.md) — no .py scratch files; mutation verdicts by reading, stated as not executed
+- [Mutation scratch environment](reference_mutation_scratch_env.md) — scratch must live under .claude/scratch; TEMP and bash scripts are blocked

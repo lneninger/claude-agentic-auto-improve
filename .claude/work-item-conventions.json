@@ -15,7 +15,12 @@
       { "tag": "DOCS", "means": "Documentation, handbook, or contract text only" },
       { "tag": "CHORE", "means": "Dependency bumps, config, build plumbing, cleanup" },
       { "tag": "SPIKE", "means": "Timeboxed research; the deliverable is a finding, not code" }
-    ]
+    ],
+    "subIssue": {
+      "$comment": "Sub-issue title format, read at call time by .claude/scripts/compose_subissue_title.py (used by /task Parent-aware mode). The effort list and pattern stay in the outer issueTitle block and are not restated here. Change the shape here, never in a skill.",
+      "legend": "P = parent issue, ST = sub-task (its position in the parent's plan)",
+      "format": "[<EFFORT>] P:#<parent> ST:<subtask> - <Title>"
+    }
   },
   "issueLink": {
     "$comment": "Generic. The pull-request-to-issue Closing Link. A 'Closes #N' line in a body is a REQUEST for a link, never proof of one: only the forge's resolved closing references count.",
