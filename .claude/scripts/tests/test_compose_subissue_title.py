@@ -1352,6 +1352,116 @@ with tempfile.TemporaryDirectory() as td_n6:
               raw.returncode == 0 and want in raw.stdout,
               f"rc={raw.returncode} stdout={raw.stdout[:80]!r} stderr={raw.stderr.decode('utf-8', 'replace').strip()[-120:]!r}")
 
+# ------------------------------------------------- final review (RED cases)
+# Reuses replay_x / creates_of / argval / said_of / one_block / bash / prose / cmp / expect_refused above.
+
+FR = "final review"
+
+# --- B1 (final review): Git Bash (MSYS) rewrites a native-program argument of the form --opt=/... into a
+# Windows path, so the create block must not hand the helper a title that starts with '/' bare.
+check(f"B1[{FR}]: the helper call does not pass --title=\"$BARE\" with no leading protection",
+      one_block is not None and '--title="$BARE"' not in one_block,
+      "the create block still passes --title=\"$BARE\"; pass --title=\" $BARE\" (the helper trims ends)")
+check(f"B1[{FR}]: the helper call passes --title=\" $BARE\" (one leading space)",
+      one_block is not None and '--title=" $BARE"' in one_block,
+      "no --title=\" $BARE\" in the create block")
+for label, bare in (("slash word", "/flow note"), ("double slash", "//srv share"), ("slash path", "/a/b")):
+    n = f"B1[{FR}][replay {label}]"
+    if bash is None:
+        check(f"{n}: recorded gh issue create --title is the unrewritten composed title", True)
+        continue
+    if one_block is None:
+        check(f"{n}: recorded gh issue create --title is the unrewritten composed title", False, "no single block to run")
+        continue
+    with tempfile.TemporaryDirectory() as rtd:
+        cp, calls = replay_x(bash, one_block, bare, Path(rtd))
+        cr = creates_of(calls)
+        got = argval(cr[0]["argv"], "--title") if cr else None
+        want = f"[PERF] P:#638 ST:16 - {bare}"
+        check(f"{n}: recorded gh issue create --title is the unrewritten composed title",
+              got == want,
+              f"expected {want!r}, got {got!r} (rc={cp.returncode}, said={said_of(cp).strip()[-120:]!r})")
+
+# --- W1 (final review): conventions with NO effortTypes key at all are refused, and the table row says so
+with tempfile.TemporaryDirectory() as td_fw1:
+    data_fw1 = conventions()
+    del data_fw1["issueTitle"]["effortTypes"]
+    proc_fw1 = compose(write_conv(Path(td_fw1), data_fw1, "no-effort-types.json"))
+    expect_refused(f"W1[{FR}]: issueTitle has no effortTypes key", proc_fw1, "conventions-missing", "effortTypes")
+    check(f"W1[{FR}]: issueTitle has no effortTypes key: no Python traceback", "Traceback" not in proc_fw1.stderr,
+          proc_fw1.stderr.strip()[-160:])
+row_fw1 = next((ln for ln in prose.splitlines() if ln.lstrip().startswith("| `conventions-missing`")), "")
+check(f"W1[{FR}]: the conventions-missing row of the refusal table mentions effortTypes",
+      "effortTypes" in row_fw1, f"row={row_fw1[:160]!r}")
+
+# --- W2 / N4 (final review): prose outside the fenced blocks
+prose_only = re.sub(r"(?ms)^\s*```.*?^\s*```\s*$", " ", prose)
+flat = re.sub(r"\s+", " ", prose_only)
+w2_ok = False
+for m in re.finditer(r"single[- ]quot", flat, flags=re.IGNORECASE):
+    win = flat[max(0, m.start() - 150): m.end() + 150]
+    if (re.search(r"halt", win, re.IGNORECASE)
+            and re.search(r"\b(not|never) (run|execute)|\bdo not (run|use|execute)|\bwithout running", win, re.IGNORECASE)
+            and re.search(r"\b(contain|contains|hold|holds|include|includes)\b", win, re.IGNORECASE)
+            and re.search(r"\bif\b", win, re.IGNORECASE)):
+        w2_ok = True
+        break
+check(f"W2[{FR}]: prose says to halt and not run the block if a value filled into a single-quoted placeholder "
+      f"contains a single quote", w2_ok,
+      "no paragraph within 300 characters of 'single quote' that says: if a filled value contains one, halt and do not run")
+four_claims = re.findall(r"\bfour\b[^.]{0,120}single[- ]quot|single[- ]quot[^.]{0,120}\bfour\b", flat, flags=re.IGNORECASE)
+check(f"N4[{FR}]: the prose does not say the create block has four single-quoted placeholders",
+      not four_claims, f"found {four_claims!r} (the create block has parent, type, ordinal; the sub number is repair-only)")
+
+# --- N5 (final review): the leading-tag check is case-insensitive
+with tempfile.TemporaryDirectory() as td_fn5:
+    conv_fn5 = write_conv(Path(td_fn5), conventions())
+    for label, bare in (("lower-case tag", "[perf] X"), ("mixed-case tag", "[Perf] X")):
+        expect_refused(f"N5[{FR}]: bare title {label} {bare!r}", cmp(conv_fn5, title=bare), "bare-title-invalid")
+
+# --- N1 (final review): patterns that blow up in re.compile are refused, never a traceback
+with tempfile.TemporaryDirectory() as td_fn1:
+    for label, pat in (("overflow quantifier", "a{99999999999}"), ("deeply nested group", "(" * 3000 + "a" + ")" * 3000)):
+        proc = compose(write_conv(Path(td_fn1), conventions(pattern=pat), f"fn1-{slug(label)}.json"))
+        expect_refused(f"N1[{FR}]: pattern is a {label}", proc, "conventions-missing", "pattern")
+        check(f"N1[{FR}]: pattern is a {label}: no Python traceback", "Traceback" not in proc.stderr,
+              proc.stderr.strip()[-160:])
+
+# --- N2 (final review): a lone surrogate (category Cs) is a refusal in JSON and text mode.
+# Built in-process only: a lone surrogate cannot travel through a Windows argv, and nothing is written to disk.
+import contextlib
+import io
+
+SURR = "Fix \ud800 X"
+with tempfile.TemporaryDirectory() as td_fn2:
+    conv_fn2 = write_conv(Path(td_fn2), conventions())
+    if MOD is None or not callable(getattr(MOD, "main", None)):
+        for mode in ("JSON", "text"):
+            check(f"N2[{FR}][{mode}]: lone surrogate bare title is refused bare-title-invalid, no traceback",
+                  False, "module not importable in-process")
+    else:
+        for mode, extra in (("JSON", ["--json"]), ("text", [])):
+            buf = io.StringIO()
+            rc, err = None, None
+            try:
+                with contextlib.redirect_stdout(buf):
+                    rc = MOD.main(["--type", "PERF", "--parent", "638", "--subtask", "16", "--title", SURR,
+                                   "--conventions", str(conv_fn2)] + extra)
+            except BaseException as exc:  # noqa: BLE001 - reported as a failed check
+                err = "%s: %s" % (type(exc).__name__, exc)
+            outtxt = buf.getvalue()
+            if mode == "JSON":
+                try:
+                    cause = json.loads(outtxt).get("cause")
+                except Exception:
+                    cause = None
+                ok = cause == "bare-title-invalid"
+            else:
+                ok = "cause:   bare-title-invalid" in outtxt
+            check(f"N2[{FR}][{mode}]: lone surrogate bare title is refused bare-title-invalid, no traceback",
+                  err is None and rc == 2 and ok,
+                  f"rc={rc} err={err!r} out={outtxt.strip()[:100]!r}")
+
 # ----------------------------------------------------------------- summary
 
 print()

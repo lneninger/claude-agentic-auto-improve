@@ -91,7 +91,7 @@ pre-authorization terms Step 6 already grants the `/design-first` handoff. Never
 **One block does the find, the compose, the create and the verify.** The scripts ship with the
 plugin and with a vendored copy, the same as `/advance`'s `pr_merged.py` lookup, so the block
 resolves `VPL` itself with that same lookup and then derives everything else from it. Fill each
-placeholder in with its value (the four numeric or fixed-tag ones sit inside single quotes, the
+placeholder in with its value (the numeric or fixed-tag ones sit inside single quotes, the
 two free-text ones inside quoted here-documents; keep each where it is) and run the block once, whole, in a single Bash invocation: shell variables do not survive between
 invocations, and a block split in two is how a title ends up created without its parent
 reference. Every `HALT` below stops the run before anything further is created or claimed.
@@ -127,7 +127,7 @@ P=$(printf %s "$P" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); P=${P#\#}
 case "$P" in ''|*[!0-9]*) echo "HALT: PARENT_ISSUE must be an issue number such as 638 or #638; nothing is created"; exit 2;; esac
 P=$(printf %s "$P" | sed 's/^0*//')
 [ -n "$P" ] && [ "${#P}" -le 18 ] || { echo "HALT: PARENT_ISSUE must be a positive number of at most 18 digits; nothing is created"; exit 2; }
-OUT=$(py -3 -X utf8 "$CST" --type '<TYPE>' --parent "$P" --subtask '<k>' --title="$BARE" --conventions "${CLAUDE_PROJECT_DIR:-.}/.claude/work-item-conventions.json" --json); RC=$?
+OUT=$(py -3 -X utf8 "$CST" --type '<TYPE>' --parent "$P" --subtask '<k>' --title=" $BARE" --conventions "${CLAUDE_PROJECT_DIR:-.}/.claude/work-item-conventions.json" --json); RC=$?
 if [ "$RC" -ne 0 ]; then
   printf '%s\n' "$OUT"
   if printf '%s' "$OUT" | py -3 -X utf8 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("verdict") == "refused" else 1)' >/dev/null 2>&1; then
@@ -180,15 +180,20 @@ How the block is built, and why:
   `issueTitle.subIssue`; to see it, print `issueTitle.subIssue.format` and
   `issueTitle.subIssue.legend` from there. This document does not restate either.
 - **`<k>` is the sub-task's ordinal** from its id in the handoff plan (`t16` gives `16`).
-- **The parent, effort tag, ordinal and sub-issue number are written in single quotes** because
-  each is a number or a fixed tag that can never hold a single quote; inside single quotes the shell
+- **The parent, effort tag and ordinal (the create block's three single-quoted placeholders) are
+  written in single quotes**; the sub-issue number is single-quoted only in the repair block. Each
+  is a number or a fixed tag that can never hold a single quote; inside single quotes the shell
   expands nothing, so a pasted `$(...)` stays literal text and fails the digits check instead of
-  running. The shell trims only leading and trailing whitespace, removes at most one leading `#`,
+  running. If any value you fill into a single-quoted placeholder contains a single quote, halt and
+  do not run the block: the quote would end the string early. The shell trims only leading and trailing whitespace, removes at most one leading `#`,
   rejects anything not all digits (internal whitespace included) with a named `HALT`, and strips
   leading zeros (`0638` is `638`) before `gh`, the helper and the verifier see the value.
 - **The bare title and the body each enter through a quoted here-document**, each with its own
   delimiter, so no character in either can alter the command. The title is handed over as
-  `--title="$BARE"`, one word, so a title that begins with dashes is still a value, not an option.
+  `--title=" $BARE"`, one word, so a title that begins with dashes is still a value, not an option.
+  The one leading space is deliberate: free text that can start with `/` is protected from Git Bash
+  (MSYS) path conversion, which would otherwise rewrite `--title=/flow note` into a Windows path;
+  the helper trims the ends, so the space never reaches the title.
   The body goes to `gh` with `--body-file -`, never inline as `--body`.
 - **Never retry with a title that lacks the parent reference.**
 
@@ -197,7 +202,7 @@ Exit `0` is `composed`; exit `2` is `refused`, and nothing is created. The refus
 
 | Cause | What it means |
 |---|---|
-| `conventions-missing` | the conventions file, its `issueTitle` block, `issueTitle.subIssue.format`, or a present and valid `issueTitle.pattern` is absent or unreadable (or the project root could not be determined) — add the block named in `remediation` |
+| `conventions-missing` | the conventions file, its `issueTitle` block, `issueTitle.subIssue.format`, `issueTitle.effortTypes` (a list; an empty list counts as present), or a present and valid `issueTitle.pattern` is absent or unreadable (or the project root could not be determined) — add the block named in `remediation` |
 | `format-malformed` | the declared format lacks or repeats a placeholder, or is not led by the effort tag |
 | `parent-missing` | `PARENT_ISSUE` is empty (or only a `#`) |
 | `parent-not-positive-integer` | `PARENT_ISSUE` is not a positive integer (one leading `#` is allowed) |

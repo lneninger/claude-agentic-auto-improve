@@ -191,6 +191,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract's invariant says "refuse when the project root cannot be determined" for a project-owned file, or a skill block validates an input and then runs a mutating command with it
 - **Tags:** `locator, plugin-install, fail-loud, contract-amendment, normalised-value, orphan-record`
 
+### 2026-10-16 — Never let free text start an argument handed to a native program from Git Bash
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-15-subissue-title-parent-ref.md`
+- **Lesson:** Git Bash turns an argument of the form `--option=/text` into a Windows path before a native program such as `py` sees it, so `/flow note` arrived as `C:/Program Files/Git/flow note` and a public issue title would have been silently corrupted. A test that passes the value as an argument list without a shell cannot show this; only a replay in the real shell can. Prefix free text with a character the receiver trims (one space) or send it through a file or standard input, and add a replay test with a title that starts with `/`.
+- **Apply when:** a skill's shell block passes free text (a title, a name, a message) to a native program as an argument on Windows
+- **Tags:** `git-bash, msys, path-conversion, free-text-argument, replay-test`
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

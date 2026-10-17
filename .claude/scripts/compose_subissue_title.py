@@ -127,16 +127,16 @@ def _load_title_block(conventions_path):
     sub = block.get("subIssue")
     if not isinstance(sub, dict) or not isinstance(sub.get("format"), str) or not sub["format"].strip():
         return None, _refuse("conventions-missing", "no issueTitle.subIssue.format in %s" % path)
-    effort = block.get("effortTypes", [])
+    effort = block.get("effortTypes")  # an absent key is refused; an empty list is still a list
     if not isinstance(effort, list) or not all(
             isinstance(e, dict) and isinstance(e.get("tag"), str) for e in effort):
         return None, _refuse(
             "conventions-missing",
-            "issueTitle.effortTypes must be a list of objects each with a string 'tag' in %s" % path)
+            "issueTitle.effortTypes must be present as a list of objects each with a string 'tag' in %s" % path)
     pattern = block.get("pattern")
     try:
         re.compile(pattern)
-    except (TypeError, re.error):
+    except (TypeError, re.error, OverflowError, RecursionError, MemoryError):
         return None, _refuse("conventions-missing", "issueTitle.pattern missing or invalid in %s" % path)
     return block, None
 
@@ -183,10 +183,10 @@ def compose(effort_tag, parent, subtask, bare_title, conventions_path=None):
     tags = [t["tag"] for t in block.get("effortTypes", []) if t["tag"]]
     if not title:
         return _refuse("bare-title-invalid", "The bare title is empty.")
-    if any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in title):
+    if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Zl", "Zp") for ch in title):
         return _refuse(
             "bare-title-invalid", "The bare title contains a line break, control or format character.")
-    if any(title.startswith("[%s]" % t) for t in tags):
+    if any(title.lower().startswith("[%s]" % t.lower()) for t in tags):
         return _refuse("bare-title-invalid", "The bare title already starts with an effort tag.")
 
     if effort_tag not in tags:
