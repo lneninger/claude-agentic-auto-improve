@@ -3540,6 +3540,10 @@ def main() -> int:
                        "to do" if found else
                        "it is not a merged pull request into %s that maps to no sub-task and is this "
                        "contract's own (the brief's branch or link)" % base)
+                if brief_fields is None:
+                    why += ("; no Work Item Brief is linked to this contract (a run started with "
+                            "/design-first, not /task, writes none). Add a brief whose contract: names "
+                            "this contract and whose branch: is the delivered branch, then run again")
                 return _refuse("G-1", "not-a-delivery-candidate", "pull request %s cannot be recorded: %s"
                                % (ref, why))
             if defects or not tasks:
