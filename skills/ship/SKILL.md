@@ -270,6 +270,7 @@ answered this question in this run. An assumed answer writes `pending` and never
   line. With the recorded-offer requirement on, Step 4d's verdict is `offer-declined`; with it
   off, the verdict is `not-applicable`. Both resolve to `issue_link: none` and are a
   **success**, not a warning.
+- If `issue_offer: opened` is recorded but the id is absent, the issue has probably already been created and only the id was lost. First look for it: search the repository's issues by its exact title, and if one is found, write its id back into the brief (`id:`, `url:`, `repo:`). Only offer to create an issue when none is found.
 - If `gh` is not available here, write `issue_offer: unavailable` with the matching
   `issue_offer_reason:`. That is not a final answer. Without `gh`, Step 4d halts earlier still,
   with `unverifiable` and the cause `gh-missing` (or `gh-unauthenticated`), until `gh` works
@@ -343,7 +344,7 @@ The script performs **no mutation** of any GitHub object; it only reads. It retu
 | `offer-unavailable` | No issue, and the brief records a reason the offer could not be made that still holds (`create-failed` or `no-problem-statement`) | Success. `issue_link: none` |
 | `exempt-partial` | `Refs #N` on a deliberately partial item | Success. `issue_link: refs` |
 | `absent-repairable` | No link, and the body can be repaired | **The one repairable row** — see below |
-| `offer-unrecorded` | No issue, and the brief records no decision about opening one (or records a reason that no longer holds) | HALT. Ask the Step 3.5 question, record the answer in `issue_offer:`, then re-run Step 4d. Do not create the pull request again: it is already open. |
+| `offer-unrecorded` | No issue, and the brief records no decision about opening one (or records a reason that no longer holds) | HALT. Ask the Step 3.5 question, record the answer in `issue_offer:`, then re-run Step 4d. Do not create the pull request again: it is already open. If `issue_offer` is `opened`, first look for the issue already created, searching by its exact title, write its id back into the brief, and only offer to create one when none is found. |
 | `still-absent` | Repair was attempted and the link is still missing | HALT. `issue_link: unresolved` |
 | everything else | `unverifiable` (including the cause `brief-path-unresolved`, which means pass the brief path as it exists from the current directory), `malformed-id`, `unresolved-id`, `issue-unreachable`, `issue-already-closed`, `pr-not-open`, `foreign-closing-ref`, `unexpected-closing-ref`, `undeclared-target`, `refs-without-partial` | HALT. Report the `reason` and `remediation` verbatim |
 

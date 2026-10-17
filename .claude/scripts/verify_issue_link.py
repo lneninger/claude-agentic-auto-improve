@@ -169,6 +169,8 @@ OFFER_VERDICTS = ("offer-declined", "offer-unavailable", "offer-unrecorded")
 # two offerReasons, create-failed and no-problem-statement, still hold at ship
 # time and so count as a recorded "could not offer" (offer-unavailable).
 STALE_OFFER_REASONS = ("gh-missing", "gh-unauthenticated")
+# The ONLY reasons that reach offer-unavailable, whatever offerReasons lists.
+SUCCESS_OFFER_REASONS = ("create-failed", "no-problem-statement")
 
 
 # --------------------------------------------------------------------------
@@ -547,6 +549,10 @@ def _evaluate_absent(exp, out):
     if reason in STALE_OFFER_REASONS:
         return unrecorded("the recorded reason %s is stale; this /ship run has just used gh, "
                           "so the offer can be made." % reason)
+    if reason not in SUCCESS_OFFER_REASONS:
+        # Declared by the project but not a reason this script accepts as final.
+        return unrecorded("%s is %r, which this script does not accept as a reason that "
+                          "still holds at ship time." % (reason_field, reason))
     return out("offer-unavailable",
                "An issue could not be opened (%s: unavailable, %s: %s)."
                % (field, reason_field, reason))
@@ -998,7 +1004,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Verify that GitHub reports a Closing Link for a PR and its work item.")
     parser.add_argument("--brief", required=True,
-                        help="Work Item Brief path; resolved via work_items_dir() when relative.")
+                        help="brief-path-unresolved halts a brief with no issue that is "
+                             "found only through work_items_dir(), so pass the path as it "
+                             "exists from the current directory.")
     parser.add_argument("--pr", required=True, type=int, help="Pull request number.")
     # SEED ONLY, never identity. verify() re-reads the canonical owner/repo from
     # `gh repo view --json nameWithOwner` and overrides whatever arrives here

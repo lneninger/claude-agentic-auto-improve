@@ -2423,8 +2423,54 @@ def case_53_repeated_issue_offer_key_last_wins():
             check(name, r["verdict"] == verdict, "got %r" % r["verdict"])
 
 
+# ---- case 54 -- round 4 W1: offer-unavailable is an explicit allow-list -----
+def case_54_offer_unavailable_allow_list_is_in_the_script():
+    """Only create-failed and no-problem-statement may reach offer-unavailable,
+    whatever the project's own offerReasons list says."""
+    name = "54 an extra declared reason 'assumed' + unavailable -> offer-unrecorded"
+    if need_subject(name):
+        return
+    extended = list(OFFER_KEYS["offerReasons"]) + ["assumed"]
+    with tmp() as d:
+        r = _run_offer_safely(Path(d), dict(id="none", issue_offer="unavailable",
+                                            issue_offer_reason="assumed"),
+                              override={"offerReasons": extended})
+        check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+        check("54 'assumed' is never offer-unavailable", r["verdict"] != "offer-unavailable",
+              "got %r" % r["verdict"])
+        check("54 'assumed' halts with exit 2", _halts_with_2(r),
+              "halt=%r exit=%r" % (r.get("halt"), r.get("exit_code")))
+
+    name = "54 gh-missing renamed 'no-gh' in the project's list + that reason -> offer-unrecorded"
+    renamed = ["no-gh" if x == "gh-missing" else x for x in OFFER_KEYS["offerReasons"]]
+    with tmp() as d:
+        r = _run_offer_safely(Path(d), dict(id="none", issue_offer="unavailable",
+                                            issue_offer_reason="no-gh"),
+                              override={"offerReasons": renamed})
+        check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+        check("54 'no-gh' is never offer-unavailable", r["verdict"] != "offer-unavailable",
+              "got %r" % r["verdict"])
+
+
+# ---- case 55 -- round 4 N2: --help must not hide the brief-path halt --------
+def case_55_help_text_mentions_the_brief_path_halt():
+    import subprocess
+    name = "55 --brief help does not claim work_items_dir() resolution without the halt"
+    if need_subject(name):
+        return
+    proc = subprocess.run([sys.executable, str(SCRIPTS_DIR / "verify_issue_link.py"), "--help"],
+                          capture_output=True, text=True)
+    text = " ".join((proc.stdout or "").split())
+    check("55 --help runs", proc.returncode == 0, "rc=%r err=%r" % (proc.returncode, proc.stderr))
+    claims = "work_items_dir()" in text
+    check(name, (not claims) or "brief-path-unresolved" in text,
+          "help says: %r" % text[text.find("--brief"):text.find("--brief") + 200])
+
+
 def main():
     for fn in (
+        case_54_offer_unavailable_allow_list_is_in_the_script,
+        case_55_help_text_mentions_the_brief_path_halt,
         case_50_field_keys_of_the_wrong_type,
         case_51_extra_outcome_with_reason_is_not_unavailable,
         case_52_unreadable_beside_file_reason_text,

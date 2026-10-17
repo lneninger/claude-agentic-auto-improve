@@ -14,7 +14,7 @@ north_stars: none
 contract: .claude/concepts/2026-10-16-recorded-issue-offer-outcome.md
 pr: UNKNOWN
 issue_link: unknown
-status: implementing
+status: verifying
 created: 2026-10-16
 ---
 
@@ -56,8 +56,8 @@ M - re-sized from S after `/debug`. The root cause (see `.claude/debug-notes-own
   - W1: `offer-unavailable` is reached by any extra reason a project adds to `offerReasons`; the contract allows only `create-failed` and `no-problem-statement`. Fix: an explicit allow-list in `_evaluate_absent` (`.claude/scripts/verify_issue_link.py` near line 546), plus a test.
   - W2: after `offer-unrecorded` with `issue_offer: opened` and no id, `/ship` Step 4d tells the agent to re-offer, which can create a duplicate issue. Fix: look up the already-created issue by exact title and write its id back first (`skills/ship/SKILL.md`, Step 3.5 gate and the Step 4d row).
   - Smaller notes N1 to N7 are in the review: byte-order mark in a brief, stale `--brief` help text, nested brief layout, wording gaps in the ship skill, and the changed agent-memory file.
-- Suites at the last full run: issue-link verifier 535 of 535 checks pass; ship-skill consistency 102 of 102 pass; version-bump, script-lookup and sub-issue-title suites pass. Known failures that also fail without this change: `test_pr_merged.py` (1), `test_plugin_doctor.py` (11), `test_plugin_manifests.py` (14); all need hook or add-on files that are not tracked. `/verify-before-done` has NOT been run.
-- Stopped before verification, commit and pull request. Local commit only, not pushed.
+- Suites at the last full run: issue-link verifier 535 of 535 checks pass; ship-skill consistency 102 of 102 pass; version-bump, script-lookup and sub-issue-title suites pass. Known failures that also fail without this change: `test_pr_merged.py` (1), `test_plugin_doctor.py` (11), `test_plugin_manifests.py` (14); all need hook or add-on files that are not tracked. (State at the first stop; superseded by the next entry.)
+- 2026-10-16 (resumed on the user's "continue"): W1 and W2 fixed test-first (explicit allow-list of the two reasons that still hold at ship time; `/ship` looks up an already-created issue before re-offering). Verified on the final tree: issue-link verifier 542 checks pass, ship-skill consistency 104 pass, version-bump, script-lookup and sub-issue-title suites pass, version check "raised to 0.9.4". No review pass was run on this last small fix (the three earlier passes were); that is disclosed in the pull request. Not fixed, by choice: N1 (brief with a byte-order mark), N3 (brief nested deeper than `work-items`), N4 and N5 and N6 wording notes.
 
 ## Routing
 non-trivial -> `/design-first` (contract), then `/tdd-first`. Debug notes: `.claude/debug-notes-own-repo-issue-closing.md`.

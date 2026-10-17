@@ -316,6 +316,34 @@ check("the Notes line lists the still-valid reasons create-failed and no-problem
 check("the Notes line does not list the stale reasons gh-missing / gh-unauthenticated",
       "gh-missing" not in notes and "gh-unauthenticated" not in notes, notes[-300:])
 
+def says_find_existing_issue_first(text: str) -> list[str]:
+    """Meaningful words, not a whole sentence. Returns the list of missing ideas."""
+    missing = []
+    if not re.search(r"look(ing)? (for|up)|search|find|found", text, re.I):
+        missing.append("look for / search / find")
+    if not re.search(r"exact title", text, re.I):
+        missing.append("by its exact title")
+    if not re.search(r"already (been )?(created|exists?|opened|made)|already-created", text, re.I):
+        missing.append("the issue already created")
+    if not re.search(r"write[^.|]{0,60}\bid\b|\bid\b[^.|]{0,40}back", text, re.I):
+        missing.append("write its id back")
+    if not (re.search(r"\bonly\b", text, re.I)
+            and re.search(r"\bnone\b|not found|no (such |matching )?issue|nothing", text, re.I)
+            and re.search(r"create", text, re.I)):
+        missing.append("only offer to create when none is found")
+    return missing
+
+
+opened_chunks = " ".join(c for c in chunks(step35) if "opened" in c)
+miss_gate = says_find_existing_issue_first(opened_chunks)
+check("Step 3.5 says, for 'opened' with an absent id, to find the issue already created "
+      "by its exact title, write its id back, and offer to create only if none is found",
+      bool(opened_chunks) and not miss_gate,
+      "missing ideas: %s" % miss_gate if opened_chunks else "no Step 3.5 text names 'opened'")
+miss_row = says_find_existing_issue_first(" ".join(unrecorded_rows))
+check("the 'offer-unrecorded' row says the same (find by exact title, write the id back, "
+      "create only if none is found)", not miss_row, "missing ideas: %s" % miss_row)
+
 print("\nhalting verdicts are presented as halting")
 for verdict in sorted(HALTING):
     if verdict == "still-absent":
