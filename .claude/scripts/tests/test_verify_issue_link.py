@@ -20,7 +20,9 @@ resolved closing link, and issue #6 is still open although PR #30 delivered
 it. The only admissible proof is GitHub's own resolved reference, exposed by
 `gh pr view --json closingIssuesReferences` (INV-1).
 
-This suite pins the 16-verdict ORDERED decision procedure. Order IS the
+This suite pins the 19-verdict ORDERED decision procedure (16, plus the three
+offer verdicts of issue #57, contract
+.claude/concepts/2026-10-16-recorded-issue-offer-outcome.md). Order IS the
 enforcement mechanism for INV-3 (never rewrite Refs into Closes) and INV-13,
 so a rule moved "for readability" must go RED here.
 
@@ -120,9 +122,20 @@ ISSUE_LINK_BLOCK = {
         "foreign-closing-ref", "unexpected-closing-ref", "exempt-partial",
         "deferred-close", "linked", "undeclared-target", "refs-without-partial",
         "absent-repairable", "still-absent",
+        "offer-declined", "offer-unavailable", "offer-unrecorded",
     ],
     "unverifiableCauses": ["gh-missing", "gh-unauthenticated", "query-failed",
-                           "pr-not-found", "conventions-missing"],
+                           "pr-not-found", "conventions-missing",
+                           "brief-path-unresolved"],
+}
+
+# Issue #57 -- the Recorded-offer requirement keys (contract Data Shapes).
+OFFER_KEYS = {
+    "offerOutcomeField": "issue_offer",
+    "offerOutcomes": ["pending", "opened", "declined", "unavailable"],
+    "offerReasonField": "issue_offer_reason",
+    "offerReasons": ["gh-missing", "gh-unauthenticated", "create-failed",
+                     "no-problem-statement"],
 }
 
 def resolved_link(number, owner=OWNER, repo=REPO_NAME):
@@ -506,6 +519,22 @@ def case_09_unverifiable():
         check("9  conventions-missing does NOT silently return not-applicable",
               r["verdict"] != "not-applicable", "got %r" % r["verdict"])
 
+    # (f) brief-path-unresolved -- the sixth cause (issue #57): a brief found only
+    #     through work_items_dir() cannot say which project's switch applies.
+    name = "9  unverifiable cause=brief-path-unresolved"
+    with tmp() as d:
+        r = fallback_verify(Path(d), dict(id="none", issue_offer="declined"))
+        check(name, r["verdict"] == "unverifiable", "got %r" % r["verdict"])
+        check("9  brief-path-unresolved exact cause",
+              r.get("cause") == "brief-path-unresolved", "got %r" % r.get("cause"))
+        check("9  brief-path-unresolved exits non-zero", r.get("exit_code", 0) != 0,
+              "exit_code=%r" % r.get("exit_code"))
+        check("9  brief-path-unresolved remediation contains 'current directory'",
+              "current directory" in (r.get("remediation") or ""),
+              "remediation=%r" % r.get("remediation"))
+        check("9  brief-path-unresolved does NOT silently return not-applicable",
+              r["verdict"] != "not-applicable", "got %r" % r["verdict"])
+
 
 # ==========================================================================
 # Case 9b -- the four states Rev 1 left unmapped
@@ -808,6 +837,33 @@ def case_14_rule_order():
                    gh_stub(base="develop", body="## Summary\n\nRefs #39\n"))
         check(name, r["verdict"] == "undeclared-target", "got %r" % r["verdict"])
 
+    # Issue #57: the offer rule sits in rule 4's slot, so the rules above it
+    # still win and the rules below it are never reached.
+    name = "14 rule order: resolver failure (1) wins over offer-unrecorded (4)"
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none"),
+                      gh=gh_stub(version_rc=127, version_err="'gh' is not recognized"))
+        check(name, r["verdict"] == "unverifiable" and r.get("cause") == "gh-missing",
+              "got %r cause=%r" % (r["verdict"], r.get("cause")))
+
+    name = "14 rule order: malformed-id (2) wins over offer-unrecorded (4)"
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="not an id!"))
+        check(name, r["verdict"] == "malformed-id", "got %r" % r["verdict"])
+
+    name = "14 rule order: unresolved-id (3) wins over offer-unrecorded (4)"
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="UNKNOWN"))
+        check(name, r["verdict"] == "unresolved-id", "got %r" % r["verdict"])
+
+    name = "14 rule order: offer-unrecorded (4) answers before any pr/issue/repo read"
+    with tmp() as d:
+        calls = []
+        r = run_offer(Path(d), dict(id="none"), gh=gh_stub(recorder=calls))
+        check(name, r["verdict"] == "offer-unrecorded" and
+              all(c[:1] == ["--version"] for c in calls),
+              "verdict=%r calls=%r" % (r["verdict"], calls))
+
 
 # ==========================================================================
 # Coverage guard -- every declared verdict has its own case above
@@ -818,9 +874,10 @@ ALL_VERDICTS = [
     "foreign-closing-ref", "unexpected-closing-ref", "exempt-partial",
     "deferred-close", "linked", "undeclared-target", "refs-without-partial",
     "absent-repairable", "still-absent",
+    "offer-declined", "offer-unavailable", "offer-unrecorded",
 ]
 ALL_CAUSES = ["gh-missing", "gh-unauthenticated", "query-failed",
-              "pr-not-found", "conventions-missing"]
+              "pr-not-found", "conventions-missing", "brief-path-unresolved"]
 
 
 def case_17_resolver_failure_on_every_gh_read():
@@ -1016,6 +1073,15 @@ def case_20_real_corpus_integration():
     check("20 the REAL conventions file agrees with the subject's VERDICTS",
           list(V.VERDICTS) == list(block.get("verdicts") or []),
           "json=%r" % (block.get("verdicts"),))
+    check("20 the REAL conventions file declares exactly the 19 verdicts",
+          list(block.get("verdicts") or []) == ALL_VERDICTS,
+          "json=%r" % (block.get("verdicts"),))
+    for key, value in OFFER_KEYS.items():
+        check("20 the REAL conventions file declares %s" % key,
+              block.get(key) == value, "got %r" % (block.get(key, "<absent>"),))
+    check("20 the REAL conventions file turns requireRecordedOffer on (this repository)",
+          block.get("requireRecordedOffer") is True,
+          "got %r" % (block.get("requireRecordedOffer", "<absent>"),))
 
     briefs = sorted(V.work_items_dir().glob("*.md"))
     check("20 the real work-items dir is non-empty (positive control)",
@@ -1152,12 +1218,12 @@ def case_16_rename_and_real_shape():
 
 
 def case_15_declared_sets():
-    name = "15 subject declares exactly the 16 contract verdicts"
+    name = "15 subject declares exactly the 19 contract verdicts"
     if need_subject(name):
         return
     check(name, list(V.VERDICTS) == ALL_VERDICTS,
           "got %r" % (list(getattr(V, "VERDICTS", [])),))
-    check("15 subject declares exactly the 5 unverifiable causes",
+    check("15 subject declares exactly the 6 unverifiable causes",
           list(V.UNVERIFIABLE_CAUSES) == ALL_CAUSES,
           "got %r" % (list(getattr(V, "UNVERIFIABLE_CAUSES", [])),))
 
@@ -1622,8 +1688,761 @@ def case_32_command_line_drives_declared_base():
         check("32 TWIN: undeclared-target halts", exit_code != 0, "got %r" % exit_code)
 
 
+# ==========================================================================
+# Cases 33-42 -- issue #57, the recorded outcome of the issue offer.
+# Contract: .claude/concepts/2026-10-16-recorded-issue-offer-outcome.md
+#
+# The switch (requireRecordedOffer), the four offer keys and the verdicts list
+# are read ONLY from <brief>/../../work-item-conventions.json, i.e. the
+# `.claude` folder the brief lives in. Fixture layout, per project root:
+#
+#     <root>/.claude/work-items/brief.md             the brief, passed as given
+#     <root>/.claude/work-item-conventions.json      the beside-brief file
+#     <root>/passed/work-item-conventions.json       what verify() gets as
+#                                                    conventions_path (the
+#                                                    locator-chosen file)
+#
+# Keeping the two files apart is what proves the switch and the lists are not
+# borrowed from the locator-chosen file.
+# ==========================================================================
+import contextlib
+import os
+import re
+
+try:
+    import _project_paths as PP  # type: ignore  # put on sys.path by _claude_paths
+except Exception:  # noqa: BLE001
+    PP = None  # type: ignore
+
+_MISSING = object()
+
+
+def offer_block(switch=True, drop=(), empty=(), without_verdicts=(), override=None):
+    """An issueLink block with the offer keys. switch=_MISSING omits the key."""
+    block = json.loads(json.dumps(ISSUE_LINK_BLOCK))
+    block.update(json.loads(json.dumps(OFFER_KEYS)))
+    if switch is not _MISSING:
+        block["requireRecordedOffer"] = switch
+    for key in drop:
+        block.pop(key, None)
+    for key in empty:
+        block[key] = [] if isinstance(block.get(key), list) else ""
+    if without_verdicts:
+        block["verdicts"] = [v for v in block["verdicts"] if v not in without_verdicts]
+    block.update(override or {})
+    return block
+
+
+def write_conventions_in(folder, block):
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "work-item-conventions.json"
+    path.write_text(json.dumps({"issueTitle": {}, "prTitle": {}, "issueLink": block},
+                               indent=2), encoding="utf-8")
+    return path
+
+
+def offer_project(root, fields, switch=True, drop=(), empty=(), beside=True,
+                  passed_block=None, without_verdicts=(), override=None):
+    """Build the fixture layout above. Returns (brief_path, passed_conventions)."""
+    claude = root / ".claude"
+    (claude / "work-items").mkdir(parents=True, exist_ok=True)
+    if beside:
+        write_conventions_in(claude, offer_block(switch, drop, empty,
+                                                 without_verdicts, override))
+    brief = write_brief(claude / "work-items", **fields)
+    passed = write_conventions_in(
+        root / "passed", passed_block if passed_block is not None else ISSUE_LINK_BLOCK)
+    return brief, passed
+
+
+def run_offer(root, fields, gh=None, **kw):
+    brief, passed = offer_project(root, fields, **kw)
+    return verify(brief, passed, gh or gh_stub())
+
+
+@contextlib.contextmanager
+def redirected(neutral, project_dir=None, self_root=None, cwd=None, home=None):
+    """Point every locator rank at a known place, then restore.
+
+    Ranks: CLAUDE_PROJECT_DIR, the resolver's own root (SELF_ROOT), the current
+    directory, the home folder. Whatever is not named is sent to an EMPTY
+    folder under `neutral`, so the real checkout and the real home cannot
+    answer for the test.
+    """
+    saved = (os.environ.get("CLAUDE_PROJECT_DIR"), PP.SELF_ROOT, PP.HOME, os.getcwd())
+    try:
+        if project_dir is not None:
+            os.environ["CLAUDE_PROJECT_DIR"] = str(project_dir)
+        else:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        PP.SELF_ROOT = self_root if self_root is not None else neutral / "self" / ".claude"
+        PP.HOME = home if home is not None else neutral / "home"
+        empty_cwd = neutral / "cwd"
+        empty_cwd.mkdir(parents=True, exist_ok=True)
+        os.chdir(str(cwd if cwd is not None else empty_cwd))
+        yield
+    finally:
+        os.chdir(saved[3])
+        PP.HOME = saved[2]
+        PP.SELF_ROOT = saved[1]
+        if saved[0] is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved[0]
+
+
+def fallback_verify(root, fields, switch=True, request="brief.md", gh=None):
+    """Run verify() with a RELATIVE brief that exists only via work_items_dir()."""
+    proj = root / "proj"
+    offer_project(proj, fields, switch=switch)
+    neutral = root / "neutral"
+    with redirected(neutral, project_dir=proj):
+        return verify(Path(request), proj / "passed" / "work-item-conventions.json",
+                      gh or gh_stub())
+
+
+def _halts_with_2(r):
+    return r.get("halt") is True and r.get("exit_code", 0) == 2
+
+
+# ---- case 33 -- the defect itself ------------------------------------------
+def case_33_switch_on_absent_id_no_field_is_unrecorded():
+    name = "33 switch on + id none + no issue_offer field -> offer-unrecorded (today: not-applicable)"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none"))
+        check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+        check("33 offer-unrecorded halts with exit 2", _halts_with_2(r),
+              "halt=%r exit=%r" % (r.get("halt"), r.get("exit_code")))
+        check("33 offer-unrecorded writes NO issue_link", "issue_link" not in r,
+              "got %r" % r.get("issue_link"))
+        check("33 reason names the missing field", "issue_offer" in (r.get("reason") or ""),
+              "reason=%r" % r.get("reason"))
+
+    name = "33 replay of the pull request 55 brief shape (id none, no field) with the switch on"
+    with tmp() as d:
+        fields = dict(id="none", url="none", source="free-text", partial=None,
+                      issue_link="unknown", pr="pending")
+        r = run_offer(Path(d), fields)
+        check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+        check("33 pull request 55 replay halts", _halts_with_2(r),
+              "halt=%r exit=%r" % (r.get("halt"), r.get("exit_code")))
+
+    # POSITIVE CONTROL: the identical brief with the switch OFF still passes.
+    name = "33 POSITIVE CONTROL: identical brief, switch off -> not-applicable, issue_link none"
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none"), switch=False)
+        check(name, r["verdict"] == "not-applicable", "got %r" % r["verdict"])
+        check("33 POSITIVE CONTROL writes issue_link: none", r.get("issue_link") == "none",
+              "got %r" % r.get("issue_link"))
+        check("33 POSITIVE CONTROL proceeds", r.get("halt") is False, "got %r" % r.get("halt"))
+
+
+# ---- case 34 -- recorded outcomes pass -------------------------------------
+def case_34_recorded_outcomes_succeed():
+    name = "34 switch on + declined -> offer-declined"
+    if need_subject(name):
+        return
+    for label, extra in (("declined", {}),
+                         ("declined + a reason (reason ignored, still recorded)",
+                          {"issue_offer_reason": "gh-missing"}),
+                         ("declined + an unknown reason (ignored)",
+                          {"issue_offer_reason": "whatever"})):
+        name = "34 switch on + %s -> offer-declined" % label
+        with tmp() as d:
+            r = run_offer(Path(d), dict(id="none", issue_offer="declined", **extra))
+            check(name, r["verdict"] == "offer-declined", "got %r" % r["verdict"])
+            check("34 %s writes issue_link: none" % label, r.get("issue_link") == "none",
+                  "got %r" % r.get("issue_link"))
+            check("34 %s does not halt" % label, r.get("halt") is False,
+                  "got %r" % r.get("halt"))
+            check("34 %s exits 0" % label, r.get("exit_code", 0) == 0,
+                  "got %r" % r.get("exit_code"))
+
+    for reason in ("create-failed", "no-problem-statement"):
+        name = "34 switch on + unavailable / %s -> offer-unavailable" % reason
+        with tmp() as d:
+            r = run_offer(Path(d), dict(id="none", issue_offer="unavailable",
+                                        issue_offer_reason=reason))
+            check(name, r["verdict"] == "offer-unavailable", "got %r" % r["verdict"])
+            check("34 %s writes issue_link: none" % reason, r.get("issue_link") == "none",
+                  "got %r" % r.get("issue_link"))
+            check("34 %s does not halt" % reason, r.get("halt") is False,
+                  "got %r" % r.get("halt"))
+            check("34 %s echoes the reason in the result" % reason,
+                  reason in (r.get("reason") or ""), "reason=%r" % r.get("reason"))
+
+
+# ---- case 35 -- everything else is unrecorded, each named ------------------
+def _expect_unrecorded(label, fields, fragment=None, **kw):
+    name = "35 offer-unrecorded: %s" % label
+    if need_subject(name):
+        return None
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none", **fields), **kw)
+        check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+        check("35 %s halts with exit 2" % label, _halts_with_2(r),
+              "halt=%r exit=%r" % (r.get("halt"), r.get("exit_code")))
+        check("35 %s writes NO issue_link" % label, "issue_link" not in r,
+              "got %r" % r.get("issue_link"))
+        if fragment:
+            check("35 %s reason names the case (%r)" % (label, fragment),
+                  fragment in (r.get("reason") or ""), "reason=%r" % r.get("reason"))
+        return r
+
+
+def case_35_unrecorded_cases():
+    pending = _expect_unrecorded("pending", dict(issue_offer="pending"), "pending")
+    missing = _expect_unrecorded("key missing", dict(), "issue_offer")
+    if pending and missing:
+        check("35 the pending and key-missing cases get DIFFERENT reasons",
+              pending.get("reason") != missing.get("reason"),
+              "both said %r" % pending.get("reason"))
+    _expect_unrecorded("opened with an absent id contradicts itself",
+                       dict(issue_offer="opened"), "opened")
+    _expect_unrecorded("unknown value", dict(issue_offer="maybe"), "maybe")
+    _expect_unrecorded("empty value", dict(issue_offer=""))
+    _expect_unrecorded("unknown value (a leftover template placeholder)",
+                       dict(issue_offer="<pending|opened|declined|unavailable>"))
+    _expect_unrecorded("unavailable, reason key absent",
+                       dict(issue_offer="unavailable"), "issue_offer_reason")
+    _expect_unrecorded("unavailable, reason empty",
+                       dict(issue_offer="unavailable", issue_offer_reason=""),
+                       "issue_offer_reason")
+    _expect_unrecorded("unavailable, unknown reason",
+                       dict(issue_offer="unavailable", issue_offer_reason="network-glitch"),
+                       "network-glitch")
+    # The stale-reason rule: gh --version already succeeded, so gh is present.
+    for reason in ("gh-missing", "gh-unauthenticated"):
+        _expect_unrecorded("unavailable / %s is stale at ship time" % reason,
+                           dict(issue_offer="unavailable", issue_offer_reason=reason),
+                           "stale")
+
+
+# ---- case 36 -- switch off or absent: nothing changes ----------------------
+def case_36_switch_off_is_backward_compatible():
+    outcomes = [
+        ("no field", {}),
+        ("declined", dict(issue_offer="declined")),
+        ("pending", dict(issue_offer="pending")),
+        ("opened", dict(issue_offer="opened")),
+        ("unavailable / gh-missing", dict(issue_offer="unavailable",
+                                          issue_offer_reason="gh-missing")),
+        ("unavailable / create-failed", dict(issue_offer="unavailable",
+                                             issue_offer_reason="create-failed")),
+        ("garbage", dict(issue_offer="garbage")),
+    ]
+    modes = [
+        ("switch false", dict(switch=False)),
+        ("switch key missing", dict(switch=_MISSING)),
+        ("switch \"yes\" (anything but true is off)", dict(switch="yes")),
+        ("switch \"on\" (anything but true is off)", dict(switch="on")),
+        ("no beside-brief file", dict(beside=False)),
+    ]
+    for mode, kw in modes:
+        for label, extra in outcomes:
+            name = "36 %s + %s -> not-applicable" % (mode, label)
+            if need_subject(name):
+                return
+            with tmp() as d:
+                r = run_offer(Path(d), dict(id="none", **extra), **kw)
+                check(name, r["verdict"] == "not-applicable", "got %r" % r["verdict"])
+                check("36 %s + %s writes issue_link: none" % (mode, label),
+                      r.get("issue_link") == "none", "got %r" % r.get("issue_link"))
+                check("36 %s + %s proceeds" % (mode, label), r.get("halt") is False,
+                      "got %r" % r.get("halt"))
+
+
+# ---- case 37 -- switch on, lists missing or empty --------------------------
+def case_37_incomplete_conventions_halt():
+    keys = ("offerOutcomeField", "offerOutcomes", "offerReasonField",
+            "offerReasons", "verdicts")
+    for mode in ("missing", "empty"):
+        for key in keys:
+            name = "37 switch on + %s %s in the beside-brief file -> conventions-missing" % (
+                key, mode)
+            if need_subject(name):
+                return
+            kw = dict(drop=(key,)) if mode == "missing" else dict(empty=(key,))
+            with tmp() as d:
+                # The locator-chosen file is COMPLETE, so a pass here would prove
+                # the value was borrowed from it.
+                r = run_offer(Path(d), dict(id="none", issue_offer="declined"),
+                              passed_block=offer_block(switch=False), **kw)
+                check(name, r["verdict"] == "unverifiable" and
+                      r.get("cause") == "conventions-missing",
+                      "got verdict=%r cause=%r" % (r["verdict"], r.get("cause")))
+                check("37 %s %s exits 2" % (key, mode), r.get("exit_code", 0) == 2,
+                      "got %r" % r.get("exit_code"))
+                check("37 %s %s: the reason names the key" % (key, mode),
+                      key in ((r.get("reason") or "") + (r.get("remediation") or "")),
+                      "reason=%r remediation=%r" % (r.get("reason"), r.get("remediation")))
+
+
+# ---- case 38 -- the brief path must exist as given -------------------------
+def case_38_brief_path_unresolved():
+    name = "38 brief found only via work_items_dir() + absent id -> brief-path-unresolved"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        r = fallback_verify(Path(d), dict(id="none", issue_offer="declined"))
+        check(name, r["verdict"] == "unverifiable" and
+              r.get("cause") == "brief-path-unresolved",
+              "got verdict=%r cause=%r" % (r["verdict"], r.get("cause")))
+        check("38 brief-path-unresolved exits 2", r.get("exit_code", 0) == 2,
+              "got %r" % r.get("exit_code"))
+        check("38 remediation says to pass the path as it exists from the current directory",
+              "current directory" in (r.get("remediation") or ""),
+              "remediation=%r" % r.get("remediation"))
+
+    # The halt is about the PATH, so it holds with the switch off too: this is
+    # the one change that reaches a project with the switch off.
+    name = "38 the same fallback with the switch OFF still halts brief-path-unresolved"
+    with tmp() as d:
+        r = fallback_verify(Path(d), dict(id="none"), switch=False)
+        check(name, r["verdict"] == "unverifiable" and
+              r.get("cause") == "brief-path-unresolved",
+              "got verdict=%r cause=%r" % (r["verdict"], r.get("cause")))
+
+    name = "38 the same fallback with a NUMBER id is unchanged (linked)"
+    with tmp() as d:
+        r = fallback_verify(Path(d), dict(id="39"), gh=gh_stub(closing=MATCHING))
+        check(name, r["verdict"] == "linked", "got %r" % r["verdict"])
+
+    name = "38 a brief found NOWHERE still fails open to not-applicable (case 21)"
+    with tmp() as d:
+        r = fallback_verify(Path(d), dict(id="none"), request="ghost.md")
+        check(name, r["verdict"] == "not-applicable", "got %r" % r["verdict"])
+        check("38 a brief found nowhere does not halt", r.get("halt") is False,
+              "got %r" % r.get("halt"))
+        check("38 a brief found nowhere exits 0", r.get("exit_code", 0) == 0,
+              "got %r" % r.get("exit_code"))
+
+
+# ---- case 39 -- one decoy per other location -------------------------------
+def case_39_decoys_never_turn_the_switch_on():
+    """Switch ON in a file at each OTHER place the locator could reach.
+
+    The brief's own .claude folder holds NO conventions file, so the only
+    switch-on files in the world are the decoys. Each location is run
+    separately (JOURNAL 2026-10-05).
+    """
+    locations = ("CLAUDE_PROJECT_DIR root", "resolver's own root (SELF_ROOT)",
+                 "current directory", "home folder")
+    for which in locations:
+        name = "39 decoy at the %s -> not-applicable" % which
+        if need_subject(name):
+            return
+        if PP is None:
+            check(name, False, "_project_paths not importable")
+            continue
+        with tmp() as d:
+            root = Path(d)
+            brief, passed = offer_project(root / "proj", dict(id="none", issue_offer="pending"),
+                                          beside=False)
+            decoy = root / "decoy"
+            write_conventions_in(decoy / ".claude", offer_block(True))
+            kw = {
+                "CLAUDE_PROJECT_DIR root": dict(project_dir=decoy),
+                "resolver's own root (SELF_ROOT)": dict(self_root=decoy / ".claude"),
+                "current directory": dict(cwd=decoy),
+                "home folder": dict(home=decoy),
+            }[which]
+            with redirected(root / "neutral", **kw):
+                r = verify(brief, passed, gh_stub())
+            check(name, r["verdict"] == "not-applicable", "got %r" % r["verdict"])
+            check("39 decoy at the %s does not halt" % which, r.get("halt") is False,
+                  "got %r" % r.get("halt"))
+
+        # POSITIVE CONTROL: the identical file BESIDE the brief does halt.
+        name = "39 POSITIVE CONTROL (%s): the same switch-on file beside the brief halts" % which
+        with tmp() as d:
+            root = Path(d)
+            brief, passed = offer_project(root / "proj",
+                                          dict(id="none", issue_offer="pending"))
+            with redirected(root / "neutral"):
+                r = verify(brief, passed, gh_stub())
+            check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+
+    # A beside-brief file that exists but never names the switch is OFF, even
+    # with a switch-on decoy at the CLAUDE_PROJECT_DIR root.
+    name = "39 beside file without the switch key + a switch-on decoy elsewhere -> not-applicable"
+    if PP is not None:
+        with tmp() as d:
+            root = Path(d)
+            brief, passed = offer_project(root / "proj", dict(id="none", issue_offer="pending"),
+                                          switch=_MISSING)
+            decoy = root / "decoy"
+            write_conventions_in(decoy / ".claude", offer_block(True))
+            with redirected(root / "neutral", project_dir=decoy):
+                r = verify(brief, passed, gh_stub())
+            check(name, r["verdict"] == "not-applicable", "got %r" % r["verdict"])
+
+
+# ---- case 40 -- a number id wins (I-1) -------------------------------------
+def case_40_number_id_ignores_the_outcome():
+    for label, extra in (("pending", dict(issue_offer="pending")),
+                         ("declined", dict(issue_offer="declined")),
+                         ("opened", dict(issue_offer="opened")),
+                         ("no field", {})):
+        name = "40 id 39 + %s + switch on + matching link -> linked (I-1)" % label
+        if need_subject(name):
+            return
+        with tmp() as d:
+            r = run_offer(Path(d), dict(id="39", **extra), gh=gh_stub(closing=MATCHING))
+            check(name, r["verdict"] == "linked", "got %r" % r["verdict"])
+            check("40 %s writes issue_link: closes" % label, r.get("issue_link") == "closes",
+                  "got %r" % r.get("issue_link"))
+
+    name = "40 id 39 + declined + switch on + no link -> absent-repairable (unchanged)"
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="39", issue_offer="declined"),
+                      gh=gh_stub(body=PLAIN_BODY))
+        check(name, r["verdict"] == "absent-repairable", "got %r" % r["verdict"])
+
+
+# ---- case 41 -- the closed sets move together ------------------------------
+def case_41_offer_closed_sets():
+    name = "41 the three offer verdicts are appended after still-absent, in order"
+    if need_subject(name):
+        return
+    check(name, list(V.VERDICTS)[-4:] == ["still-absent", "offer-declined",
+                                          "offer-unavailable", "offer-unrecorded"],
+          "tail=%r" % (list(V.VERDICTS)[-4:],))
+    check("41 offer-declined writes issue_link: none",
+          V.ISSUE_LINK_WRITES.get("offer-declined") == "none",
+          "got %r" % V.ISSUE_LINK_WRITES.get("offer-declined"))
+    check("41 offer-unavailable writes issue_link: none",
+          V.ISSUE_LINK_WRITES.get("offer-unavailable") == "none",
+          "got %r" % V.ISSUE_LINK_WRITES.get("offer-unavailable"))
+    check("41 offer-unrecorded writes NO issue_link",
+          "offer-unrecorded" not in V.ISSUE_LINK_WRITES, "it is in ISSUE_LINK_WRITES")
+    check("41 offer-unrecorded is HALTING", "offer-unrecorded" in V.HALTING,
+          "HALTING=%r" % (sorted(V.HALTING),))
+    check("41 offer-declined and offer-unavailable are NOT halting",
+          "offer-declined" not in V.HALTING and "offer-unavailable" not in V.HALTING,
+          "HALTING=%r" % (sorted(V.HALTING),))
+    check("41 brief-path-unresolved has a remediation",
+          bool(V.REMEDIATION.get("brief-path-unresolved")),
+          "got %r" % V.REMEDIATION.get("brief-path-unresolved"))
+
+
+# ---- case 42 -- the doctor scaffold mirrors the shipped keys ---------------
+def case_42_scaffold_equals_shipped_offer_keys():
+    """Pattern of test_compose_subissue_title.py:576-595, for issue #57.
+
+    Deliberately NOT isolated, like case 20: it compares two real files.
+    """
+    name = "42 plugin_doctor scaffold issueLink carries the offer keys"
+    if need_subject(name):
+        return
+    try:
+        import plugin_doctor  # type: ignore
+        scaffold = json.loads(plugin_doctor.SCAFFOLDS[".claude/work-item-conventions.json"])
+        scaffold_block = scaffold.get("issueLink", {})
+    except Exception as exc:  # noqa: BLE001
+        check(name, False, "plugin_doctor import/parse failed: %s: %s"
+              % (type(exc).__name__, exc))
+        return
+    shipped, cause = V.read_conventions(SCRIPTS_DIR.parent / "work-item-conventions.json")
+    shipped = shipped or {}
+    for key in ("offerOutcomeField", "offerOutcomes", "offerReasonField", "offerReasons"):
+        check("42 scaffold %s equals the declared value" % key,
+              scaffold_block.get(key) == OFFER_KEYS[key],
+              "scaffold=%r expected=%r" % (scaffold_block.get(key), OFFER_KEYS[key]))
+        check("42 scaffold %s equals the shipped file's" % key,
+              key in shipped and scaffold_block.get(key) == shipped.get(key),
+              "scaffold=%r shipped=%r" % (scaffold_block.get(key), shipped.get(key)))
+    check("42 scaffold verdicts list equals the shipped file's",
+          scaffold_block.get("verdicts") == shipped.get("verdicts") and
+          scaffold_block.get("verdicts") == ALL_VERDICTS,
+          "scaffold=%r shipped=%r" % (scaffold_block.get("verdicts"), shipped.get("verdicts")))
+    check("42 scaffold requireRecordedOffer is present and false",
+          scaffold_block.get("requireRecordedOffer") is False,
+          "got %r" % (scaffold_block.get("requireRecordedOffer", "<absent>"),))
+    check("42 SHIPPED requireRecordedOffer is true (this repository opts in)",
+          shipped.get("requireRecordedOffer") is True,
+          "got %r" % (shipped.get("requireRecordedOffer", "<absent>"),))
+
+
+# ---- case 43 -- decoys on the LOADED block (round 2) -----------------------
+def case_43_loaded_block_is_not_the_switch_source():
+    """The passed conventions_path block is already loaded by verify(). A reader
+    that reuses it for the switch would read the wrong project's file."""
+    name = "43a no file beside the brief + passed file switch true -> not-applicable"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none", issue_offer="pending"), beside=False,
+                      passed_block=offer_block(True))
+        check(name, r["verdict"] == "not-applicable", "got %r" % r["verdict"])
+        check("43a proceeds", r.get("halt") is False, "got %r" % r.get("halt"))
+
+    name = "43b beside file switch false + passed file switch true -> not-applicable"
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none", issue_offer="pending"), switch=False,
+                      passed_block=offer_block(True))
+        check(name, r["verdict"] == "not-applicable", "got %r" % r["verdict"])
+        check("43b proceeds", r.get("halt") is False, "got %r" % r.get("halt"))
+
+
+# ---- case 44 -- relative brief paths that exist as given -------------------
+def case_44_relative_brief_paths():
+    spots = (
+        ("project root", "", ".claude/work-items/brief.md"),
+        (".claude", ".claude", "work-items/brief.md"),
+        ("work-items (bare filename)", ".claude/work-items", "brief.md"),
+    )
+    for label, sub, rel in spots:
+        name = "44 cwd=%s, relative brief %r, switch on, no issue_offer -> offer-unrecorded" % (
+            label, rel)
+        if need_subject(name):
+            return
+        if PP is None:
+            check(name, False, "_project_paths not importable")
+            continue
+        with tmp() as d:
+            root = Path(d)
+            proj = root / "proj"
+            brief, passed = offer_project(proj, dict(id="none"))
+            target = proj / sub if sub else proj
+            with redirected(root / "neutral", cwd=target):
+                r = verify(Path(rel), passed, gh_stub())
+            check(name, r["verdict"] == "offer-unrecorded", "got %r (cause=%r)" % (
+                r["verdict"], r.get("cause")))
+            check("44 cwd=%s halts with exit 2" % label, _halts_with_2(r),
+                  "halt=%r exit=%r" % (r.get("halt"), r.get("exit_code")))
+
+    # Distinct from case 38: a bare filename that EXISTS in cwd exists 'as given'
+    # and must NOT be reported brief-path-unresolved.
+    name = "44 a bare filename that exists in cwd is NOT brief-path-unresolved"
+    if PP is not None:
+        with tmp() as d:
+            root = Path(d)
+            proj = root / "proj"
+            brief, passed = offer_project(proj, dict(id="none", issue_offer="declined"))
+            with redirected(root / "neutral", cwd=proj / ".claude" / "work-items"):
+                r = verify(Path("brief.md"), passed, gh_stub())
+            check(name, r["verdict"] == "offer-declined", "got %r (cause=%r)" % (
+                r["verdict"], r.get("cause")))
+
+
+# ---- case 45 -- outcome + a reason that does not belong --------------------
+def case_45_reason_never_rescues_a_non_unavailable_outcome():
+    for outcome in ("pending", "opened", "maybe"):
+        name = "45 %s + issue_offer_reason create-failed -> offer-unrecorded" % outcome
+        if need_subject(name):
+            return
+        with tmp() as d:
+            r = run_offer(Path(d), dict(id="none", issue_offer=outcome,
+                                        issue_offer_reason="create-failed"))
+            check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+            check("45 %s + reason is never offer-unavailable" % outcome,
+                  r["verdict"] != "offer-unavailable", "got %r" % r["verdict"])
+            check("45 %s + reason halts with exit 2" % outcome, _halts_with_2(r),
+                  "halt=%r exit=%r" % (r.get("halt"), r.get("exit_code")))
+
+
+# ---- case 46 -- W2: the verdicts list must hold the offer verdicts ---------
+def case_46_beside_verdicts_must_name_the_offer_verdicts():
+    for missing in ("offer-declined", "offer-unavailable", "offer-unrecorded"):
+        name = "46 switch on + beside verdicts lacking %s -> conventions-missing" % missing
+        if need_subject(name):
+            return
+        with tmp() as d:
+            r = run_offer(Path(d), dict(id="none", issue_offer="declined"),
+                          without_verdicts=(missing,),
+                          passed_block=offer_block(switch=False))
+            check(name, r["verdict"] == "unverifiable" and
+                  r.get("cause") == "conventions-missing",
+                  "got verdict=%r cause=%r" % (r["verdict"], r.get("cause")))
+            check("46 lacking %s exits 2" % missing, r.get("exit_code", 0) == 2,
+                  "got %r" % r.get("exit_code"))
+            check("46 lacking %s: the reason names the missing verdict" % missing,
+                  missing in ((r.get("reason") or "") + (r.get("remediation") or "")),
+                  "reason=%r remediation=%r" % (r.get("reason"), r.get("remediation")))
+
+
+# ---- case 47 -- N1: a list stored as a string ------------------------------
+def case_47_list_keys_stored_as_strings():
+    for key in ("offerOutcomes", "offerReasons"):
+        name = "47 switch on + %s a string, not a list -> conventions-missing" % key
+        if need_subject(name):
+            return
+        value = ",".join(OFFER_KEYS[key])
+        with tmp() as d:
+            r = run_offer(Path(d), dict(id="none", issue_offer="declined"),
+                          override={key: value}, passed_block=offer_block(switch=False))
+            check(name, r["verdict"] == "unverifiable" and
+                  r.get("cause") == "conventions-missing",
+                  "got verdict=%r cause=%r" % (r["verdict"], r.get("cause")))
+            check("47 %s string exits 2" % key, r.get("exit_code", 0) == 2,
+                  "got %r" % r.get("exit_code"))
+            check("47 %s string: the reason names the key" % key,
+                  key in ((r.get("reason") or "") + (r.get("remediation") or "")),
+                  "reason=%r remediation=%r" % (r.get("reason"), r.get("remediation")))
+
+
+# ---- case 48 -- N2: an unreadable beside file is not a missing one ---------
+def case_48_beside_file_not_valid_json():
+    """A MISSING beside file still means off (case 36). A file that EXISTS but
+    cannot be parsed is a different case: the project tried to configure the
+    switch, so it fails loud rather than silently turning the check off."""
+    name = "48 beside file exists but is not valid JSON + absent id -> conventions-missing"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        root = Path(d)
+        brief, passed = offer_project(root / "proj", dict(id="none", issue_offer="pending"),
+                                      beside=False)
+        (root / "proj" / ".claude" / "work-item-conventions.json").write_text(
+            "{ this is not json", encoding="utf-8")
+        r = verify(brief, passed, gh_stub())
+        check(name, r["verdict"] == "unverifiable" and
+              r.get("cause") == "conventions-missing",
+              "got verdict=%r cause=%r" % (r["verdict"], r.get("cause")))
+        check("48 unparseable beside file exits 2", r.get("exit_code", 0) == 2,
+              "got %r" % r.get("exit_code"))
+
+    name = "48 CONTRAST: a MISSING beside file still means off -> not-applicable"
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none", issue_offer="pending"), beside=False)
+        check(name, r["verdict"] == "not-applicable", "got %r" % r["verdict"])
+
+
+# ---- case 49 -- the field name is read from offerOutcomeField --------------
+def case_49_renamed_outcome_field_is_honoured():
+    name = "49 offerOutcomeField renamed to offer_state: the renamed field is read"
+    if need_subject(name):
+        return
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none", offer_state="declined"),
+                      override={"offerOutcomeField": "offer_state"})
+        check(name, r["verdict"] == "offer-declined", "got %r" % r["verdict"])
+    name = "49 offerOutcomeField renamed: a brief still using issue_offer reads as unrecorded"
+    with tmp() as d:
+        r = run_offer(Path(d), dict(id="none", issue_offer="declined"),
+                      override={"offerOutcomeField": "offer_state"})
+        check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+
+
+def _run_offer_safely(root, fields, **kw):
+    """run_offer, but a crash becomes a verdict-shaped dict so the check names it."""
+    try:
+        return run_offer(root, fields, **kw)
+    except Exception as exc:  # noqa: BLE001
+        return {"verdict": "RAISED %s: %s" % (type(exc).__name__, exc)}
+
+
+# ---- case 50 -- round 3 W1: field-name keys of the wrong type --------------
+def case_50_field_keys_of_the_wrong_type():
+    wrong = (("a list", ["issue_offer"]), ("an object", {"name": "issue_offer"}),
+             ("a number", 5))
+    for key in ("offerOutcomeField", "offerReasonField"):
+        for label, value in wrong:
+            name = "50 switch on + %s is %s -> conventions-missing" % (key, label)
+            if need_subject(name):
+                return
+            with tmp() as d:
+                r = _run_offer_safely(Path(d), dict(id="none", issue_offer="declined"),
+                                      override={key: value},
+                                      passed_block=offer_block(switch=False))
+                check(name, r["verdict"] == "unverifiable" and
+                      r.get("cause") == "conventions-missing",
+                      "got verdict=%r cause=%r" % (r["verdict"], r.get("cause")))
+                check("50 %s is %s: exits 2" % (key, label), r.get("exit_code", 0) == 2,
+                      "got %r" % r.get("exit_code"))
+                check("50 %s is %s: the reason names the key" % (key, label),
+                      key in ((r.get("reason") or "") + (r.get("remediation") or "")),
+                      "reason=%r" % r.get("reason"))
+
+
+# ---- case 51 -- round 3 W2: an extra declared outcome with a reason --------
+def case_51_extra_outcome_with_reason_is_not_unavailable():
+    name = "51 extra outcome 'skipped' + reason create-failed -> offer-unrecorded"
+    if need_subject(name):
+        return
+    extended = list(OFFER_KEYS["offerOutcomes"]) + ["skipped"]
+    with tmp() as d:
+        r = _run_offer_safely(Path(d), dict(id="none", issue_offer="skipped",
+                                            issue_offer_reason="create-failed"),
+                              override={"offerOutcomes": extended})
+        check(name, r["verdict"] == "offer-unrecorded", "got %r" % r["verdict"])
+        check("51 it is never offer-unavailable", r["verdict"] != "offer-unavailable",
+              "got %r" % r["verdict"])
+        check("51 the reason text does not claim 'unavailable'",
+              "unavailable" not in (r.get("reason") or "").lower(),
+              "reason=%r" % r.get("reason"))
+
+
+# ---- case 52 -- round 3 W3: pin the unreadable-file reason -----------------
+def case_52_unreadable_beside_file_reason_text():
+    broken = '{"issueLink": {"requireRecordedOffer": false'
+    for label, text in (("not valid JSON", broken),
+                        ("UTF-8 byte-order-mark + not valid JSON", "﻿" + broken)):
+        name = "52 switch off but beside file is %s -> conventions-missing" % label
+        if need_subject(name):
+            return
+        with tmp() as d:
+            root = Path(d)
+            brief, passed = offer_project(root / "proj", dict(id="none"), beside=False)
+            (root / "proj" / ".claude" / "work-item-conventions.json").write_text(
+                text, encoding="utf-8")
+            r = verify(brief, passed, gh_stub())
+            reason = r.get("reason") or ""
+            check(name, r["verdict"] == "unverifiable" and
+                  r.get("cause") == "conventions-missing",
+                  "got verdict=%r cause=%r" % (r["verdict"], r.get("cause")))
+            check("52 (%s) the reason says the file is not valid JSON" % label,
+                  "not valid JSON" in reason, "reason=%r" % reason)
+            check("52 (%s) the reason says it is the file beside the brief" % label,
+                  "beside the brief" in reason, "reason=%r" % reason)
+            check("52 (%s) the reason says whether the requirement is on cannot be read" % label,
+                  re.search(r"cannot be read|can not be read|cannot read", reason) is not None
+                  and "requirement" in reason, "reason=%r" % reason)
+            check("52 (%s) the reason does NOT claim the requirement is on" % label,
+                  "requirement is on" not in reason, "reason=%r" % reason)
+
+
+# ---- case 53 -- round 3 N4: a repeated key reads as the LAST value ---------
+def case_53_repeated_issue_offer_key_last_wins():
+    for first, last, verdict in (("pending", "declined", "offer-declined"),
+                                 ("declined", "pending", "offer-unrecorded")):
+        name = "53 issue_offer repeated (%s then %s) reads as the last -> %s" % (
+            first, last, verdict)
+        if need_subject(name):
+            return
+        with tmp() as d:
+            root = Path(d)
+            brief, passed = offer_project(root / "proj", dict(id="none"))
+            brief.write_text("---\nid: none\ntitle: t\nrepo: %s\nissue_offer: %s\n"
+                             "issue_offer: %s\n---\n\n# Body\n" % (REPO, first, last),
+                             encoding="utf-8")
+            r = verify(brief, passed, gh_stub())
+            check(name, r["verdict"] == verdict, "got %r" % r["verdict"])
+
+
 def main():
     for fn in (
+        case_50_field_keys_of_the_wrong_type,
+        case_51_extra_outcome_with_reason_is_not_unavailable,
+        case_52_unreadable_beside_file_reason_text,
+        case_53_repeated_issue_offer_key_last_wins,
+        case_43_loaded_block_is_not_the_switch_source,
+        case_44_relative_brief_paths,
+        case_45_reason_never_rescues_a_non_unavailable_outcome,
+        case_46_beside_verdicts_must_name_the_offer_verdicts,
+        case_47_list_keys_stored_as_strings,
+        case_48_beside_file_not_valid_json,
+        case_49_renamed_outcome_field_is_honoured,
+        case_33_switch_on_absent_id_no_field_is_unrecorded,
+        case_34_recorded_outcomes_succeed, case_35_unrecorded_cases,
+        case_36_switch_off_is_backward_compatible,
+        case_37_incomplete_conventions_halt, case_38_brief_path_unresolved,
+        case_39_decoys_never_turn_the_switch_on,
+        case_40_number_id_ignores_the_outcome, case_41_offer_closed_sets,
+        case_42_scaffold_equals_shipped_offer_keys,
         case_01_linked, case_02_not_applicable, case_02b_unresolved_id,
         case_03_exempt_partial, case_04_unexpected_closing_ref,
         case_05_absent_repairable, case_06_undeclared_target, case_07_still_absent,

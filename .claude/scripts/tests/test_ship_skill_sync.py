@@ -36,6 +36,11 @@ THE INVARIANTS
           work-item-conventions.json.
   INV-S6  SKILL.md drives the script by its real CLI: the flag that marks the
           post-repair re-query is spelled exactly as argparse defines it.
+  INV-S7  The recorded issue-offer outcome (issue #57, contract
+          2026-10-16-recorded-issue-offer-outcome.md): the conventions file
+          declares the offer keys, /ship names the field and every outcome,
+          /task and /design-first name the field, and all three call sites
+          create the issue with --body-file, never an inline body.
 """
 
 from __future__ import annotations
@@ -102,7 +107,7 @@ WRITES = literal_dict("ISSUE_LINK_WRITES")
 HALTING = literal_set("HALTING")
 
 print("\nthe script's closed sets were readable")
-check("VERDICTS parsed (expected 16)", len(VERDICTS) == 16, str(len(VERDICTS)))
+check("VERDICTS parsed (expected 19)", len(VERDICTS) == 19, str(len(VERDICTS)))
 check("ISSUE_LINK_WRITES parsed", len(WRITES) >= 4, str(WRITES))
 check("HALTING parsed", len(HALTING) >= 10, str(len(HALTING)))
 
@@ -162,6 +167,154 @@ print("\nINV-S6  the skill drives the script by its real CLI")
 for flag in ("--brief", "--pr", "--repair-attempted"):
     check("script defines %s" % flag, ('"%s"' % flag) in script_text)
     check("  ...and SKILL.md uses it", flag in skill_text)
+
+print("\nINV-S7  the recorded issue-offer outcome is declared and named by all three call sites")
+link_block = conventions.get("issueLink", {})
+FIELD = "issue_offer"
+OUTCOMES = ["pending", "opened", "declined", "unavailable"]
+check("conventions declares offerOutcomeField == %r" % FIELD,
+      link_block.get("offerOutcomeField") == FIELD, str(link_block.get("offerOutcomeField")))
+check("conventions declares offerOutcomes == %s" % OUTCOMES,
+      link_block.get("offerOutcomes") == OUTCOMES, str(link_block.get("offerOutcomes")))
+check("conventions declares offerReasonField == 'issue_offer_reason'",
+      link_block.get("offerReasonField") == "issue_offer_reason",
+      str(link_block.get("offerReasonField")))
+check("conventions declares the four offerReasons",
+      link_block.get("offerReasons") == ["gh-missing", "gh-unauthenticated",
+                                         "create-failed", "no-problem-statement"],
+      str(link_block.get("offerReasons")))
+check("conventions turns requireRecordedOffer on (this repository)",
+      link_block.get("requireRecordedOffer") is True,
+      str(link_block.get("requireRecordedOffer", "<absent>")))
+field = link_block.get("offerOutcomeField") or FIELD
+outcomes = link_block.get("offerOutcomes") or OUTCOMES
+def names_field(text: str) -> bool:
+    """The field as a whole word: 'issue_offer' must not match 'issue_offer_reason'."""
+    return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(field), text) is not None
+
+
+check("word-boundary matcher: 'issue_offer_reason' alone does NOT name the field",
+      not names_field("only `issue_offer_reason: gh-missing` here") and
+      names_field("writes `issue_offer: pending`"))
+check("SKILL.md (ship) names the field '%s'" % field, names_field(skill_text))
+for outcome in outcomes:
+    check("SKILL.md (ship) names the outcome '%s'" % outcome,
+          re.search(r"(?<![A-Za-z-])%s(?![A-Za-z-])" % re.escape(outcome), skill_text)
+          is not None)
+for reason in ("create-failed", "no-problem-statement"):
+    check("SKILL.md (ship) names the reason '%s' (the Step 3.5 gate rule)" % reason,
+          reason in skill_text)
+check("SKILL.md (ship) names the halting cause 'brief-path-unresolved'",
+      "brief-path-unresolved" in skill_text)
+
+SKILLS = {
+    "ship": SKILL,
+    "task": ROOT / "skills" / "task" / "SKILL.md",
+    "design-first": ROOT / "skills" / "design-first" / "SKILL.md",
+}
+def fenced_commands(text: str) -> list[str]:
+    """Every logical command inside a fenced block, backslash continuations joined."""
+    commands: list[str] = []
+    in_fence = False
+    pending = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            if pending:
+                commands.append(pending)
+                pending = ""
+            continue
+        if not in_fence:
+            continue
+        if stripped.endswith("\\"):
+            pending += stripped[:-1].rstrip() + " "
+            continue
+        commands.append(pending + stripped)
+        pending = ""
+    return commands
+
+
+check("fenced_commands joins a backslash-continued inline --body into one command",
+      fenced_commands("```bash\ngh issue create --title t \\\n  --body \"x\"\n```")
+      == ['gh issue create --title t --body "x"'])
+
+ASSUMED = re.compile(
+    r"assum.{0,300}?pending.{0,300}?(never|not).{0,60}?declined"
+    r"|assum.{0,300}?(never|not).{0,60}?declined.{0,200}?pending", re.S | re.I)
+
+for label, path in SKILLS.items():
+    text = read(path) if path.is_file() else ""
+    if label != "ship":
+        check("skills/%s/SKILL.md names the field '%s'" % (label, field), names_field(text))
+    check("skills/%s/SKILL.md: an assumed answer writes pending and never declined (I-4)" % label,
+          bool(ASSUMED.search(text)))
+    create_cmds = [c for c in fenced_commands(text)
+                   if "gh issue create" in c and "--parent" not in c]
+    check("skills/%s/SKILL.md shows a 'gh issue create' command" % label,
+          len(create_cmds) >= 1, "found %d" % len(create_cmds))
+    check("skills/%s/SKILL.md: every 'gh issue create' uses --body-file" % label,
+          bool(create_cmds) and all("--body-file" in c for c in create_cmds),
+          str(create_cmds))
+    check("skills/%s/SKILL.md: no 'gh issue create' passes an inline --body" % label,
+          not any(re.search(r"--body(?!-file)", c) for c in create_cmds),
+          str(create_cmds))
+
+task_text = read(SKILLS["task"]) if SKILLS["task"].is_file() else ""
+check("/task template writes 'issue_offer: pending'",
+      re.search(r"^\s*issue_offer:\s*pending\b", task_text, re.M) is not None)
+check("/task template has NO 'issue_offer_reason:' line (I-6)",
+      re.search(r"^\s*issue_offer_reason:", task_text, re.M) is None)
+
+unrecorded_rows = [ln for ln in skill_text.splitlines()
+                   if ln.lstrip().startswith("|") and "offer-unrecorded" in ln]
+check("ship's Step 4d table has an 'offer-unrecorded' row", len(unrecorded_rows) >= 1,
+      "found %d" % len(unrecorded_rows))
+row = " ".join(unrecorded_rows)
+check("the 'offer-unrecorded' row says to re-run Step 4d",
+      re.search(r"re-?run[^|]{0,60}4d|4d[^|]{0,60}re-?run", row, re.I) is not None, row)
+check("the 'offer-unrecorded' row says not to create the pull request again",
+      re.search(r"(do not|don't|never|not)[^|]{0,40}(create|open)[^|]{0,40}"
+                r"(pull request|PR)[^|]{0,20}again", row, re.I) is not None, row)
+
+def section(text: str, start: str, end: str) -> str:
+    a = text.find(start)
+    b = text.find(end, a + len(start)) if a >= 0 else -1
+    return text[a:b] if a >= 0 and b >= 0 else ""
+
+
+def chunks(text: str) -> list[str]:
+    """Paragraphs and list items, so one bullet is judged on its own words."""
+    out: list[str] = []
+    cur: list[str] = []
+    for ln in text.splitlines():
+        if not ln.strip() or ln.lstrip().startswith("- "):
+            if cur:
+                out.append(" ".join(cur))
+            cur = [ln.strip()] if ln.strip() else []
+        else:
+            cur.append(ln.strip())
+    if cur:
+        out.append(" ".join(cur))
+    return out
+
+
+step35 = section(skill_text, "## Step 3.5", "## Step 4:")
+check("found the Step 3.5 section", bool(step35))
+gh_gone = [c for c in chunks(step35)
+           if re.search(r"`gh` is not available|gh is not available|gh-missing|gh-unauthenticated", c)
+           and "offer-unrecorded" in c
+           and not re.search(r"stale", c)]
+check("Step 3.5 does not name offer-unrecorded as the verdict for 'gh not available' "
+      "(that case halts earlier, unverifiable / gh-missing)", bool(step35) and not gh_gone,
+      str(gh_gone))
+
+notes = section(skill_text, "## Notes", "Closes #<id>")
+check("found the Step 3 Notes template", bool(notes))
+check("the Notes line lists the still-valid reasons create-failed and no-problem-statement",
+      "create-failed" in notes and "no-problem-statement" in notes, notes[-300:])
+check("the Notes line does not list the stale reasons gh-missing / gh-unauthenticated",
+      "gh-missing" not in notes and "gh-unauthenticated" not in notes, notes[-300:])
 
 print("\nhalting verdicts are presented as halting")
 for verdict in sorted(HALTING):

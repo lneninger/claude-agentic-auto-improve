@@ -41,8 +41,15 @@
       "issue-unreachable", "issue-already-closed", "pr-not-open",
       "foreign-closing-ref", "unexpected-closing-ref", "exempt-partial",
       "deferred-close", "linked", "undeclared-target", "refs-without-partial",
-      "absent-repairable", "still-absent"
+      "absent-repairable", "still-absent",
+      "offer-declined", "offer-unavailable", "offer-unrecorded"
     ],
+    "requireRecordedOffer": true,
+    "$offerComment": "The Recorded-offer requirement. When requireRecordedOffer is true, a brief with no issue must record the outcome of the issue offer (the brief field named by offerOutcomeField, with offerReasonField carrying the reason only when the outcome is unavailable) or verify_issue_link.py halts with offer-unrecorded. The switch and the keys offerOutcomeField, offerOutcomes, offerReasonField, offerReasons and verdicts are read ONLY from this file, the conventions file beside the brief, never from another root. A missing file, a missing switch or any value other than true means OFF. With the switch on, a missing or empty one of those keys halts as unverifiable (conventions-missing). The text keys offerOutcomeField and offerReasonField must be non-empty text and the list keys must be lists, or the same halt applies. A file beside the brief that exists but is not valid JSON halts the same way even when the switch is off. THIS REPOSITORY turns it on. A project copying this block should set requireRecordedOffer to false unless it wants the halt.",
+    "offerOutcomeField": "issue_offer",
+    "offerOutcomes": ["pending", "opened", "declined", "unavailable"],
+    "offerReasonField": "issue_offer_reason",
+    "offerReasons": ["gh-missing", "gh-unauthenticated", "create-failed", "no-problem-statement"],
     "maxRepairAttempts": 1,
     "parentLink": {
       "$comment": "Single source of truth for the sub-issue-to-parent link verified by .claude/scripts/verify_parent_link.py (sub-task 2, contract .claude/concepts/2026-09-19-flow-parent-subissue-topology.md). That script reads its verdict names and its gh read-back command from here and restates neither -- restating is how two readers drift. maxRepairAttempts is NOT duplicated here: it is owned by the outer issueLink block above (issueLink.maxRepairAttempts), which is the single source of truth for both links.",

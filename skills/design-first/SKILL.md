@@ -245,15 +245,26 @@ When the user approves a contract, check that a Work Item Brief (the file under 
 
 1. Find the linked brief the way `pr_merged.find_linked_brief` does: the contract's `**Work Item Brief:**` header first, then the one brief whose `contract:` field names this contract. If one exists, do nothing.
 2. If none exists, write a minimal brief at `.claude/work-items/<contract-date>-<contract-slug>.md`, in the shape `/task` writes:
-   - `id: none`, `source: free-text`, `url: none`, `status: designing`, `created:` today
+   - `id: none`, `issue_offer: pending`, `source: free-text`, `url: none`, `status: designing`, `created:` today (`issue_offer:` records what happened when the chain offered to open a tracker issue; step 4 below sets it. Its allowed values are the `offerOutcomes` list in `work-item-conventions.json` → `issueLink`, not restated here)
    - `branch:` the branch you are on now (the branch the work will be delivered from), never the default branch
    - `contract:` the contract's repository-relative path
    - `pr: none`, `issue_link: none`, `north_stars: none`
    - a short Problem statement and Acceptance criteria that point at the contract, which is authoritative
 3. Add the line `**Work Item Brief:** .claude/work-items/<file>.md` to the contract header, under `**Requested by:**`.
-4. Tell the user in one line that the brief was created, and why.
+4. Make the issue offer, the same offer `/task` Step 2.5 point 6 and `/ship` Step 3.5 make, in the same wording (one mechanism, three call sites). Gate on the **id**: it applies when the brief's id reads `absent` (the `absentIdTokens` list in `work-item-conventions.json` → `issueLink`). One `AskUserQuestion`, asked once, quoting the exact title and body that would be created. Write the body (the problem statement, then the acceptance criteria) to a file first and pass the file, never the text inline, because Git Bash can mangle free text that starts an argument:
 
-Do not ask a question for this: it records facts already known (the branch and the contract path). If you are on the default branch, stop and enter a worktree first, because the brief's branch must be the one that will merge.
+   ```bash
+   gh issue create --title "[<TYPE>] <bare title>" --body-file <path to the body file>
+   ```
+
+   Record the answer in `issue_offer:`. Never write `declined` unless the user answered this question in this run; an assumed answer, or a question you skipped, writes `pending` and never `declined`.
+   - On accept: write `id:`, `url:` and `repo:` into the brief and set `issue_offer: opened`. If the create command fails, write `issue_offer: unavailable` and add `issue_offer_reason: create-failed`.
+   - On decline: write `issue_offer: declined`. A recorded decline is final.
+   - If `gh` is missing or signed out: write `issue_offer: unavailable` and add `issue_offer_reason: gh-missing` (or `gh-unauthenticated`).
+   - If there is no problem statement to put in the body: write `issue_offer: unavailable` and add `issue_offer_reason: no-problem-statement`. Invent nothing.
+5. Tell the user in one line that the brief was created, and why.
+
+Do not ask a question for the facts this step records: they are already known (the branch and the contract path). The issue offer in point 4 is the one question this step asks. If you are on the default branch, stop and enter a worktree first, because the brief's branch must be the one that will merge.
 
 ## Step 4: Hand off to implementer agents
 

@@ -116,6 +116,20 @@ SCAFFOLDS: Dict[str, str] = {
             "sameRepoFormat": "#<n>",
             "absentIdTokens": ["none"],
             "unresolvedIdTokens": ["unknown", "tbd"],
+            "verdicts": [
+                "unverifiable", "malformed-id", "unresolved-id", "not-applicable",
+                "issue-unreachable", "issue-already-closed", "pr-not-open",
+                "foreign-closing-ref", "unexpected-closing-ref", "exempt-partial",
+                "deferred-close", "linked", "undeclared-target", "refs-without-partial",
+                "absent-repairable", "still-absent",
+                "offer-declined", "offer-unavailable", "offer-unrecorded"
+            ],
+            "requireRecordedOffer": False,
+            "offerOutcomeField": "issue_offer",
+            "offerOutcomes": ["pending", "opened", "declined", "unavailable"],
+            "offerReasonField": "issue_offer_reason",
+            "offerReasons": ["gh-missing", "gh-unauthenticated", "create-failed",
+                             "no-problem-statement"],
             "maxRepairAttempts": 1
         }
     }, indent=2) + "\n",

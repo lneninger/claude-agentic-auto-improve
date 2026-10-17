@@ -44,11 +44,22 @@ INV-10  This module performs NO mutation of any GitHub object. Its only
         writing. Test case 12 proves this by recording bypasses, not by
         observing the seam.
 INV-12  Every path resolves through ``_claude_paths``. No ``Path.home()``,
-        no drive letter, no absolute path literal.
+        no drive letter, no absolute path literal. ONE named exception: the
+        conventions file BESIDE THE BRIEF (``<brief>/../../work-item-
+        conventions.json``, the brief path resolved to an absolute path
+        first), read by exact path for the Recorded-offer
+        requirement (issue #57). A project-owned switch must never come from
+        another root, so that read never goes through the multi-root locator
+        (JOURNAL 2026-10-15 and 2026-10-16). A brief found only through the
+        ``work_items_dir()`` fallback has no trustworthy "beside" folder, so
+        an absent id there halts ``brief-path-unresolved`` instead.
 
 THE ORDER IS THE ENFORCEMENT
 ----------------------------
-``evaluate`` implements rules 1..16 literally, first match wins. The order
+``evaluate`` implements rules 1..16 literally, first match wins. Rule 4 (the
+``absent`` kind) is a sub-partition (issue #57) that yields not-applicable,
+offer-declined, offer-unavailable, offer-unrecorded, or an unverifiable halt;
+the rule count stays 16 because the slot is the same. The order
 is not stylistic: rule 7 before rule 15 is what stops a ``gh pr edit``
 firing against a merged PR, and rule 14 before rule 15 is what stops a
 deliberate ``Refs #N`` being repaired into ``Closes #N`` (INV-3 / AC-4).
@@ -93,6 +104,9 @@ VERDICTS = [
     "refs-without-partial",     # 14
     "absent-repairable",        # 15
     "still-absent",             # 16
+    "offer-declined",           # 17 -- rule 4 slot (issue #57)
+    "offer-unavailable",        # 18 -- rule 4 slot (issue #57)
+    "offer-unrecorded",         # 19 -- rule 4 slot (issue #57), halting
 ]
 
 UNVERIFIABLE_CAUSES = [
@@ -101,6 +115,7 @@ UNVERIFIABLE_CAUSES = [
     "query-failed",
     "pr-not-found",
     "conventions-missing",
+    "brief-path-unresolved",
 ]
 
 REMEDIATION = {
@@ -111,6 +126,9 @@ REMEDIATION = {
     "conventions-missing": (
         "Add the issueLink block to work-item-conventions.json "
         "(see the contract's Extension Points 1)."
+    ),
+    "brief-path-unresolved": (
+        "Pass the brief path as it exists from the current directory."
     ),
 }
 
@@ -124,14 +142,33 @@ ISSUE_LINK_WRITES = {
     "not-applicable": "none",
     "exempt-partial": "refs",
     "still-absent": "unresolved",
+    "offer-declined": "none",
+    "offer-unavailable": "none",
 }
 
 HALTING = {
     "unverifiable", "malformed-id", "unresolved-id", "issue-unreachable",
     "issue-already-closed", "pr-not-open", "foreign-closing-ref",
     "unexpected-closing-ref", "undeclared-target", "refs-without-partial",
-    "still-absent",
+    "still-absent", "offer-unrecorded",
 }
+
+# The keys the Recorded-offer requirement reads from the conventions file
+# beside the brief (issue #57). All must be present and non-empty when the
+# switch is on.
+OFFER_KEYS = ("offerOutcomeField", "offerOutcomes", "offerReasonField",
+              "offerReasons", "verdicts")
+# The three keys above that must hold lists, and the offer verdicts the beside-
+# brief ``verdicts`` list must contain when the switch is on.
+OFFER_LIST_KEYS = ("offerOutcomes", "offerReasons", "verdicts")
+OFFER_TEXT_KEYS = ("offerOutcomeField", "offerReasonField")  # must be non-empty text
+OFFER_VERDICTS = ("offer-declined", "offer-unavailable", "offer-unrecorded")
+# A recorded "could not offer" reason that is stale at ship time: this script
+# has already run ``gh --version`` successfully in the /ship run that called it,
+# so gh worked a moment ago (not a proof gh works later). The other
+# two offerReasons, create-failed and no-problem-statement, still hold at ship
+# time and so count as a recorded "could not offer" (offer-unavailable).
+STALE_OFFER_REASONS = ("gh-missing", "gh-unauthenticated")
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +231,46 @@ def read_conventions(conventions_path=None):
     if not isinstance(block, dict) or not block:
         return (None, "conventions-missing")
     return (block, None)
+
+
+def read_offer_conventions(brief_path):
+    """Read the Recorded-offer requirement from the file BESIDE the brief.
+
+    Exact path ``<brief>/../../work-item-conventions.json``; never the
+    multi-root locator (INV-12's one exception). Returns ``None`` when the
+    requirement is off: a MISSING file, a missing issueLink block, or any
+    switch value other than the JSON boolean ``true``. A file that exists but
+    is not valid JSON (a byte-order-mark counts) returns
+    ``{"unreadable": True, ...}``, which halts even with the switch off. When
+    the requirement is on, returns ``{"keys": {...}, "missing": [names]}``.
+    """
+    # Resolve first: a bare filename run from inside work-items has an empty
+    # parent, so only the absolute path names the brief's own .claude folder.
+    path = Path(brief_path).resolve().parent.parent / "work-item-conventions.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # The file exists but cannot be read: the project tried to configure the
+        # switch, so fail loud instead of silently turning the check off.
+        return {"keys": {}, "missing": [], "unreadable": True}
+    block = payload.get("issueLink") if isinstance(payload, dict) else None
+    if not isinstance(block, dict) or block.get("requireRecordedOffer") is not True:
+        return None
+    missing = [key for key in OFFER_KEYS
+               if not block.get(key)
+               or (key in OFFER_LIST_KEYS and not isinstance(block.get(key), list))
+               or (key in OFFER_TEXT_KEYS and not isinstance(block.get(key), str))]
+    if "verdicts" not in missing:
+        missing += [verdict for verdict in OFFER_VERDICTS if verdict not in block["verdicts"]]
+    return {"keys": {key: block.get(key) for key in OFFER_KEYS}, "missing": missing}
+
+
+def read_brief_offer(brief_text, field, reason_field):
+    """The brief's raw Issue offer outcome and reason. ``None`` means the key is absent."""
+    fields = parse_frontmatter(brief_text)
+    return {"outcome": fields.get(field), "reason": fields.get(reason_field)}
 
 
 _BARE = re.compile(r"\A#?(\d+)\Z")
@@ -404,6 +481,77 @@ def render_diff(before, after):
     )
 
 
+def _evaluate_absent(exp, out):
+    """Rule 4's sub-partition for an absent id (issue #57)."""
+    if exp.get("briefPathUnresolved"):
+        return out("unverifiable",
+                   "The brief was found only through the work-items folder lookup, so the "
+                   "project whose conventions apply is unknown.",
+                   cause="brief-path-unresolved",
+                   remediation=REMEDIATION["brief-path-unresolved"], exit_code=2)
+
+    offer = exp.get("recordedOffer")
+    if not offer:  # switch off, key missing, or no beside-brief file
+        return out("not-applicable", "Brief records no issue; nothing to link.")
+
+    if offer.get("unreadable"):
+        return out("unverifiable",
+                   "The conventions file beside the brief is not valid JSON, so whether the "
+                   "recorded-offer requirement applies cannot be read.",
+                   cause="conventions-missing",
+                   remediation=REMEDIATION["conventions-missing"], exit_code=2)
+
+    if offer["missing"]:
+        return out("unverifiable",
+                   "The Recorded-offer requirement is on, but the conventions file beside "
+                   "the brief lacks, empties or mistypes: %s." % ", ".join(offer["missing"]),
+                   cause="conventions-missing",
+                   remediation=REMEDIATION["conventions-missing"], exit_code=2)
+
+    keys = offer["keys"]
+    field = keys["offerOutcomeField"]
+    reason_field = keys["offerReasonField"]
+    outcome = offer["brief"]["outcome"]
+    reason = offer["brief"]["reason"]
+
+    def unrecorded(why):
+        return out("offer-unrecorded",
+                   "Brief records no issue and no recorded decision about one: %s" % why,
+                   exit_code=2)
+
+    if outcome is None:
+        return unrecorded("it has no %s field. Ask the user whether to open an issue, "
+                          "then record the answer." % field)
+    if outcome not in keys["offerOutcomes"]:
+        return unrecorded("%s is %r, which is not a recognised outcome (an empty or "
+                          "placeholder value counts as unrecorded)." % (field, outcome))
+    if outcome == "pending":
+        return unrecorded("%s is pending, so nobody has answered the offer yet." % field)
+    if outcome == "opened":
+        return unrecorded("%s is opened, but the id is absent, so the record contradicts "
+                          "itself." % field)
+    if outcome == "declined":
+        return out("offer-declined", "The user declined to open an issue (%s: declined)."
+                   % field)
+
+    if outcome != "unavailable":
+        # Declared in offerOutcomes but given no meaning by this script.
+        return unrecorded("%s is %r, which this script does not treat as a recorded "
+                          "decision." % (field, outcome))
+
+    # outcome == "unavailable"
+    if not reason:
+        return unrecorded("%s is unavailable but %s is absent or empty." % (field, reason_field))
+    if reason not in keys["offerReasons"]:
+        return unrecorded("%s is %r, which is not a recognised reason." % (reason_field, reason))
+    if reason in STALE_OFFER_REASONS:
+        return unrecorded("the recorded reason %s is stale; this /ship run has just used gh, "
+                          "so the offer can be made." % reason)
+    return out("offer-unavailable",
+               "An issue could not be opened (%s: unavailable, %s: %s)."
+               % (field, reason_field, reason))
+
+
 # --------------------------------------------------------------------------
 # The ordered decision procedure -- rules 1..16, first match wins.
 # --------------------------------------------------------------------------
@@ -458,9 +606,10 @@ def evaluate(exp):
                    "Brief id is %r -- unresolved, not absent. Say which issue this is, "
                    "or set id: none." % (exp["idReading"].get("raw"),), exit_code=2)
 
-    # 4 -- deliberately no issue. A success path (INV-6).
+    # 4 -- no issue. A success path (INV-6) unless the Recorded-offer
+    #      requirement is on (issue #57), which sub-partitions this slot.
     if kind == "absent":
-        return out("not-applicable", "Brief records no issue; nothing to link.")
+        return _evaluate_absent(exp, out)
 
     # 5 -- issue transferred, deleted, or in a repo gh cannot see.
     if exp.get("issueState") == "unreachable":
@@ -719,8 +868,10 @@ def verify(brief_path, pr_number, repo, conventions_path=None,
 
     # A missing DATA FILE fails OPEN (INV-9): no brief means no issue to link.
     path = Path(brief_path)
+    found_by_fallback = False
     if not path.is_absolute() and not path.exists():
         path = work_items_dir() / path.name
+        found_by_fallback = True
     if not path.exists():
         return evaluate({"resolverCause": None, "idReading": {"kind": "absent", "raw": None},
                          "issueLinkBlock": block})
@@ -734,7 +885,22 @@ def verify(brief_path, pr_number, repo, conventions_path=None,
         return evaluate({"resolverCause": cause})
 
     id_reading = read_brief_id(brief_text, block, repo)
-    if id_reading["kind"] in ("absent", "malformed", "unresolved"):
+    if id_reading["kind"] == "absent":
+        exp = {"idReading": id_reading, "issueLinkBlock": block}
+        if found_by_fallback:
+            # The brief's folder was chosen by the locator, so no switch may be
+            # read from it (INV-12's exception needs the path as given).
+            exp["briefPathUnresolved"] = True
+        else:
+            offer = read_offer_conventions(path)
+            if offer:
+                if not offer["missing"] and not offer.get("unreadable"):
+                    keys = offer["keys"]
+                    offer["brief"] = read_brief_offer(
+                        brief_text, keys["offerOutcomeField"], keys["offerReasonField"])
+                exp["recordedOffer"] = offer
+        return evaluate(exp)
+    if id_reading["kind"] in ("malformed", "unresolved"):
         return evaluate({"idReading": id_reading, "issueLinkBlock": block})
 
     # Repo IDENTITY comes from gh, never from the brief's repo: string. This
