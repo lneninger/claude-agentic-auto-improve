@@ -289,9 +289,13 @@ class MissingMemberTests(unittest.TestCase):
         text = "PLAIN-STOP-TEXT\n"
         _pid, code, out, err = self.ws.run({self.first: {"code": 2, "err": text}})
         self.assertEqual(code, 2, msg="the first member's exit 2 still stops the turn: " + err[:300])
-        self.assertTrue(err.startswith(text),
+        # The stub runs inside the dispatcher through a text wrapper (_inprocess_hook.run_script) whose newline
+        # setting turns "\n" into "\r\n" on Windows, and Workspace.run decodes without translating. Compare on
+        # normalised newlines: the member's text still comes first and unchanged, whichever line ending it got.
+        err_n = err.replace("\r\n", "\n")
+        self.assertTrue(err_n.startswith(text),
                         msg="the member's own bytes come first and are unchanged: " + repr(err[:200]))
-        trailing = err[len(text):].strip()
+        trailing = err_n[len(text):].strip()
         self.assertIn(self.second, trailing, msg="the notice naming the missing member follows that text")
         self.assertEqual(len(trailing.splitlines()), 1, msg="exactly one notice line trails the member text")
         self.assertEqual(system_messages(out), [], msg="on exit 2 the notice goes to stderr, not stdout")
