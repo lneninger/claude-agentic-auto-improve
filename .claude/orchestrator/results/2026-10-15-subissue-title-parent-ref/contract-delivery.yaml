@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/55
+number: 55
+head_ref: feature/subissue-title-parent-ref
+base_ref: master
+base_is_default: true
+commit: 328462f9765e00c3faece3490df610c1fb88d678
+merged_at: '2026-10-17T01:04:14Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-10-17T01:18:52.686607+00:00'
+blocks_recorded:
+- t1-sub-issue-title-helper-conventions-skills-and-version
+blocks_already_recorded: []
