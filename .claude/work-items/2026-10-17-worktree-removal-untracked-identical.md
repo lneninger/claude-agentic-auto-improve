@@ -1,6 +1,6 @@
 ---
 id: none
-issue_offer: pending
+issue_offer: closed-unanswered
 title: Delivery cleanup leaves a worktree behind over an untracked file that master already holds, and the concept gate blocks a script written outside any project
 type: BUG
 source: free-text
@@ -15,9 +15,9 @@ north_stars: none
 parent_issue: none
 base: master
 contract: .claude/concepts/2026-10-17-worktree-removal-untracked-identical.md
-pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/65 (draft)
-issue_link: unresolved
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/65 (merged 2026-10-18)
+issue_link: none (no tracking issue was opened, so the pull request closes none)
+status: shipped
 created: 2026-10-17
 ---
 
@@ -62,3 +62,6 @@ M — changes a destructive deletion path and a safety hook, with new behaviour 
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-10-18: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/65); contract 2026-10-17-worktree-removal-untracked-identical flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed: none

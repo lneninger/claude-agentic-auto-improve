@@ -1,0 +1,28 @@
+status: completed
+commit: 657652ca1ca5d17845a5e15e05ffd239c843a8a7
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/65
+merged_at: '2026-10-18T13:21:52Z'
+verified: github
+hand_resolved:
+  files:
+  - .claude-plugin/marketplace.json
+  - .claude-plugin/plugin.json
+  - .claude/hooks/concept-gate.py
+  - .claude/hooks/hooks.json
+  - .claude/registries/MECHANISMS.md
+  - .cursor-plugin/plugin.json
+  - README.md
+  - plugin.json
+  merge_commits: 1
+  commits_inspected: 3
+  commits_unread: 0
+base_ref: master
+base_is_default: true
+delivered_by: contract-delivery
