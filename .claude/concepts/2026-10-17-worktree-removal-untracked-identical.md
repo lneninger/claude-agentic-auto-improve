@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-10-17
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-10-18, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/65; 0 checklist items from review reports, 7 with no structured evidence; not performed: none; owner confirmed resolved: none
 **Supersedes:** none (extends INV-3 and INV-4 of `.claude/concepts/2026-10-15-auto-cleanup-delivered-worktrees.md`; that contract stays `implemented` and is not edited)
 **Work Item Brief:** .claude/work-items/2026-10-17-worktree-removal-untracked-identical.md
 **Tracking issue:** none
@@ -493,11 +494,11 @@ After merge, the reviewer extends the **Delivery cleanup** entry in `MECHANISMS.
 
 `pr_merged.py` fills this list when the contract's work is merged and nothing is pending. Do not tick lines by hand.
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [ ] Implementation matches Data Shapes exactly — no structured evidence
+- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced) — no structured evidence
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — no structured evidence
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — no structured evidence
+- [ ] Integration surfaces reflected on both backend and frontend sides — no structured evidence
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — no structured evidence
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — no structured evidence
+- [x] `Status` flipped to `implemented`

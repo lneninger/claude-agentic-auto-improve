@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/65
+number: 65
+head_ref: fix/worktree-removal-untracked-identical
+base_ref: master
+base_is_default: true
+commit: 657652ca1ca5d17845a5e15e05ffd239c843a8a7
+merged_at: '2026-10-18T13:21:52Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-10-18T14:25:34.852594+00:00'
+blocks_recorded:
+- t1-landed-untracked-files-the-outside-every-project-allowance-docs-and-version
+blocks_already_recorded: []
