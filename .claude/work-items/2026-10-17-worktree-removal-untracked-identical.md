@@ -15,9 +15,9 @@ north_stars: none
 parent_issue: none
 base: master
 contract: .claude/concepts/2026-10-17-worktree-removal-untracked-identical.md
-pr: UNKNOWN
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/65 (draft)
+issue_link: unresolved
+status: verifying
 created: 2026-10-17
 ---
 
