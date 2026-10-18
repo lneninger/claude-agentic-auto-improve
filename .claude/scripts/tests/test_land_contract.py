@@ -493,6 +493,16 @@ def sha40(ch):
     return ch * 40
 
 
+def write_owner_marker(wt, path=None, run_id="old"):
+    """L-15': the landing-owner marker a landing run writes into the git folder of a checkout it created.
+
+    A fixture that pre-creates a "recorded" landing checkout and expects it reused gains one."""
+    gitdir = git(wt, "rev-parse", "--absolute-git-dir")
+    (Path(gitdir) / "landing-owner").write_text(
+        json.dumps({"run_id": run_id, "path": str(path or wt), "created_at": "2026-10-05T00:00:00Z"}),
+        encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Result-file fixtures (literal formats the parsers must read)
 # ---------------------------------------------------------------------------
@@ -993,15 +1003,24 @@ class TestUnionMerge(LandCase):
             self.assertEqual(lines.count(needle), 1, "%s must appear once in the union" % needle)
         self.assertLess(lines.index("## A"), lines.index("## B"), "base order is preserved")
 
-    def test_a_hunk_editing_a_base_line_halts(self):
+    def test_a_base_line_edited_on_one_side_unites_with_an_append_on_the_other(self):
         base = "## A\n- a\n- b\n"
         r = self.merge(base, "## A\n- a\n- B-edited\n", "## A\n- a\n- b\n## C\n")
-        self.assertFalse(r["ok"], "an edited base line is not an insert-only hunk")
+        self.assertTrue(r["ok"], "one side edits, the other only inserts, so they are compatible: %s"
+                        % r.get("reason"))
+        lines = r["text"].splitlines()
+        self.assertIn("- B-edited", lines, "the edit survives in the union")
+        self.assertNotIn("- b", lines, "the edited base line does not come back unedited")
+        self.assertEqual(lines.count("## C"), 1, "the appended heading appears exactly once")
 
-    def test_a_hunk_deleting_a_base_line_halts(self):
+    def test_a_base_line_deleted_on_one_side_unites_with_an_append_on_the_other(self):
         base = "## A\n- a\n- b\n"
         r = self.merge(base, "## A\n- a\n", "## A\n- a\n- b\n## C\n")
-        self.assertFalse(r["ok"], "a deleted base line is not an insert-only hunk")
+        self.assertTrue(r["ok"], "one side deletes, the other only inserts, so they are compatible: %s"
+                        % r.get("reason"))
+        lines = r["text"].splitlines()
+        self.assertNotIn("- b", lines, "the deletion survives in the union")
+        self.assertEqual(lines.count("## C"), 1, "the appended heading appears exactly once")
 
     def test_repeated_field_lines_are_never_keys(self):
         base = "## A\n- **Trigger:** x\n"
@@ -1484,6 +1503,7 @@ class TestWorktreeResetRefusals(LandCase):
         reset = self.fn("worktree_reset")
         wt = self.kit.add_worktree("20260101-land-394")
         self.record_phase(wt)
+        write_owner_marker(wt)
         write_files(wt, {"stray.txt": "x", "node_modules/keep.txt": "y"})
         with self.passthrough() as run:
             reset(wt, self.kit.main, SLUG)
@@ -2378,6 +2398,7 @@ class TestLauncherWorktreeLocation(LauncherCase):
         kit = Kit(self._tmp.name)
         old = kit.add_worktree("20250101-land-394")
         self.phase(kit, old)
+        write_owner_marker(old)
         self.launch(kit)
         found = self.landing_worktrees(kit)
         self.assertEqual(len(found), 1, "no second worktree is created")
@@ -3757,6 +3778,7 @@ class TestLauncherNeverTouchesAnOperatorWorktree(LauncherCase):
         wt = kit.add_worktree("20250101-land-394")
         write_files(kit.landing_dir() / SLUG, {"phase.json": json.dumps(
             {"run_id": "old", "phase": "p8", "worktree": str(wt)})})
+        write_owner_marker(wt)
         write_files(wt, {"notes.txt": "stray\n"})
         _, execm, _ = self.launch(kit)
         self.assertEqual(execm.call_count, 1, "the recorded landing worktree is accepted and the stage starts")

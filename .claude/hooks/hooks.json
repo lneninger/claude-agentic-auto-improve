@@ -23,13 +23,35 @@
     "per-platform branch available in this format, so the choice is documented",
     "rather than solved.",
     "",
-    "WHAT IS REGISTERED (twelve entries). The gates are the concept gate, the",
+    "WHAT IS REGISTERED (fourteen entries). The gates are the concept gate, the",
     "architecture guard and the plain-language guard. As of operator decision 8 of",
     "2026-10-09 this plugin also registers BOTH database guards itself:",
     "db-destructive-guard.py on the edit group, Bash and PowerShell, and",
     "db-research-readonly-guard.py on Bash and PowerShell (it left the edit group).",
     "The four post-edit trackers run inside ONE asynchronous dispatcher,",
-    "post-edit-dispatcher.py, so an edit starts one process instead of four.",
+    "post-edit-dispatcher.py, so an edit starts one process instead of four. At Stop",
+    "ONE dispatcher, stop-dispatcher.py (not asynchronous), runs the plain-language",
+    "guard and then the Changed-file check, .claude/scripts/concept_changed_check.py, in one",
+    "process.",
+    "plan-question-advisor.py is a default hook on UserPromptSubmit.",
+    "",
+    "THE SHELL ROW. gate-launch.py concept-gate.py on Bash|PowerShell runs the",
+    "main-checkout guard and, for gh pull-request commands, the merge-direction check",
+    "before a shell command. The gate half of the row does nothing: concept-gate.py",
+    "allows any tool that is not an edit. The guard reads the files a command writes",
+    "with the default shell parser helper that ships beside it (the underscore-",
+    "prefixed shell write targets file in this folder); that helper is imported,",
+    "never registered, and its name is left out of this file on purpose, because a",
+    "test refuses that name anywhere in here. For files a shell command or a program",
+    "writes, the Changed-file check (above) asks git after the fact.",
+    "",
+    "NOT REGISTERED HERE: THE ADD-ONS. bash-gate.py (the strict per-command shell",
+    "gate), the three CodeGraph hooks and angular-tailwind-advisor.py live under",
+    ".claude/addons/<add-on>/hooks/ and are never listed in this file. Each costs",
+    "something a default install should not pay (a program start on every shell",
+    "command; a gate that blocks every source read when the CodeGraph server is",
+    "missing; rules specific to Angular and Tailwind projects), so a project gets one",
+    "only through that add-on's install skill, which writes the project's own row.",
     "",
     "BLAST RADIUS: these are enforcement gates, not suggestions. Installing this",
     "plugin turns them on. concept-gate blocks Edit/Write on non-trivial files inside a",
@@ -73,6 +95,16 @@
             "type": "command",
             "command": "py",
             "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/db-destructive-guard.py"]
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/gate-launch.py", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py"]
           }
         ]
       },
@@ -127,6 +159,11 @@
             "type": "command",
             "command": "py",
             "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py", "--carry-forward"]
+          },
+          {
+            "type": "command",
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plan-question-advisor.py"]
           }
         ]
       }
@@ -137,7 +174,7 @@
           {
             "type": "command",
             "command": "py",
-            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py"],
+            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/stop-dispatcher.py"],
             "statusMessage": "Checking the message reads plainly..."
           },
           {

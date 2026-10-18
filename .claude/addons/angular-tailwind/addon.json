@@ -1,0 +1,21 @@
+{
+  "name": "angular-tailwind",
+  "hooks": [
+    "angular-tailwind-advisor.py"
+  ],
+  "helpers": [
+    ".claude/hooks/_project_paths.py"
+  ],
+  "registrations": [
+    {
+      "event": "UserPromptSubmit",
+      "hook": "angular-tailwind-advisor.py",
+      "args": []
+    }
+  ],
+  "prerequisites": [],
+  "kill_switches": [
+    "CLAUDE_ARCH_ADVISOR"
+  ],
+  "install_skill": "auto-improve-angular-tailwind-install"
+}

@@ -1,0 +1,41 @@
+{
+  "name": "codegraph",
+  "hooks": [
+    "codegraph-first-guard.py",
+    "codegraph-turn-reset.py",
+    "codegraph-turn-tracker.py"
+  ],
+  "helpers": [
+    ".claude/hooks/_project_paths.py",
+    ".claude/hooks/_error_log.py"
+  ],
+  "registrations": [
+    {
+      "event": "PreToolUse",
+      "matcher": "Read|Grep|Glob",
+      "hook": "codegraph-first-guard.py",
+      "args": []
+    },
+    {
+      "event": "UserPromptSubmit",
+      "hook": "codegraph-turn-reset.py",
+      "args": []
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": "mcp__codegraph__.*",
+      "hook": "codegraph-turn-tracker.py",
+      "args": []
+    }
+  ],
+  "prerequisites": [
+    {
+      "kind": "mcp-server",
+      "name": "codegraph"
+    }
+  ],
+  "kill_switches": [
+    "CLAUDE_SKIP_CG"
+  ],
+  "install_skill": "auto-improve-codegraph-install"
+}

@@ -326,7 +326,9 @@ same sub-task means either the work shipped twice or the mapping is wrong, and b
 person.
 
 Then update the state store to mark that sub-task completed, so the live position agrees with
-the evidence.
+the evidence. The script does this in the same run: a confirmed merge writes `status:
+completed` plus `branch` (the head ref), `pull_request` (the link) and `base` (the base ref)
+into the sub-task's state entry, and writes nothing for a pull request that maps to no sub-task.
 
 **Commit what you just wrote.** Completion records and the brief's final status are written after the merge, so no earlier commit contains them. The state store is git-ignored and never staged. Stage exactly those files and commit them to the one stable records branch of the contract, `docs/<contract-slug>-records`. Do not use a `task/...` name: the loop maps a merged pull request to its sub-task by that exact branch pattern, and a records branch must not be mapped to one.
 

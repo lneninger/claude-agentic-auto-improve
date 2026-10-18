@@ -7,10 +7,13 @@
 >   `NotebookEdit` aimed at the repository's *main checkout* (the original checkout, whose `.git` is a
 >   folder). Linked worktrees are not affected. There is **no off switch**: no environment variable,
 >   flag or file turns it off.
-> - **Shell git is not guarded by the plugin.** The tree-changing `git` and `gh` check lives in
->   `bash-gate.py`, which this plugin keeps cut (contract `2026-09-28-hook-server-modes`, INV-O1), so only
->   the edit tools are covered here. `/ship` still runs `merge_direction.py`, which checks that a pull
->   request targets the right branch before it is opened.
+> - **Shell commands are guarded from 0.9.8.** Before 0.9.8 only the edit tools were covered, because
+>   the shell check lived in `bash-gate.py`, which the plugin did not register. Since 0.9.9 that gate
+>   is the opt-in `strict-shell-gate` add-on (see "Add-ons" below). The plugin now registers a launcher row on `Bash` and
+>   `PowerShell` that runs the same main-checkout guard, and the merge-direction check for `gh` pull
+>   request commands, before every shell command. It reads the files a command writes with the shared
+>   parser `_shell_write_targets.py`. `/ship` still runs `merge_direction.py` before it opens a pull
+>   request.
 > - **What to do.** Start each change in a fresh flat worktree: `/task` creates one under
 >   `.claude/worktrees/` and enters it; or run `py -3 .claude/scripts/flat_worktree.py --create --action
 >   <feature|bug|infra> --slug <name> --detached origin/<default>` and `EnterWorktree` into the path it
@@ -107,7 +110,7 @@ session starts. To check which copy is live, search the cache and not the market
 
 ### Installing the hooks turns on enforcement
 
-**The plugin is the source of its hooks.** Its `.claude/hooks/hooks.json` registers twelve
+**The plugin is the source of its hooks.** Its `.claude/hooks/hooks.json` registers fourteen
 hooks, and they are active the moment the plugin is enabled. They are gates, not suggestions.
 
 **A project registers none of them itself.** Claude Code does not merge a project hook with the
@@ -122,6 +125,7 @@ What the plugin registers. Every entry is in exec form (`"command": "py"`, `"arg
 |---|---|---|---|
 | SessionStart | none | `working-agreements.py` | no, it only adds text |
 | PreToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit` | `concept-gate.py` | yes |
+| PreToolUse | `Bash\|PowerShell` | `gate-launch.py` with `concept-gate.py` (the main-checkout guard and merge-direction check; the gate half allows any shell command) | yes |
 | PreToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit` | `architecture-guard.py` | yes |
 | PreToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit` | `db-destructive-guard.py` | yes |
 | PreToolUse | `Bash` | `db-destructive-guard.py` | yes |
@@ -129,8 +133,9 @@ What the plugin registers. Every entry is in exec form (`"command": "py"`, `"arg
 | PreToolUse | `PowerShell` | `db-destructive-guard.py` | yes |
 | PreToolUse | `PowerShell` | `db-research-readonly-guard.py` | yes |
 | UserPromptSubmit | none | `plain-language-guard.py --carry-forward` | no, it only hands over a saved note |
+| UserPromptSubmit | none | `plan-question-advisor.py` | no, it only adds a reminder in plan mode |
 | PostToolUse | `Edit\|Write\|MultiEdit` | `post-edit-dispatcher.py` (asynchronous) | no |
-| Stop | none | `plain-language-guard.py` | yes, with a short correction request |
+| Stop | none | `stop-dispatcher.py` (runs `plain-language-guard.py`, then `../scripts/concept_changed_check.py`) | yes, with a short correction request or a list of files no contract covers |
 | Stop | none | `memory-pager.py` (asynchronous) | no |
 
 - **`concept-gate`** blocks `Edit` / `Write` / `MultiEdit` on non-trivial files inside a project
@@ -153,7 +158,25 @@ What the plugin registers. Every entry is in exec form (`"command": "py"`, `"arg
   condition is read from a marker that the plugin's `SessionStart` hook writes for `startup`
   and `resume`. If any of this is in doubt, or anything fails, the plugin copy acts as it did
   before. The worst result is a guard that runs twice, never a call that no guard checks.
+- **The shell row** launches `gate-launch.py` with `concept-gate.py` on `Bash` and `PowerShell`.
+  The launcher runs the main-checkout guard and the merge-direction check before the gate; the
+  gate half does nothing on a shell command, because the concept gate allows any tool that is
+  not an edit. The guard reads the files a command writes with `_shell_write_targets.py`, a
+  helper that ships beside it and is never registered. It costs one program start per shell
+  command.
 - **`plain-language-guard`** checks that the assistant's prose reads plainly.
+- **`stop-dispatcher`** runs two checks at Stop inside one process, in this order:
+  `plain-language-guard.py`, then `../scripts/concept_changed_check.py`. If either exits 2 the turn is
+  stopped and both error texts are shown. Any other failure is ignored.
+- **`concept_changed_check.py`** (the Changed-file check, in the scripts folder) is the default enforcement of the concept
+  rule for files a shell command or a program writes, which the edit-tool gate cannot see. At
+  the end of a turn it asks git which files changed since the session started and judges each
+  through `concept-gate.py`'s own matcher. It stops the turn once for a file no approved
+  contract covers, never twice for the same set, and only notes files git marks
+  `linguist-generated`. `concept_changed_check.py --staged` runs the same judgement on the
+  staged files at commit time. It fails open when git is missing or slow.
+- **`plan-question-advisor`** adds a short reminder to prompts sent in plan mode, pointing at
+  the `plan-questions` skill.
 - **`post-edit-dispatcher`** runs four small checks after an edit inside one process, in this
   order: `integration-check.py`, `critic-verdict-tracker.py`, `contract-status-watcher.py` and
   `journal-post-approval-tracker.py`. One check that fails never stops the next, and its output
@@ -173,14 +196,15 @@ treated as protected, and only a disposable suffix gets through. Copy the templa
 `integration-check.rules.json` are read from your project's `.claude/hooks/` when it has them,
 and from the template beside the hook otherwise.
 
-Seven of the nine variables below are kill switches, set by you and never by an agent. Two are
+Eight of the ten variables below are kill switches, set by you and never by an agent. Two are
 not: `CLAUDE_ACTIVE_CONTRACT` is an approval pin and `CLAUDE_DESTRUCTIVE_DB_OK` is a one-shot
 approval. This table lists exactly the variables the hooks read, and a test (INV-12 in
 `test_plugin_manifests.py`) fails when the two disagree.
 
 | Variable | Effect |
 |---|---|
-| `CLAUDE_CONCEPT_GATE=off` | disable the concept gate |
+| `CLAUDE_CONCEPT_GATE=off` | disable the concept gate and the Changed-file check |
+| `CLAUDE_PLAN_QUESTION_ADVISOR=off` | disable the plan-question advisor |
 | `CLAUDE_ARCH_GUARD=off` | disable the architecture guard |
 | `CLAUDE_PLAIN_LANGUAGE_GUARD=off` | disable the plain-language guard |
 | `CLAUDE_INTEGRATION_CHECK=off` | disable the integration check (one piece of the dispatcher) |
@@ -198,29 +222,37 @@ register only the hooks you want.
 
 ### Retired hooks, and how to restore one
 
-Version 0.7.0 retired six hooks. The plugin neither ships nor registers them any more:
+Version 0.7.0 retired six hooks. Version 0.9.8 brought `plan-question-advisor.py` back as a
+default hook (see the table above). Version 0.9.9 brings the other five back as three **opt-in
+add-ons**. The plugin ships their files under `.claude/addons/` but never registers them, so a
+default install runs none of them:
 
-| Retired hook | What it did | Why it went |
-|---|---|---|
-| `bash-gate.py` | blocked shell writes into source files without a contract | the slowest Bash hook, and it refused legitimate writes; `concept-gate` still gates every edit tool |
-| `codegraph-first-guard.py` | blocked `Read` / `Grep` / `Glob` on source until a CodeGraph tool had run | the slowest single cost per read, and unusable by an agent without CodeGraph tools |
-| `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | kept the per-turn marker the guard above read | they existed only for that guard |
-| `architecture-advisor.py` | a keyword reminder at every prompt | the guard still enforces at the write |
-| `plan-question-advisor.py` | scanned the transcript at every prompt | the `plan-questions` skill stays and is invoked by name |
+| Add-on | Its hook files | What it does | Why it is not a default |
+|---|---|---|---|
+| `angular-tailwind` | `angular-tailwind-advisor.py` (formerly `architecture-advisor.py`) | at each UI prompt, reminds the agent of the Angular and Tailwind CSS rules | it only suits Angular plus Tailwind projects; `architecture-guard.py` still enforces at the write |
+| `codegraph` | `codegraph-first-guard.py`, `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | blocks `Read` / `Grep` / `Glob` on source until a CodeGraph tool has run in the turn | it blocks every source read when the CodeGraph server is missing |
+| `strict-shell-gate` | `bash-gate.py` | reads each shell command before it runs and blocks a write into a source file no approved contract covers | a program start on every shell command, and it misreads some commands (it read `--stat` as the file written in `sed -i` followed by `git diff --stat`) and cannot see what a program such as `python` or `node` writes; the Changed-file check, which stays on, catches those after the fact |
+
+**To install one in a project**, run its skill. Each one previews the files and the
+`settings.json` change, asks once, and writes only after a yes:
+
+| Add-on | Skill |
+|---|---|
+| `angular-tailwind` | `/auto-improve-angular-tailwind-install` |
+| `codegraph` | `/auto-improve-codegraph-install` (stops with a plain message when the CodeGraph MCP server is not configured) |
+| `strict-shell-gate` | `/auto-improve-strict-shell-gate-install` |
+
+Each skill runs `auto_improve_finish_install.py addon --name <add-on>`. The script copies the
+add-on's hook files and the helper files its `addon.json` names (a helper only when the project
+lacks it), then writes the rows in exec form on `${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>`, through
+the same preview, plan hash, backup and symbolic-link refusal as the hooks step. It never removes
+a row or a file and never overwrites a file that differs; start a new session afterwards, because
+hooks are read when a session starts. To remove an add-on, delete its rows from
+`.claude/settings.json` and its hook files from `.claude/hooks/` by hand. `plugin_doctor.py
+--drift` compares an installed add-on's files with the plugin's.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
 `post-edit-dispatcher.py` rather than as four registrations.
-
-**To restore a retired hook in one project**, take its file from the last release that had it
-(0.6.2) and register it yourself, because the plugin no longer carries it:
-
-1. Copy the file from that release's folder in the plugin cache, or from the repository at that
-   tag with `git show <tag>:.claude/hooks/<name>`, into your project's `.claude/hooks/`.
-   Bring `_project_paths.py`, `_error_log.py`, `_contract_files.py` and `_contract_index.py` along
-   when it imports them.
-2. Register it in your own `.claude/settings.local.json` (this machine only) or
-   `.claude/settings.json` (the team), under the event and matcher in the table above.
-3. Start a new session. Hooks are read when a session starts.
 
 ### Local development workflow
 
@@ -377,10 +409,11 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          22 generic skills          (plugin root -- all three providers)
+skills/          25 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    6 shipped working agreements, delivered at session start
+  addons/        3 opt-in add-ons (addon.json + hook files), never registered by hooks.json
   hooks/         12 generic hooks, 4 shared helper modules, 6 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
     tests/       9 hook test suites
@@ -424,11 +457,15 @@ dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scou
 flow, task, design-first, tdd-first, advance, pr-merged, verify-before-done,
 git-commit, ship, debug, north-star, north-star-review, list-contracts,
 contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
-validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install.
+validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install,
+auto-improve-angular-tailwind-install, auto-improve-codegraph-install,
+auto-improve-strict-shell-gate-install.
 
 `auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
 skill, run once per project after the plugin is installed. Its name carries the plugin's name
-because you may have several plugins installed.
+because you may have several plugins installed. The three `auto-improve-*-install` skills
+after it are not stages either: each installs one opt-in add-on (see "Retired hooks, and how
+to restore one").
 
 The rest form one chain, and each stage hands the next a written artefact rather than a memory
 of the conversation:
@@ -463,18 +500,26 @@ Neither half loops. A person merging is what joins them.
 concept-gate, architecture-guard, plain-language-guard, db-destructive-guard,
 db-research-readonly-guard, memory-pager, working-agreements, post-edit-dispatcher, and the
 four checks the dispatcher runs: integration-check, critic-verdict-tracker,
-contract-status-watcher, journal-post-approval-tracker. That is twelve hook files. Beside them
-sit the shared helpers `_error_log.py`, `_memory_common.py`, `_project_paths.py` and
-`_inprocess_hook.py` (the dispatcher's in-process runner), and the generic data files
+contract-status-watcher, journal-post-approval-tracker. Since 0.9.8 also plan-question-advisor
+and stop-dispatcher. That is fourteen hook files. The Changed-file check the Stop dispatcher runs
+beside the plain-language guard is not a hook file: it is the script
+`.claude/scripts/concept_changed_check.py`. Beside the hook files
+sit the gate launcher `gate-launch.py` and the shared helpers `_error_log.py`,
+`_memory_common.py`, `_project_paths.py`, `_main_checkout_guard.py`, `_shell_write_targets.py`
+(the shell parser the guard reads write targets with) and
+`_inprocess_hook.py` (the dispatchers' in-process runner), and the generic data files
 `architecture-guard.rules.json`, `architecture-guard.exceptions.json`,
 `plain-language-guard.rules.json`, `integration-check.rules.json`,
 `db-destructive-guard.rules.json` and `working-agreements.rules.json`.
 
-All twelve hook files are accounted for in `.claude/hooks/hooks.json`, which the Claude
-manifest references: eight are registered there directly and the four checks are named in the
-dispatcher's constant list. That makes twelve registrations, because `plain-language-guard.py`
-is registered on two events and `db-destructive-guard.py` on three matchers, while the four
-checks share the dispatcher's one. The file plus that list are the single registration point:
+All fourteen hook files are accounted for in `.claude/hooks/hooks.json`, which the Claude
+manifest references: ten are registered there directly (`concept-gate.py` through the gate
+launcher) and four are named in the post-edit dispatcher's constant list (`plain-language-guard.py`
+is also in the Stop dispatcher's list, which names the Changed-file check script as its other
+member).
+That makes fourteen registrations, because `plain-language-guard.py` is registered on
+`UserPromptSubmit`, `db-destructive-guard.py` on three matchers and the gate launcher on two,
+while the four post-edit checks share one dispatcher row. The file plus those lists are the single registration point:
 adding a hook without adding it to one of them ships a file nothing runs, and a test
 (INV-8 in `test_plugin_manifests.py`) fails on it.
 
@@ -611,7 +656,7 @@ would ship the part that can be wrong and leave behind the part that would say s
 
    *By hand instead:* register the hooks in your `.claude/settings.json`, pathing every command through
    `$CLAUDE_PROJECT_DIR/.claude/hooks/`. `.claude/hooks/hooks.json` in this repository is
-   the worked example: it registers all twelve against the right events and matchers, so
+   the worked example: it registers all fourteen against the right events and matchers, so
    copy its entries and swap `${CLAUDE_PLUGIN_ROOT}` for `$CLAUDE_PROJECT_DIR`. A plugin
    install does this step for you and needs no `settings.json` edit, and a project that
    installs the plugin registers none of these hooks itself. A vendored copy of
@@ -667,7 +712,7 @@ project ships an empty `contractLanding` block in `.claude/work-item-conventions
 stops with `landing-not-configured` until the project declares its own verification steps.
 
 The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
-neither can drift from the other. It carries 484 tests.
+neither can drift from the other. It carries 575 tests.
 
 ### What it will refuse to do
 
@@ -692,7 +737,8 @@ declares with the installed plugin's, and it reports a hook registered by both s
 `0` when the comparison ran and nothing counted, `1` when something did, and `4` when it could
 not compare (no plugin found, a folder missing, a file that does not parse, or no file pair
 compared). `--json` adds the `compared` count, so a caller can tell an empty comparison from a
-clean one, and `--ignore-repo-owned` prints a repository-owned finding as `reported` instead of
+clean one, `compared_addons` counts the installed add-on files it compared (they are never
+counted in `compared`), and `--ignore-repo-owned` prints a repository-owned finding as `reported` instead of
 counting it.
 
 It creates the directories, copies the templates and registries out of the plugin, and

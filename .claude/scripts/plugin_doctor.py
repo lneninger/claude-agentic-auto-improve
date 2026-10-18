@@ -266,6 +266,15 @@ def apply_fixes(project_root: Path, missing: List[Requirement],
 #   registered-twice         an Effective hook registered by the project and by the plugin
 #   unreadable-registration  a dispatcher's member list that cannot be read as a literal
 #
+# Add-on files (Revision 3): the sync config's ``addons`` object maps an add-on name to the add-on hook
+# files this project carries in ``.claude/hooks/``. Each is compared with
+# ``<plugin>/.claude/addons/<add-on>/hooks/<file>`` by the content-differs rule, and a listed file missing
+# on either side is one-sided (owner: plugin). These files count in ``compared_addons``, never in
+# ``compared``. A listed add-on whose plugin folder or addon.json is missing is exit 4. A project with no
+# sync config is read by presence instead: an add-on counts as installed when any hook file its
+# manifest names is in ``.claude/hooks/``. The helpers an installed add-on copied are compared with the
+# plugin's default-tree copy only when no vendored tree already declares them.
+#
 # Exit codes: 0 only when the comparison ran and nothing counted; 1 for any counted finding;
 # 4 when it could not compare. It never exits 0 when it could not compare.
 # ===========================================================================
@@ -361,6 +370,11 @@ class DriftConfig:
             else list(DEFAULT_PROJECT_ENFORCED_HOOKS)
         self.enforced = {h.casefold() for h in _string_list(enforced)}
         self.repo_owned = {_rel(p) for p in _string_list(data.get("repo_owned"))}
+        raw_addons = data.get("addons")
+        self.addons: Dict[str, List[str]] = {}
+        if isinstance(raw_addons, dict):
+            for addon_name, addon_files in raw_addons.items():
+                self.addons[str(addon_name)] = _string_list(addon_files)
 
     def is_exempt(self, project_rel: str, tree_rel: str) -> bool:
         """Named by ``templated_in_plugin`` or by an ``excluded`` entry: never compared."""
@@ -479,6 +493,50 @@ def _walk_files(base: Path) -> List[str]:
     return sorted(out)
 
 
+def _plain_file_name(value: str) -> bool:
+    return value not in ("", ".", "..") and "/" not in value and "\\" not in value
+
+
+def _plugin_addon(plugin: Path, name: str) -> Dict[str, Any]:
+    """The plugin's folder, hook file names and helper paths of one add-on. ``DriftError`` when the
+    folder or its addon.json is missing or unreadable: a listed add-on that cannot be compared must
+    never read as clean."""
+    if not _plain_file_name(name):
+        raise DriftError("'%s' is not an add-on name (the sync config's addons object)" % name)
+    folder = plugin / ".claude" / "addons" / name
+    if not folder.is_dir():
+        raise DriftError("the plugin has no add-on folder '.claude/addons/%s'; the add-on '%s' cannot be compared"
+                         % (name, name))
+    manifest = folder / "addon.json"
+    if not manifest.is_file():
+        raise DriftError("the plugin's add-on '%s' has no addon.json (%s); it cannot be compared" % (name, manifest))
+    data = _read_json(manifest, "the add-on manifest of '%s'" % name)
+    if not isinstance(data, dict):
+        raise DriftError("the add-on manifest of '%s' (%s) does not hold a JSON object" % (name, manifest))
+    return {"folder": folder,
+            "hooks": [h for h in _string_list(data.get("hooks")) if _plain_file_name(h)],
+            "helpers": [_rel(h) for h in _string_list(data.get("helpers"))]}
+
+
+def _addon_jobs(config: DriftConfig, project: Path, plugin: Path) -> List[Tuple[str, List[str], Dict[str, Any]]]:
+    """Which add-ons to compare, as ``(name, project file names, plugin info)``. With a sync config, the
+    ones its ``addons`` object lists; without one, the ones installed by presence."""
+    jobs: List[Tuple[str, List[str], Dict[str, Any]]] = []
+    if config.from_file:
+        for name, files in sorted(config.addons.items()):
+            if not all(_plain_file_name(f) for f in files):
+                raise DriftError("the sync config lists a file for the add-on '%s' that is not a plain file name" % name)
+            jobs.append((name, files, _plugin_addon(plugin, name)))
+        return jobs
+    base = plugin / ".claude" / "addons"
+    folders = sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
+    for name in folders:
+        info = _plugin_addon(plugin, name)
+        if any((project / ".claude" / "hooks" / h).is_file() for h in info["hooks"]):
+            jobs.append((name, info["hooks"], info))
+    return jobs
+
+
 def compute_drift(project: Path, plugin: Path) -> Dict[str, Any]:
     """Compare ``project`` with ``plugin``. Returns ``{"findings", "compared", "compared_addons"}``
     (findings as ``DriftFinding`` objects). Raises ``DriftError`` when it cannot compare, and that
@@ -522,6 +580,8 @@ def _compute_drift(project: Path, plugin: Path) -> Dict[str, Any]:
         if not (plugin / plugin_path).is_dir():
             raise DriftError("the plugin has no folder '%s' (root pair %s <-> %s); nothing under it "
                              "can be compared" % (plugin_path, project_path, plugin_path))
+
+    addon_jobs = _addon_jobs(config, project, plugin)
 
     found: Dict[Tuple[str, str], DriftFinding] = {}
 
@@ -585,12 +645,35 @@ def _compute_drift(project: Path, plugin: Path) -> Dict[str, Any]:
     for label in project_unreadable + plugin_unreadable:
         add("unreadable-registration", label, OWNER_PLUGIN)
 
+    compared_addons = 0
+    vendored_declared = {project_rel for project_rel, _plugin_rel in declared}
+    helpers_seen: set = set()
+    for name, files, info in addon_jobs:
+        for file_name in files:
+            project_rel = ".claude/hooks/" + file_name
+            here, there = project / project_rel, info["folder"] / "hooks" / file_name
+            if here.is_file() and there.is_file():
+                compared_addons += 1
+                if _folded_bytes(here) != _folded_bytes(there):
+                    add("content-differs", project_rel)
+            elif here.is_file() != there.is_file():
+                add("one-sided", project_rel)
+        # The helpers the install copied: compared only when no vendored tree already declares them.
+        for helper in info["helpers"]:
+            if helper in vendored_declared or helper in helpers_seen:
+                continue
+            here, there = project / helper, plugin / helper
+            if here.is_file() and there.is_file():
+                helpers_seen.add(helper)
+                compared_addons += 1
+                if _folded_bytes(here) != _folded_bytes(there):
+                    add("content-differs", helper)
+
     if compared == 0:
         raise DriftError("the comparison covered zero file pairs; a run that compared nothing "
                          "must not read as clean")
     findings = sorted(found.values(), key=lambda f: (f.kind, f.path))
-    # compared_addons stays 0 until the add-on manifests exist (contract block 18; decision 9).
-    return {"findings": findings, "compared": compared, "compared_addons": 0}
+    return {"findings": findings, "compared": compared, "compared_addons": compared_addons}
 
 
 def drift_report(result: Dict[str, Any], error: Optional[str] = None) -> Dict[str, Any]:
@@ -638,7 +721,8 @@ def run_drift(args: argparse.Namespace) -> int:
         for f in findings:
             reported = args.ignore_repo_owned and f.owner == OWNER_REPO
             print("  %s%-24s %s  [owner: %s]" % ("reported  " if reported else "", f.kind, f.path, f.owner))
-        print("compared %d file pair(s); %d finding(s), %d counted" % (result["compared"], len(findings), len(counted)))
+        print("compared %d file pair(s) and %d add-on file(s); %d finding(s), %d counted"
+              % (result["compared"], result["compared_addons"], len(findings), len(counted)))
     return EXIT_FINDINGS if counted else 0
 
 
