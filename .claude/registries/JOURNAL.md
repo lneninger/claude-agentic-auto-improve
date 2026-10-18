@@ -198,6 +198,28 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a skill's shell block passes free text (a title, a name, a message) to a native program as an argument on Windows
 - **Tags:** `git-bash, msys, path-conversion, free-text-argument, replay-test`
 
+### 2026-10-17 — Git for Windows lists files beneath an untracked junction; a parent-link check is load-bearing
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-17-worktree-removal-untracked-identical.md`
+- **Lesson:** The contract ASSUMED git does not list files beneath an untracked junction or symlink folder and called the parent-link check "defence in depth". That is FALSIFIED: `git status --porcelain -z --untracked-files=all` printed `?? d/f.txt` where `d` was a junction to a folder outside the tree. Any step that deletes or rewrites a path taken from git's status must check every folder between the tree root and the file for a link (`_is_link`) and check real-path containment, and must do it immediately before the mutation, not only before a slow subprocess.
+- **Apply when:** a contract deletes, moves or overwrites files whose paths come from `git status` / `git ls-files` in a worktree that may hold junctions or symlinks (node_modules links, shared folders)
+- **Tags:** `junction, symlink, git-status, delete-safety, windows`
+
+### 2026-10-17 — Loosening a guard rule must be checked against the guard's own test fixtures
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-17-worktree-removal-untracked-identical.md
+- **Lesson:** Before allowing a class of paths through a gate, grep the gate's own tests for fixtures that live in that class (for example marker-less temp folders). Give them the marker the rule keys on instead of weakening the rows.
+- **Apply when:** a contract changes what a hook allows or blocks, or how it finds the project root
+- **Tags:** concept-gate, hook-tests, fixtures, allowlist
+
+### 2026-10-17 — Judge "identical to master" by git's view, not raw bytes, on Windows
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-17-worktree-removal-untracked-identical.md
+- **Lesson:** Compare a working-tree file to a committed blob with `git hash-object` (filters on), so autocrlf checkouts count as identical. Raw-byte comparison never matches a CRLF checkout of an LF blob.
+- **Apply when:** a contract compares working-tree files with committed content before deleting or skipping them
+- **Tags:** autocrlf, crlf, hash-object, cleanup, windows
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
+

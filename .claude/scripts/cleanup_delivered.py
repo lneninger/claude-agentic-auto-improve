@@ -23,6 +23,10 @@ Rules this module keeps (INV-1 to INV-9 of the contract):
   * A worktree goes only when it is clean, its HEAD is in ``origin/<default>``, it is not locked, no ignored
     folder in it is itself a worktree, and nobody stands in it. A branch goes only after an ancestor check.
   * Directory links (junctions, symlinks) are removed as the link entry alone, last, right before the removal.
+  * Landed untracked files (contract 2026-10-17): when every change in a tree is an untracked file that git
+    would store as exactly the blob ``origin/<default>`` holds at that path (``git hash-object``, filters on),
+    each such file is deleted alone, last, after a fresh re-hash, and the tree is then removed WITHOUT force.
+    Anything git cannot prove identical keeps the tree; a failed comparison is ``unverifiable``.
   * Never a forced removal, never a global tidy of stale entries, never a recursive delete of a worktree,
     never a switch or checkout in any tree.
   * A tree somebody stands in is deferred and left untouched; the next call from elsewhere clears it.
@@ -379,7 +383,7 @@ class Run:
 def _wt_item(w: Dict[str, Any], source: str) -> Dict[str, Any]:
     return {"kind": "worktree", "path": w["path"], "branch": w.get("branch"), "head": w.get("head"),
             "source": source, "locked": bool(w.get("locked")), "action": "left", "reason": None, "files": [],
-            "detail": None, "links": []}
+            "detail": None, "links": [], "identical": []}
 
 
 def _left(item: Dict[str, Any], reason: str, files: Optional[List[str]] = None, detail: Optional[str] = None,
@@ -388,12 +392,12 @@ def _left(item: Dict[str, Any], reason: str, files: Optional[List[str]] = None, 
     return item
 
 
-def _status_files(path: str) -> Tuple[Optional[List[str]], str]:
-    """Changed and untracked paths of a worktree, or ``(None, error)``."""
+def _status_entries(path: str) -> Tuple[Optional[List[Tuple[str, str]]], str]:
+    """``(status code, path)`` of every changed and untracked entry of a worktree, or ``(None, error)``."""
     code, out, err = _git("-C", path, "status", "--porcelain", "-z", "--untracked-files=all")
     if code != 0:
         return None, err.strip()
-    files: List[str] = []
+    entries: List[Tuple[str, str]] = []
     parts = out.split("\0")
     i = 0
     while i < len(parts):
@@ -401,10 +405,104 @@ def _status_files(path: str) -> Tuple[Optional[List[str]], str]:
         i += 1
         if len(entry) < 4:
             continue
-        files.append(entry[3:])
+        entries.append((entry[:2], entry[3:]))
         if entry[0] in "RC" or entry[1] in "RC":
             i += 1  # the original name of a rename or copy
-    return sorted(files), ""
+    return sorted(entries, key=lambda e: e[1]), ""
+
+
+def _status_files(path: str) -> Tuple[Optional[List[str]], str]:
+    """Changed and untracked paths of a worktree, or ``(None, error)``."""
+    entries, err = _status_entries(path)
+    if entries is None:
+        return None, err
+    return [p for _c, p in entries], ""
+
+
+# ---------------------------------------------------------------------------
+# Landed untracked files (contract 2026-10-17, CL-1 to CL-6)
+# ---------------------------------------------------------------------------
+HASH_CHUNK_CHARS = 7000  # a command line stays under 8000 characters
+
+
+def _plain_file_inside(tree: str, rel: str) -> bool:
+    """CL-1: a regular file (not a link), no linked folder between the tree root and it, real path inside the tree."""
+    full = os.path.join(tree, *rel.split("/"))
+    try:
+        here = tree
+        for part in rel.split("/")[:-1]:
+            here = os.path.join(here, part)
+            if _is_link(here):
+                return False
+        if _is_link(full) or not stat.S_ISREG(os.lstat(full).st_mode):
+            return False
+    except (OSError, ValueError):
+        return False
+    return _inside(full, tree)
+
+
+def _hash_files(tree: str, rels: List[str]) -> Tuple[Optional[Dict[str, str]], str]:
+    """Blob ids git would store for each path (clean filters and line-ending conversion ON), or ``(None, cause)``."""
+    ids: Dict[str, str] = {}
+    batches: List[List[str]] = []
+    chunk: List[str] = []
+    size = 0
+    for rel in rels:
+        if chunk and size + len(rel) + 1 > HASH_CHUNK_CHARS:
+            batches.append(chunk)
+            chunk, size = [], 0
+        chunk.append(rel)
+        size += len(rel) + 1
+    if chunk:
+        batches.append(chunk)
+    for batch in batches:
+        code, out, err = _git("-C", tree, "hash-object", "--", *batch)
+        if code != 0:
+            return None, "git hash-object failed: %s" % _clean(err.strip())[:200]
+        lines = out.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        if len(lines) != len(batch):
+            return None, "git hash-object returned %d ids for %d paths" % (len(lines), len(batch))
+        for rel, line in zip(batch, lines):
+            ids[rel] = line.strip()
+    return ids, ""
+
+
+def compare_untracked(tree: str, ref: str, untracked: List[str]) -> Dict[str, Any]:
+    """The Untracked Comparison of one tree whose every status entry is untracked."""
+    result: Dict[str, Any] = {"ref": ref, "identical": [], "differing": [], "blobs": {}, "verdict": "all-identical",
+                              "cause": ""}
+    candidates = [rel for rel in untracked if _plain_file_inside(tree, rel)]
+    differing = {rel for rel in untracked if rel not in candidates}
+    wanted = set(candidates)
+    code, out, err = _git("-C", tree, "ls-tree", "-r", "-z", "--full-tree", ref)
+    if code != 0:
+        result.update(verdict="unverifiable", cause="git ls-tree of %s failed: %s" % (ref, _clean(err.strip())[:200]))
+        return result
+    blobs: Dict[str, str] = {}
+    for record in out.split("\0"):
+        meta, tab, name = record.partition("\t")
+        if not tab or name not in wanted:
+            continue
+        fields = meta.split()
+        if len(fields) == 3 and fields[1] == "blob" and fields[0] in ("100644", "100755"):
+            blobs[name] = fields[2].lower()
+    differing.update(rel for rel in candidates if rel not in blobs)
+    ids, cause = _hash_files(tree, sorted(blobs))
+    if ids is None:
+        result.update(verdict="unverifiable", cause=cause)
+        return result
+    for rel in sorted(blobs):
+        if ids[rel].lower() == blobs[rel]:
+            result["identical"].append(rel)
+            result["blobs"][rel] = blobs[rel]
+        else:
+            differing.add(rel)
+    result["differing"] = sorted(differing)
+    if differing:
+        result["verdict"] = "some-differ"
+    return result
 
 
 def _ignored_dirs(path: str) -> Optional[List[str]]:
@@ -446,12 +544,24 @@ def clean_worktree(run: Run, item: Dict[str, Any]) -> None:
     if not os.path.isdir(path):
         _left(item, "remove-failed", detail="the folder is missing; git still lists it")
         return
-    changed, err = _status_files(path)
-    if changed is None:
+    entries, err = _status_entries(path)
+    if entries is None:
         _left(item, "unverifiable", detail=err)
         return
-    if changed:
-        _left(item, "uncommitted-changes", files=changed)
+    landed: Dict[str, str] = {}  # Landed untracked file -> the blob id it matched
+    untracked = [p for _c, p in entries]
+    if entries and all(code == "??" for code, _p in entries):
+        compared = compare_untracked(path, run.ref, untracked)
+        if compared["verdict"] == "unverifiable":
+            _left(item, "unverifiable", detail=compared["cause"])
+            return
+        item["identical"] = list(compared["identical"])
+        if compared["verdict"] == "some-differ":
+            _left(item, "uncommitted-changes", files=compared["differing"])
+            return
+        landed = dict(compared["blobs"])
+    elif entries:
+        _left(item, "uncommitted-changes", files=untracked)
         return
     head = item["head"]
     if not head:  # read the tree's own HEAD; never fall back to the main checkout's
@@ -519,6 +629,38 @@ def clean_worktree(run: Run, item: Dict[str, Any]) -> None:
             _left(item, "in-use", action="deferred", detail=_clean(failure))
             run.finish_needed = True
             return
+    deleted: List[str] = []
+    if landed:
+        again, err = _status_entries(path)
+        if again is None:
+            _left(item, "unverifiable", detail="status could not be read again: " + err)
+            return
+        if [p for _c, p in again] != untracked or any(c != "??" for c, _p in again):
+            _left(item, "uncommitted-changes", files=[p for _c, p in again])
+            return
+        for rel in sorted(landed):
+            gone = ("; already deleted (each verified a moment before): " + ", ".join(deleted)) if deleted else ""
+            if not _plain_file_inside(path, rel):
+                _left(item, "uncommitted-changes", files=[rel],
+                      detail="the file is no longer a plain file in the tree" + gone)
+                return
+            ids, cause = _hash_files(path, [rel])
+            if ids is None:
+                _left(item, "unverifiable", detail=cause + gone)
+                return
+            if ids[rel].lower() != landed[rel]:
+                _left(item, "uncommitted-changes", files=[rel], detail="the file changed since the comparison" + gone)
+                return
+            if not _plain_file_inside(path, rel):  # again, right before the delete: git lists files beneath a junction
+                _left(item, "uncommitted-changes", files=[rel],
+                      detail="the file is no longer a plain file in the tree" + gone)
+                return
+            try:
+                os.remove(os.path.join(path, *rel.split("/")))
+            except OSError as exc:
+                _left(item, "remove-failed", detail="%s could not be deleted: %s%s" % (rel, _clean(exc), gone))
+                return
+            deleted.append(rel)
     links: List[Dict[str, Any]] = []
     for link in found_links:
         try:
@@ -534,6 +676,8 @@ def clean_worktree(run: Run, item: Dict[str, Any]) -> None:
     if code != 0 or os.path.exists(path):
         recreate = "; ".join("%s -> %s" % (l["path"], l["target"]) for l in links)
         detail = (err.strip() or "the folder is still present after git worktree remove")
+        if deleted:
+            detail += "; deleted identical files: " + ", ".join(deleted)
         if recreate:
             detail += "; removed links: " + recreate
         _left(item, "remove-failed", detail=detail)
@@ -733,7 +877,15 @@ def _left_entry(item: Dict[str, Any], file_cap: int) -> str:
     return text
 
 
-def build_line(slug: str, items: List[Dict[str, Any]], finish: Optional[str]) -> str:
+def _removed_entry(item: Dict[str, Any], file_cap: int, ref: Optional[str]) -> str:
+    text = _name(item)
+    files = [_clean(f.replace("\\", "/")) for f in item.get("identical") or []]
+    if item["kind"] == "worktree" and files:
+        text += " [identical to %s: %s]" % (_clean(ref or "the default branch"), _listing(files, file_cap, ", "))
+    return text
+
+
+def build_line(slug: str, items: List[Dict[str, Any]], finish: Optional[str], ref: Optional[str] = None) -> str:
     removed = [i for i in items if i["action"] == "removed"]
     left = [i for i in items if i["action"] in ("left", "deferred")]
     repairs = [i["repair"] for i in items if i.get("repair")]
@@ -744,7 +896,7 @@ def build_line(slug: str, items: List[Dict[str, Any]], finish: Optional[str]) ->
     for cap, file_cap in ((8, 3), (6, 3), (4, 2), (3, 2), (2, 1), (1, 1), (0, 0), (-1, 0)):
         if cap >= 0:
             line = "CLEANUP %s: removed %d (%s); left %d (%s)" % (
-                _clean(slug), len(removed), _listing([_name(i) for i in removed], cap, ", "), len(left),
+                _clean(slug), len(removed), _listing([_removed_entry(i, file_cap, ref) for i in removed], cap, ", "), len(left),
                 _listing([_left_entry(i, file_cap) for i in left], cap, "; "))
         else:  # last resort: the parenthesised lists go, the counts and the tail stay
             line = "CLEANUP %s: removed %d; left %d" % (_clean(slug), len(removed), len(left))
@@ -825,7 +977,7 @@ def cleanup(slug: str, start: str, start_cwd: str, remove_remote: bool, dry_run:
         outcome, code = "cleaned", EXIT_OK
     else:
         outcome, code = "nothing-owned", EXIT_OK
-    base.update(outcome=outcome, items=items, line=build_line(slug, items, finish))
+    base.update(outcome=outcome, items=items, line=build_line(slug, items, finish, ref))
     if finish:
         base["finish_command"] = finish
     if run.repair:

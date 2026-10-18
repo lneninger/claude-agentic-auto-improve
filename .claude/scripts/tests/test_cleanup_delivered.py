@@ -414,6 +414,27 @@ def commit_off_master(w, branch: str) -> str:
     return sha
 
 
+def land_on_master(w, files: dict) -> dict:
+    """Put files on origin/master from the GitHub side, shaped like ``add_sibling_item``: commit them on
+    ``w.ghub`` master and push, then fetch into the main checkout so ``origin/master`` holds them there too.
+    ``files`` maps a path to its text or bytes (bytes are written as they are, so a CRLF stays a CRLF).
+    Call it AFTER ``merge_records`` (the records commit must stay a fast-forward on the GitHub side).
+    Returns the path -> bytes map that was committed."""
+    git(w.ghub, "switch", "-q", "master")
+    landed = {}
+    for rel, data in files.items():
+        raw = data if isinstance(data, bytes) else data.encode("utf-8")
+        target = w.ghub / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        landed[rel] = raw
+    git(w.ghub, "add", "-A")
+    git(w.ghub, "commit", "-q", "-m", "land files on master")
+    git(w.ghub, "push", "-q", "origin", "master")
+    git(w.main, "fetch", "-q", "origin")
+    return landed
+
+
 # ---------------------------------------------------------------------------
 # Reading a report
 # ---------------------------------------------------------------------------
@@ -2321,6 +2342,429 @@ class CommandLineTests(CleanupCase):
         self.assertEqual(real(proc.out.strip()), real(self.w.main),
                          msg="--print-main-root prints flat_worktree.describe()['main_root'], the MAIN checkout, even from a worktree")
         self.assertEqual(len(proc.out.strip().splitlines()), 1, msg="and nothing else: the skills use it in `cd $(...)`")
+
+
+# ===========================================================================
+# Landed untracked files (contract 2026-10-17-worktree-removal-untracked-identical, CL-1 to CL-8)
+# ===========================================================================
+LANDED_REL = "src/landed.txt"
+LANDED_BYTES = b"landed on master\nsecond line\n"
+REF = "origin/master"
+
+
+class LandedUntrackedTests(CleanupCase):
+    """An untracked file that git would store as exactly the blob ``origin/<default>`` holds at the same path no
+    longer keeps a delivered worktree: cleanup proves it identical (git's own filtered ``hash-object``), deletes
+    it last and file by file, then removes the tree without force. Anything it cannot prove keeps today's
+    behaviour. Every test starts from the delivered world (stage 2) with ``core.autocrlf`` pinned to false in the
+    main repository (shared by its worktrees), so a host-wide autocrlf setting cannot change a verdict."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        git(self.w.main, "config", "core.autocrlf", "false")
+        self.deliver()
+
+    # -- helpers ---------------------------------------------------------------------------------
+    def land(self, files: dict | None = None) -> dict:
+        return land_on_master(self.w, files if files is not None else {LANDED_REL: LANDED_BYTES})
+
+    def untracked_copy(self, rel: str, data: bytes | None = None, tree: Path | None = None) -> Path:
+        """Write the untracked copy. By default the exact bytes ``git cat-file blob origin/master:<rel>`` holds."""
+        if data is None:
+            done = subprocess.run([REAL_GIT, "cat-file", "blob", f"{REF}:{rel}"], cwd=str(self.w.main),
+                                  capture_output=True)
+            self.assertEqual(done.returncode, 0, msg=f"fixture: the blob {REF}:{rel} must exist: {done.stderr!r}")
+            data = done.stdout
+        path = (tree or self.w.fw) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def porcelain(self, tree: Path | None = None) -> str:
+        return git(tree or self.w.fw, "status", "--porcelain", "--untracked-files=all")
+
+    def fw_item(self, report: dict) -> dict:
+        return pick(report, "worktree", FW_NAME)
+
+    def calls_for(self, tree_name: str, *heads: str) -> list:
+        return [c["args"] for c in git_calls(self.w.tools)
+                if sub_command(c["args"])[:1] and sub_command(c["args"])[0] in heads
+                and any(tree_name in a for a in c["args"])]
+
+    def worktree_remove_calls(self) -> list:
+        return [c["args"] for c in git_calls(self.w.tools)
+                if sub_command(c["args"])[:2] == ["worktree", "remove"] and FW_NAME in c["args"][-1].replace("\\", "/")]
+
+    # -- 1 fixture control -----------------------------------------------------------------------
+    def test_fixture_control_land_on_master_leaves_the_tree_behind_origin_with_only_the_copy_untracked(self):
+        self.land()
+        copy = self.untracked_copy(LANDED_REL)
+
+        self.assertEqual(git_rc_code(self.w.fw, "merge-base", "--is-ancestor", "HEAD", REF), 0,
+                         msg="fixture: the tree's HEAD is still an ancestor of origin/master after the landing")
+        self.assertEqual(self.porcelain(), f"?? {LANDED_REL}",
+                         msg="fixture: git status lists only the copy, as untracked")
+        self.assertEqual(copy.read_bytes(), LANDED_BYTES, msg="fixture: the copy holds exactly the landed bytes")
+
+    # -- 2 and 3 the removal ---------------------------------------------------------------------
+    def test_the_only_untracked_file_being_identical_the_tree_is_removed_and_the_report_says_why(self):
+        self.land()
+        self.untracked_copy(LANDED_REL)
+
+        proc, report = self.run_report(what="one identical untracked file")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("removed", None),
+                         msg="CL-1/CL-5: an untracked file identical to the blob on origin/master loses nothing, so the "
+                             f"tree is removed; got {item.get('action')}/{item.get('reason')} files={item.get('files')}")
+        self.assertGone(self.w.fw, "identical untracked file")
+        self.assertNotIn(FEATURE, local_branches(self.w), msg="its branch is removed as for a clean tree")
+        self.assertEqual(item.get("identical"), [LANDED_REL], msg="CL-7: the item names the file it proved identical")
+        self.assertIn(f"[identical to {REF}: {LANDED_REL}]", report.get("line", ""),
+                      msg="CL-7: the printed line explains the removal with the identical bracket")
+        self.assertEqual((proc.rc, report.get("outcome")), (0, "cleaned"), msg="everything was cleaned: exit 0")
+
+    def test_an_identical_file_in_a_subfolder_head_does_not_have_still_lets_the_tree_go(self):
+        rel = "docs/deep/landed.txt"
+        self.land({rel: LANDED_BYTES})
+        self.assertFalse((self.w.fw / "docs").exists(), msg="fixture: HEAD has no docs folder, the copy creates it")
+        self.untracked_copy(rel)
+
+        proc, report = self.run_report(what="identical file in a new subfolder")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("removed", None),
+                         msg="CL-6: the empty folders the delete leaves are not a reason to keep the tree "
+                             "(a non-forced `git worktree remove` takes them)")
+        self.assertGone(self.w.fw, "identical file in a new subfolder")
+        self.assertEqual(item.get("identical"), [rel], msg="CL-7: the item names the file")
+
+    # -- 4 and 5 differing -----------------------------------------------------------------------
+    def test_untracked_file_with_different_content_at_a_landed_path_keeps_the_tree(self):
+        self.land()
+        copy = self.untracked_copy(LANDED_REL, b"my own unsaved edit\n")
+
+        proc, report = self.run_report(what="different content at a landed path")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "uncommitted-changes"),
+                         msg="CL-4: content that differs from the blob is unsaved work")
+        self.assertEqual([f.replace("\\", "/") for f in item.get("files") or []], [LANDED_REL], msg="files names it")
+        self.assertEqual(item.get("identical"), [], msg="CL-4: the item carries an empty identical list, not a missing key")
+        self.assertEqual(copy.read_bytes(), b"my own unsaved edit\n", msg="the file is intact")
+        self.assertKept(self.w.fw, "different content")
+
+    def test_a_file_origin_lacks_next_to_an_identical_one_keeps_the_tree_and_deletes_neither(self):
+        self.land()
+        same = self.untracked_copy(LANDED_REL)
+        absent = self.w.fw / "src" / "not_on_master.txt"
+        absent.write_bytes(b"only here\n")
+
+        proc, report = self.run_report(what="identical file next to an absent one")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "uncommitted-changes"),
+                         msg="CL-4: one untracked file that is not on origin/master keeps the tree")
+        self.assertEqual([f.replace("\\", "/") for f in item.get("files") or []], ["src/not_on_master.txt"],
+                         msg="CL-4: files lists only the file that differs (here: absent at the ref)")
+        self.assertEqual(item.get("identical"), [LANDED_REL], msg="CL-4: identical lists the proven one")
+        self.assertTrue(same.is_file() and absent.is_file(), msg="CL-4: nothing is deleted, not even the identical file")
+        self.assertKept(self.w.fw, "identical next to absent")
+
+    # -- 6 line endings --------------------------------------------------------------------------
+    def test_6a_with_autocrlf_true_a_crlf_copy_of_landed_lf_text_is_identical(self):
+        text = b"line one\nline two\n"
+        self.land({LANDED_REL: text})
+        git(self.w.main, "config", "core.autocrlf", "true")
+        self.untracked_copy(LANDED_REL, b"line one\r\nline two\r\n")
+
+        proc, report = self.run_report(what="CRLF copy under core.autocrlf=true")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("removed", None),
+                         msg="CL-1/Q1: hash-object with filters folds CRLF to LF under autocrlf=true, exactly as git "
+                             "stages the file, so the copy is identical to the blob")
+        self.assertGone(self.w.fw, "CRLF copy under autocrlf")
+        self.assertEqual(item.get("identical"), [LANDED_REL], msg="the file is reported as identical")
+
+    def test_6b_with_autocrlf_false_the_same_crlf_copy_differs(self):
+        self.land({LANDED_REL: b"line one\nline two\n"})
+        git(self.w.main, "config", "core.autocrlf", "false")
+        copy = self.untracked_copy(LANDED_REL, b"line one\r\nline two\r\n")
+        self.assertFalse((self.w.fw / ".gitattributes").exists(), msg="fixture: no .gitattributes in the tree")
+
+        proc, report = self.run_report(what="CRLF copy under core.autocrlf=false")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "uncommitted-changes"),
+                         msg="CL-1: when git applies no conversion, CRLF versus LF is a real difference")
+        self.assertEqual(item.get("identical"), [],
+                         msg="CL-1: git's view decides, not a line-ending fold of our own; nothing is identical")
+        self.assertEqual(copy.read_bytes(), b"line one\r\nline two\r\n", msg="the file is intact")
+        self.assertKept(self.w.fw, "CRLF copy without conversion")
+
+    def test_6c_with_autocrlf_true_a_crlf_copy_with_one_word_changed_still_differs(self):
+        self.land({LANDED_REL: b"line one\nline two\n"})
+        git(self.w.main, "config", "core.autocrlf", "true")
+        copy = self.untracked_copy(LANDED_REL, b"line one\r\nline TWO\r\n")
+
+        proc, report = self.run_report(what="changed CRLF copy under core.autocrlf=true")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "uncommitted-changes"),
+                         msg="CL-1: a real content change still differs even where line endings are folded")
+        self.assertEqual(item.get("identical"), [], msg="and nothing is reported identical")
+        self.assertEqual(copy.read_bytes(), b"line one\r\nline TWO\r\n", msg="the edit is intact")
+        self.assertKept(self.w.fw, "changed CRLF copy")
+
+    # -- 7 any other change ----------------------------------------------------------------------
+    def _assert_other_change_keeps_today_exactly(self, tree_change: str) -> None:
+        self.land()
+        self.untracked_copy(LANDED_REL)
+        (self.w.fw / "src" / "feature.txt").write_text("edited and not committed\n", encoding="utf-8")
+        if tree_change == "staged":
+            git(self.w.fw, "add", "src/feature.txt")
+        self.w.tools.clear_git_calls()
+
+        proc, report = self.run_report(what=f"identical untracked file plus a {tree_change} change")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "uncommitted-changes"),
+                         msg=f"CL-2: a {tree_change} tracked change keeps the tree")
+        self.assertEqual(sorted(f.replace("\\", "/") for f in item.get("files") or []), ["src/feature.txt", LANDED_REL],
+                         msg="CL-2: `files` lists both paths exactly as today")
+        self.assertEqual(item.get("identical"), [], msg="CL-2: no comparison ran, so the list is empty")
+        compared = [a for a in git_calls_args(self.w.tools)
+                    if sub_command(a)[:1] == ["hash-object"]
+                    or (sub_command(a)[:1] == ["ls-tree"] and "--name-only" not in a)]
+        self.assertEqual(compared, [], msg="CL-2: no ls-tree of the ref and no hash-object runs when anything else changed")
+        self.assertTrue((self.w.fw / LANDED_REL).is_file(), msg="the untracked file is still there")
+        self.assertKept(self.w.fw, f"identical untracked plus {tree_change}")
+
+    def test_7_an_identical_file_plus_a_modified_tracked_file_is_left_exactly_as_today(self):
+        self._assert_other_change_keeps_today_exactly("modified")
+
+    def test_7_an_identical_file_plus_a_staged_change_is_left_exactly_as_today(self):
+        self._assert_other_change_keeps_today_exactly("staged")
+
+    # -- 8 fail closed ---------------------------------------------------------------------------
+    def _assert_unverifiable(self, token: str) -> None:
+        self.land()
+        copy = self.untracked_copy(LANDED_REL)
+        if token == "ls-tree":  # not the contract-folder read that runs from the main checkout
+            set_git_fail(self.w.tools, ["ls-tree"], unless=["--name-only"])
+        else:
+            set_git_fail(self.w.tools, [token])
+
+        proc, report = self.run_report(what=f"{token} fails")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "unverifiable"),
+                         msg=f"CL-3: when git {token} fails the tree is unverifiable, never treated as identical")
+        self.assertTrue(item.get("detail"), msg="CL-3: detail names the cause")
+        self.assertEqual(copy.read_bytes(), LANDED_BYTES, msg="the file is intact")
+        self.assertEqual(self.worktree_remove_calls(), [], msg="CL-3: no `git worktree remove` for this tree")
+        self.assertKept(self.w.fw, f"{token} fails")
+
+    def test_8_a_failing_ls_tree_of_the_ref_leaves_the_tree_unverifiable(self):
+        self._assert_unverifiable("ls-tree")
+
+    def test_8_a_failing_hash_object_leaves_the_tree_unverifiable(self):
+        self._assert_unverifiable("hash-object")
+
+    # -- 9 ordering ------------------------------------------------------------------------------
+    def test_9_with_an_unpushed_commit_the_identical_file_is_still_on_disk(self):
+        self.land()
+        copy = self.untracked_copy(LANDED_REL)
+        # Stage only the extra file: the shared `commit` helper runs `git add -A`, which would also commit the
+        # untracked copy and leave no untracked file for the comparison to prove identical.
+        (self.w.fw / "src" / "extra.txt").write_text("never merged\n", encoding="utf-8")
+        git(self.w.fw, "add", "--", "src/extra.txt")
+        git(self.w.fw, "commit", "-q", "-m", "a commit origin/master does not have")
+
+        proc, report = self.run_report(what="identical file and an unpushed commit")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "unpushed-commits"),
+                         msg="CL-5: the HEAD check still comes before any delete")
+        self.assertEqual(copy.read_bytes(), LANDED_BYTES, msg="CL-5: the identical file is NOT deleted from a tree that is kept")
+        self.assertEqual(item.get("identical"), [LANDED_REL],
+                         msg="Q3: a comparison ran at the status step, so --json reports what it proved")
+
+    def test_9_in_a_standing_tree_the_identical_file_is_still_on_disk(self):
+        self.land()
+        copy = self.untracked_copy(LANDED_REL)
+
+        proc, report = self.run_report(from_dir=self.w.fw, what="identical file in the standing tree")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("deferred", "standing-tree"),
+                         msg="CL-5: an identical untracked file must not turn the standing-tree deferral into "
+                             f"uncommitted-changes; got {item.get('action')}/{item.get('reason')}")
+        self.assertEqual(copy.read_bytes(), LANDED_BYTES, msg="CL-5: a deferred tree is left entirely untouched")
+
+    def test_9_in_a_locked_tree_the_identical_file_is_still_on_disk(self):
+        self.land()
+        copy = self.untracked_copy(LANDED_REL)
+        git(self.w.main, "worktree", "lock", "--reason", "another session", str(self.w.fw))
+
+        proc, report = self.run_report(what="identical file in a locked tree")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "locked"), msg="CL-5: the lock check still comes first")
+        self.assertEqual(copy.read_bytes(), LANDED_BYTES, msg="CL-5: nothing is deleted from a locked tree")
+        self.assertEqual(item.get("identical"), [], msg="the lock check precedes the comparison: no identical list")
+
+    def test_9_a_dry_run_reports_the_identical_file_and_deletes_nothing(self):
+        self.land()
+        copy = self.untracked_copy(LANDED_REL)
+        before = mutating_calls(self.w.tools)
+
+        proc, report = self.run_report("--dry-run", what="dry run with an identical file")
+
+        item = self.fw_item(report)
+        self.assertEqual(item["action"], "removed", msg="CL-5/AC4: a dry run says the tree would be removed")
+        self.assertEqual(item.get("identical"), [LANDED_REL], msg="CL-5: and reports the identical file")
+        self.assertIn(f"[identical to {REF}: {LANDED_REL}]", report.get("line", ""), msg="CL-7: the dry-run line carries the bracket")
+        self.assertEqual(copy.read_bytes(), LANDED_BYTES, msg="CL-5: a dry run deletes no file")
+        self.assertEqual(mutating_calls(self.w.tools), before, msg="a dry run runs no mutating git command")
+        self.assertKept(self.w.fw, "dry run")
+
+    # -- 10 order of calls -----------------------------------------------------------------------
+    def test_10_the_file_is_rehashed_after_the_status_reread_and_before_its_delete_and_removal_is_not_forced(self):
+        self.land()
+        self.untracked_copy(LANDED_REL)
+        real_remove, real_unlink = os.remove, os.unlink
+        deletes: list = []
+
+        def spy(real_fn):
+            def fn(path, *a, **k):
+                if os.path.basename(str(path)) == "landed.txt":
+                    deletes.append((str(path), len(git_calls(self.w.tools))))
+                return real_fn(path, *a, **k)
+            return fn
+
+        rc, out, report = self.run_in_process([], patches={"os.remove": spy(real_remove), "os.unlink": spy(real_unlink)})
+
+        self.assertIsInstance(report, dict, msg=f"the in-process run must print a report, got {out[:300]!r}")
+        item = pick(report, "worktree", FW_NAME)
+        self.assertEqual(item["action"], "removed", msg="the identical file does not keep the tree")
+        self.assertEqual(len(deletes), 1, msg=f"CL-6: the file is deleted by one single-file delete, saw {deletes}")
+        at = deletes[0][1]
+        calls = git_calls(self.w.tools)
+        status_idx = [i for i, c in enumerate(calls[:at]) if sub_command(c["args"])[:1] == ["status"]
+                      and any(FW_NAME in a for a in c["args"])]
+        hash_idx = [i for i, c in enumerate(calls[:at]) if sub_command(c["args"])[:1] == ["hash-object"]
+                    and any(FW_NAME in a for a in c["args"])]
+        self.assertGreaterEqual(len(status_idx), 2, msg="CL-5 step 5: status is read again before the first delete")
+        self.assertTrue(hash_idx and hash_idx[-1] > status_idx[-1],
+                        msg=f"CL-5 step 6: a hash-object of the file comes after the status re-read (status {status_idx}, "
+                            f"hash-object {hash_idx}) and before its delete")
+        removes = [(i, c["args"]) for i, c in enumerate(calls) if sub_command(c["args"])[:2] == ["worktree", "remove"]
+                   and FW_NAME in c["args"][-1].replace("\\", "/")]
+        self.assertEqual(len(removes), 1, msg="one `git worktree remove` for the tree")
+        self.assertGreaterEqual(removes[0][0], at, msg="CL-5 step 8: the removal comes after the delete")
+        self.assertFalse([a for a in removes[0][1] if a in ("-f", "--force", "-ff")],
+                         msg="CL-8: the removal is never forced")
+
+    # -- 11 per-file re-check --------------------------------------------------------------------
+    def test_11_a_second_file_rewritten_after_the_first_delete_stops_the_loop_and_is_kept(self):
+        a_rel, b_rel = "src/landed_a.txt", "src/landed_b.txt"
+        self.land({a_rel: b"file a\n", b_rel: b"file b\n"})
+        self.untracked_copy(a_rel)
+        self.untracked_copy(b_rel)
+        fw = self.w.fw
+        real_remove, real_unlink = os.remove, os.unlink
+        order: list = []
+        new_bytes = b"written by someone after the first delete\n"
+
+        def rewriting(real_fn):
+            def fn(path, *a, **k):
+                result = real_fn(path, *a, **k)
+                name = os.path.basename(str(path))
+                if name in ("landed_a.txt", "landed_b.txt") and not order:
+                    order.append(name)
+                    other = "landed_b.txt" if name == "landed_a.txt" else "landed_a.txt"
+                    (fw / "src" / other).write_bytes(new_bytes)
+                elif name in ("landed_a.txt", "landed_b.txt"):
+                    order.append(name)
+                return result
+            return fn
+
+        rc, out, report = self.run_in_process([], patches={"os.remove": rewriting(real_remove),
+                                                           "os.unlink": rewriting(real_unlink)})
+
+        self.assertIsInstance(report, dict, msg=f"the in-process run must print a report, got {out[:300]!r}")
+        item = pick(report, "worktree", FW_NAME)
+        self.assertTrue(order, msg="CL-5: the first identical file was deleted before the second was checked again")
+        first = order[0]
+        second = "landed_b.txt" if first == "landed_a.txt" else "landed_a.txt"
+        self.assertEqual((item["action"], item.get("reason")), ("left", "uncommitted-changes"),
+                         msg="CL-5 step 6: a file that changed since the comparison stops the loop")
+        self.assertEqual([f.replace("\\", "/") for f in item.get("files") or []], ["src/" + second],
+                         msg="CL-5 step 6: files names the changed file only")
+        self.assertEqual(order, [first], msg=f"nothing is deleted after the mismatch, saw deletes {order}")
+        self.assertEqual((fw / "src" / second).read_bytes(), new_bytes, msg="the new bytes of the changed file are intact")
+        self.assertIn("src/" + first, str(item.get("detail")).replace("\\", "/"),
+                      msg="CL-5 step 6: detail lists the file that was already deleted")
+        self.assertEqual(self.worktree_remove_calls(), [], msg="no `git worktree remove` after a mismatch")
+        self.assertKept(fw, "second file changed")
+
+    # -- 12 links --------------------------------------------------------------------------------
+    def test_12a_an_untracked_symlink_at_a_landed_path_is_never_identical(self):
+        rel = "src/landed_link.txt"
+        self.land({rel: LANDED_BYTES})
+        outside = self.tmp / "outside_target.txt"
+        outside.write_bytes(LANDED_BYTES)
+        link = self.w.fw / rel
+        try:
+            os.symlink(str(outside), str(link))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"a file symlink cannot be created on this host without a privilege: {exc}")
+
+        proc, report = self.run_report(what="symlink at a landed path")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "uncommitted-changes"),
+                         msg="CL-1: lstat shows a link, not a regular file, so the path differs and the tree is left")
+        self.assertEqual(item.get("identical"), [], msg="CL-1: a link is never identical")
+        self.assertTrue(os.path.islink(str(link)), msg="the link is still there")
+        self.assertEqual(outside.read_bytes(), LANDED_BYTES, msg="the link's target is intact")
+        self.assertKept(self.w.fw, "symlink at a landed path")
+
+    def test_12b_a_landed_file_reached_through_an_untracked_linked_folder_is_never_deleted(self):
+        rel = "src/shared/landed.txt"
+        self.land({rel: LANDED_BYTES})
+        outside = self.tmp / "outside_shared"
+        outside.mkdir()
+        (outside / "landed.txt").write_bytes(LANDED_BYTES)
+        link = self.w.fw / "src" / "shared"
+        try:
+            make_directory_link(link, outside)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"a directory link cannot be created on this host: {exc}")
+        listed = self.porcelain()  # records whether git lists the file through the link at all (the ASSUMED line)
+
+        proc, report = self.run_report(what="landed file behind an untracked linked folder")
+
+        item = self.fw_item(report)
+        self.assertEqual((item["action"], item.get("reason")), ("left", "uncommitted-changes"),
+                         msg="CL-1: a path behind a linked folder fails the parent-link check and counts as differing, "
+                             f"so the tree is left. git status listed: {listed!r}")
+        self.assertEqual(item.get("identical"), [],
+                         msg=f"CL-1: nothing behind a link is identical. git status listed: {listed!r}")
+        self.assertEqual((outside / "landed.txt").read_bytes(), LANDED_BYTES,
+                         msg=f"the file in the folder outside the tree is intact. git status listed: {listed!r}")
+        self.assertTrue(is_link_entry(link), msg="the link is still there")
+        self.assertKept(self.w.fw, "landed file behind a linked folder")
+
+
+def git_rc_code(repo, *args: str) -> int:
+    return run_cmd([REAL_GIT, *args], cwd=repo).rc
+
+
+def git_calls_args(tools: Tools) -> list:
+    return [c["args"] for c in git_calls(tools)]
 
 
 # ===========================================================================
