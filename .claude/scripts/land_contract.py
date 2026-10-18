@@ -40,6 +40,8 @@ enforcement; it is pinned by ``evaluate_gates`` and by the tests.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import difflib
 import json
 import os
 import re
@@ -52,7 +54,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
@@ -80,7 +82,14 @@ LANDING_OUTCOMES = frozenset(SUCCESS_OUTCOMES) | frozenset(HALT_OUTCOMES)
 BASELINE_OUTCOMES: Tuple[str, ...] = ("baseline-recorded", "landing-in-progress",
                                       "landing-not-configured", "environment-failure",
                                       "unverifiable")
-SUCCESS_EXIT = ("landed", "already-landed", "not-applicable", "baseline-recorded")
+#: The members the two reuse entry points add (``--module-tags``, ``--verify-here``). Each command also
+#: returns existing Landing Outcome members; every outcome either returns is in one of the two sets.
+VERIFY_OUTCOMES: Tuple[str, ...] = ("verified", "module-tags-read", "base-unreadable", "no-baseline")
+SUCCESS_EXIT = ("landed", "already-landed", "not-applicable", "baseline-recorded",
+                "verified", "module-tags-read")
+#: A run id the verification runner accepts (it becomes a folder name under logs_dir()/verify/).
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+RUN_ID_INVALID_REASON = "pass a fresh run id of letters, digits, dot, dash or underscore"
 
 EXIT_OK = 0
 EXIT_GH_REPO_SET = 8
@@ -122,6 +131,9 @@ REMEDIES: Dict[str, str] = {
     "not-mergeable": "resolve the mergeability problem on the pull request, then rerun",
     "merge-refused": "read the refusal in the detail, then rerun",
     "merge-unconfirmed": "rerun: the next run reads the merged pull request and writes the bookkeeping",
+    # The two halts the reuse entry points add (VERIFY_OUTCOMES).
+    "base-unreadable": "fetch origin and pass a --base ref that exists",
+    "no-baseline": "master holds no failing-test baseline, so this runner ran no step and decides nothing",
 }
 
 
@@ -157,19 +169,31 @@ def _kill_tree(proc: "subprocess.Popen[bytes]") -> None:
         pass
 
 
-def _run_long(cmd: Sequence[Any], timeout: float, log_path: Any, cwd: Any) -> Tuple[Optional[int], bool]:
+def _child_env(checkout: Any) -> Dict[str, str]:
+    """L-14': the one variable a child gets that this process does not hold: the landing checkout.
+
+    Everything else is inherited unchanged. ``os.environ`` itself is never touched for this.
+    """
+    return {"CLAUDE_PROJECT_DIR": str(checkout)}
+
+
+def _run_long(cmd: Sequence[Any], timeout: float, log_path: Any, cwd: Any,
+              env: Optional[Dict[str, str]] = None) -> Tuple[Optional[int], bool]:
     """Run a long command (a build, a test run), its combined output going to ``log_path``.
 
+    ``env`` is laid over a copy of this process's environment for the child alone (L-14').
     Returns ``(returncode, timed_out)``. ``returncode`` is None when the process never started.
     """
     log = Path(log_path)
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = [str(c) for c in cmd]
+    child_env = dict(os.environ)
+    child_env.update(env or {})
     with open(log, "wb") as fh:
         try:
             proc = subprocess.Popen(argv, cwd=str(cwd) if cwd else None, stdout=fh,
                                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                    env=dict(os.environ))
+                                    env=child_env)
         except OSError as exc:
             fh.write(("launch failed: %s\n" % exc).encode("utf-8", "replace"))
             return None, False
@@ -469,8 +493,41 @@ def landing_state_dir(main_root: Any) -> Path:
     return Path(main_root) / ".claude" / "state" / "landing"
 
 
+#: The file, inside a landing checkout's git folder, that says a landing run created the checkout (L-15').
+OWNER_MARKER = "landing-owner"
+
+
+class OwnerMarkerMissing(ValueError):
+    """A reused landing checkout carries no marker naming its own path: it is never reset (L-15')."""
+
+    def __init__(self, path: Any) -> None:
+        super().__init__("%s has no landing-owner marker naming it; refusing a destructive git command" % path)
+        self.path = str(path)
+
+
+def _owner_marker_path(path: Any) -> Optional[Path]:
+    rc, out = _run(["git", "rev-parse", "--absolute-git-dir"], cwd=path)
+    return Path(out.strip()) / OWNER_MARKER if rc == 0 and out.strip() else None
+
+
+def write_owner_marker(path: Any, run_id: str) -> None:
+    """Record that this run's ``git worktree add`` created ``path``. Never called on reuse (L-15')."""
+    marker = _owner_marker_path(path)
+    if marker is None:
+        raise RuntimeError("cannot locate the git folder of %s to write the landing-owner marker" % path)
+    _atomic_write(marker, json.dumps({"run_id": run_id, "path": str(path), "created_at": now_iso()}) + "\n")
+
+
+def read_owner_marker(path: Any) -> Optional[Dict[str, Any]]:
+    """The checkout's owner marker, or None when it has none or it is unreadable."""
+    marker = _owner_marker_path(path)
+    data = _read_json(marker) if marker is not None else None
+    return data if isinstance(data, dict) else None
+
+
 def worktree_reset(path: Any, main_root: Any, slug: str, ref: Optional[str] = None) -> None:
     """L-15: reset and clean a landing worktree, only after matching it to git and to phase.json.
+    L-15': and only when its owner marker names this very path.
 
     Ignored files survive (``git clean`` never uses -x), so installed packages and build output
     stay between runs. With ``ref`` the worktree is detached at it first.
@@ -488,6 +545,9 @@ def worktree_reset(path: Any, main_root: Any, slug: str, ref: Optional[str] = No
     if not isinstance(phase, dict) or _norm(phase.get("worktree") or "") != _norm(path):
         raise ValueError("%s is not the worktree phase.json records for %s; refusing a destructive "
                          "git command" % (path, slug))
+    marker = read_owner_marker(path)
+    if marker is None or _norm(marker.get("path") or "") != _norm(path):
+        raise OwnerMarkerMissing(path)
     if ref:
         landing_only()
         rc, out = _run(["git", "checkout", "--detach"], cwd=path)
@@ -688,7 +748,7 @@ def parse_unittest_text(text: Optional[str]) -> Optional[List[Dict[str, str]]]:
         head = _UT_HEAD.match(line)
         if head:
             name, dotted, tail = head.group(1), head.group(2), head.group(3)
-            unit = dotted.rsplit(".", 1)[0] if "." in dotted else dotted
+            unit = _ut_unit(name, dotted)
             if tail is not None and _UT_RESULT.match(tail):
                 results.append(_ut_result(unit, name, tail))
                 pending = None
@@ -708,8 +768,7 @@ def parse_unittest_text(text: Optional[str]) -> Optional[List[Dict[str, str]]]:
     for line in lines:
         detail = _UT_DETAIL.match(line)
         if detail:
-            dotted = detail.group(3)
-            current = (dotted.rsplit(".", 1)[0] if "." in dotted else dotted, detail.group(2))
+            current = (_ut_unit(detail.group(2), detail.group(3)), detail.group(2))
             messages.setdefault(current, [])
             continue
         if current is not None and (line.startswith("Ran ") or line.startswith("=" * 10)):
@@ -720,6 +779,16 @@ def parse_unittest_text(text: Optional[str]) -> Optional[List[Dict[str, str]]]:
         if r["outcome"] == "failed":
             r["message"] = "\n".join(messages.get((r["unit"], r["name"]), [])).strip()
     return results
+
+
+def _ut_unit(name: str, dotted: str) -> str:
+    """The dotted class of a unittest line, in BOTH formats (W4).
+
+    Python 3.11 and later print ``test_x (pkg.Mod.TestA.test_x)``: the last part is the test name, strip it.
+    Python 3.10 and earlier print ``test_x (pkg.Mod.TestA)``: the dotted name IS the class, strip nothing.
+    """
+    head, _, last = dotted.rpartition(".")
+    return head if head and last == name else dotted
 
 
 def _ut_result(unit: str, name: str, tail: str) -> Dict[str, str]:
@@ -853,6 +922,7 @@ def run_step(step: Dict[str, Any], emulators: Iterable[Dict[str, Any]], baseline
     if down:
         reading = read_step(step, {"launched": False}, baseline, emulators)
         reading["reading"] = "environment"
+        reading["ran"] = False
         reading["environment_reason"] = "emulator-unreachable: " + "; ".join(
             "%s (%s)" % (e.get("id"), e.get("start_hint") or "start it") for e in down)
         return reading
@@ -865,7 +935,8 @@ def run_step(step: Dict[str, Any], emulators: Iterable[Dict[str, Any]], baseline
     command = [sub(c) for c in (step.get("command") or [])]
     workdir = Path(cwd) / (step.get("cwd") or ".")
     log_path = results_dir / "output.log"
-    rc, timed_out = _run_long(command, float(step.get("timeout_minutes") or 30) * 60, log_path, workdir)
+    rc, timed_out = _run_long(command, float(step.get("timeout_minutes") or 30) * 60, log_path, workdir,
+                              env=_child_env(cwd))
 
     def read_file(path: Path) -> Optional[str]:
         try:
@@ -881,7 +952,9 @@ def run_step(step: Dict[str, Any], emulators: Iterable[Dict[str, Any]], baseline
     run = {"launched": rc is not None, "exit_code": rc, "timed_out": bool(timed_out),
            "log_text": read_file(log_path) or "", "results_text": results_text,
            "log_path": str(log_path), "root": str(cwd)}
-    return read_step(step, run, baseline, emulators)
+    reading = read_step(step, run, baseline, emulators)
+    reading["ran"] = rc is not None
+    return reading
 
 
 def merge_recording(runs: Sequence[Optional[Sequence[Dict[str, str]]]]) -> Optional[Dict[str, Any]]:
@@ -987,38 +1060,130 @@ def _align(base: List[str], side: List[str]) -> Optional[List[List[str]]]:
     return gaps if j == len(base) else None
 
 
-def merge_union(base: str, ours: str, theirs: str, entry_key: str) -> Dict[str, Any]:
-    """Union two edits of a registry file. Admissible only when each side only INSERTED lines.
+def _merge_file_text(base: str, ours: str, theirs: str) -> str:
+    """Stdout of ``git merge-file -p --diff3 ours base theirs`` over three temporary files."""
+    with tempfile.TemporaryDirectory(prefix="landing-regions-") as tmp:
+        names = {"ours": ours, "base": base, "theirs": theirs}
+        for name, text in names.items():
+            with open(os.path.join(tmp, name + ".txt"), "w", encoding="utf-8", newline="") as fh:
+                fh.write(text)
+        proc = subprocess.run(
+            ["git", "-c", "core.autocrlf=false", "merge-file", "-p", "--diff3",
+             "-L", "ours", "-L", "base", "-L", "theirs", "ours.txt", "base.txt", "theirs.txt"],
+            cwd=tmp, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+    if proc.returncode < 0 or proc.returncode > 127:
+        raise RuntimeError("git merge-file failed: %s" % proc.stderr.decode("utf-8", "replace").strip())
+    return proc.stdout.decode("utf-8", "replace")
 
-    Then a duplicate check over the inserted lines only, keyed by ``entry_key`` (a heading's text or a
-    ``- [Title](file.md)`` link target). A key halts when its count in the result exceeds the larger of
-    its base count and one, so repeats already in the base never fire.
+
+def _split_merge_file(text: str) -> List[Any]:
+    """Segments of a diff3 text: a plain string (clean line) or a region dict, in file order."""
+    segments: List[Any] = []
+    current: Optional[Dict[str, List[str]]] = None
+    section = "ours"
+    for line in text.splitlines():
+        if current is None:
+            if line.startswith("<<<<<<< "):
+                current, section = {"base": [], "ours": [], "theirs": []}, "ours"
+            else:
+                segments.append(line)
+        elif line.startswith("||||||| "):
+            section = "base"
+        elif line == "=======":
+            section = "theirs"
+        elif line.startswith(">>>>>>> "):
+            segments.append(current)
+            current = None
+        else:
+            current[section].append(line)
+    return segments
+
+
+def conflict_regions(base: str, ours: str, theirs: str) -> List[Dict[str, List[str]]]:
+    """One ``{"base", "ours", "theirs"}`` line-run dict per conflict hunk of ``git merge-file --diff3``."""
+    return [seg for seg in _split_merge_file(_merge_file_text(base, ours, theirs)) if isinstance(seg, dict)]
+
+
+def _boundary_in(base_l: List[str], edited: List[str]) -> List[int]:
+    """Where each base gap (0..len(base)) falls in ``edited``: an edited run's gaps map to its end."""
+    ops = difflib.SequenceMatcher(None, base_l, edited, autojunk=False).get_opcodes()
+    out: List[int] = []
+    for k in range(len(base_l) + 1):
+        for tag, i1, i2, j1, j2 in ops:
+            if i1 <= k <= i2 and not (tag == "insert" and i1 != k):
+                out.append(j1 + (k - i1) if tag == "equal" else (j1 if k == i1 else j2))
+                break
+        else:
+            out.append(len(edited))
+    return out
+
+
+def _union_region(region: Dict[str, List[str]]) -> Optional[List[str]]:
+    """The union of one region, or None when it cannot be united.
+
+    Both sides insert-only: their insertions meet at each base gap. One side insert-only and the other
+    edited or deleted a base line: the inserter's lines are carried into the editing side's text at the
+    position its base gap has there. Both sides edited a base line: None.
     """
-    base_l, ours_l, theirs_l = base.splitlines(), ours.splitlines(), theirs.splitlines()
-    g_ours, g_theirs = _align(base_l, ours_l), _align(base_l, theirs_l)
-    if g_ours is None or g_theirs is None:
-        return {"ok": False, "text": "",
-                "reason": "a side edited or deleted a base line; only insert-only hunks can be united"}
+    base_l = region["base"]
+    g_ours, g_theirs = _align(base_l, region["ours"]), _align(base_l, region["theirs"])
+    if g_ours is not None and g_theirs is not None:
+        out: List[str] = []
+        for i in range(len(base_l) + 1):
+            a, b = g_ours[i], g_theirs[i]
+            out.extend(a if a == b else a + b)
+            if i < len(base_l):
+                out.append(base_l[i])
+        return out
+    if g_ours is None and g_theirs is None:
+        return None
+    gaps, edited = (g_theirs, region["ours"]) if g_ours is None else (g_ours, region["theirs"])
+    where = _boundary_in(base_l, edited)
+    inserts: Dict[int, List[str]] = {}
+    for gap, lines in enumerate(gaps):
+        if lines:
+            inserts.setdefault(where[gap], []).extend(lines)
+    out = []
+    for pos in range(len(edited) + 1):
+        out.extend(inserts.get(pos, []))
+        if pos < len(edited):
+            out.append(edited[pos])
+    return out
+
+
+def merge_union(base: str, ours: str, theirs: str, entry_key: str) -> Dict[str, Any]:
+    """Union two edits of a registry file, judged per Conflict region (L-6').
+
+    Outside every region the merge is git's own. A region is admissible only when each side only
+    INSERTED lines inside it. Then a duplicate check over the whole merged result, keyed by ``entry_key``
+    (a heading's text or a ``- [Title](file.md)`` link target). A key halts when its count in the result
+    exceeds the larger of its base count and one, so repeats already in the base never fire.
+    """
+    try:
+        segments = _split_merge_file(_merge_file_text(base, ours, theirs))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "text": "", "reason": str(exc)}
     merged: List[str] = []
-    inserted: List[str] = []
-    for i in range(len(base_l) + 1):
-        a, b = g_ours[i], g_theirs[i]
-        block = a if a == b else a + b
-        merged.extend(block)
-        inserted.extend(block)
-        if i < len(base_l):
-            merged.append(base_l[i])
+    for seg in segments:
+        if isinstance(seg, str):
+            merged.append(seg)
+            continue
+        united = _union_region(seg)
+        if united is None:
+            return {"ok": False, "text": "",
+                    "reason": "a side edited or deleted a base line; only insert-only hunks can be united"}
+        merged.extend(united)
     counts_result: Dict[str, int] = {}
     counts_base: Dict[str, int] = {}
     for line in merged:
         key = _entry_key(line, entry_key)
         if key is not None:
             counts_result[key] = counts_result.get(key, 0) + 1
-    for line in base_l:
+    for line in base.splitlines():
         key = _entry_key(line, entry_key)
         if key is not None:
             counts_base[key] = counts_base.get(key, 0) + 1
-    for line in inserted:
+    for line in merged:
         key = _entry_key(line, entry_key)
         if key is not None and counts_result[key] > max(counts_base.get(key, 0), 1):
             return {"ok": False, "text": "",
@@ -1111,12 +1276,22 @@ def evaluate_gates(facts: Dict[str, Any]) -> Optional[str]:
 
 
 def applicable_steps(steps: Sequence[Dict[str, Any]], contract_diff: Iterable[str],
-                     merge_diff: Iterable[str]) -> List[str]:
-    """Step ids whose ``when_paths`` match the contract diff UNION the merge diff (L-7)."""
+                     merge_diff: Iterable[str],
+                     expand: Optional[Callable[[List[str]], List[str]]] = None) -> List[str]:
+    """Step ids whose ``when_paths`` match the contract diff UNION the merge diff (L-7).
+
+    ``expand`` takes one step's ``when_paths`` list and returns the expanded globs (W9: ``sentinel:<key>``
+    tokens). None keeps the literal match. A step without ``when_paths`` applies to every diff; one whose
+    entries expand to nothing applies to none.
+    """
     changed = sorted(set(contract_diff) | set(merge_diff))
     out: List[str] = []
     for step in steps:
         wanted = step.get("when_paths")
+        if wanted and expand is not None:
+            wanted = list(expand(list(wanted)))
+            if not wanted:
+                continue
         if not wanted or any(path_matches(p, wanted) for p in changed):
             out.append(step["id"])
     return out
@@ -1239,10 +1414,31 @@ def build_delivery_set(listings: Dict[str, Dict[str, str]], slug: str) -> Dict[s
 def next_command_for_outcome(outcome: str, slug: str, **facts: Any) -> Dict[str, Any]:
     """The Next Command per outcome: data this script returns, never prose a skill composes."""
     advance_line = "/advance %s" % slug
+    if facts.get("verify_here"):
+        # --verify-here: no contract is being landed, so never /advance and never /design-first (V-1).
+        if outcome == "verified":
+            return {"commands": [],
+                    "reason": "the self-check passed; continue with /verify-before-done Step 5"}
+        if outcome == "verification-not-ready":
+            ids = list(facts.get("new_failures") or [])
+            return {"commands": [],
+                    "reason": "new failures against the recorded baseline: %s; fix them, then rerun "
+                              "/verify-before-done" % (", ".join(ids) or "see the report")}
+        # Every other halt hands the decision to the prose steps: this runner decided nothing.
+        return {"commands": [], "fallback": "prose-steps", "reason": REMEDIES.get(outcome) or outcome}
+    if outcome == "module-tags-read":
+        return {"commands": [],
+                "reason": "tags derived; an unmapped path still needs the ask-then-add rule"}
+    if outcome == "base-unreadable":
+        return {"commands": [], "reason": REMEDIES[outcome]}
     if outcome in ("landed", "already-landed"):
         return {"commands": [], "reason": "the parent pull request is merged; /advance commits the "
                                           "updated parent brief to the records draft"}
     if outcome == "not-applicable":
+        if facts.get("manual_landing"):
+            return {"commands": [],
+                    "reason": "the parent brief declares landing: manual; the operator merges the "
+                              "parent pull request"}
         return {"commands": ["/verify-before-done"],
                 "reason": "no parent branch is declared, so today's ending applies"}
     if outcome == "children-still-open":
@@ -1252,6 +1448,9 @@ def next_command_for_outcome(outcome: str, slug: str, **facts: Any) -> Dict[str,
         reason = facts.get("live") or "a landing is running"
         if facts.get("dry_run"):
             reason = "dry run: P1 to P5 passed and nothing was changed"
+        if facts.get("live_kind") == "verify":
+            return {"commands": [advance_line],
+                    "reason": "a verification self-check holds the lock; rerun after it ends"}
         return {"commands": [], "reason": reason}
     if outcome == "baseline-recorded":
         return {"commands": [], "reason": "commit .claude/test-baseline.json through an ordinary pull request"}
@@ -1259,6 +1458,7 @@ def next_command_for_outcome(outcome: str, slug: str, **facts: Any) -> Dict[str,
         now = list(facts.get("new_failures") or [])
         previous = list(facts.get("previous_new_failures") or [])
         repeat = bool(now) and set(now) <= set(previous) \
+            and facts.get("baseline_commit_previous") is not None \
             and facts.get("baseline_commit_now") != facts.get("baseline_commit_previous")
         if repeat:
             return {"commands": ["/design-first %s" % slug], "repeat_after_rerecord": True,
@@ -1394,6 +1594,37 @@ def pid_alive(pid: Any) -> bool:
     return True
 
 
+def run_is_live(lock: Any, phase: Any) -> bool:
+    """L-17, the one liveness rule: the lock's launcher is alive, or the phase of the lock's scope carries
+    the lock's run_id and a live ``stage_pid``. A recycled process id reads live (errs toward waiting)."""
+    if not isinstance(lock, dict):
+        return False
+    if pid_alive(lock.get("pid")):
+        return True
+    return (isinstance(phase, dict) and bool(lock.get("run_id")) and phase.get("run_id") == lock.get("run_id")
+            and pid_alive(phase.get("stage_pid")))
+
+
+def lock_phase(landing_dir: Path, lock: Any) -> Any:
+    """The ``phase.json`` of a lock's scope: ``verify/<run_id>`` under the logs folder for a ``verify`` lock,
+    else the contract's (or ``_baseline``'s) folder under the landing root. Never the baseline's for a verify run."""
+    if not isinstance(lock, dict):
+        return None
+    if lock.get("kind") == "verify" and lock.get("run_id"):
+        try:
+            return _read_json(Path(_claude_paths.logs_dir()) / "verify" / str(lock["run_id"]) / "phase.json")
+        except (OSError, RuntimeError, ValueError):
+            return None
+    return _read_json(landing_dir / str(lock.get("contract") or "_baseline") / "phase.json")
+
+
+def lock_is_live(landing_dir: Path, lock: Any) -> bool:
+    """``run_is_live`` for a lock file's content, reading the phase of the lock's scope."""
+    if not isinstance(lock, dict):
+        return False
+    return run_is_live(lock, lock_phase(landing_dir, lock))
+
+
 def lock_acquire(landing_dir: Path, info: Dict[str, Any]) -> Dict[str, Any]:
     """Take the ONE global lock exclusively. A holder whose process is gone is reclaimed and noted."""
     landing_dir.mkdir(parents=True, exist_ok=True)
@@ -1412,7 +1643,7 @@ def lock_acquire(landing_dir: Path, info: Dict[str, Any]) -> Dict[str, Any]:
                     young = False
                 if young:  # a holder mid-write: not stale
                     return {"acquired": False, "holder": {}}
-            elif pid_alive(pid):
+            elif lock_is_live(landing_dir, holder):
                 return {"acquired": False, "holder": holder}
             try:
                 lock.unlink()
@@ -1438,13 +1669,25 @@ def lock_release(landing_dir: Path, run_id: str) -> None:
 
 
 def write_phase(contract_dir: Path, run_id: str, phase: str, worktree: Any = None,
-                merge_commit: Optional[str] = None) -> None:
+                merge_commit: Optional[str] = None, stage_pid: Optional[int] = None,
+                stage_started_at: Optional[str] = None, clear_worktree: bool = False) -> None:
+    """Write phase.json. ``worktree`` is carried forward unless ``clear_worktree`` (P15 after a removal)
+    writes null; ``stage_pid`` / ``stage_started_at`` are carried forward within one run (L-17)."""
     previous = _read_json(contract_dir / "phase.json")
-    started = previous.get("started_at") if isinstance(previous, dict) and previous.get("run_id") == run_id else None
+    prev = previous if isinstance(previous, dict) else {}
+    same_run = prev.get("run_id") == run_id
+    if clear_worktree:
+        recorded = None
+    elif worktree:
+        recorded = str(worktree)
+    else:
+        recorded = prev.get("worktree")
     _atomic_write(contract_dir / "phase.json", json.dumps({
-        "run_id": run_id, "phase": phase, "started_at": started or now_iso(), "heartbeat_at": now_iso(),
-        "worktree": str(worktree) if worktree else (previous or {}).get("worktree") if isinstance(previous, dict) else None,
-        "merge_commit": merge_commit}, indent=2) + "\n")
+        "run_id": run_id, "phase": phase, "started_at": (prev.get("started_at") if same_run else None) or now_iso(),
+        "heartbeat_at": now_iso(), "worktree": recorded, "merge_commit": merge_commit,
+        "stage_pid": stage_pid if stage_pid is not None else (prev.get("stage_pid") if same_run else None),
+        "stage_started_at": stage_started_at or (prev.get("stage_started_at") if same_run else None)},
+        indent=2) + "\n")
 
 
 def write_report(contract_dir: Path, report: Dict[str, Any]) -> None:
@@ -1456,7 +1699,9 @@ def make_report(run_id: str, contract: Optional[str], outcome: str, gate: str, d
                 **extra: Any) -> Dict[str, Any]:
     next_facts = {k: extra.pop(k) for k in list(extra) if k in (
         "new_failures", "previous_new_failures", "suite_ids", "baseline_commit_now",
-        "baseline_commit_previous", "open_children", "live", "dry_run")}
+        "baseline_commit_previous", "open_children", "live", "dry_run", "live_kind", "verify_here")}
+    if "manual_landing" in extra:  # a fact for the next command AND a field a dry run records (L-18)
+        next_facts["manual_landing"] = extra["manual_landing"]
     report: Dict[str, Any] = {
         "run_id": run_id, "contract": contract, "outcome": outcome, "gate": gate, "detail": detail,
         "remedy": remedy if remedy is not None else REMEDIES.get(outcome, ""),
@@ -1569,26 +1814,43 @@ def expand_paths(entries: Iterable[str], worktree: Any, ref: Optional[str] = Non
     return out
 
 
-def module_tags(paths: Iterable[str], pr_title: Dict[str, Any]) -> List[str]:
-    """The pull request title's module tags from the conventions ``prTitle`` block (same glob semantics)."""
-    if not isinstance(pr_title, dict):
-        return []
-    ignore = (pr_title.get("ignore") or {}).get("globs") or []
-    tags = set()
+def module_tag_reading(paths: Iterable[str], pr_title: Dict[str, Any], base: Optional[str] = None) -> Dict[str, Any]:
+    """The Module Tag Reading: ``tags`` (ordered), ``unmapped`` paths and the title ``prefix``.
+
+    ``pr_title`` is the conventions ``prTitle`` block (same glob semantics); an absent or non-object
+    block reports every path unmapped. A map entry's ``coveredBy[]`` names the tags its files cover:
+    the entry's tag is dropped when any of them is also present in the diff (``/ship`` rule 3).
+    """
+    cfg = pr_title if isinstance(pr_title, dict) else {}
+    ignore = (cfg.get("ignore") or {}).get("globs") or []
+    tags: set = set()
+    covered_by: Dict[str, set] = {}
+    unmapped: List[str] = []
     for path in paths:
         if path_matches(path, ignore):
             continue
         hit = False
-        for entry in pr_title.get("map") or []:
+        for entry in cfg.get("map") or []:
             if path_matches(path, entry.get("globs") or []):
                 tags.add(entry["tag"])
+                covered_by.setdefault(entry["tag"], set()).update(entry.get("coveredBy") or [])
                 hit = True
-        for shared in pr_title.get("shared") or []:
+        for shared in cfg.get("shared") or []:
             if path in (shared.get("files") or []):
                 tags.update(shared.get("emits") or [])
                 hit = True
-    order = pr_title.get("order") or []
-    return [t for t in order if t in tags]
+        if not hit:
+            unmapped.append(path)
+    present = set(tags)
+    kept = {t for t in tags if not (covered_by.get(t, set()) & present)}
+    ordered = [t for t in (cfg.get("order") or []) if t in kept]
+    return {"outcome": "module-tags-read", "tags": ordered, "unmapped": unmapped,
+            "prefix": "".join("[%s]" % t for t in ordered), "base": base}
+
+
+def module_tags(paths: Iterable[str], pr_title: Dict[str, Any]) -> List[str]:
+    """The pull request title's module tags (``module_tag_reading``'s ``tags``)."""
+    return module_tag_reading(paths, pr_title)["tags"]
 
 
 # ---------------------------------------------------------------------------
@@ -1601,11 +1863,11 @@ class _Halt(Exception):
 
 
 def _run_commands(commands: Sequence[Sequence[str]], cwd: Path, log_dir: Path, label: str,
-                  timeout_minutes: float = 30) -> Optional[str]:
-    """Run each argv in turn; returns a failure description or None."""
+                  timeout_minutes: float = 30, env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """Run each argv in turn (``env`` laid over the inherited environment); returns a failure or None."""
     for index, command in enumerate(commands):
         rc, timed_out = _run_long(command, timeout_minutes * 60,
-                                  log_dir / ("%s-%d" % (label, index)) / "output.log", cwd)
+                                  log_dir / ("%s-%d" % (label, index)) / "output.log", cwd, env=env)
         if rc is None or timed_out or rc != 0:
             return "%s command %d (%s) %s" % (
                 label, index, " ".join(str(c) for c in command)[:160],
@@ -1649,6 +1911,7 @@ def run_landing(args: Dict[str, Any]) -> Dict[str, Any]:
                              notes=notes, parent_branch=args.get("parent"))
     if roots is not None:
         write_report(roots["landing_root"] / slug, report)
+        lock_release(roots["landing_root"], run_id)  # L-17: report.json first, then the run's own lock
     return report
 
 
@@ -1660,10 +1923,13 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     dry_run = bool(args.get("dry_run"))
     logs = roots["logs_dir"] / "landing" / slug / run_id
 
-    def phase(name: str, merge_commit: Optional[str] = None) -> None:
-        write_phase(contract_dir, run_id, name, worktree=args["worktree"], merge_commit=merge_commit)
+    stage_started = now_iso()
 
-    phase("p1")
+    def phase(name: str, merge_commit: Optional[str] = None) -> None:
+        write_phase(contract_dir, run_id, name, worktree=args["worktree"], merge_commit=merge_commit,
+                    stage_pid=os.getpid(), stage_started_at=stage_started)
+
+    phase("p1")  # L-17: the stage's first act records its own process id
     default = detect_default_branch(wt)
     default_ref = "origin/%s" % default
     mark_m = rev_parse(wt, "refs/remotes/origin/%s" % default)
@@ -1727,13 +1993,21 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
         raise _Halt("ambiguous-parent", "P1", "the briefs declare %r but the launcher passed %r"
                     % (topology["parent_branch"], parent))
     parent_issue = topology["parent_issue"]
-    parent_brief = next((b for b in briefs if (b.get("branch") or "") == parent
-                         and (b.get("id") or "") == (parent_issue or "")), None)
+    # D-4: the one rule for "which brief is the parent brief" lives in pr_merged, shared with /pr-merged.
+    parent_brief = pr_merged.parent_brief_of(slug, briefs, default, protected)
     if not parent_issue or parent_brief is None:
         raise _Halt("parent-unresolved", "P1", "no brief has branch: %s and id: %s" % (parent, parent_issue))
     parent_brief_path = parent_brief["_path"]
     child_ids = [c for c in topology["child_ids"]]
     base_report = {"parent_branch": parent, "parent_issue": parent_issue}
+    # L-18: `landing: manual` in the parent brief means the operator merges the parent pull request.
+    # A real run ends here; a dry run changes nothing anyway, so it records the fact and goes on to P5.
+    if (parent_brief.get("landing") or "").strip().lower() == "manual":
+        if not dry_run:
+            raise _Halt("not-applicable", "P1",
+                        "the parent brief declares landing: manual; nothing is merged, pushed or reset",
+                        manual_landing=True, **base_report)
+        base_report["manual_landing"] = True
     if not mark_m or not mark_p:
         raise _Halt("unverifiable", "P1", "the fetched refs origin/%s and origin/%s are not both present"
                     % (default, parent), **base_report)
@@ -1803,7 +2077,7 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
                    and found.get("baseRefName") == default and found.get("headRefName") == parent)
     if already:
         return _finish_landed(args, "already-landed", found, found, base_report, parent_brief_path, notes,
-                              run_id, slug, None, None, default, dry_run)
+                              run_id, slug, None, None, default, dry_run, contract_dir=contract_dir)
     if dry_run:
         raise halt("landing-in-progress", "P5",
                    "dry run: P1 to P5 passed; P6 onward was not run and nothing was changed",
@@ -1815,7 +2089,8 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
         if (wt / entry.get("when_missing", "")).exists():
             continue
         failure = _run_commands([entry["command"]], wt / (entry.get("cwd") or "."), logs,
-                                "setup-%s" % entry.get("id", "x"), float(entry.get("timeout_minutes") or 30))
+                                "setup-%s" % entry.get("id", "x"), float(entry.get("timeout_minutes") or 30),
+                                env=_child_env(wt))
         if failure:
             facts["p6_environment_failure"] = True
             details["environment-failure"] = "setup failed: " + failure
@@ -1838,7 +2113,7 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     suite_ids = sorted({f.split("::", 1)[0] for f in new_failures})
     prev_verification = previous.get("verification") if previous.get("outcome") == "verification-not-ready" else None
     prev_new = (prev_verification or {}).get("new_failures") or []
-    prev_fp = (prev_verification or {}).get("baseline_commit")
+    prev_fp = _previous_measured_commit(prev_verification)
     details["verification-not-ready"] = "verification is not READY: " + (
         "; ".join(summary.get("reasons") or []) or "new failures: " + ", ".join(new_failures))
     details["environment-failure"] = "verification could not run: " + "; ".join(
@@ -1944,7 +2219,7 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     issue_state = gh_issue_state(parent_issue, cwd=wt) or "UNKNOWN"
     return _finish_landed(args, "landed", pr, after, base_report, parent_brief_path, notes, run_id, slug,
                           summary, head, default, dry_run, merged_commit=merge_oid, issue_state=issue_state,
-                          resolved=resolved)
+                          resolved=resolved, contract_dir=contract_dir)
 
 
 def _pr_number(url: str) -> Optional[int]:
@@ -1958,18 +2233,34 @@ def _pr_title(parent_brief: Dict[str, str], paths: List[str], conventions: Any) 
     pattern = (cfg.get("issueTitle") or {}).get("pattern")
     if pattern:
         title = re.sub(r"^\[[A-Z-]+\]\s+", "", title) if re.match(pattern, title) else title
-    tags = module_tags(paths, cfg.get("prTitle") or {})
-    return "%s %s" % ("".join("[%s]" % t for t in tags), title) if tags else title
+    prefix = module_tag_reading(paths, cfg.get("prTitle") or {})["prefix"]
+    return "%s %s" % (prefix, title) if prefix else title
+
+
+def _previous_measured_commit(verification: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The baseline's measured commit in a previous report: the new key, else the old ``baseline_commit``."""
+    if not isinstance(verification, dict):
+        return None
+    baseline = verification.get("baseline")
+    if isinstance(baseline, dict):
+        return baseline.get("measured_at_commit")
+    return verification.get("baseline_commit")
+
+
+def _baseline_text(baseline: Any) -> str:
+    if isinstance(baseline, dict):
+        return "`%s` measured at `%s`" % (baseline.get("path"), baseline.get("measured_at_commit"))
+    return str(baseline)
 
 
 def _pr_body(parent_issue: str, slug: str, parent: str, default: str, summary: Dict[str, Any],
              resolved: List[str]) -> str:
     lines = ["Closes #%s" % parent_issue, "",
              "Contract landing of `%s`: parent branch `%s` into `%s`." % (slug, parent, default), "",
-             "Verification: %s at `%s`; %d step(s) applied; new failures: %s." % (
-                 summary["verdict"], summary["head"], len(summary["steps"]),
-                 ", ".join(summary["new_failures"]) or "none"),
-             "Baseline: %s." % summary.get("baseline", "absent")]
+             "Verification: %s at `%s`; %d of %d step(s) ran; new failures: %s." % (
+                 summary["verdict"], summary["head"], sum(1 for s in summary["steps"] if s.get("ran")),
+                 len(summary["steps"]), ", ".join(summary["new_failures"]) or "none"),
+             "Baseline: %s." % _baseline_text(summary.get("baseline", "absent"))]
     if resolved:
         lines += ["", "Hand-resolved or regenerated in the merge:"] + ["- `%s`" % p for p in resolved]
     return "\n".join(lines) + "\n"
@@ -1979,7 +2270,8 @@ def _finish_landed(args: Dict[str, Any], outcome: str, pr: Dict[str, Any], view:
                    base_report: Dict[str, Any], parent_brief_path: str, notes: List[str], run_id: str,
                    slug: str, summary: Optional[Dict[str, Any]], head: Optional[str], default: str,
                    dry_run: bool, merged_commit: Optional[str] = None, issue_state: Optional[str] = None,
-                   resolved: Optional[List[str]] = None) -> Dict[str, Any]:
+                   resolved: Optional[List[str]] = None,
+                   contract_dir: Optional[Path] = None) -> Dict[str, Any]:
     """P15: idempotent bookkeeping. A failed removal never changes the outcome (master is already merged)."""
     merge_oid = merged_commit or ((view.get("mergeCommit") or {}).get("oid")
                                   if isinstance(view.get("mergeCommit"), dict) else None)
@@ -2001,18 +2293,26 @@ def _finish_landed(args: Dict[str, Any], outcome: str, pr: Dict[str, Any], view:
     except Exception as exc:  # the merge is done: a bookkeeping problem is a note, not a halt
         report["notes"].append("bookkeeping-failed: %s" % exc)
     here = os.getcwd()
+    removed = False
     try:
         # A process standing inside a directory blocks its removal on Windows: step out first.
         os.chdir(str(args["project_root"]))
         if not is_landing_worktree(args["worktree"], args["project_root"]):
             raise RuntimeError("not a landing worktree (<main root>/.claude/worktrees/<8 digits>-land-<issue>)")
         worktree_remove(args["worktree"])
+        removed = True
     except Exception as exc:
         report["notes"].append("worktree-not-removed: %s" % args["worktree"])
         report["notes"].append("worktree-remove-error: %s" % exc)
     finally:
         if os.path.isdir(here):
             os.chdir(here)
+    if removed and contract_dir is not None:
+        # L-15' (W11): a removed checkout is forgotten, so a later directory at that path is not "recorded".
+        try:
+            write_phase(contract_dir, run_id, "p15", merge_commit=head, clear_worktree=True)
+        except OSError as exc:
+            report["notes"].append("phase-not-cleared: %s" % exc)
     return report
 
 
@@ -2088,7 +2388,7 @@ def _p7_merge(args: Dict[str, Any], wt: Path, default: str, mark_m: str, mark_p:
             if not any(path_matches(p, patterns) for p in touched):
                 continue
             failure = _run_commands(regen.get("command") or [], wt, logs, "regen-%s" % regen.get("id", "x"),
-                                    float(regen.get("timeout_minutes") or 30))
+                                    float(regen.get("timeout_minutes") or 30), env=_child_env(wt))
             if failure:
                 facts["p7_regeneration_failed"] = True
                 details["regeneration-failed"] = "regenerator %s failed: %s" % (regen.get("id"), failure)
@@ -2127,13 +2427,22 @@ def _p8_verify(wt: Path, head: str, config: Dict[str, Any], baseline: Dict[str, 
         cached["reused"] = True
         return cached
     steps = list((config.get("verification") or {}).get("steps") or [])
-    wanted = set(applicable_steps(steps, contract_diff, merge_diff))
+    wanted = set(applicable_steps(steps, contract_diff, merge_diff,
+                                  expand=lambda entries: expand_paths(entries, wt, default_ref)))
     emulators = list(config.get("emulators") or [])
     before_head, before_status = rev_parse(wt, "HEAD"), status_snapshot(wt)
     readings: List[Dict[str, Any]] = []
+    entries: List[Dict[str, Any]] = []
     for step in steps:
         if step["id"] in wanted:
-            readings.append(run_step(step, emulators, baseline, logs / step["id"], wt))
+            r = run_step(step, emulators, baseline, logs / step["id"], wt)
+            readings.append(r)
+            entries.append(dict(r, applicable=True, ran=bool(r.get("ran"))))
+        else:
+            entries.append({"id": step["id"], "suite": step.get("suite", step["id"]), "applicable": False,
+                            "ran": False, "reading": "not-applicable", "exit_code": None, "executed_count": 0,
+                            "failed_tests": [], "new_failures": [], "baseline_now_passing": [],
+                            "environment_reason": None, "log": None})
     after_head, after_status = rev_parse(wt, "HEAD"), status_snapshot(wt)
     tree_unchanged = before_head == after_head and before_status == after_status
     forbidden = [p for p in contract_diff if path_matches(p, config.get("forbiddenPaths") or [])
@@ -2160,15 +2469,17 @@ def _p8_verify(wt: Path, head: str, config: Dict[str, Any], baseline: Dict[str, 
     summary = {
         "head": head, "verdict": verdict, "reasons": reasons, "contract_diff": contract_diff,
         "merge_diff": merge_diff, "resolved_paths": resolved, "new_failures": new_failures,
-        "baseline": baseline_note, "baseline_commit": baseline_fingerprint,
-        "steps": [{"id": r["id"], "suite": r["suite"], "reading": r["reading"], "exit_code": r.get("exit_code"),
-                   "executed_count": r["executed_count"], "failed_tests": r["failed_tests"],
-                   "new_failures": r["new_failures"], "baseline_now_passing": r["baseline_now_passing"],
-                   "environment_reason": r["environment_reason"], "log": r.get("log")} for r in readings],
+        "baseline": ("absent" if baseline_note == "absent"
+                     else {"path": baseline_note, "measured_at_commit": baseline_fingerprint}),
+        "steps": [{"id": e["id"], "suite": e["suite"], "applicable": e["applicable"], "ran": e["ran"],
+                   "reading": e["reading"], "exit_code": e.get("exit_code"),
+                   "executed_count": e["executed_count"], "failed_tests": e["failed_tests"],
+                   "new_failures": e["new_failures"], "baseline_now_passing": e["baseline_now_passing"],
+                   "environment_reason": e["environment_reason"], "log": e.get("log")} for e in entries],
         "review_coverage": [{"reviewer": r, "satisfied": r in satisfied} for r in needed],
         "hygiene": {"tree_unchanged_by_steps": tree_unchanged, "forbidden_paths": forbidden},
     }
-    if verdict == "READY" and not summary["steps"]:
+    if verdict == "READY" and not any(s["applicable"] for s in summary["steps"]):
         summary["reasons"] = ["configured, but no step applies"]
     summary = _readable_summary(summary)
     # JSON is valid YAML: the Verification Record is one format with one reader (_read_json above).
@@ -2191,7 +2502,7 @@ def run_record_baseline(args: Dict[str, Any]) -> Dict[str, Any]:
         roots = resolve_roots(args["project_root"])
         report_dir = roots["landing_root"] / "_baseline"
         wt = Path(args["worktree"])
-        write_phase(report_dir, run_id, "record", worktree=wt)
+        write_phase(report_dir, run_id, "record", worktree=wt, stage_pid=os.getpid(), stage_started_at=now_iso())
         default = detect_default_branch(wt)
         text = git_show("origin/%s" % default, CONVENTIONS_PATH, cwd=wt)
         try:
@@ -2208,7 +2519,7 @@ def run_record_baseline(args: Dict[str, Any]) -> Dict[str, Any]:
                 if not (wt / entry.get("when_missing", "")).exists():
                     failure = _run_commands([entry["command"]], wt / (entry.get("cwd") or "."), logs,
                                             "setup-%s" % entry.get("id", "x"),
-                                            float(entry.get("timeout_minutes") or 30))
+                                            float(entry.get("timeout_minutes") or 30), env=_child_env(wt))
                     if failure:
                         break
             if failure:
@@ -2225,6 +2536,7 @@ def run_record_baseline(args: Dict[str, Any]) -> Dict[str, Any]:
                              "%s: %s\n%s" % (type(exc).__name__, exc, traceback.format_exc(limit=6)))
     if roots is not None:
         write_report(roots["landing_root"] / "_baseline", report)
+        lock_release(roots["landing_root"], run_id)  # L-17
     return report
 
 
@@ -2247,8 +2559,8 @@ def read_status(landing_dir: Path, slug: Optional[str]) -> Dict[str, Any]:
     lock = _read_json(landing_dir / "lock")
     report = _read_json(landing_dir / slug / "report.json") if slug else None
     if isinstance(lock, dict) and lock:
-        phase = _read_json(landing_dir / str(lock.get("contract") or "_baseline") / "phase.json")
-        if pid_alive(lock.get("pid")):
+        phase = lock_phase(landing_dir, lock)
+        if run_is_live(lock, phase):
             return {"state": "live", "lock": lock, "phase": phase}
         if isinstance(report, dict) and report.get("run_id") == lock.get("run_id"):
             return {"state": "report", "report": report}
@@ -2292,12 +2604,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--status", action="store_true", help="report a live, interrupted or last run; mutate nothing")
     ap.add_argument("--record-baseline", action="store_true", help="record the failing-test baseline")
     ap.add_argument("--suite", action="append", default=[], help="with --record-baseline: only this suite")
+    ap.add_argument("--module-tags", action="store_true",
+                    help="print the pull request title's module tags for this checkout's diff against --base")
+    ap.add_argument("--verify-here", action="store_true",
+                    help="run the configured verification steps in THIS checkout against the failing-test "
+                         "baseline; with --run-id and --status, locate that run's report (read-only)")
+    ap.add_argument("--base", help="with --module-tags or --verify-here: the ref to diff against "
+                                   "(default origin/<default branch>)")
+    ap.add_argument("--run-id", help="with --verify-here: the run id (letters, digits, dot, dash or "
+                                     "underscore, at most 64, starting with a letter or digit); the report "
+                                     "goes to logs/verify/<run id>/report.json")
     ap.add_argument("--stage", choices=("land", "record-baseline"), help=argparse.SUPPRESS)
     ap.add_argument("--probe", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--parent", help=argparse.SUPPRESS)
     ap.add_argument("--project-root", help=argparse.SUPPRESS)
     ap.add_argument("--checkout", help=argparse.SUPPRESS)
-    ap.add_argument("--run-id", help=argparse.SUPPRESS)
     ap.add_argument("--worktree", help=argparse.SUPPRESS)
     ap.add_argument("--out", help=argparse.SUPPRESS)
     args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -2318,9 +2639,251 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _emit(report, True)
         return exit_code_for(report["outcome"])
 
+    if args.module_tags:
+        return launch_module_tags(args)
+    if args.verify_here:
+        return launch_verify_here(args)
     if not args.contract and not args.record_baseline:
-        ap.error("--contract is required (or --record-baseline)")
+        ap.error("--contract is required (or --record-baseline, --module-tags or --verify-here)")
     return launch(args)
+
+
+# ---------------------------------------------------------------------------
+# Reuse entry points (issue 404): the module tags and the verification self-check
+# ---------------------------------------------------------------------------
+DRIFT_STEP_ID = "generated-drift"
+DRIFT_NOT_APPLICABLE = "verify-here: Step 4 regenerates, compares and stages in the operator tree"
+
+
+def _current_checkout() -> Optional[Path]:
+    rc, top = _run(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd())
+    return Path(top.strip()) if rc == 0 and top.strip() else None
+
+
+def _lean_report(outcome: str, gate: str, detail: str, **extra: Any) -> Dict[str, Any]:
+    """A report for a command that lands nothing: no landing fields, one Next Command."""
+    facts = {k: extra.pop(k) for k in list(extra) if k in ("verify_here", "new_failures", "live", "live_kind")}
+    report: Dict[str, Any] = {"outcome": outcome, "gate": gate, "detail": detail,
+                              "remedy": REMEDIES.get(outcome, "")}
+    report.update(extra)
+    report["next_command"] = next_command_for_outcome(outcome, "", **facts)
+    return report
+
+
+def launch_module_tags(args: "argparse.Namespace") -> int:
+    """``--module-tags``: the title prefix for this checkout's diff against ``--base``. Reads only."""
+    checkout = _current_checkout()
+    if checkout is None:
+        print(json.dumps({"error": "not-a-repository", "detail": "run this from inside a checkout"}))
+        return 2
+    base = args.base or "origin/%s" % detect_default_branch(checkout)
+    rc, out = _git(checkout, "diff", "--name-only", "%s...HEAD" % base) if rev_parse(checkout, base) else (1, "")
+    if rc != 0:
+        report = _lean_report("base-unreadable", "module-tags", "cannot diff HEAD against %r" % base, base=base)
+        _emit(report, args.json)
+        return exit_code_for("base-unreadable")
+    paths = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    conventions = _read_json(checkout / CONVENTIONS_PATH)
+    pr_title = conventions.get("prTitle") if isinstance(conventions, dict) else None
+    reading = module_tag_reading(paths, pr_title or {}, base=base)
+    report = _lean_report("module-tags-read", "module-tags",
+                          "tags %s; %d unmapped path(s)" % (reading["prefix"] or "none", len(reading["unmapped"])),
+                          tags=reading["tags"], unmapped=reading["unmapped"], prefix=reading["prefix"], base=base)
+    _emit(report, args.json)
+    return exit_code_for("module-tags-read")
+
+
+def verify_locator(roots: Dict[str, Path], run_id: str) -> Dict[str, Any]:
+    """The Verification Run locator: where a run's report is and whether the run is over. Reads only."""
+    report_path = roots["logs_dir"] / "verify" / run_id / "report.json"
+    landing_dir = roots["landing_root"]
+    lock = _read_json(landing_dir / "lock")
+    mine = isinstance(lock, dict) and lock.get("kind") == "verify" and lock.get("run_id") == run_id
+    parsed = _read_json(report_path) if report_path.is_file() else None
+    report = parsed if isinstance(parsed, dict) and parsed.get("run_id") == run_id else None
+    if report is not None:
+        state = "report"
+    elif mine and run_is_live(lock, lock_phase(landing_dir, lock)):  # L-17's one rule
+        state = "live"
+    elif mine or report_path.parent.exists():
+        state = "interrupted"
+    else:
+        state = "none"
+    return {"state": state, "run_id": run_id, "report_path": str(report_path), "report": report}
+
+
+def _refuse_run_id(detail: str) -> int:
+    print(json.dumps({"error": "run-id-invalid", "detail": detail,
+                      "next_command": {"commands": [], "fallback": "prose-steps",
+                                       "reason": RUN_ID_INVALID_REASON}}, indent=2))
+    return 2
+
+
+@contextlib.contextmanager
+def _project_dir_is(checkout: Any) -> Any:
+    """For the steps of a ``--verify-here`` run, CLAUDE_PROJECT_DIR is the checkout being verified (L-14').
+
+    The roots were resolved before this block, so nothing here reads the main root again; the previous
+    value comes back on the way out, even after an error."""
+    saved = os.environ.get("CLAUDE_PROJECT_DIR")
+    os.environ["CLAUDE_PROJECT_DIR"] = str(checkout)
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved
+
+
+def launch_verify_here(args: "argparse.Namespace") -> int:
+    """``--verify-here``: run the configured steps in THIS checkout (V-1), or with ``--status`` locate a run."""
+    run_id = args.run_id
+    if args.status and run_id is None:
+        return _refuse_run_id("--status needs --run-id")
+    if run_id is not None and not RUN_ID_PATTERN.fullmatch(run_id):
+        return _refuse_run_id("the run id %r does not match %s" % (run_id, RUN_ID_PATTERN.pattern))
+    checkout = _current_checkout()
+    if checkout is None:
+        print(json.dumps({"error": "not-a-repository", "detail": "run this from inside a checkout"}))
+        return 2
+    try:
+        roots = resolve_roots(checkout)
+    except RuntimeError as exc:
+        print(json.dumps({"error": "environment-failure", "detail": str(exc)}))
+        return EXIT_HALT
+    if args.status:
+        located = verify_locator(roots, run_id)  # type: ignore[arg-type]
+        print(json.dumps(located, indent=2, default=str) if args.json else "state: %s" % located["state"])
+        return EXIT_OK
+    if run_id is None:
+        run_id = new_run_id()
+    folder = roots["logs_dir"] / "verify" / run_id
+    if folder.exists():
+        return _refuse_run_id("the folder for run id %r already exists" % run_id)
+    return _verify_here(args, checkout, roots, run_id, folder)
+
+
+def _verify_diff(checkout: Path, merge_base: str) -> List[str]:
+    """Committed work since the merge base plus uncommitted and untracked paths."""
+    paths = set(diff_names(checkout, merge_base))
+    rc, out = _git(checkout, "ls-files", "--others", "--exclude-standard")
+    if rc == 0:
+        paths.update(ln.strip() for ln in out.splitlines() if ln.strip())
+    return sorted(paths)
+
+
+def _verify_here(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Path], run_id: str,
+                 folder: Path) -> int:
+    report_path = folder / "report.json"
+    landing_dir = roots["landing_root"]
+    state: Dict[str, Any] = {"head": rev_parse(checkout, "HEAD"), "verdict": None, "reasons": [], "diff": [],
+                             "new_failures": [], "baseline": "absent", "steps": [], "notes": []}
+
+    def finish(outcome: str, gate: str, detail: str, **extra: Any) -> int:
+        report: Dict[str, Any] = {"run_id": run_id, "report_path": str(report_path)}
+        report.update(_lean_report(outcome, gate, detail, verify_here=True, **extra))
+        for key, value in state.items():
+            report.setdefault(key, value)
+        write_report(folder, report)  # before the lock is released (V-1 c)
+        _emit(report, args.json)
+        return exit_code_for(outcome)
+
+    default_ref = "origin/%s" % detect_default_branch(checkout)
+    base = args.base or default_ref
+    merge_base = _git(checkout, "merge-base", base, "HEAD")[1].strip() if rev_parse(checkout, base) else ""
+    if not HEX40.fullmatch(merge_base):
+        return finish("base-unreadable", "V1", "cannot find the merge base of %r and HEAD" % base)
+
+    conventions = _read_json(checkout / CONVENTIONS_PATH)  # the configuration comes from this checkout's disk
+    config = conventions.get("contractLanding") if isinstance(conventions, dict) else None
+    # {results_dir} is the run's folder under the MAIN root's logs, which is inside the checkout when the
+    # operator verifies in the main checkout (git-ignored there); so the "results inside the tree" test is
+    # run against a results_dir outside this checkout, which still catches a literal in-tree result path.
+    bad = check_configuration(config, checkout, checkout.parent / ".verify-results-check")
+    if bad:
+        return finish("landing-not-configured", "V1", bad["detail"])
+    steps = list((config.get("verification") or {}).get("steps") or [])
+    state["diff"] = _verify_diff(checkout, merge_base)
+    wanted = set(applicable_steps(steps, state["diff"], [],
+                                  expand=lambda entries: expand_paths(entries, checkout, None)))
+    wanted.discard(DRIFT_STEP_ID)
+
+    def blank(step: Dict[str, Any], reading: str, **more: Any) -> Dict[str, Any]:
+        applicable = step["id"] in wanted
+        entry = {"id": step["id"], "suite": step.get("suite", step["id"]), "applicable": applicable,
+                 "ran": False, "reading": reading, "exit_code": None, "executed_count": 0,
+                 "failed_tests": [], "new_failures": [], "baseline_now_passing": [],
+                 "environment_reason": None, "log": None}
+        entry.update(more)
+        return entry
+
+    def not_run() -> List[Dict[str, Any]]:
+        return [blank(s, "not-run") if s["id"] in wanted else
+                blank(s, "not-applicable", **({"reason": DRIFT_NOT_APPLICABLE} if s["id"] == DRIFT_STEP_ID else {}))
+                for s in steps]
+
+    # V-1 (a0): the baseline is read BEFORE any lock, from origin/<default>, never from the disk.
+    text = git_show(default_ref, BASELINE_PATH, cwd=checkout)
+    if text is None:
+        state["steps"] = not_run()
+        return finish("no-baseline", "V1", "%s is absent on %s" % (BASELINE_PATH, default_ref))
+    try:
+        baseline = json.loads(text)
+    except ValueError:
+        baseline = None
+    if not isinstance(baseline, dict):
+        state["steps"] = not_run()
+        return finish("baseline-unreadable", "V1", "%s on %s is not a JSON object" % (BASELINE_PATH, default_ref))
+    fingerprint = ",".join(sorted(str(e.get("measured_at_commit")) for e in baseline.values()
+                                  if isinstance(e, dict))) or None
+    state["baseline"] = {"path": BASELINE_PATH, "measured_at_commit": fingerprint}
+
+    taken = lock_acquire(landing_dir, {"pid": os.getpid(), "run_id": run_id, "kind": "verify",
+                                       "contract": None, "started_at": now_iso()})
+    if not taken["acquired"]:
+        holder = taken.get("holder") or {}
+        live = "a %s run for %s is live (pid %s, started %s)" % (
+            holder.get("kind"), holder.get("contract"), holder.get("pid"), holder.get("started_at"))
+        state["steps"] = not_run()
+        return finish("landing-in-progress", "V1", live, live=live, live_kind=holder.get("kind"))
+    try:
+        write_phase(folder, run_id, "verify", stage_pid=os.getpid(), stage_started_at=now_iso())
+        emulators = list(config.get("emulators") or [])
+        readings: List[Dict[str, Any]] = []
+        entries: List[Dict[str, Any]] = []
+        with _project_dir_is(checkout):
+            for step in steps:
+                if step["id"] in wanted:
+                    reading = run_step(step, emulators, baseline, folder / step["id"], checkout)
+                    readings.append(reading)
+                    entries.append(dict(reading, applicable=True, ran=bool(reading.get("ran"))))
+                else:
+                    entries.append(blank(step, "not-applicable",
+                                         **({"reason": DRIFT_NOT_APPLICABLE} if step["id"] == DRIFT_STEP_ID else {})))
+        verdict = roll_up_verdict(readings)
+        new_failures = sorted({f for r in readings for f in r["new_failures"]})
+        state.update(verdict=verdict, new_failures=new_failures, steps=[
+            {k: e.get(k) for k in ("id", "suite", "applicable", "ran", "reading", "exit_code", "executed_count",
+                                   "failed_tests", "new_failures", "baseline_now_passing", "environment_reason",
+                                   "log", "reason") if k in e} for e in entries])
+        if verdict == "NOT-READY":
+            named = new_failures or ["step %s" % r["id"] for r in readings if r.get("reading") == "regression"]
+            return finish("verification-not-ready", "V2", "verification is not READY: " + ", ".join(named),
+                          new_failures=named)
+        if verdict == "ENVIRONMENT":
+            return finish("environment-failure", "V2", "verification could not run: " + "; ".join(
+                "%s: %s" % (r["id"], r.get("environment_reason")) for r in readings
+                if r.get("reading") == "environment"))
+        if not readings:
+            state["reasons"] = ["configured, but no step applies"]
+        return finish("verified", "V2", "%d of %d step(s) ran and read ok" % (len(readings), len(steps)))
+    except Exception as exc:  # fail closed: the locator must still find a report for this run
+        import traceback
+        return finish("environment-failure", "V-unexpected",
+                      "%s: %s\n%s" % (type(exc).__name__, exc, traceback.format_exc(limit=6)))
+    finally:
+        lock_release(landing_dir, run_id)
 
 
 def launch(args: "argparse.Namespace") -> int:
@@ -2360,11 +2923,11 @@ def launch(args: "argparse.Namespace") -> int:
                                        "contract": slug, "started_at": now_iso()})
     if not taken["acquired"]:
         holder = taken.get("holder") or {}
-        phase = _read_json(landing_dir / str(holder.get("contract") or "_baseline") / "phase.json") or {}
+        phase = lock_phase(landing_dir, holder) or {}
         live = "a %s run for %s is live (pid %s, started %s, phase %s)" % (
             holder.get("kind"), holder.get("contract"), holder.get("pid"), holder.get("started_at"),
             phase.get("phase"))
-        return finish("landing-in-progress", "P0", live, live=live)
+        return finish("landing-in-progress", "P0", live, live=live, live_kind=holder.get("kind"))
     if taken.get("note"):
         notes.append(taken["note"])
     try:
@@ -2373,6 +2936,10 @@ def launch(args: "argparse.Namespace") -> int:
         return _launch_land(args, checkout, roots, slug or "", run_id, finish, scope_dir)
     finally:
         lock_release(landing_dir, run_id)
+
+
+def _remove_checkout_remedy(path: Any) -> str:
+    return "remove the landing worktree %s with git worktree remove, then rerun" % path
 
 
 def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Path], slug: str, run_id: str,
@@ -2433,9 +3000,12 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
             if rc != 0:
                 return finish("environment-failure", "P0", "cannot create the landing worktree: %s" % out)
         if plan["create"]:
+            write_owner_marker(path, run_id)  # before phase.json names it (L-15')
             write_phase(scope_dir, run_id, "p0", worktree=path)  # this run made it, so this run may record it
         worktree_reset(path, main_root, slug, ref="origin/%s" % parent)  # on reuse phase.json must already name it
         write_phase(scope_dir, run_id, "p0", worktree=path)
+    except OwnerMarkerMissing as exc:
+        return finish("environment-failure", "P0", str(exc), remedy=_remove_checkout_remedy(exc.path))
     except (ValueError, RuntimeError) as exc:
         return finish("environment-failure", "P0", str(exc))
 
@@ -2493,9 +3063,12 @@ def _launch_baseline(args: "argparse.Namespace", checkout: Path, roots: Dict[str
             if rc != 0:
                 return finish("environment-failure", "P0", "cannot create the baseline worktree: %s" % out)
         if plan["create"]:
+            write_owner_marker(path, run_id)
             write_phase(scope_dir, run_id, "p0", worktree=path)
         worktree_reset(path, main_root, "_baseline", ref="origin/%s" % default)
         write_phase(scope_dir, run_id, "p0", worktree=path)
+    except OwnerMarkerMissing as exc:
+        return finish("environment-failure", "P0", str(exc), remedy=_remove_checkout_remedy(exc.path))
     except (ValueError, RuntimeError) as exc:
         return finish("environment-failure", "P0", str(exc))
     script = path / ".claude" / "scripts" / "land_contract.py"

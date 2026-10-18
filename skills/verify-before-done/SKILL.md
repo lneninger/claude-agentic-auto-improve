@@ -27,7 +27,52 @@ Roots come from `.claude/project-profile.md`. Read it first; do not infer a path
 
 **Step 5.5 (safety-critical review gate) fires on every non-docs-only scope** — it short-circuits to PASS when no safety-critical path is touched, so it is cheap. See Step 5.5 for the path-to-reviewer mapping.
 
+## Steps 1 to 4: the scripted runner first, the prose steps as the fallback
+
+When Step 0 selected any of Steps 1 to 4, try `land_contract.py --verify-here` first. It runs the configured verification steps of this checkout against the failing-test baseline on the default branch, and it is the one test run: **the prose Steps 1 to 3 never run beside it**, because two test runs on one LocalDB would collide. It never pushes, merges, resets, cleans or regenerates anything, so Step 4 (drift) stays the prose regenerate-compare-stage step below, whatever the runner says.
+
+1. **Find the script**, the same way `/advance` finds it:
+
+   ```bash
+   LANDER=$(ls .claude/scripts/land_contract.py          "$CLAUDE_PLUGIN_ROOT/.claude/scripts/land_contract.py"          ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/land_contract.py          2>/dev/null | head -1)
+   ```
+
+2. **Read its `--help`.** An older script does not know the flag and would exit 2 on it:
+
+   ```bash
+   py -3 "$LANDER" --help
+   ```
+
+3. **Pick the arm, first match wins.** Arm 1 is decided before anything is launched; arms 2 to 6 are decided from the locator after the run has ended.
+
+   1. `LANDER` is empty, or the `--help` text does not list `--verify-here` → **launch nothing.** Run Steps 1 to 4 below as written and let them decide. Say "runner not found" (empty `LANDER`) or "runner too old" (no `--verify-here` in `--help`). Never stop here: unlike `/advance`, this skill has a complete fallback.
+
+   Otherwise generate the run id yourself (`verify-<UTC YYYYMMDDTHHMMSSZ>-<six hex digits>`) and launch the runner **in background mode**. The shell caps a foreground call at ten minutes and the suites run 40 to 60 minutes:
+
+   ```bash
+   RUN_ID=$(py -3 -c "import datetime, uuid; print('verify-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:6])")
+   py -3 "$LANDER" --verify-here --run-id "$RUN_ID" --json
+   ```
+
+   **Wait for that background run to end** (its completion notice arrives on its own; do not poll it, and do not start any prose step meanwhile). **Never read the background task's output** for the result and **never build the report path by hand.** Then ask the read-only locator, which needs no `--contract`, takes no lock and writes nothing:
+
+   ```bash
+   py -3 "$LANDER" --verify-here --run-id "$RUN_ID" --status --json
+   ```
+
+   It returns `state` (`live`, `report`, `interrupted` or `none`), `run_id`, `report_path` and `report` (the parsed report, or null). Read `state`, then `report.outcome`:
+
+   2. `state` is not `report` → the run ended without a report for this run id (it was cut short, or it refused its arguments). Run Steps 1 to 4 below as written and let them decide. Say so, and point to the background run's own output so the operator can read why.
+   3. `outcome` is `no-baseline` → the default branch holds no failing-test baseline, so the runner ran no step (it ends in seconds, without taking the lock). Run Steps 1 to 4 below as written and let them decide. The report lists only the suites that would apply.
+   4. `outcome` is `verified` → the runner's reading stands in for Steps 1 to 3, so Steps 1 to 4 pass once Step 4 (drift) has run as written. Skip the prose in Steps 1 to 3 and go on to Step 5.
+   5. `outcome` is `verification-not-ready` → Steps 1 to 4 **fail** on the new failures listed in `report.new_failures`. A baseline exists, so the reading is trusted: do not rerun the prose. Halt and report them.
+   6. Any other outcome (`environment-failure`, `landing-in-progress`, `landing-not-configured`, `baseline-unreadable`, `base-unreadable`) → the runner decided nothing. Run Steps 1 to 4 below as written, now that the runner has ended, and let them decide. Say which outcome it was; `report.next_command.reason` carries the fix.
+
+Arms 1, 2, 3 and 6 are exactly today's path. A `landing-in-progress` outcome means a contract landing holds the lock: neither side waits for the other.
+
 ## Step 1: Backend build
+
+Reached when the runner arms above sent you here, or when the runner was not used.
 
 ```bash
 dotnet build --nologo --verbosity minimal
@@ -346,7 +391,7 @@ The scripted gate substitutes for two steps here:
 - **Step 5 (migration safety)** is not run. It applies migrations to the developer database, and the script never does. A contract touching `migration.root` needs a passing `migration-safety-reviewer` artefact instead, which the script checks.
 - **Step 5.5 (safety-critical review gate)** is not judged from session history. The script checks that a completion record of the contract carries a passing review artefact for each reviewer the changed paths require.
 
-Everything else in the gauntlet is a configured verification step in the script (build, tests, drift), read from `master`'s `contractLanding` configuration and compared with the failing-test baseline on `master`. This skill still governs a contract with no parent branch and every sub-task's own branch.
+Everything else in the gauntlet is a configured verification step in the script (build and tests), read from `master`'s `contractLanding` configuration and compared with the failing-test baseline on `master`. Step 4 (drift) is its `generated-drift` step: it runs the model and GraphQL regenerators' commands and fails when `git status` shows a change afterwards. It runs in a landing only. In the `--verify-here` runner the same step is reported not applicable, because regenerating and staging happen in the operator's tree, so Step 4 stays the prose step there. This skill still governs a contract with no parent branch and every sub-task's own branch.
 
 ## Anti-patterns (halt immediately)
 

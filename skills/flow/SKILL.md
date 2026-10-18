@@ -167,6 +167,8 @@ Read `defects` and `sub_tasks` from the answer and go no further into the contra
 with one named exception: `sub_tasks` carries each block's identity and its heading-derived name,
 never the block's own body text, because the script's `--status` mode never calls its own body
 reader — that reader only runs in the release path, and only for a sub-task already merged.
+Each entry in `blocks` also carries `base`, `base_source` and `base_problem`, the branch that
+sub-task would be cut from and where that came from; `--status` never refuses for a base.
 Where a later step in this section needs the numbered handoff block itself, matching the heading
 `sub_tasks` already gave is the one place this step reads the contract directly. No other read
 into the contract is licensed here.

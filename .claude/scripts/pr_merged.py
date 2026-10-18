@@ -1158,10 +1158,165 @@ def _dispatch_project_root() -> Path:
     return Path(named) if named else Path.cwd()
 
 
+# ---------------------------------------------------------------------------
+# Dispatch preconditions (#451 problem 5) -- information for the operator, never a gate here
+# ---------------------------------------------------------------------------
+#: The optional ``**Preconditions:**`` line of a handoff block. Anchored at column 0 the way
+#: ``_parse_depends_on`` anchors its label, so an indented or mid-line mention (as in a TASK
+#: block's text) is never read.
+_PRECONDITIONS_LINE = re.compile(r"^\*\*Preconditions:\*\*(.*)$", re.M)
+
+#: ``owner/repo#5`` -> the pull request's link, which ``gh pr view`` accepts as written.
+_PR_SHORT_REF = re.compile(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#(\d+)$")
+
+
+def _parse_preconditions(body: str) -> List[Dict[str, str]]:
+    """The declared items of a block's ``**Preconditions:**`` line, in the order written.
+
+    Items are comma-separated: ``pull-request <link or owner/repo#n>``, ``emulator <id>``,
+    or any other text (kind ``other``). Absent line -> ``[]``.
+    """
+    items: List[Dict[str, str]] = []
+    for match in _PRECONDITIONS_LINE.finditer(body or ""):
+        for part in match.group(1).split(","):
+            text = part.strip()
+            if not text:
+                continue
+            head, _, rest = text.partition(" ")
+            if head in ("pull-request", "emulator") and rest.strip():
+                items.append({"kind": head, "ref": rest.strip(), "source": "declared"})
+            else:
+                items.append({"kind": "other", "ref": text, "source": "declared"})
+    return items
+
+
+def _load_landing_config(checkout: Path) -> Dict[str, Any]:
+    """The checkout's ``contractLanding`` block, or ``{}`` when the file is absent or unreadable."""
+    try:
+        data = json.loads((Path(checkout) / ".claude" / "work-item-conventions.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    config = data.get("contractLanding") if isinstance(data, dict) else None
+    return config if isinstance(config, dict) else {}
+
+
+def _probe_emulator(emulator: Dict[str, Any]) -> bool:
+    """One TCP probe of a configured emulator, through the landing's own ``tcp_probe``.
+
+    A thin seam: ``land_contract`` imports this module, so it is imported here, lazily.
+    """
+    import land_contract
+    return bool(land_contract.tcp_probe(emulator.get("host"), emulator.get("port"),
+                                        float(emulator.get("timeout") or 5)))
+
+
+def _derived_emulator_items(task: SubTask, config: Dict[str, Any],
+                            checkout: Path) -> List[Dict[str, str]]:
+    """Emulators that gate a verification step whose ``when_paths`` match one of the block's files."""
+    emulators = [e for e in (config.get("emulators") or []) if isinstance(e, dict) and e.get("id")]
+    steps = {s.get("id"): s for s in ((config.get("verification") or {}).get("steps") or [])
+             if isinstance(s, dict)}
+    if not emulators or not steps or not task.files:
+        return []
+    import land_contract
+    derived: List[Dict[str, str]] = []
+    for emulator in emulators:
+        for step_id in emulator.get("gates_steps") or []:
+            step = steps.get(step_id)
+            when_paths = (step or {}).get("when_paths")
+            if not when_paths:
+                continue
+            patterns = land_contract.expand_paths(when_paths, checkout)
+            if any(land_contract.path_matches(f, patterns) for f in task.files):
+                derived.append({"kind": "emulator", "ref": str(emulator["id"]), "source": "derived"})
+                break
+    return derived
+
+
+def _read_precondition_state(item: Dict[str, str], config: Dict[str, Any],
+                             cache: Dict[Any, Any]) -> Tuple[str, str]:
+    """``(state, detail)`` for one item; an emulator and a pull request are read once per run."""
+    kind, ref = item["kind"], item["ref"]
+    key = (kind, ref)
+    if key in cache:
+        return cache[key]
+    if kind == "emulator":
+        entry = next((e for e in (config.get("emulators") or [])
+                      if isinstance(e, dict) and e.get("id") == ref), None)
+        if entry is None:
+            reading = ("unknown", "emulator %s is not configured, so nothing can be probed" % ref)
+        else:
+            answered = _probe_emulator(entry)
+            where = "%s:%s" % (entry.get("host"), entry.get("port"))
+            if answered is None:  # a probe that declined to look
+                reading = ("unknown", "%s was not probed" % where)
+            elif answered:
+                reading = ("met", "%s answers" % where)
+            else:
+                reading = ("unmet", "%s does not answer" % where)
+    elif kind == "pull-request":
+        short = _PR_SHORT_REF.match(ref)
+        target = ("https://github.com/%s/%s/pull/%s" % short.groups()) if short else ref.lstrip("#")
+        code, out = _run(["gh", "pr", "view", target, "--json", "state"])
+        pr_state = None
+        if code == 0 and out:
+            try:
+                payload = json.loads(out)
+                pr_state = payload.get("state") if isinstance(payload, dict) else None
+            except ValueError:
+                pr_state = None
+        if pr_state == "MERGED":
+            reading = ("met", "merged")
+        elif pr_state in ("OPEN", "CLOSED"):
+            reading = ("unmet", "the pull request is %s" % pr_state.lower())
+        else:
+            reading = ("unknown", "gh could not read the pull request")
+    else:
+        reading = ("unknown", "free text; nothing can check it")
+    cache[key] = reading
+    return reading
+
+
+def read_dispatch_preconditions(task: SubTask, body: str, checkout: Path,
+                                cache: Dict[Any, Any]) -> List[Dict[str, str]]:
+    """The Dispatch preconditions of one sub-task: declared items first, then derived emulators.
+
+    ONE function for ``--preconditions`` and the ``--dispatch`` packet. ``cache`` is the run's
+    probe cache, so an emulator or pull request is read at most once per run. An emulator is
+    probed only when the block has an emulator item; a block with none opens no port.
+    """
+    if "config" not in cache:
+        cache["config"] = _load_landing_config(checkout)
+    config = cache["config"]
+    items = _parse_preconditions(body)
+    declared_emulators = {i["ref"] for i in items if i["kind"] == "emulator"}
+    for derived in _derived_emulator_items(task, config, checkout):
+        if derived["ref"] not in declared_emulators:
+            items.append(derived)
+    out: List[Dict[str, str]] = []
+    for item in items:
+        state, detail = _read_precondition_state(item, config, cache)
+        out.append({**item, "state": state, "detail": detail})
+    return out
+
+
+def rank_preconditions(items: Sequence[Dict[str, str]]) -> str:
+    """``held`` when any item is unmet, else ``unknown`` when any is unknown, else ``ready``."""
+    states = {i.get("state") for i in items}
+    if "unmet" in states:
+        return "held"
+    if "unknown" in states:
+        return "unknown"
+    return "ready"
+
+
 def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
                    block_body: str, issue: Optional[int] = None,
                    base: Optional[str] = None, brief: Optional[str] = None,
-                   needs_issue: bool = False) -> Dict[str, Any]:
+                   needs_issue: bool = False, base_source: Optional[str] = None,
+                   read_preconditions: bool = False, checkout: Optional[Path] = None,
+                   precondition_cache: Optional[Dict[Any, Any]] = None) -> Dict[str, Any]:
     """Everything needed to start one sub-task, and nothing more.
 
     This produces the packet. It does not run anything: implementation needs a
@@ -1191,6 +1346,10 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
          stage it did not ask for.
     Every stage carries the block's own agent and the constant isolation
     ``fresh-subagent``.
+
+    ``base_source`` is D-1's label for ``base``. ``read_preconditions`` (default False) adds the
+    packet's ``preconditions`` key through ``read_dispatch_preconditions``; ``checkout`` and
+    ``precondition_cache`` are that read's inputs and are used only when it is True.
     """
     block = extract_task_block(block_body)
 
@@ -1207,7 +1366,7 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
             stage, basis = "unphased", "no-declared-phase"
     cycle = [{"stage": stage, "agent": task.agent, "isolation": "fresh-subagent"}]
 
-    return {
+    packet: Dict[str, Any] = {
         "sub_task": task.id,
         "branch": branch_for(contract_slug, task.id),
         "agent": task.agent,
@@ -1222,11 +1381,20 @@ def build_dispatch(task: SubTask, contract_slug: str, contract_path: str,
         "needs_agent": task.agent is None,
         "issue": issue,
         "base": base,
+        #: Where ``base`` came from: state | declared-topology | default (D-1).
+        "base_source": base_source,
         "brief": brief,
         "needs_issue": needs_issue,
         "cycle": cycle,
         "cycle_basis": basis,
     }
+    if read_preconditions:
+        # Only the --dispatch path asks: the general report's packets (--status, --pr) never
+        # read a conventions file, open a port or call gh for a precondition.
+        packet["preconditions"] = read_dispatch_preconditions(
+            task, block_body, checkout if checkout is not None else Path("."),
+            precondition_cache if precondition_cache is not None else {})
+    return packet
 
 
 # ---------------------------------------------------------------------------
@@ -1308,6 +1476,85 @@ def declared_topology(contract_id: Optional[str], briefs: List[Dict[str, Any]],
         and (_brief_value(b, "base") or _brief_value(b, "parent_issue"))
     ]
     return result
+
+
+def parent_brief_of(contract_id: Optional[str], briefs: List[Dict[str, Any]],
+                    default_branch: str, protected: List[str]) -> Optional[Dict[str, Any]]:
+    """The parent brief of a contract (D-4): ``branch:`` is the declared parent branch and
+    ``id:`` the declared parent issue, read through ``declared_topology``.
+
+    Pure. Returns the brief mapping, or ``None`` when no parent is declared, no parent
+    issue is named, or not exactly one brief carries both.
+    """
+    topology = declared_topology(contract_id, briefs, default_branch, protected)
+    parent_branch, parent_issue = topology["parent_branch"], topology["parent_issue"]
+    if not parent_branch or not parent_issue:
+        return None
+    matches = [b for b in briefs
+               if (contract_id is None or _brief_names_contract(b, contract_id))
+               and _brief_value(b, "branch") == parent_branch
+               and _brief_value(b, "id") == parent_issue]
+    return matches[0] if len(matches) == 1 else None
+
+
+def effective_base(state: Dict[str, Any], subtask_id: str, topology: Dict[str, Any],
+                   default_base: str) -> Dict[str, Any]:
+    """D-1: the base one sub-task is cut from, and where that came from. First match wins.
+
+    Returns ``{"base", "base_source", "problem", "detail"}``. ``problem`` is
+    ``base-not-declared`` (``base`` and ``base_source`` are then ``None``) or ``None``.
+    ``--dispatch`` turns a problem into its refusal; ``--status`` only reports it.
+
+    Rule 0 (rehydration found two briefs for the branch: ``identity-ambiguous``) belongs to
+    contract 460's rehydration, which is not on this branch, so it is not built here.
+
+      1. the state entry has a recorded brief        -> that entry's base, ``state``
+      2. the briefs' topology is ``ambiguous``       -> ``base-not-declared``
+      3. the briefs declare a parent branch          -> that branch, ``declared-topology``
+      4. ``base_not_declared`` (sibling check) fires -> ``base-not-declared``
+      5. otherwise the entry's own non-default base (``state``), else the default (``default``)
+
+    ``new_state`` fills the default branch into every entry, so an entry's base is never read
+    as a declaration unless it has a recorded brief (rule 1) or differs from the default (rule 5).
+    """
+    entry = (state.get("sub_tasks") or {}).get(subtask_id) or {}
+
+    def found(base: str, source: str) -> Dict[str, Any]:
+        return {"base": base, "base_source": source, "problem": None, "detail": None}
+
+    def refused(detail: str) -> Dict[str, Any]:
+        return {"base": None, "base_source": None, "problem": "base-not-declared", "detail": detail}
+
+    if entry.get("brief") and entry.get("base"):
+        return found(entry["base"], "state")
+    if topology.get("reason") == "ambiguous":
+        return refused("the Sub-Task Work Items of this contract disagree on base: or "
+                       "parent_issue:, so no parent branch can be chosen for sub-task %r -- make the "
+                       "briefs agree on one parent branch, or record this sub-task's own identity "
+                       "with --record-subtask %s --issue <n> --base <parent> --brief <path>, then "
+                       "dispatch again" % (subtask_id, subtask_id))
+    if topology.get("parent_branch"):
+        return found(topology["parent_branch"], "declared-topology")
+    sibling = base_not_declared(state, subtask_id, default_base)
+    if sibling:
+        return refused(sibling)
+    own = entry.get("base")
+    if own and own != default_base:
+        return found(own, "state")
+    return found(default_base, "default")
+
+
+def record_merge_in_state(state: Dict[str, Any], subtask_id: str, branch: Optional[str],
+                          pull_request: Optional[str], base: Optional[str]) -> Dict[str, Any]:
+    """Stamp a confirmed merge into a sub-task's state entry (#451 problem 2).
+
+    Pure, like ``mark_dispatched``. Never invents an entry: an id the state lacks is left alone.
+    """
+    st = copy.deepcopy(state)
+    if subtask_id in st.get("sub_tasks", {}):
+        st["sub_tasks"][subtask_id].update({"status": "completed", "branch": branch,
+                                            "pull_request": pull_request, "base": base})
+    return st
 
 
 # ---------------------------------------------------------------------------
@@ -2060,8 +2307,15 @@ def read_work_item_briefs(contract_slug: str) -> List[Dict[str, str]]:
     brief names yields ``[]`` (so the briefless callers keep today's ending).
     """
     try:
-        from _claude_paths import work_items_dir
-        directory = work_items_dir()
+        from _claude_paths import project_dir, work_items_dir
+        # The state store, the records and the contract are all read relative to the working
+        # directory, so the briefs must be too: with no CLAUDE_PROJECT_DIR told to us, a
+        # `.claude/work-items/` here is this run's own, and the resolver (whose second
+        # candidate is the script's own checkout) must not read another checkout's briefs.
+        if project_dir() is None and WORK_ITEMS_DIR.is_dir():
+            directory = WORK_ITEMS_DIR
+        else:
+            directory = work_items_dir()
     except ImportError:
         directory = Path(".claude/work-items")
     out: List[Dict[str, str]] = []
@@ -2486,11 +2740,14 @@ def brief_header_path(contract_text: str) -> Optional[Path]:
 
 
 def find_linked_brief(contract_text: str, slug: str,
-                      work_items_dir: Optional[Path] = None) -> Optional[Path]:
-    """I-17: the brief linked to a contract, or None when there is none or more than one.
+                      work_items_dir: Optional[Path] = None,
+                      default_branch_name: Optional[str] = None) -> Optional[Path]:
+    """I-17 and D-4: the brief linked to a contract, or None.
 
-    First the contract's own ``**Work Item Brief:**`` path. Otherwise the ONE brief
-    under the work items folder whose frontmatter ``contract:`` names this contract.
+    First the contract's own ``**Work Item Brief:**`` path. Without one, among the briefs
+    under the work items folder whose ``contract:`` names this contract: the parent brief
+    (``parent_brief_of``, the rule the landing's P1 uses); failing that, the one brief with
+    no ``parent_issue:`` (absent or ``none``); otherwise None.
     """
     header_path = brief_header_path(contract_text)
     if header_path is not None:
@@ -2498,12 +2755,22 @@ def find_linked_brief(contract_text: str, slug: str,
     folder = work_items_dir if work_items_dir is not None else WORK_ITEMS_DIR
     if not folder.is_dir():
         return None
-    matches = []
+    named: List[Dict[str, Any]] = []
     for candidate in sorted(folder.glob("*.md")):
         fields = read_brief_frontmatter(candidate)
         if fields and _names_contract(fields.get("contract"), slug):
-            matches.append(candidate)
-    return matches[0] if len(matches) == 1 else None
+            entry: Dict[str, Any] = dict(fields)
+            entry["_path"] = str(candidate)
+            named.append(entry)
+    parentless = [b for b in named if _brief_value(b, "parent_issue").lower() in ("", "none")]
+    if len(named) > 1:
+        # Only several candidates need the topology, and reading the default branch costs a
+        # git call, so a lone brief never pays for it.
+        default = default_branch_name if default_branch_name is not None else default_branch()
+        parent = parent_brief_of(None, named, default, [default])
+        if parent is not None:
+            return Path(parent["_path"])
+    return Path(parentless[0]["_path"]) if len(parentless) == 1 else None
 
 
 def find_tracking_issue(contract_text: str, slug: str,
@@ -3322,6 +3589,17 @@ def evaluate_completion(ctx: CompletionContext) -> Tuple[Dict[str, Any], List[st
 # ---------------------------------------------------------------------------
 def _usage_refusal(args: argparse.Namespace) -> Optional[str]:
     """I-13: flag combinations that are refused with exit 2, or None when the flags agree."""
+    if getattr(args, "preconditions", False):
+        # First rule, so the detail always names --preconditions: it reads and writes nothing,
+        # so it cannot ride beside a flag that acts.
+        for flag, given in (("--dispatch", bool(args.dispatch)), ("--pr", bool(args.pr)),
+                            ("--record-subtask", bool(args.record_subtask)),
+                            ("--record-delivery", bool(args.record_delivery)),
+                            ("--resume", bool(args.resume)),
+                            ("--owner-resolved", bool(args.owner_resolved)),
+                            ("--skipped", bool(args.skipped))):
+            if given:
+                return "--preconditions cannot be combined with %s" % flag
     if args.record_delivery:
         if len(args.pr) != 1:
             return "--record-delivery needs exactly one --pr"
@@ -3367,6 +3645,8 @@ def main() -> int:
                     help="the owner confirms this blocked review report was fixed (repeatable)")
     ap.add_argument("--skipped", action="append", default=[], metavar="TEXT",
                     help="a verification the owner declares skipped or impossible (repeatable)")
+    ap.add_argument("--preconditions", action="store_true",
+                    help="read-only: rank the released sub-tasks by their Dispatch preconditions")
     args = ap.parse_args()
 
     if args.locate_parent:
@@ -3393,8 +3673,19 @@ def main() -> int:
 
     usage = _usage_refusal(args)
     if usage:
-        print(json.dumps({"error": "usage-refused", "detail": usage}))
+        refusal_payload: Dict[str, Any] = {"error": "usage-refused", "detail": usage}
+        if usage.startswith("--preconditions cannot be combined"):
+            contract_slug = (Path(args.contract).stem if args.contract.lower().endswith(".md")
+                             else args.contract)
+            refusal_payload["next_command"] = {
+                "commands": ["py -3 .claude/scripts/pr_merged.py --contract %s --preconditions --json"
+                             % contract_slug],
+                "reason": "run --preconditions alone; it reads and writes nothing"}
+        print(json.dumps(refusal_payload))
         return 2
+    if args.preconditions:
+        # Read-only exactly as --status: every guard below that tests args.status applies unchanged.
+        args.status = True
 
     contract = find_contract(args.contract)
     if not contract:
@@ -3427,6 +3718,8 @@ def main() -> int:
     # I-8: a fresh checkout's state store is empty (it is git-ignored and per checkout), so rebuild
     # what the tracked briefs and the existing branches already say, before any reader below.
     state, ambiguous_briefs = rehydrate_state(state, slug, fresh=not stored_state, default=base)
+    #: One probe cache per run: an emulator or pull request is read at most once (D-1 / problem 5).
+    precondition_cache: Dict[Any, Any] = {}
 
     if args.record_subtask:
         # /flow Step 2.7's writer: stamp one sub-task's issue, declared base
@@ -3499,7 +3792,7 @@ def main() -> int:
                 return 2
 
     # The Work Item Brief, the Delivery Record and what both say about this contract (I-14, I-17).
-    brief_path = find_linked_brief(contract_text, slug)
+    brief_path = find_linked_brief(contract_text, slug, default_branch_name=base)
     brief_fields = read_brief_frontmatter(brief_path) if brief_path is not None else None
     delivery = load_delivery(slug)
 
@@ -3851,6 +4144,12 @@ def main() -> int:
             write_record(slug, task.id, rec)
             written_files.append(_list_record(RESULTS_DIR / slug / (task.id + ".yaml")))
         records[task.id] = rec
+        if verdict == "merged" and rec.get("status") == "completed":
+            # #451 problem 2: the state entry carries the merge's own trace -- the head
+            # branch, the pull request's link and the base it merged into. Only a pull
+            # request that maps to a sub-task reaches here; nothing is invented for others.
+            state = record_merge_in_state(state, task.id, pr.get("headRefName"),
+                                          pr.get("url"), pr.get("baseRefName"))
         (report["failed"] if rec["status"] == "failed" else report["closed"]).append(
             {"pr": ref, "sub_task": task.id, "record": rec})
 
@@ -3937,33 +4236,36 @@ def main() -> int:
                                             "would build on work that does not exist"}))
             return 3
 
-        # Defect Two, second half: an entry with no declared base falls back
-        # to `base` (default_branch()) at `declared_task_base` below,
-        # silently, even where a sibling in this same contract already
-        # declares a real parent branch. This refusal runs BEFORE
-        # that fallback is ever read, before the identity check, and before
-        # any branch is cut, in every mode including --dry-run -- a dry run
-        # must preview the real run, not silently succeed. I-8 stays intact:
-        # a state where no OTHER entry declares a non-default base triggers
-        # nothing here, and dispatch proceeds exactly as it did before this
-        # refusal existed.
+        # I-8 first: two tracked briefs naming this sub-task's branch are a guess either way,
+        # so the identity refusal precedes the base decision (operator decision 2026-10-17).
         if task.id in ambiguous_briefs:
             # I-8: two tracked briefs name this sub-task's branch, so either would be a guess.
             print(json.dumps({"error": "identity-ambiguous", "sub_task": task.id,
                               "detail": ambiguous_briefs[task.id]}))
             return 5
-        base_refusal = base_not_declared(state, task.id, base)
-        if base_refusal:
-            print(json.dumps({"error": "base-not-declared", "sub_task": task.id,
-                              "detail": base_refusal}))
+        # D-1 (#451 problem 1): ONE first-match procedure decides the base and says where it
+        # came from. It runs BEFORE the identity check and before any branch is cut, in every
+        # mode including --dry-run -- a dry run must preview the real run, not silently
+        # succeed. A `base-not-declared` outcome is this path's refusal (exit 7, unchanged);
+        # --status reports the same outcome and never refuses. It subsumes Defect Two's
+        # sibling check (`base_not_declared`, rule 4) and I-8: a state where no OTHER entry
+        # declares a non-default base dispatches from the default branch as before.
+        resolved = effective_base(state, task.id, declared_topology(None, briefs, base, [base]), base)
+        if resolved["problem"]:
+            print(json.dumps({
+                "error": resolved["problem"], "sub_task": task.id, "detail": resolved["detail"],
+                "next_command": {
+                    "commands": [],
+                    "reason": "no parent branch can be chosen for %s; make the Sub-Task Work Items "
+                              "agree, or record its identity with --record-subtask, then dispatch "
+                              "again" % task.id}}))
             return 7
 
         task_state_entry = state.get("sub_tasks", {}).get(task.id, {})
         # I-1 -- the acceptance criterion this whole feature exists to
-        # satisfy: a sub-task branch is cut from ITS OWN declared base, read
-        # out of its state entry, never unconditionally from the default
-        # branch. I-8: an entry with no base key falls back to base.
-        declared_task_base = task_state_entry.get("base") or base
+        # satisfy: a sub-task branch is cut from ITS OWN declared base,
+        # never unconditionally from the default branch.
+        declared_task_base = resolved["base"]
         task_issue = task_state_entry.get("issue")
 
         # I-7, run before every dispatch: a state entry's issue/base must
@@ -4024,7 +4326,9 @@ def main() -> int:
         needs_issue = len(tasks) >= 2 and task_issue is None
         packet = build_dispatch(task, slug, str(contract), bodies.get(task.id, ""),
                                 issue=task_issue, base=declared_task_base,
-                                brief=task_state_entry.get("brief"), needs_issue=needs_issue)
+                                brief=task_state_entry.get("brief"), needs_issue=needs_issue,
+                                base_source=resolved["base_source"], read_preconditions=True,
+                                checkout=Path("."), precondition_cache=precondition_cache)
         # N-2: a read-only run (--dry-run, --resume or --status) never cuts
         # the branch (`ok, detail` above is a stub "read-only run" result),
         # so the packet and the printed line must not claim it did either.
@@ -4044,6 +4348,50 @@ def main() -> int:
                    briefs=briefs, default_branch=base, candidates=candidates)
     if move["action"] == "delivery-unrecorded" and records_pr_url:
         move["records_pull_request"] = records_pr_url
+
+    if args.preconditions:
+        # The reading /advance decides on, answered before the Completion Verdict. Read-only:
+        # nothing is cut, marked or written, and no lock is taken. args.status is already True.
+        by_id_ready = {t.id: t for t in tasks}
+        bodies_ready = handoff_bodies(contract_text)
+        ranked: List[Dict[str, Any]] = []
+        for tid in (move.get("sub_tasks", []) if move["action"] == "dispatch" else []):
+            items = read_dispatch_preconditions(by_id_ready[tid], bodies_ready.get(tid, ""),
+                                                Path("."), precondition_cache)
+            ranked.append({"id": tid, "preconditions": items, "rank": rank_preconditions(items)})
+        all_held = bool(ranked) and all(r["rank"] == "held" for r in ranked)
+        reading = {
+            "outcome": "preconditions-read", "contract": slug, "action": move["action"],
+            "sub_tasks": ranked,
+            "next_command": {
+                "commands": [],
+                "reason": ("every released sub-task waits on an unmet precondition; dispatch "
+                           "nothing until one is met") if all_held else
+                          "ranked reading; /advance dispatches a ready sub-task with --dispatch"},
+        }
+        if args.json:
+            print(json.dumps(reading, indent=2))
+        else:
+            print("contract %s: next move %s" % (slug, move["action"]))
+            for r in ranked:
+                print("  %s: %s" % (r["id"], r["rank"]))
+                for item in r["preconditions"]:
+                    print("    %s %s (%s): %s - %s" % (item["kind"], item["ref"], item["source"],
+                                                       item["state"], item["detail"]))
+            print("next command: none - %s" % reading["next_command"]["reason"])
+        return 0
+
+    # D-1: the base each block would be cut from. --status reports it and never refuses.
+    topology_now = declared_topology(None, briefs, base, [base])
+    planned_ids = {t.id for t in tasks}
+    for block_entry in report["blocks"]:
+        if block_entry["id"] in planned_ids:
+            resolved_entry = effective_base(state, block_entry["id"], topology_now, base)
+            block_entry.update({"base": resolved_entry["base"],
+                                "base_source": resolved_entry["base_source"],
+                                "base_problem": resolved_entry["problem"]})
+        else:
+            block_entry.update({"base": None, "base_source": None, "base_problem": None})
     report["next_move"] = move
     report["released"] = move.get("sub_tasks", [])
     report["blocked"] = move.get("blocked", {})
@@ -4110,11 +4458,15 @@ def main() -> int:
         report["dispatch"] = []
         for tid in move["sub_tasks"]:
             entry = state.get("sub_tasks", {}).get(tid, {})
+            # D-1's reading; a problem keeps today's value (the --dispatch path refuses it).
+            resolved_packet = effective_base(state, tid, topology_now, base)
             report["dispatch"].append(build_dispatch(
                 by_id[tid], slug, str(contract), bodies.get(tid, ""),
-                issue=entry.get("issue"), base=entry.get("base") or base,
+                issue=entry.get("issue"),
+                base=resolved_packet["base"] or entry.get("base") or base,
                 brief=entry.get("brief"),
                 needs_issue=len(tasks) >= 2 and entry.get("issue") is None,
+                base_source=resolved_packet["base_source"],
             ))
 
     # Extension Point 5 / W2: stamp every hand_resolved entry -- seeded
