@@ -140,6 +140,27 @@ that declares nine defective blocks — which is the silent discard this action 
 
 ### `dispatch` — there is work ready to start
 
+**Read the preconditions before choosing what to start.** One read-only call ranks every
+released sub-task. It cuts nothing, writes nothing and takes no lock:
+
+```bash
+py -3 "$PRM" --contract <slug> --preconditions --json
+```
+
+Decide from each sub-task's `rank` and nothing else. This skill probes no port and calls no
+`gh` itself; the script already did.
+
+- One sub-task is `ready` → start it.
+- Several are `ready` → list them and ask which (the rule below).
+- None is `ready` but some are `unknown` → list them, name each `unknown` item, and ask.
+- Every sub-task is `held` → dispatch nothing. Report each held sub-task with its unmet items
+  and stop. Say plainly why: once `--dispatch` runs, the branch is cut and `awaiting-merge` is
+  written, so holding afterwards undoes nothing.
+
+The packet that `--dispatch` returns carries its own `preconditions` too, but that reading is
+information only. If it now shows an item unmet, report it and continue on the branch that was
+cut, as the `needs_issue` remedy below does. Never dispatch a second time.
+
 **Start it with the script, not by hand.** The branch, the state write and the readiness
 re-check all belong to one command:
 
@@ -147,18 +168,21 @@ re-check all belong to one command:
 py -3 "$PRM" --contract <slug> --dispatch <sub-task-id> --json
 ```
 
-It cuts the branch from the sub-task's own base, read out of its state entry — the parent
-branch for a Sub-Task Work Item, the repository default branch only when that entry carries no
-base at all. How `create_branch` cuts it depends on whether a sub-issue is recorded. With one,
+It cuts the branch from the sub-task's own base. The base comes from the sub-task's recorded
+brief when it has one, otherwise from the parent branch the Sub-Task Work Items declare, and
+only then from the repository default branch. The packet's `base_source` says which of
+`state`, `declared-topology` or `default` decided it. How `create_branch` cuts it depends on
+whether a sub-issue is recorded. With one,
 `gh issue develop` cuts the branch on GitHub from that base, and the new branch is then fetched.
 Without one, it fetches the base first and cuts the branch locally. It then records the sub-task
 as `awaiting-merge` with the cut branch in the state store, and returns the packet.
 
 It refuses with `not-released` if the sub-task's dependencies have not landed, so a wrong
 identity cannot start work that has nothing to build on. It also refuses with exit code 7,
-`base-not-declared`, when the dispatched entry itself carries no declared base while another
-entry in the same state already declares a real parent branch — never a silent fallback to
-the default branch beside a sibling that says otherwise. Either refusal cuts no branch and
+`base-not-declared`, when the Work Item briefs disagree on the parent branch, or when the
+dispatched entry carries no declared base while another entry in the same state already
+declares a real parent — never a silent fallback to the default branch beside a sibling that
+says otherwise. Either refusal cuts no branch and
 writes nothing; the remedy for `base-not-declared` is recording the sub-task's own identity
 first (`--record-subtask <sub-task-id> --issue <n> --base <parent> --brief <path>`, running
 `/task` in Parent-aware mode first if it has no brief yet), then dispatching again. Add
@@ -349,7 +373,9 @@ arrived.
      nothing. On any halt, this is the previous run's report. Render it in one line and go on to
      step 3: rerunning `/advance <slug>` is how a halt resumes (operator decision 2026-10-05),
      and the script re-derives every phase from git and GitHub facts, so a relaunch on an
-     unfixed cause ends in the same halt.
+     unfixed cause ends in the same halt. One report is not a halt: `not-applicable` with
+     `manual_landing: true` means the parent brief declares `landing: manual`. Stop, tell the
+     operator to merge the parent pull request themselves, and never relaunch the landing.
    - `interrupted` — a lock whose process is gone, with no report for its run. The session
      ended or the machine slept mid-run. Go on to step 3.
    - `none` — no run yet. Go on to step 3.
@@ -376,7 +402,8 @@ arrived.
 5. **Render the Landing Report** field by field: `outcome`, `gate`, `detail`, `remedy`,
    `pull_request`, `merged_commit`, `parent_issue_state_after`, `hand_resolved_in_merge`,
    `bookkeeping_files` and `notes`. Its `next_command` is the closing line, printed verbatim:
-   the landing has its own table, so do not substitute Step 3's call to `pr_merged.py`. After
+   the landing has its own table, so do not substitute Step 3's call to `pr_merged.py`. On
+   `not-applicable` with `manual_landing: true`, stop there and relaunch nothing. After
    `landed` or `already-landed`, the script has edited the parent brief in this checkout. Commit
    it to the records draft exactly as `/pr-merged` Step 3 does: the one stable branch
    `docs/<contract-slug>-records`, fetched and committed on top when it exists on origin, cut from

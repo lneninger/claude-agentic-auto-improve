@@ -152,13 +152,24 @@ def _guarded_subprocess_run(cmd, *args, **kwargs):
     return _REAL_SUBPROCESS_RUN(cmd, *args, **kwargs)
 
 
+_REAL_PROBE_EMULATOR = getattr(pr_merged, "_probe_emulator", None)
+
+
+def _stub_probe_emulator(_emulator):
+    """No test here may open a socket: a --dispatch packet reads emulator preconditions."""
+    return None  # reads as "unknown"
+
+
 def setUpModule():
     subprocess.run = _guarded_subprocess_run
     pr_merged.gh_authenticated = _stub_gh_authenticated
+    pr_merged._probe_emulator = _stub_probe_emulator
 
 
 def tearDownModule():
     subprocess.run = _REAL_SUBPROCESS_RUN
+    if _REAL_PROBE_EMULATOR is not None:
+        pr_merged._probe_emulator = _REAL_PROBE_EMULATOR
     if _HAD_GH_AUTHENTICATED:
         pr_merged.gh_authenticated = _REAL_GH_AUTHENTICATED
     elif hasattr(pr_merged, "gh_authenticated"):
