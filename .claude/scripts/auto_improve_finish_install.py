@@ -24,6 +24,15 @@ Usage:
   py -3 .claude/scripts/auto_improve_finish_install.py hooks --project . [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py hooks --project . --apply \\
       --expect-sha256 <hash> [--skip <hook>]
+  py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . [--json]
+  py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . --apply \\
+      --expect-sha256 <plan hash>
+
+The ``addon`` subcommand installs one opt-in add-on (a folder under ``.claude/addons/`` in the plugin)
+into the project: it copies the add-on's hook files and the helper files its ``addon.json`` names, and
+writes the manifest's registration rows into the project's settings.json in exec form, through the same
+preview, plan hash, backup and atomic writer as ``hooks``. It never removes a row or a file and never
+overwrites a file that differs.
 """
 
 from __future__ import annotations
@@ -85,9 +94,14 @@ REFUSAL_CODES: Tuple[str, ...] = (
     "changed-since-preview",
     "write-failed",
     "plugin-install-needs-no-registration",
+    "addon-unknown",
+    "addon-manifest-missing",
+    "codegraph-mcp-not-configured",
+    "addon-file-differs",
 )
 
-_ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing")
+_ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing",
+                      "addon-manifest-missing")
 
 # Refusal code -> process exit code (3 environment problem, 2 operator-correctable).
 EXIT_CLASS: Dict[str, int] = {
@@ -129,9 +143,18 @@ NOT_VERIFIABLE: Tuple[str, ...] = (
 )
 
 CODE_SEARCH_NOTE = (
-    "The code-search-first check was retired in 0.7.0. The plugin no longer blocks a source Read, "
-    "Grep or Glob, and no CodeGraph tool has to run first, so there is nothing to bypass."
+    "The code-search-first guard is the codegraph add-on, and it is off by default: the plugin does "
+    "not block a source Read, Grep or Glob. To turn it on, run /auto-improve-codegraph-install, which "
+    "first checks that the CodeGraph MCP server is configured."
 )
+
+ADDONS_REL = ".claude/addons"
+ADDON_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+ADDON_HELPER_ROOTS = (".claude/hooks/", ".claude/scripts/")
+ADDON_ROW_KEYS = ("async", "statusMessage")
+NEW_SESSION_NOTE = (
+    "Claude Code reads the hook rows once, when a session starts. Start a new session for the "
+    "installed add-on to take effect.")
 
 PLATFORM_NOTE = (
     "On macOS and Linux the plugin's cached hooks.json launches 'py -3', which does not exist "
@@ -1182,6 +1205,7 @@ def _readiness(project: Path, home: Path, verdict: Result, platform: str) -> Res
         "gates": sorted({r.file for r in regs if r.event == "PreToolUse"}),
         "database-guard-rules": _db_rules_state(install),
         "not-verifiable": list(NOT_VERIFIABLE), "code-search-first-note": CODE_SEARCH_NOTE,
+        "add-ons": _addon_listing(install),
     }
     if posix:
         report["platform-note"] = PLATFORM_NOTE
@@ -1279,24 +1303,16 @@ def _plugin_hooks_json(root: Optional[Path]) -> Optional[Path]:
     return None
 
 
-def _plan_vendored(project: Path, platform: str, home: Path, plugin_root: Optional[Path],
-                   skip: Optional[List[str]]) -> Tuple[Result, Dict[str, Any]]:
-    """The SettingsPlan (or a refusal) plus the bytes the apply needs."""
-    own = project / ".claude" / "hooks" / "hooks.json"
-    chosen_root: Optional[Path] = None
-    source: Optional[Path] = own
-    if not own.is_file():
-        chosen_root = _separate_plugin_root(project, plugin_root, home,
-                                            lambda r: _plugin_hooks_json(r) is not None)
-        source = _plugin_hooks_json(chosen_root)
-    if source is None:
-        return refusal("hooks-json-missing", "neither the project nor the plugin has a hooks.json to read",
-                       own), {}
-    problem, regs = _source_registrations(source)
-    if problem:
-        return problem, {}
-    skipped = set(skip or [])
-    regs = [r for r in regs if r.file not in skipped]
+def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Registration]
+                        ) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """The one settings.json merge both the vendored hooks step and an add-on install use.
+
+    Reads the project's settings.json strictly, finds which of ``regs`` no layer registers yet, and
+    renders the file with those rows appended in exec form (the existing text, indent, line ending and
+    byte order mark are kept). Writes nothing. Returns (refusal, {}) or (None, edit) where edit carries
+    the target, the old and new bytes, the rows to add, the rows already present, notes, whether any
+    layer disables hooks, and the unified diff.
+    """
     target = project / ".claude" / "settings.json"
     try:
         old_bytes = target.read_bytes() if target.is_file() else None
@@ -1325,9 +1341,6 @@ def _plan_vendored(project: Path, platform: str, home: Path, plugin_root: Option
             if different:
                 notes.append("%s is registered under matcher %r, the source uses %r; tools only the source "
                              "matcher names are not covered" % (reg.key, match["matcher"], reg.matcher))
-    if platform == "win32" and any(r.file == "db-destructive-guard.py" and "PowerShell" not in (r.matcher or "")
-                                   for r in regs):
-        notes.append("the database guard's matcher names no PowerShell tool, so a PowerShell command is not checked")
     text = old_bytes.decode("utf-8-sig") if old_bytes is not None else ""
     newline = "\r\n" if "\r\n" in text else "\n"
     indent_match = re.search(r"\n([ \t]+)\S", text)
@@ -1346,7 +1359,37 @@ def _plan_vendored(project: Path, platform: str, home: Path, plugin_root: Option
     bom = b"\xef\xbb\xbf" if old_bytes is not None and old_bytes.startswith(b"\xef\xbb\xbf") else b""
     diff = "".join(difflib.unified_diff(text.splitlines(keepends=True), new_text.splitlines(keepends=True),
                                         fromfile=str(target), tofile=str(target))) if to_add else ""
-    new_bytes = bom + new_text.encode("utf-8")
+    return None, {"target": target, "old-bytes": old_bytes, "new-bytes": bom + new_text.encode("utf-8"),
+                  "to-add": to_add, "present": present, "notes": notes, "disabled": disabled, "diff": diff}
+
+
+def _plan_vendored(project: Path, platform: str, home: Path, plugin_root: Optional[Path],
+                   skip: Optional[List[str]]) -> Tuple[Result, Dict[str, Any]]:
+    """The SettingsPlan (or a refusal) plus the bytes the apply needs."""
+    own = project / ".claude" / "hooks" / "hooks.json"
+    chosen_root: Optional[Path] = None
+    source: Optional[Path] = own
+    if not own.is_file():
+        chosen_root = _separate_plugin_root(project, plugin_root, home,
+                                            lambda r: _plugin_hooks_json(r) is not None)
+        source = _plugin_hooks_json(chosen_root)
+    if source is None:
+        return refusal("hooks-json-missing", "neither the project nor the plugin has a hooks.json to read",
+                       own), {}
+    problem, regs = _source_registrations(source)
+    if problem:
+        return problem, {}
+    skipped = set(skip or [])
+    regs = [r for r in regs if r.file not in skipped]
+    problem, edit = _plan_settings_edit(project, platform, home, regs)
+    if problem:
+        return problem, {}
+    target, old_bytes, new_bytes = edit["target"], edit["old-bytes"], edit["new-bytes"]
+    to_add, present, notes = edit["to-add"], edit["present"], edit["notes"]
+    disabled, diff = edit["disabled"], edit["diff"]
+    if platform == "win32" and any(r.file == "db-destructive-guard.py" and "PowerShell" not in (r.matcher or "")
+                                   for r in regs):
+        notes.append("the database guard's matcher names no PowerShell tool, so a PowerShell command is not checked")
     skip_list = "\n".join(sorted(skipped)).encode("utf-8")
     plan: Result = {
         "status": "plan", "install-mode": "vendored", "target": str(target), "hooks-json": str(source),
@@ -1496,15 +1539,302 @@ def apply_hooks(
             "gitignore-hint": ".claude/settings.json.bak-*"}
 
 
+# --- add-ons ---------------------------------------------------------------------------
+
+def _plain_name(value: Any) -> bool:
+    """A bare file name: no separator, no parent reference, not empty."""
+    return (isinstance(value, str) and value not in ("", ".", "..")
+            and "/" not in value and "\\" not in value and not value.startswith("."))
+
+
+def _addon_manifest_problem(path: Path, why: str) -> Result:
+    return refusal("addon-manifest-missing", "the add-on manifest %s is unusable: %s" % (path.name, why), path)
+
+
+def _read_addon_manifest(folder: Path) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """The parsed, shape-checked addon.json of an add-on folder, or a refusal (exit 3)."""
+    path = folder / "addon.json"
+    if not path.is_file():
+        return refusal("addon-manifest-missing",
+                       "the add-on %s has no addon.json in the plugin" % folder.name, path), {}
+    data = _load_json_lenient(path)
+    if not isinstance(data, dict):
+        return _addon_manifest_problem(path, "it is not a JSON object"), {}
+    hooks, helpers = data.get("hooks"), data.get("helpers")
+    rows, prerequisites = data.get("registrations"), data.get("prerequisites")
+    if not (isinstance(hooks, list) and hooks and all(_plain_name(h) and str(h).endswith(".py") for h in hooks)):
+        return _addon_manifest_problem(path, "hooks must be a non-empty list of hook file names"), {}
+    if not (isinstance(helpers, list) and all(
+            isinstance(h, str) and h.startswith(ADDON_HELPER_ROOTS) and ".." not in h.split("/")
+            and "\\" not in h for h in helpers)):
+        return _addon_manifest_problem(path, "helpers must be paths under .claude/hooks/ or .claude/scripts/"), {}
+    if not (isinstance(rows, list) and rows and all(
+            isinstance(r, dict) and r.get("hook") in hooks and isinstance(r.get("event"), str) and r["event"]
+            and isinstance(r.get("args", []), list) and all(isinstance(a, str) for a in r.get("args", []))
+            and isinstance(r.get("matcher", ""), str) for r in rows)):
+        return _addon_manifest_problem(path, "registrations must be rows naming an event and one of the hooks"), {}
+    if not (isinstance(prerequisites, list) and all(
+            isinstance(p, dict) and p.get("kind") == "mcp-server" and isinstance(p.get("name"), str) and p["name"]
+            for p in prerequisites)):
+        return _addon_manifest_problem(path, "prerequisites must be a list of mcp-server entries"), {}
+    return None, data
+
+
+def _addon_listing(root: Path) -> List[Dict[str, Any]]:
+    """Every add-on folder of a plugin tree with its install skill, for the readiness report."""
+    found: List[Dict[str, Any]] = []
+    base = Path(root) / ADDONS_REL
+    try:
+        folders = sorted(p for p in base.iterdir() if p.is_dir())
+    except OSError:
+        return found
+    for folder in folders:
+        data = _load_json_lenient(folder / "addon.json")
+        if isinstance(data, dict) and isinstance(data.get("install_skill"), str):
+            found.append({"name": folder.name, "install-skill": data["install_skill"],
+                          "hooks": [h for h in data.get("hooks", []) if isinstance(h, str)]})
+    return found
+
+
+def _mcp_servers_in(data: Any) -> Set[str]:
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return set(servers) if isinstance(servers, dict) else set()
+
+
+def _mcp_server_configured(server: str, project: Path, claude_home: Optional[Path]) -> bool:
+    """True when ``server`` is configured in the project's .mcp.json, in the user's Claude configuration
+    file (``.claude.json``, in the home directory or the Claude config directory), or in that file's entry
+    for this project. An entry under another project's path does not count."""
+    if server in _mcp_servers_in(_load_json_lenient(project / ".mcp.json")):
+        return True
+    user_files = {Path(os.path.expanduser("~")) / ".claude.json", _claude_home(claude_home) / ".claude.json"}
+    wanted = {_norm(project), _norm(project.resolve()), project.as_posix()}
+    for path in sorted(user_files):
+        data = _load_json_lenient(path)
+        if server in _mcp_servers_in(data):
+            return True
+        projects = data.get("projects") if isinstance(data, dict) else None
+        for key, entry in (projects.items() if isinstance(projects, dict) else []):
+            if (_norm(key) in wanted or str(key).replace("\\", "/") in wanted) and server in _mcp_servers_in(entry):
+                return True
+    return False
+
+
+def _fold_text_bytes(data: bytes) -> bytes:
+    """Line endings folded and a leading byte order mark stripped, the drift check's comparison form."""
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    return data.replace(b"\r\n", b"\n")
+
+
+def _addon_file_ops(project: Path, root: Path, folder: Path, manifest: Dict[str, Any]
+                    ) -> Tuple[Optional[Result], List[Dict[str, Any]]]:
+    """What the install does to each file: copy it, find it already identical, or leave a helper alone.
+
+    A hook file that exists in the project and differs from the plugin's is refused (addon-file-differs):
+    nothing is overwritten. A helper that exists is kept as it is, whatever it holds.
+    """
+    ops: List[Dict[str, Any]] = []
+    entries = [("hook", ".claude/hooks/" + h, folder / "hooks" / h) for h in manifest["hooks"]]
+    entries += [("helper", h, root / h) for h in manifest["helpers"]]
+    for kind, rel, src in entries:
+        if not src.is_file():
+            return refusal("hook-file-missing", "%s is not in the plugin (%s); the install would leave a row "
+                           "pointing at nothing" % (rel, src), src), []
+        try:
+            wanted = src.read_bytes()
+        except OSError as exc:
+            return refusal("hook-file-missing", "%s cannot be read: %s" % (src, exc), src), []
+        dest = project / Path(rel)
+        action = "copy"
+        if os.path.lexists(str(dest)):
+            if kind == "helper":
+                action = "keep-existing"
+            else:
+                try:
+                    have = dest.read_bytes() if dest.is_file() and not os.path.islink(str(dest)) else None
+                except OSError:
+                    have = None
+                if have is None or _fold_text_bytes(have) != _fold_text_bytes(wanted):
+                    return refusal("addon-file-differs",
+                                   "%s exists in the project and differs from the plugin's add-on file, so it "
+                                   "is left as it is and nothing was written. Compare it with %s, then rename "
+                                   "or remove it by hand if you want the add-on's copy" % (rel, src), dest), []
+                action = "present"
+        ops.append({"path": rel, "kind": kind, "action": action, "dest": dest, "data": wanted,
+                    "sha256": _sha256(wanted)})
+    return None, ops
+
+
+def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[Path],
+                plugin_root: Optional[Path], provider: str = "claude") -> Tuple[Result, Dict[str, Any]]:
+    """The AddonPlan (or a refusal) plus the bytes the apply needs. Writes nothing."""
+    if provider != "claude":
+        return _no_hooks_provider(provider, project), {}
+    bad = _check_project(project)
+    if bad:
+        return bad, {}
+    if _manifest_names_plugin(project):
+        return refusal("plugin-source-checkout",
+                       "this project is the plugin's own checkout; an add-on is installed into a project "
+                       "that uses the plugin", project), {}
+    if not ADDON_NAME_RE.match(name or ""):
+        return refusal("addon-unknown", "%r is not an add-on name" % name, project), {}
+    home = _claude_home(claude_home)
+    root = _separate_plugin_root(project, plugin_root, home, lambda r: (r / ADDONS_REL / name).is_dir())
+    if root is None:
+        return refusal("addon-manifest-missing",
+                       "no copy of the plugin with an add-ons folder was found to install from", project), {}
+    folder = root / ADDONS_REL / name
+    if not folder.is_dir():
+        known = sorted(a["name"] for a in _addon_listing(root))
+        return refusal("addon-unknown", "there is no add-on %r under %s; the add-ons are: %s"
+                       % (name, root / ADDONS_REL, ", ".join(known) or "none"), folder), {}
+    problem, manifest = _read_addon_manifest(folder)
+    if problem:
+        return problem, {}
+    for need in manifest["prerequisites"]:
+        if not _mcp_server_configured(need["name"], project, claude_home):
+            return refusal(
+                "codegraph-mcp-not-configured",
+                "the %s MCP server is not configured, so the %s add-on is not installed. Looked in the "
+                "project's .mcp.json, in the user's Claude configuration file (.claude.json) and in that "
+                "file's entry for this project. A gate installed without the server blocks every source read "
+                "and gives the agent no way past it. Configure the server first, then run this again."
+                % (need["name"], name), project / ".mcp.json"), {}
+    problem, ops = _addon_file_ops(project, root, folder, manifest)
+    if problem:
+        return problem, {}
+    regs = [_Registration(r["event"], r.get("matcher") or None, r["hook"], tuple(r.get("args", [])),
+                          "py", r["hook"], "command",
+                          tuple((k, r[k]) for k in ADDON_ROW_KEYS if k in r))
+            for r in manifest["registrations"]]
+    problem, edit = _plan_settings_edit(project, platform, home, regs)
+    if problem:
+        return problem, {}
+    ops_digest = "\n".join("%s|%s|%s" % (o["action"], o["path"], o["sha256"]) for o in ops).encode("utf-8")
+    old_bytes, new_bytes, to_add = edit["old-bytes"], edit["new-bytes"], edit["to-add"]
+    plan: Result = {
+        "status": "plan", "add-on": name, "install-skill": manifest.get("install_skill"),
+        "target": str(edit["target"]), "plugin-root": str(root),
+        "files": [{"path": o["path"], "kind": o["kind"], "action": o["action"]} for o in ops],
+        "source-sha256": _sha256(old_bytes) if old_bytes is not None else "absent",
+        "plan-sha256": _plan_digest(old_bytes if old_bytes is not None else b"absent", new_bytes, ops_digest),
+        "to-add": [{"event": r.event, "matcher": r.matcher, "command": _written_hook(r, platform)["command"],
+                    "args": _written_hook(r, platform)["args"], "registration-key": r.key} for r in to_add],
+        "already-present": edit["present"], "interpreter": "py -3" if platform == "win32" else "python3",
+        "disable-all-hooks": edit["disabled"], "unified-diff": edit["diff"], "notes": edit["notes"],
+        "kill-switches": [k for k in manifest.get("kill_switches", []) if isinstance(k, str)],
+        "new-session-note": NEW_SESSION_NOTE,
+    }
+    return plan, {"old-bytes": old_bytes, "new-bytes": new_bytes, "to-add": to_add, "ops": ops}
+
+
+def plan_addon(
+    project: Path,
+    name: str,
+    platform: Optional[str] = None,
+    claude_home: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+    provider: str = "claude",
+) -> Dict[str, Any]:
+    """Preview installing one add-on (AddonPlan) or return a Refusal. Writes nothing."""
+    plan, _payload = _plan_addon(Path(project), name, platform or sys.platform, claude_home, plugin_root,
+                                 provider)
+    return plan
+
+
+def apply_addon(
+    project: Path,
+    name: str,
+    expect_sha256: str,
+    platform: Optional[str] = None,
+    claude_home: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+    provider: str = "claude",
+) -> Dict[str, Any]:
+    """Install one add-on: copy its missing files, then merge its rows into the project's settings.json.
+
+    The previewed plan hash must still match. Every check runs before the first write. The hook files are
+    copied before the rows are written, so a row never points at a file that is not there. A backup of
+    settings.json is taken and the file is replaced atomically. Nothing is ever removed or overwritten.
+    """
+    project = Path(project)
+    platform = platform or sys.platform
+    plan, payload = _plan_addon(project, name, platform, claude_home, plugin_root, provider)
+    if _is_refusal(plan):
+        return plan
+    target = Path(plan["target"])
+    if expect_sha256 != plan["plan-sha256"]:
+        return refusal("changed-since-preview",
+                       "what would be written changed since it was previewed (settings.json, the add-on's "
+                       "files in the project or in the plugin differ); run the preview again", target)
+    copies = [o for o in payload["ops"] if o["action"] == "copy"]
+    if not copies and not payload["to-add"]:
+        return {"status": "nothing-to-do", "target": str(target), "add-on": name}
+    if payload["to-add"]:
+        launcher = "py" if platform == "win32" else "python3"
+        if not shutil.which(launcher):
+            return refusal("interpreter-not-found", "%s is not on PATH; a missing program fails open silently"
+                           % launcher, target)
+        if os.path.islink(str(target)):
+            return refusal("write-failed", "%s is a symbolic link; the apply would replace the link or write "
+                           "through it, so nothing was written. Edit the file it points to by hand" % target.name,
+                           target)
+        try:
+            current = target.read_bytes() if target.is_file() else None
+        except OSError as exc:
+            return refusal("project-unreadable", "settings.json cannot be read: %s" % exc, target)
+        if current != payload["old-bytes"]:
+            return refusal("changed-since-preview", "settings.json changed while the apply was running", target)
+    for op in copies:
+        if os.path.lexists(str(op["dest"])):
+            return refusal("changed-since-preview", "%s appeared while the apply was running; nothing more "
+                           "was written" % op["path"], op["dest"])
+    copied: List[str] = []
+    for op in copies:
+        error = _atomic_write(op["dest"], op["data"])
+        if error:
+            return refusal("write-failed", "%s could not be written: %s (copied so far: %s)"
+                           % (op["path"], error, ", ".join(copied) or "none"), op["dest"])
+        copied.append(op["path"])
+    result: Dict[str, Any] = {"status": "applied", "target": str(target), "add-on": name,
+                              "copied": copied, "added": len(payload["to-add"]), "backup": None,
+                              "new-session-note": NEW_SESSION_NOTE}
+    if not payload["to-add"]:
+        return result
+    old_bytes = payload["old-bytes"]
+    backup: Optional[Path] = None
+    try:
+        if old_bytes is not None:
+            backup = _backup_write(target, old_bytes)
+    except OSError as exc:
+        return refusal("write-failed", "the backup could not be written: %s (files copied: %s)"
+                       % (exc, ", ".join(copied) or "none"), target)
+    error = _atomic_write(target, payload["new-bytes"])
+    if error:
+        if backup is not None:
+            try:
+                backup.unlink()  # the original is untouched, so the backup would only be clutter
+            except OSError:
+                pass
+        return refusal("write-failed", "settings.json could not be replaced: %s (files copied: %s)"
+                       % (error, ", ".join(copied) or "none"), target)
+    result.update({"backup": str(backup) if backup else None,
+                   "rollback": ("copy %s over %s" % (backup, target)) if backup else "delete %s" % target,
+                   "gitignore-hint": ".claude/settings.json.bak-*"})
+    return result
+
+
 # =======================================================================================
 # Command line
 # =======================================================================================
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the command-line parser for the ``profile`` and ``hooks`` subcommands."""
+    """Build the command-line parser for the ``profile``, ``hooks`` and ``addon`` subcommands."""
     parser = argparse.ArgumentParser(
         prog="auto_improve_finish_install.py",
-        description="Finish Quick start steps 4 (profile) and 5 (hooks).",
+        description="Finish Quick start steps 4 (profile) and 5 (hooks), or install an opt-in add-on.",
     )
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--project", default=".", help="project root (default: .)")
@@ -1526,6 +1856,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="leave this hook out (repeatable)")
     hooks.add_argument("--platform", default=None, help="override sys.platform (tests)")
     hooks.add_argument("--provider", choices=PROVIDERS, default="claude")
+
+    addon = sub.add_parser("addon", parents=[common], help="install one opt-in add-on")
+    addon.add_argument("--name", required=True, help="the add-on to install (a folder under .claude/addons/)")
+    addon.add_argument("--platform", default=None, help="override sys.platform (tests)")
+    addon.add_argument("--provider", choices=PROVIDERS, default="claude")
     return parser
 
 
@@ -1539,11 +1874,17 @@ def _render_text(result: Result) -> str:
     if "ready" in result:
         out.append("ready: %s  (%s)" % (result["ready"], result.get("verdict")))
         out += ["  %s: %s" % (c["name"], "ok" if c["ok"] else "FAILED") for c in result.get("checks", [])]
+    for item in result.get("files", []):
+        out.append("  file %-60s %s" % (item["path"], item["action"]))
+    if "copied" in result:
+        out.append("copied: %s" % (", ".join(result["copied"]) or "none"))
     if "to-add" in result:
         out.append("to add: %d, already present: %d" % (len(result["to-add"]), len(result["already-present"])))
     out += ["note: " + n for n in result.get("notes", [])]
     if result.get("unified-diff"):
         out.append(result["unified-diff"])
+    if result.get("new-session-note"):
+        out.append(result["new-session-note"])
     return "\n".join(out)
 
 
@@ -1564,6 +1905,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = apply_profile(project, sets, args.expect_sha256 or "", home)
         else:
             result = propose_profile(project, home)
+    elif args.command == "addon":
+        if args.apply:
+            result = apply_addon(project, args.name, args.expect_sha256 or "", args.platform, home,
+                                 provider=args.provider)
+        else:
+            result = plan_addon(project, args.name, args.platform, home, provider=args.provider)
     elif args.apply:
         result = apply_hooks(project, args.expect_sha256 or "", args.skip, args.platform, args.provider, home)
     else:
