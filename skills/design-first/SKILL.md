@@ -15,7 +15,7 @@ Before anything else, remember:
 1. **Business concept first, code last.** Data shapes and mechanism reuse are decided before any file is edited.
 2. **Reuse is the default, creation is the exception.** The data-architect MUST extend existing mechanisms from `.claude/registries/MECHANISMS.md` unless an explicit justification is written.
 3. **Communication gate.** The contract is presented to the user and Open Questions resolved BEFORE implementer agents are invoked.
-4. **Hard block.** `~/.claude/hooks/concept-gate.py` blocks Edit/Write on non-trivial files without an approved contract.
+4. **Hard block.** `~/.claude/hooks/concept-gate.py` blocks Edit/Write on non-trivial files inside a project (a `.git`, `CLAUDE.md`, `package.json`, `pyproject.toml` or `*.sln` on the path) without an approved contract; a file outside every project is not gated.
 
 **Where this runs.** In the main checkout, run `/task` first: it cuts and enters a worktree, and the main-checkout guard refuses the contract file and every later edit in the shared tree. A `data-architect` or `contract-critic` handoff ending `BLOCKED: main checkout <target>` halts the run: enter a worktree with `EnterWorktree` and relaunch the agent there.
 

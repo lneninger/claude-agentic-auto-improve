@@ -208,6 +208,10 @@ class Sandbox:
         self.wt_concepts = self.wt / ".claude" / "concepts"
         for d in (self.hooks, self.scripts, self.concepts, self.home):
             d.mkdir(parents=True, exist_ok=True)
+        # A project marker (an empty .git folder) at the sandbox root: the sandbox lives under the system temp
+        # folder, which has none, and the gate does not gate a file outside every project. The marker keeps every
+        # block and index row here exercising the gate, as it does in a real checkout.
+        (self.root / ".git").mkdir(exist_ok=True)
         for name in HOOK_FILES:
             shutil.copyfile(HOOKS_DIR / name, self.hooks / name)
         for name in SCRIPT_FILES:

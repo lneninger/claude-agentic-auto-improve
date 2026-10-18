@@ -133,8 +133,10 @@ What the plugin registers. Every entry is in exec form (`"command": "py"`, `"arg
 | Stop | none | `plain-language-guard.py` | yes, with a short correction request |
 | Stop | none | `memory-pager.py` (asynchronous) | no |
 
-- **`concept-gate`** blocks `Edit` / `Write` / `MultiEdit` on non-trivial files until an
-  approved concept contract names them. Run `/design-first` to produce one.
+- **`concept-gate`** blocks `Edit` / `Write` / `MultiEdit` on non-trivial files inside a project
+  until an approved concept contract names them (a file with no `.git`, `CLAUDE.md`, `package.json`,
+  `pyproject.toml` or `*.sln` anywhere on its path is outside every project and is not gated).
+  Run `/design-first` to produce one.
 - **`architecture-guard`** blocks banned patterns at the write, using the project's own rules.
 - **`db-destructive-guard`** and **`db-research-readonly-guard`** block database operations
   that could destroy data. As of 0.7.0 the plugin registers both guards itself. The destructive

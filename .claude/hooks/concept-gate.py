@@ -6,6 +6,10 @@ Blocks Edit / Write / MultiEdit on non-trivial files unless an APPROVED
 concept contract exists under ~/.claude/concepts/<project>/ whose
 "Files to touch" section references the target file(s).
 
+Scope: only files inside a project. A target with no project marker (.git, CLAUDE.md,
+package.json, pyproject.toml, *.sln) anywhere on its path -- as written and as resolved,
+with every ancestor checked without error -- is outside every project and is allowed.
+
 Hook contract (Claude Code):
     stdin:  JSON with { tool_name, tool_input: { file_path | path | edits[] } }
     exit 0: allow (optional stdout = informational)
@@ -29,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -294,29 +299,67 @@ def is_trivial_target(path: Path) -> bool:
     return False
 
 
+PROJECT_MARKERS = frozenset({".git", "CLAUDE.md", "package.json", "pyproject.toml"})  # plus any *.sln
+
+
+def _scan_for_project(start: Path) -> tuple[str | None, bool]:
+    """
+    Walk up from ``start`` looking for a project root marker: ``PROJECT_MARKERS`` or a ``*.sln``.
+
+    Returns ``(folder name of the first directory holding a marker or None, complete)``. ``complete`` is
+    False when any ancestor's existence check or listing failed for a reason other than "not found" /
+    "not a directory" (those skip the ancestor: a new file in a new folder). Never raises (CG-2): an
+    incomplete scan must never be read as "no project".
+    """
+    complete = True
+    for parent in [start] + list(start.parents):
+        try:
+            if not stat.S_ISDIR(os.stat(parent).st_mode):
+                continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except (OSError, ValueError):
+            complete = False
+            continue
+        try:
+            entries = set(os.listdir(parent))
+        except (OSError, ValueError):
+            complete = False
+            continue
+        if entries & PROJECT_MARKERS or any(e.endswith(".sln") for e in entries):
+            return parent.name, complete
+    return None, complete
+
+
+def _resolved_target(target: Path) -> Path:
+    try:
+        return target.resolve(strict=False)
+    except (OSError, ValueError, RuntimeError):
+        return target
+
+
 def detect_project_name(target: Path) -> str | None:
     """
-    Walk up from the target file looking for a project root marker.
+    Walk up from the (resolved) target file looking for a project root marker.
     Returns the folder name of the first directory that contains one of:
     .git, CLAUDE.md, package.json, *.sln, pyproject.toml.
     """
-    markers = {".git", "CLAUDE.md", "package.json", "pyproject.toml"}
+    return _scan_for_project(_resolved_target(target))[0]
+
+
+def _outside_every_project(target: Path, resolved: Path, resolved_scan: tuple[str | None, bool]) -> bool:
+    """CG-1: True only when the resolved scan AND the written-path scan both find no project and are complete."""
+    name, complete = resolved_scan
+    if name is not None or not complete:
+        return False
     try:
-        resolved = target.resolve(strict=False)
-    except OSError:
-        resolved = target
-    for parent in [resolved] + list(resolved.parents):
-        if not parent.is_dir():
-            continue
-        try:
-            entries = {e.name for e in parent.iterdir()}
-        except (PermissionError, OSError):
-            continue
-        if entries & markers:
-            return parent.name
-        if any(e.endswith(".sln") for e in entries):
-            return parent.name
-    return None
+        written = Path(os.path.abspath(str(target)))
+    except (OSError, ValueError):
+        return False
+    if written == resolved:
+        return True
+    written_name, written_complete = _scan_for_project(written)
+    return written_name is None and written_complete
 
 
 def _markdown_files_newest_first(root: Path) -> list[Path]:
@@ -558,8 +601,14 @@ def resolve_target(
     if pinned is not None and contract_is_honored(pinned) and contract_covers_target(pinned, target):
         return True, None, pinned
 
-    # 3. Scan the concepts folder for an honored contract that covers this file.
-    project_name = detect_project_name(target)
+    # 3. CG-1: a target provably outside every project (written and resolved) is not this gate's business.
+    resolved = _resolved_target(target)
+    resolved_scan = _scan_for_project(resolved)
+    if _outside_every_project(target, resolved, resolved_scan):
+        return True, None, None
+
+    # 4. Scan the concepts folder for an honored contract that covers this file.
+    project_name = resolved_scan[0]
     extra_roots = _extra_concepts_roots_for_target(str(target))
     for contract in iter_contracts(project_name, extra_roots):
         status = _indexed_contract_status(contract)
@@ -570,7 +619,7 @@ def resolve_target(
         if _indexed_contract_covers_target(contract, target):
             return True, None, contract
 
-    # 4. Determine an accurate reason.
+    # 5. Determine an accurate reason.
     if not CONCEPTS_ROOT.exists():
         reason = "concepts folder does not exist -- no contracts have been created yet"
     else:
