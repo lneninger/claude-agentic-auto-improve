@@ -371,6 +371,8 @@ Two further rows are defects even though the block is mergeable: files present w
 
 **`Depends on:` is required on every sub-task.** Write `none`, or the ordinals it waits for. State it, never leave it to be inferred — file lists do not carry it. Backend and frontend touch entirely different files and the frontend still needs the endpoint first. A sub-task is released only when every ordinal it names has a completion record.
 
+**`Preconditions:` is optional.** Write it as a bold label at column 0, on one line between the `Depends on:` and `Files to touch` labels, never as bullets: `**Preconditions:** pull-request owner/repo#5, emulator azurite, any other text`. `/advance` reads it with `pr_merged.py --preconditions` before it starts a sub-task.
+
 **A review gate writes a file, so it is an ordinary mergeable sub-task.** The file is its review artefact. Give the gate a `Depends on:` like any other block, and a `Files to touch` list naming exactly one path:
 
 ```

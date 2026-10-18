@@ -144,7 +144,20 @@ touches, not by why it was raised.
 
 ### Deriving the modules
 
-From the diff, never from memory:
+From the diff, never from memory. **Run the script; do not apply the rules by hand.**
+`land_contract.py --module-tags` reads the diff and the `prTitle` block and returns the tags,
+the unmapped paths and the ready-made prefix:
+
+```bash
+LANDER=$(ls .claude/scripts/land_contract.py          "$CLAUDE_PLUGIN_ROOT/.claude/scripts/land_contract.py"          ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/land_contract.py          2>/dev/null | head -1)
+py -3 "$LANDER" --module-tags --base origin/<base> --json
+```
+
+Read `tags` (already ordered), `unmapped` and `prefix`. Exit 0 means the tags were read. Exit 9
+means the `--base` ref cannot be read: fetch origin and pass a ref that exists, then run it again. An
+unmapped path is listed in `unmapped` and tagged with nothing; the script never asks, so the
+ask-then-add rule under "When a path matches nothing" below still applies. If `LANDER` comes
+back empty (an older install), derive the tags by hand from the changed paths:
 
 ```bash
 git -C <tree> diff --name-only origin/<base>...HEAD
@@ -163,6 +176,11 @@ Three traps, all of which have fired before:
   touched. This is a verified failure mode, recorded in the conventions file itself. Use
   `pathlib.PurePath.match` or an explicit segment-wise matcher.
 - **`atLeastOne: true`.** A title with no module tag is invalid.
+
+A map entry may also carry `coveredBy`, a list of tags that cover it. Drop the entry's tag
+when the diff also carries a tag named in its `coveredBy`; keep it when the diff does not. It
+is data on the map entry in the conventions file, so a repository states its own covering
+pairs and the template ships none.
 
 ### When a path matches nothing
 

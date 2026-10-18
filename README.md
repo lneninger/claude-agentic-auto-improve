@@ -698,7 +698,7 @@ project ships an empty `contractLanding` block in `.claude/work-item-conventions
 stops with `landing-not-configured` until the project declares its own verification steps.
 
 The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
-neither can drift from the other. It carries 484 tests.
+neither can drift from the other. It carries 575 tests.
 
 ### What it will refuse to do
 
