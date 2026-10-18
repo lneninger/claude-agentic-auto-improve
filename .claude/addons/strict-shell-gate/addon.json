@@ -1,0 +1,25 @@
+{
+  "name": "strict-shell-gate",
+  "hooks": [
+    "bash-gate.py"
+  ],
+  "helpers": [
+    ".claude/hooks/_project_paths.py",
+    ".claude/hooks/_shell_write_targets.py",
+    ".claude/scripts/_contract_index.py"
+  ],
+  "registrations": [
+    {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "hook": "bash-gate.py",
+      "args": []
+    }
+  ],
+  "prerequisites": [],
+  "kill_switches": [
+    "CLAUDE_BASH_GATE",
+    "CLAUDE_CONCEPT_GATE"
+  ],
+  "install_skill": "auto-improve-strict-shell-gate-install"
+}

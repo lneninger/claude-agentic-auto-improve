@@ -201,8 +201,9 @@ runs twice). The answer is a readiness report. Tell the user, in plain words:
 - **Ready to load is not live.** The report says what it checked and what it could not. Say
   both. Never say "the hooks are live".
 - **Which gates are on.** Name the files in `gates`. The ones that block are the concept
-  gate, the architecture guard and the two database guards. The bash gate and the
-  code-search-first guard were retired in 0.7.0.
+  gate, the architecture guard and the two database guards. The strict shell gate and the
+  code-search-first guard are add-ons: they are off unless the project installed them (see
+  "Add-ons" below).
 - **The environment variables.** Print the list in `kill-switches`. Most are kill switches,
   set by the user and never by an agent. Two are different: `CLAUDE_ACTIVE_CONTRACT` pins one
   approved contract, and `CLAUDE_DESTRUCTIVE_DB_OK` is a one-shot approval for one destructive
@@ -213,9 +214,11 @@ runs twice). The answer is a readiness report. Tell the user, in plain words:
   template: they read the project's own `.claude/hooks/db-destructive-guard.rules.json`. A
   project that has no such file (or an empty list) has every database protected, which is
   strict on purpose. The project names its real databases in that file.
-- **The code-search-first note.** Print `code-search-first-note`. In short: the check was
-  retired in 0.7.0, the plugin no longer blocks source reads, and no CodeGraph tool has to run
-  first, so there is nothing to bypass.
+- **The code-search-first note.** Print `code-search-first-note`. In short: the guard that
+  makes a CodeGraph call come first is the `codegraph` add-on. It is off by default, so the
+  plugin does not block source reads. `/auto-improve-codegraph-install` turns it on.
+- **The add-ons.** Print the `add-ons` list from the report: each add-on's name and its
+  install skill. Say they are opt-in and that this skill installs none of them.
 - **The platform note.** If the answer has `platform-note` (macOS and Linux), say plainly
   that this command cannot fix it under a plugin install. The cached `hooks.json` launches
   `py -3`. The two options are to copy the hooks into the project instead (vendor them), or to
@@ -266,6 +269,19 @@ there is no backup.
 with the script's named reason. Say the reason in plain words. Write nothing. For `both`,
 every hook would run twice, so the user must remove one of the two registrations. That is
 their decision, not this skill's.
+
+## Add-ons (opt-in, installed by their own skills)
+
+Three optional add-ons ship with the plugin. None is registered by the plugin, and this skill
+installs none of them. Each has its own skill, which previews first and writes only after a yes:
+
+| Add-on | What it does | Its install skill |
+|---|---|---|
+| `angular-tailwind` | At each prompt, reminds the agent of the Angular and Tailwind CSS rules. | `/auto-improve-angular-tailwind-install` |
+| `codegraph` | Blocks a source Read, Grep or Glob until a CodeGraph call has run in the turn. Needs the CodeGraph MCP server. | `/auto-improve-codegraph-install` |
+| `strict-shell-gate` | Reads each shell command before it runs and blocks a write into a source file that no approved contract covers. | `/auto-improve-strict-shell-gate-install` |
+
+Only name them. Do not start one of them unless the user asks.
 
 ## Closing
 

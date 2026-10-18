@@ -8,8 +8,8 @@
 >   folder). Linked worktrees are not affected. There is **no off switch**: no environment variable,
 >   flag or file turns it off.
 > - **Shell commands are guarded from 0.9.8.** Before 0.9.8 only the edit tools were covered, because
->   the shell check lived in `bash-gate.py`, which this plugin keeps cut (contract
->   `2026-09-28-hook-server-modes`, INV-O1). The plugin now registers a launcher row on `Bash` and
+>   the shell check lived in `bash-gate.py`, which the plugin did not register. Since 0.9.9 that gate
+>   is the opt-in `strict-shell-gate` add-on (see "Add-ons" below). The plugin now registers a launcher row on `Bash` and
 >   `PowerShell` that runs the same main-checkout guard, and the merge-direction check for `gh` pull
 >   request commands, before every shell command. It reads the files a command writes with the shared
 >   parser `_shell_write_targets.py`. `/ship` still runs `merge_direction.py` before it opens a pull
@@ -221,29 +221,36 @@ register only the hooks you want.
 ### Retired hooks, and how to restore one
 
 Version 0.7.0 retired six hooks. Version 0.9.8 brought `plan-question-advisor.py` back as a
-default hook (see the table above), so five stay retired. The plugin neither ships nor registers
-these any more:
+default hook (see the table above). Version 0.9.9 brings the other five back as three **opt-in
+add-ons**. The plugin ships their files under `.claude/addons/` but never registers them, so a
+default install runs none of them:
 
-| Retired hook | What it did | Why it went |
-|---|---|---|
-| `bash-gate.py` | blocked shell writes into source files without a contract | the slowest Bash hook, and it refused legitimate writes; `concept-gate` still gates every edit tool, and since 0.9.8 the Changed-file check judges what shell commands wrote after the fact |
-| `codegraph-first-guard.py` | blocked `Read` / `Grep` / `Glob` on source until a CodeGraph tool had run | the slowest single cost per read, and unusable by an agent without CodeGraph tools |
-| `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | kept the per-turn marker the guard above read | they existed only for that guard |
-| `architecture-advisor.py` | a keyword reminder at every prompt | the guard still enforces at the write |
+| Add-on | Its hook files | What it does | Why it is not a default |
+|---|---|---|---|
+| `angular-tailwind` | `angular-tailwind-advisor.py` (formerly `architecture-advisor.py`) | at each UI prompt, reminds the agent of the Angular and Tailwind CSS rules | it only suits Angular plus Tailwind projects; `architecture-guard.py` still enforces at the write |
+| `codegraph` | `codegraph-first-guard.py`, `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | blocks `Read` / `Grep` / `Glob` on source until a CodeGraph tool has run in the turn | it blocks every source read when the CodeGraph server is missing |
+| `strict-shell-gate` | `bash-gate.py` | reads each shell command before it runs and blocks a write into a source file no approved contract covers | a program start on every shell command, and it misreads some commands (it read `--stat` as the file written in `sed -i` followed by `git diff --stat`) and cannot see what a program such as `python` or `node` writes; the Changed-file check, which stays on, catches those after the fact |
+
+**To install one in a project**, run its skill. Each one previews the files and the
+`settings.json` change, asks once, and writes only after a yes:
+
+| Add-on | Skill |
+|---|---|
+| `angular-tailwind` | `/auto-improve-angular-tailwind-install` |
+| `codegraph` | `/auto-improve-codegraph-install` (stops with a plain message when the CodeGraph MCP server is not configured) |
+| `strict-shell-gate` | `/auto-improve-strict-shell-gate-install` |
+
+Each skill runs `auto_improve_finish_install.py addon --name <add-on>`. The script copies the
+add-on's hook files and the helper files its `addon.json` names (a helper only when the project
+lacks it), then writes the rows in exec form on `${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>`, through
+the same preview, plan hash, backup and symbolic-link refusal as the hooks step. It never removes
+a row or a file and never overwrites a file that differs; start a new session afterwards, because
+hooks are read when a session starts. To remove an add-on, delete its rows from
+`.claude/settings.json` and its hook files from `.claude/hooks/` by hand. `plugin_doctor.py
+--drift` compares an installed add-on's files with the plugin's.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
 `post-edit-dispatcher.py` rather than as four registrations.
-
-**To restore a retired hook in one project**, take its file from the last release that had it
-(0.6.2) and register it yourself, because the plugin no longer carries it:
-
-1. Copy the file from that release's folder in the plugin cache, or from the repository at that
-   tag with `git show <tag>:.claude/hooks/<name>`, into your project's `.claude/hooks/`.
-   Bring `_project_paths.py`, `_error_log.py`, `_contract_files.py` and `_contract_index.py` along
-   when it imports them.
-2. Register it in your own `.claude/settings.local.json` (this machine only) or
-   `.claude/settings.json` (the team), under the event and matcher in the table above.
-3. Start a new session. Hooks are read when a session starts.
 
 ### Local development workflow
 
@@ -400,10 +407,11 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          22 generic skills          (plugin root -- all three providers)
+skills/          25 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    6 shipped working agreements, delivered at session start
+  addons/        3 opt-in add-ons (addon.json + hook files), never registered by hooks.json
   hooks/         12 generic hooks, 4 shared helper modules, 6 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
     tests/       9 hook test suites
@@ -447,11 +455,15 @@ dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scou
 flow, task, design-first, tdd-first, advance, pr-merged, verify-before-done,
 git-commit, ship, debug, north-star, north-star-review, list-contracts,
 contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
-validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install.
+validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install,
+auto-improve-angular-tailwind-install, auto-improve-codegraph-install,
+auto-improve-strict-shell-gate-install.
 
 `auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
 skill, run once per project after the plugin is installed. Its name carries the plugin's name
-because you may have several plugins installed.
+because you may have several plugins installed. The three `auto-improve-*-install` skills
+after it are not stages either: each installs one opt-in add-on (see "Retired hooks, and how
+to restore one").
 
 The rest form one chain, and each stage hands the next a written artefact rather than a memory
 of the conversation:
@@ -723,7 +735,8 @@ declares with the installed plugin's, and it reports a hook registered by both s
 `0` when the comparison ran and nothing counted, `1` when something did, and `4` when it could
 not compare (no plugin found, a folder missing, a file that does not parse, or no file pair
 compared). `--json` adds the `compared` count, so a caller can tell an empty comparison from a
-clean one, and `--ignore-repo-owned` prints a repository-owned finding as `reported` instead of
+clean one, `compared_addons` counts the installed add-on files it compared (they are never
+counted in `compared`), and `--ignore-repo-owned` prints a repository-owned finding as `reported` instead of
 counting it.
 
 It creates the directories, copies the templates and registries out of the plugin, and

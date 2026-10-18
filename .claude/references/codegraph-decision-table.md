@@ -11,9 +11,10 @@ failure modes that have actually bitten this project.
 
 ## The rule
 
-**Every codebase question starts with a CodeGraph call.** This is guidance, not a gate: the plugin's
-code-search-first hook was retired in 0.7.0, so a `Read` / `Grep` / `Glob` is never blocked for want of
-a CodeGraph call. The routing below still says which tool answers which question best.
+**Every codebase question starts with a CodeGraph call.** This is guidance, not a gate by default: the plugin
+ships the code-search-first hook as the opt-in `codegraph` add-on, installed by
+`auto-improve-codegraph-install`, so a `Read` / `Grep` / `Glob` is blocked for want of a CodeGraph
+call only in a project that installed it. The routing below still says which tool answers which question best.
 
 ## Routing
 
@@ -80,7 +81,8 @@ only its summary.
 
 ## Retired gate (0.7.0)
 
-Three hooks used to turn the rule above into a block. The plugin no longer ships or registers them:
+Three hooks used to turn the rule above into a block. The plugin retired them in 0.7.0 and now ships
+them again as the opt-in `codegraph` add-on (never registered by the plugin itself):
 
 | Retired hook | What it did |
 |---|---|
@@ -88,7 +90,7 @@ Three hooks used to turn the rule above into a block. The plugin no longer ships
 | CodeGraph turn tracker | Created the per-turn marker file after a CodeGraph call. |
 | CodeGraph turn reset | Deleted the marker at every new prompt. |
 
-A project that wants the block back registers its own copies; the README's "Retired hooks" section says how.
+A project that wants the block back runs `/auto-improve-codegraph-install`; the README's "Retired hooks" section says how.
 
 Lifecycle hooks that keep the index fresh (not part of the retired gate): `SessionStart` →
 `codegraph sync-if-dirty`; PostToolUse on Edit/Write/MultiEdit → `codegraph mark-dirty` (async);
