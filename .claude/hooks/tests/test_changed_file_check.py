@@ -113,6 +113,19 @@ def write_contract(path: Path, files: list[str], status: str = "approved") -> Pa
     return path
 
 
+def assert_fixture_outside_claude_folder(test: unittest.TestCase, root: Path) -> None:
+    """FAIL (never skip) when any part of the fixture's root path is named .claude.
+
+    The concept gate treats every path holding a .claude segment as trivial, so a probe placed under such a
+    folder reads clean by construction. The project's own .claude folder (below the root) is the only one
+    allowed, so only the root and the folders above it are looked at.
+    """
+    parts = Path(os.path.realpath(str(root))).parts
+    test.assertNotIn(".claude", [part.lower() for part in parts],
+                     msg="fixture root %s sits under a .claude folder; a probe there is clean by construction "
+                         "(point TEMP somewhere else)" % root)
+
+
 class Template:
     root: Path | None = None
     project: Path | None = None
@@ -186,6 +199,7 @@ class Project:
             raise AssertionError("template missing")
         self.root = Path(os.path.realpath(tempfile.mkdtemp(prefix="cfc_row_")))
         test.addCleanup(self._remove)
+        assert_fixture_outside_claude_folder(test, self.root)
         self.project = self.root / "project"
         shutil.copytree(TEMPLATE.project, self.project)
         # The hook error log writes only when the project's logs folder exists (it never creates it).
@@ -782,6 +796,143 @@ class ParityTests(Base):
                              "gate only: %s\ncheck only: %s\n%s"
                              % (sorted(gate_blocks - check_blocks), sorted(check_blocks - gate_blocks),
                                 res.describe()))
+
+
+# ===========================================================================
+# 7. Where a "generated" mark may come from (Revision 11, finding F2)
+# ===========================================================================
+class GeneratedAttributeSourceTests(Base):
+    """A file counts as generated only when the COMMITTED attribute files of HEAD mark it.
+
+    Three other places can carry the mark and a session controls each: an untracked ``.gitattributes``, the
+    repository-private ``.git/info/attributes`` and a user-wide attributes file. None of them may hide an
+    uncovered file. A ``linguist-generated`` line in ``info/attributes`` turns the exemption off for every file
+    in the run. At ``--staged`` a generated file is no longer silent: exit 0 and one stderr line naming it.
+
+    Each row has its own project and so its own session id. Every fixture asserts, before use, that its root
+    is not under a .claude folder (a probe there would be clean by construction) and FAILS otherwise.
+    """
+
+    def _stage(self, *rels: str) -> None:
+        for rel in rels:
+            git(self.p.project, "add", "--", rel)
+
+    def _stops_at_turn_end(self, name: str, env: dict | None = None) -> None:
+        self.assertStopped(self.p.run_check(env=env), name)
+
+    def _stops_at_staged(self, name: str, *stage: str, env: dict | None = None) -> None:
+        self._stage(*stage)
+        staged = self.p.run_check(args=("--staged",), env=env)
+        self.assertEqual(staged.rc, 2, msg="at --staged the same file must stop the commit: " + staged.describe())
+        self.assertIn(name, staged.err, msg="and the stop must name it: " + staged.describe())
+
+    def _info_attributes(self, text: str = "src/** linguist-generated\n") -> None:
+        info = self.p.project / ".git" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "attributes").write_text(text, encoding="utf-8")
+
+    def _user_wide_marking(self) -> dict:
+        """The fixture's own global git config pointing at an attributes file that marks src/**."""
+        attributes = self.p.root / "global-attributes"
+        attributes.write_text("src/** linguist-generated\n", encoding="utf-8")
+        config = self.p.root / "global-gitconfig"
+        config.write_text("[core]\n\tattributesFile = %s\n" % attributes.as_posix(), encoding="utf-8")
+        return {"GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def test_fixture_root_is_outside_any_claude_folder(self):
+        parts = [part.lower() for part in Path(os.path.realpath(str(self.p.root))).parts]
+        self.assertNotIn(".claude", parts, msg="the fixture must live under the system temporary folder")
+        # Positive control for the guard itself: a root under a .claude folder is refused (the call raises).
+        with self.assertRaises(AssertionError, msg="the guard must fail, not skip, for a root under .claude"):
+            assert_fixture_outside_claude_folder(self, self.p.root / ".claude" / "x")
+
+    def test_a_new_uncovered_file_with_no_attribute_stops_at_turn_end(self):
+        # (a) positive control: passes today.
+        name = "Plain_%s.cs" % token()
+        self.p.write("src/" + name)
+        self._stops_at_turn_end(name)
+
+    def test_a_new_uncovered_file_with_no_attribute_stops_at_staged(self):
+        # (a) positive control: passes today.
+        name = "PlainStaged_%s.cs" % token()
+        self.p.write("src/" + name)
+        self._stops_at_staged(name, "src/" + name)
+
+    def test_an_untracked_gitattributes_marking_everything_does_not_hide_the_file_at_turn_end(self):
+        # (b) the untracked file covers itself and the file beside it.
+        name = "UntrackedAttr_%s.cs" % token()
+        self.p.write("src/.gitattributes", "* linguist-generated\n")
+        self.p.write("src/" + name)
+        self._stops_at_turn_end(name)
+
+    def test_an_untracked_gitattributes_marking_everything_does_not_hide_the_file_at_staged(self):
+        # (b) with both files staged; neither is in HEAD, so neither mark counts.
+        name = "UntrackedAttrStaged_%s.cs" % token()
+        self.p.write("src/.gitattributes", "* linguist-generated\n")
+        self.p.write("src/" + name)
+        self._stops_at_staged(name, "src/.gitattributes", "src/" + name)
+
+    def test_a_mark_in_the_private_info_attributes_file_does_not_hide_the_file_at_turn_end(self):
+        # (c) git status never shows .git/info/attributes.
+        name = "InfoAttr_%s.cs" % token()
+        self._info_attributes()
+        self.p.write("src/" + name)
+        self._stops_at_turn_end(name)
+
+    def test_a_mark_in_the_private_info_attributes_file_does_not_hide_the_file_at_staged(self):
+        name = "InfoAttrStaged_%s.cs" % token()
+        self._info_attributes()
+        self.p.write("src/" + name)
+        self._stops_at_staged(name, "src/" + name)
+
+    def test_a_mark_in_a_user_wide_attributes_file_does_not_hide_the_file(self):
+        # (d) the fixture's own global git config; the developer's is never read.
+        name = "GlobalAttr_%s.cs" % token()
+        env = self._user_wide_marking()
+        self.p.write("src/" + name)
+        # Positive control: git itself, given that config, reports the mark, so the fixture is not inert.
+        probe = subprocess.run(["git", "check-attr", "linguist-generated", "--", "src/" + name],
+                               cwd=str(self.p.project), env=self.p.env(env), capture_output=True, text=True)
+        self.assertIn("linguist-generated: set", probe.stdout,
+                      msg="fixture: the user-wide file must mark the file: %r %r" % (probe.stdout, probe.stderr))
+        self._stops_at_turn_end(name, env=env)
+
+    def test_a_mark_in_a_user_wide_attributes_file_does_not_hide_the_file_at_staged(self):
+        name = "GlobalAttrStaged_%s.cs" % token()
+        env = self._user_wide_marking()
+        self.p.write("src/" + name)
+        self._stops_at_staged(name, "src/" + name, env=env)
+
+    def test_a_committed_attribute_still_notes_the_file_at_turn_end(self):
+        # (e, first half) the existing behaviour: a control that passes today.
+        name = "Committed_%s.cs" % token()
+        self.p.write("src/gen/" + name)
+        self.assertNoted(self.p.run_check(), name)
+
+    def test_a_committed_attribute_at_staged_exits_0_and_says_one_stderr_line_naming_the_file(self):
+        # (e, second half) today it says nothing.
+        name = "CommittedStaged_%s.cs" % token()
+        self.p.write("src/gen/" + name)
+        self._stage("src/gen/" + name)
+        res = self.p.run_check(args=("--staged",))
+        self.assertEqual(res.rc, 0, msg="a generated file alone does not stop the commit: " + res.describe())
+        lines = [line for line in res.err.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, msg="exactly one standard-error line: " + res.describe())
+        self.assertIn(name, lines[0], msg="and it names the generated file: " + res.describe())
+        self.assertEqual(res.out.strip(), "", msg="nothing on stdout: " + res.describe())
+
+    def test_a_committed_attribute_plus_an_info_attributes_mark_stops_at_turn_end(self):
+        # (f) the committed attribute does not save the file once the private file also marks it.
+        name = "Both_%s.cs" % token()
+        self._info_attributes()
+        self.p.write("src/gen/" + name)
+        self._stops_at_turn_end(name)
+
+    def test_a_committed_attribute_plus_an_info_attributes_mark_stops_at_staged(self):
+        name = "BothStaged_%s.cs" % token()
+        self._info_attributes()
+        self.p.write("src/gen/" + name)
+        self._stops_at_staged(name, "src/gen/" + name)
 
 
 if __name__ == "__main__":
