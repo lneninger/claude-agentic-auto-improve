@@ -88,9 +88,16 @@ It needs two helpers, `.claude/hooks/_project_paths.py` and `.claude/hooks/_erro
 Do not install the add-on anyway. Do not edit `.mcp.json` yourself. Do not offer a way around
 the check. The server's setup is the user's decision.
 
-The script only checks that the server is configured, not that it is running. A server that is
-configured but not running still blocks every source read at run time, so remind the user that
-the server must be running.
+The script checks that the server is configured as a real entry (a non-empty `command` or `url`)
+and that no settings layer lists it in `disabledMcpjsonServers`. It does not check that the
+server is running. A server that is configured but not running still blocks every source read
+at run time, so remind the user that the server must be running. The refusal message names which
+condition failed: no entry, an entry that starts no server, or a server listed as disabled.
+
+When the server is defined only in the project's `.mcp.json` and no setting approves it
+(`enabledMcpjsonServers` or `enableAllProjectMcpServers`), the preview does not refuse. It
+carries one note saying so. Pass that note on to the user: Claude Code asks for approval when a
+session starts, and until the server is approved the gate would block every source read.
 
 ## Step 1: Preview (writes nothing)
 
@@ -105,7 +112,7 @@ to `.claude/settings.json`), `notes`, `kill-switches`, `target`, `plugin-root` a
 text the write would produce and every file the install would copy, so anything that moves
 between the preview and the write is refused as `changed-since-preview`.
 
-**The preview checks for the CodeGraph MCP server first.** The script looks for a server named `codegraph` in the project's `.mcp.json`, in the user's Claude configuration file (`.claude.json`), and in that file's entry for this project. If it finds none, it refuses as `codegraph-mcp-not-configured`. Follow the section above.
+**The preview checks for the CodeGraph MCP server first.** The script looks for a server named `codegraph` in the project's `.mcp.json`, in the user's Claude configuration file (`.claude.json`), and in that file's entry for this project. It refuses as `codegraph-mcp-not-configured` when it finds none, when the entry has no `command` and no `url`, or when a settings layer lists the server in `disabledMcpjsonServers`. Follow the section above.
 
 ## Step 2: Show the plan and ask once
 
@@ -156,8 +163,9 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
   plugin's copy and renames or removes it by hand, then runs this skill again.
 - `changed-since-preview`: something moved after the preview. Go back to the preview, show the
   new plan, and ask again. Never reuse the old hash.
-- `write-failed`: for example `.claude/settings.json` is a symbolic link. Nothing was written.
-  Tell the user to edit the file the link points to by hand.
+- `write-failed`: for example `.claude/settings.json` is a symbolic link, or `.claude` or
+  `.claude/hooks` is a link (a junction on Windows) to another folder. Nothing was written.
+  Tell the user to edit the file the link points to by hand, or to replace the link with a real folder.
 - `plugin-source-checkout`: this folder is the plugin's own checkout. Install an add-on in a
   project that uses the plugin instead.
 - `addon-unknown`: the name matches no add-on folder in the plugin.
