@@ -102,6 +102,7 @@ Implementation seams the tests rely on (all stated by the contract or the reposi
 
 import contextlib
 import datetime
+import difflib
 import hashlib
 import io
 import json
@@ -3698,6 +3699,632 @@ class TestAddonInstall(Base):
         for name in ADDON_SPECS:
             self.assertIn(name, text, msg="the report names the %s add-on" % name)
             self.assertIn("auto-improve-%s-install" % name, text, msg="and its install skill")
+
+
+# ======================================================================================
+# Revision 11 (dedupe contract, block 40): the settings writer keeps every byte it does not add.
+#
+# RED rows for findings F1 (re-rendered file), F3 (CodeGraph prerequisite) and F9 (linked folders) of the
+# consuming repository's security review of the hook split. The rows for F2 live in
+# hooks/tests/test_changed_file_check.py.
+#
+# FIXTURE LOCATION. Every fixture project lives in a fresh folder under the system temporary folder. Before use
+# each one asserts that no part of its root path is named .claude, and FAILS (never skips) otherwise: the
+# concept gate treats every path holding a .claude segment as trivial, so a probe there is clean by
+# construction. The project's own .claude folder (below the root) is the only one allowed.
+#
+# THE ESCAPED FIXTURE is text built here, never a copy of any project's file. It has a byte order mark, CRLF
+# line endings, 24 unicode escapes inside strings of a permissions deny list, several one-line args arrays and
+# an existing group on the add-on's event. The escaped letters spell harmless words only.
+#
+# Rows that must PASS today (controls): the escaped fixture's positive control, the three plan hash rows, the
+# linked-parent-folder row, and the approved-command and url rows of the CodeGraph prerequisite. Every other
+# row fails today for an assertion reason.
+# ======================================================================================
+def assert_outside_claude_folder(test, root):
+    """FAIL (never skip) when any part of the fixture root's path is named .claude."""
+    parts = [p.lower() for p in Path(os.path.realpath(str(root))).parts]
+    test.assertNotIn(".claude", parts,
+                     msg="fixture root %s is under a .claude folder; a probe there is clean by construction "
+                         "(point TEMP somewhere else)" % root)
+
+
+_HARMLESS_WORDS = ["cat", "less", "head", "tail", "echo", "date", "whoami", "pwd", "uname", "hostname", "sort",
+                   "wc", "diff", "stat", "file", "find", "grep", "tree", "which", "env", "ps", "df", "du", "id"]
+_ONE_LINE_HOOK = ('{"type": "command", "command": "py", '
+                  '"args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/mine.py"]}')
+_OTHER_ONE_LINE_HOOK = ('{"type": "command", "command": "py", '
+                        '"args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/theirs.py", "--quiet"]}')
+
+PLACEMENTS = ("same-matcher", "new-group", "new-event", "no-hooks", "empty-event-list", "one-line-container",
+              "lf-only")
+
+
+def _escaped_first_letter(word):
+    return "\\u%04x" % ord(word[0]) + word[1:]
+
+
+def _event_block(name, groups):
+    """A multi-line event entry whose groups are given as (matcher or None, [one-line hook texts])."""
+    rendered = []
+    for matcher, hooks in groups:
+        lines = ["      {"]
+        if matcher is not None:
+            lines.append('        "matcher": "%s",' % matcher)
+        lines += ['        "hooks": [', ",\n".join("          " + h for h in hooks), "        ]", "      }"]
+        rendered.append("\n".join(lines))
+    return "\n".join(['    "%s": [' % name, ",\n".join(rendered), "    ]"])
+
+
+def escaped_settings_text(placement):
+    """The escaped fixture as LF text, shaped for one placement case of the add-on's event (UserPromptSubmit)."""
+    deny = ",\n".join('      "Bash(%s *)"' % _escaped_first_letter(w) for w in _HARMLESS_WORDS)
+    text = ('{\n  "permissions": {\n    "deny": [\n%s\n    ],\n'
+            '    "allow": ["Bash(ls)", "Bash(pwd)"]\n  }' % deny)
+    stop = _event_block("Stop", [(None, [_OTHER_ONE_LINE_HOOK])])
+    if placement in ("same-matcher", "lf-only"):
+        hooks = [_event_block("UserPromptSubmit", [(None, [_ONE_LINE_HOOK])]), stop]
+    elif placement == "new-group":
+        hooks = [_event_block("UserPromptSubmit", [("keep", [_ONE_LINE_HOOK])]), stop]
+    elif placement == "new-event":
+        hooks = [stop]
+    elif placement == "empty-event-list":
+        hooks = ['    "UserPromptSubmit": []', stop]
+    elif placement == "one-line-container":
+        hooks = ['    "UserPromptSubmit": [{"hooks": [%s]}]' % _ONE_LINE_HOOK, stop]
+    elif placement == "no-hooks":
+        return text + "\n}\n"
+    else:
+        raise AssertionError(placement)
+    return text + ',\n  "hooks": {\n' + ",\n".join(hooks) + "\n  }\n}\n"
+
+
+def escaped_settings_bytes(placement):
+    text = escaped_settings_text(placement)
+    if placement == "lf-only":
+        return text.encode("utf-8")
+    return b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8")
+
+
+def parsed_settings(raw):
+    return json.loads(raw.decode("utf-8-sig"))
+
+
+def add_row_to(settings, event, matcher, hook):
+    """The placement rule, written out independently of the script: join the first group with the same
+    matcher, else a new group at the end of the event's list, else a new event entry, else a hooks object."""
+    groups = settings.setdefault("hooks", {}).setdefault(event, [])
+    for group in groups:
+        if group.get("matcher") == matcher:
+            group.setdefault("hooks", []).append(hook)
+            return
+    groups.append({"matcher": matcher, "hooks": [hook]} if matcher is not None else {"hooks": [hook]})
+
+
+def only_insertions(old, new):
+    """True when removing some bytes of ``new`` gives exactly ``old`` (old is a subsequence of new)."""
+    at = 0
+    for byte in new:
+        if at < len(old) and old[at] == byte:
+            at += 1
+    return at == len(old)
+
+
+def _is_subsequence(small, big):
+    at = 0
+    for item in big:
+        if at < len(small) and small[at] == item:
+            at += 1
+    return at == len(small)
+
+
+def _inserted_part(small, big):
+    """The bytes of ``big`` left over when ``small`` is matched greedily from the left."""
+    at, left = 0, bytearray()
+    for item in big:
+        if at < len(small) and small[at] == item:
+            at += 1
+        else:
+            left.append(item)
+    return bytes(left)
+
+
+def _holds_insertion_point(old_line, new_line, hook_paths):
+    """True when ``new_line`` is ``old_line`` plus an insertion at a point where a row goes: the inserted bytes
+    start with a comma (a row follows this element) or the line holds an inserted row's hook path. Added
+    whitespace alone (a deeper indent, padding inside a line) is neither."""
+    inserted = _inserted_part(old_line, new_line)
+    return inserted.startswith(b",") or any(path in new_line for path in hook_paths)
+
+
+def row_hook_paths(rows):
+    """The hook paths (as bytes) in the args of the rows a plan adds."""
+    return [a.encode("utf-8") for row in rows for a in row.get("args", []) if "/hooks/" in a]
+
+
+def lines_kept_by_insertions_only(old, new, rows=()):
+    """True when the old lines appear in ``new`` in order, each changed only by insertions (each old line is a
+    subsequence of the new line it maps to), a changed line holds an insertion point (see
+    _holds_insertion_point) and at most one old line changes per inserted row. A whitespace-only re-layout
+    fails, whether it spreads a line, indents deeper or pads inside a line that takes no row. The alignment
+    is exact (no greedy guess), so an inserted line that happens to contain an old line's characters cannot
+    steal its place."""
+    paths = row_hook_paths(rows)
+    old_lines, new_lines = old.split(b"\n"), new.split(b"\n")
+    n, m, inf = len(old_lines), len(new_lines), 10 ** 9
+    cost = [[inf] * (m + 1) for _ in range(n + 1)]
+    cost[0] = [0] * (m + 1)
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            best = cost[i][j - 1]
+            if cost[i - 1][j - 1] < inf:
+                o, w = old_lines[i - 1], new_lines[j - 1]
+                if o == w:
+                    best = min(best, cost[i - 1][j - 1])
+                elif _is_subsequence(o, w) and _holds_insertion_point(o, w, paths):
+                    best = min(best, cost[i - 1][j - 1] + 1)
+            cost[i][j] = best
+    return cost[n][m] <= len(rows)
+
+
+def diff_rule_violations(diff, inserted_rows, rows=()):
+    """Breaches of the T1 diff rule in a unified diff: at most one removed line per inserted row, and every
+    removed line reappears among the added lines of its hunk, changed only by insertions at an insertion
+    point."""
+    paths = row_hook_paths(rows)
+    hunks, current = [], None
+    for line in diff.splitlines():
+        if line.startswith("@@"):
+            current = ([], [])
+            hunks.append(current)
+        elif current is not None and line.startswith("-"):
+            current[0].append(line[1:])
+        elif current is not None and line.startswith("+"):
+            current[1].append(line[1:])
+    removed_total = sum(len(removed) for removed, _added in hunks)
+    problems = []
+    if removed_total > inserted_rows:
+        problems.append("%d removed lines for %d inserted rows" % (removed_total, inserted_rows))
+    for removed, added in hunks:
+        for line in removed:
+            o = line.encode("utf-8")
+            if not any(_is_subsequence(o, c.encode("utf-8"))
+                       and _holds_insertion_point(o, c.encode("utf-8"), paths) for c in added):
+                problems.append("removed line not kept by an added line at an insertion point: %r" % line[:80])
+    return problems
+
+
+def first_divergence(old, new):
+    for i, (a, b) in enumerate(zip(old, new)):
+        if a != b:
+            return i
+    return min(len(old), len(new))
+
+
+def make_directory_link(link, target):
+    """A directory junction on Windows (_winapi.CreateJunction), a directory symbolic link elsewhere.
+    Raises AssertionError when it cannot be made: the row fails, it never skips."""
+    link, target = Path(link), Path(target)
+    target.mkdir(parents=True, exist_ok=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(target), str(link))
+        else:
+            os.symlink(str(target), str(link), target_is_directory=True)
+    except (OSError, ImportError, AttributeError, NotImplementedError) as exc:
+        raise AssertionError("the directory link %s -> %s could not be made (%s); this row cannot pass without "
+                             "it and is never skipped" % (link, target, exc))
+
+
+class WriterHarness(Base):
+    """Fresh flat projects under the temporary folder, and the two subcommands driven through the command line."""
+    ADDON = "angular-tailwind"
+
+    def setUp(self):
+        super().setUp()
+        build_fake_addons(self.plugin)
+        self.user_home = self.tmp / "fakeuser"
+        self.projects = 0
+        assert_outside_claude_folder(self, self.tmp)
+        self.new_project()
+
+    def new_project(self):
+        self.projects += 1
+        self.project = self.tmp / ("p%d" % self.projects)
+        self.project.mkdir()
+        assert_outside_claude_folder(self, self.project)
+        return self.project
+
+    def argv(self, kind, apply=False, sha=None):
+        if kind == "addon":
+            argv = ["addon", "--name", self.ADDON, "--project", str(self.project), "--json",
+                    "--claude-home", str(self.home), "--platform", "win32"]
+        else:
+            argv = ["hooks", "--project", str(self.project), "--json", "--claude-home", str(self.home),
+                    "--platform", "win32"]
+        if apply:
+            argv += ["--apply", "--expect-sha256", sha or ""]
+        return argv
+
+    def prepare(self, kind, raw=None):
+        """A fresh project for ``kind`` holding ``raw`` as its settings file (when given)."""
+        self.new_project()
+        if kind == "hooks":
+            self.make_vendored()
+        if raw is not None:
+            self.settings_path().parent.mkdir(parents=True, exist_ok=True)
+            self.settings_path().write_bytes(raw)
+
+    def preview_cli(self, kind):
+        return self.cli(self.argv(kind))
+
+    def apply_cli(self, kind, sha):
+        return self.cli(self.argv(kind, apply=True, sha=sha))
+
+    def preview_ok(self, kind):
+        rc, out, plan = self.preview_cli(kind)
+        self.assertIsNotNone(plan, msg="--json prints the plan; got %r" % out)
+        self.assertEqual((rc, plan.get("status")), (0, "plan"), msg="a preview is a plan, exit 0: %r" % (plan,))
+        self.assertRegex(str(plan.get("plan-sha256")), HEX64, msg="and carries the plan hash")
+        return plan
+
+    def new_bytes_of_preview(self, kind):
+        """The bytes the preview would write, read through the script's own planning seam."""
+        if kind == "addon":
+            plan, payload = fi._plan_addon(self.project, self.ADDON, "win32", self.home, self.plugin)
+        else:
+            plan, payload = fi._plan_vendored(self.project, "win32", self.home, self.plugin, None)
+        self.assertEqual(plan.get("status"), "plan", msg="the planning seam gives a plan: %r" % (plan,))
+        return payload["new-bytes"]
+
+    def backups(self):
+        folder = self.settings_path().parent
+        return sorted(folder.glob("settings.json.bak-*")) if folder.is_dir() else []
+
+
+# --------------------------------------------------------------------------------------
+# F1: byte identity, the diff, the refusal and the plan hash
+# --------------------------------------------------------------------------------------
+class TestSettingsWriterKeepsEveryByte(WriterHarness):
+    def test_the_escaped_fixture_really_holds_the_escapes_and_the_one_line_arrays(self):
+        # Positive control: passes today. Without it a fixture that lost its escapes would pass every row below.
+        for placement in PLACEMENTS:
+            with self.subTest(placement=placement):
+                raw = escaped_settings_bytes(placement)
+                self.assertGreaterEqual(raw.count(b"\\u"), 20, msg="at least twenty unicode escapes")
+                if placement != "no-hooks":
+                    self.assertGreater(len(re.findall(rb'"args": \[[^\]\r\n]*\]', raw)), 0,
+                                       msg="at least one one-line args array")
+                self.assertGreater(len(re.findall(rb'"allow": \[[^\]\r\n]*\]', raw)), 0, msg="and a one-line list")
+                self.assertEqual(raw.startswith(b"\xef\xbb\xbf"), placement != "lf-only", msg="the byte order mark")
+                if placement == "lf-only":
+                    self.assertNotIn(b"\r", raw, msg="the LF-only file has no carriage return")
+                else:
+                    self.assertEqual(raw.replace(b"\r\n", b"").count(b"\n"), 0, msg="CRLF on every line")
+                parsed = parsed_settings(raw)
+                self.assertIn("permissions", parsed, msg="and it parses as one object")
+                if placement not in ("no-hooks", "new-event"):
+                    self.assertIn("UserPromptSubmit", parsed["hooks"], msg="the add-on's event is already listed")
+
+    def test_the_new_file_is_the_old_file_plus_inserted_bytes_and_the_old_object_plus_the_row(self):
+        for kind in ("addon", "hooks"):
+            for placement in PLACEMENTS:
+                with self.subTest(kind=kind, placement=placement):
+                    raw = escaped_settings_bytes(placement)
+                    self.prepare(kind, raw)
+                    plan = self.preview_ok(kind)
+                    rows = plan["to-add"]
+                    self.assertTrue(rows, msg="fixture: there is something to add")
+                    rc, out, applied = self.apply_cli(kind, plan["plan-sha256"])
+                    self.assertEqual((rc, (applied or {}).get("status")), (0, "applied"),
+                                     msg="the apply with the plan hash writes: %r" % (applied or out,))
+                    new = self.settings_path().read_bytes()
+                    self.assertTrue(
+                        only_insertions(raw, new),
+                        msg="removing the inserted bytes from the new file must give the old file byte for "
+                            "byte; the first difference is at offset %d (the old text was re-rendered)"
+                            % first_divergence(raw, new))
+                    self.assertTrue(
+                        lines_kept_by_insertions_only(raw, new, rows),
+                        msg="line by line: every old line must appear in order, changed only by insertions "
+                            "(a whitespace-only re-layout of a line fails this)")
+                    self.assertLessEqual(len(new) - len(raw), 700 * len(rows),
+                                         msg="and the insertion is small: no layout changes were added")
+                    self.assertEqual(new.count(b"\\u"), raw.count(b"\\u"),
+                                     msg="the escape count is unchanged (a guard reads these bytes)")
+                    self.assertEqual(new.startswith(b"\xef\xbb\xbf"), raw.startswith(b"\xef\xbb\xbf"),
+                                     msg="the byte order mark state is unchanged")
+                    if placement == "lf-only":
+                        self.assertNotIn(b"\r", new, msg="an LF-only file stays LF-only")
+                    else:
+                        self.assertEqual(new.replace(b"\r\n", b"").count(b"\n"), 0,
+                                         msg="every line ending is CRLF")
+                        self.assertEqual(new.replace(b"\r\n", b"").count(b"\r"), 0, msg="and no stray carriage return")
+                    expected = parsed_settings(raw)
+                    for row in rows:
+                        add_row_to(expected, row["event"], row["matcher"],
+                                   {"type": "command", "command": row["command"], "args": row["args"]})
+                    self.assertEqual(parsed_settings(new), expected,
+                                     msg="parsed, the new file is the old object plus the added rows")
+
+    def test_the_previews_unified_diff_follows_the_insertion_only_rule(self):
+        for kind in ("addon", "hooks"):
+            for placement in PLACEMENTS:
+                with self.subTest(kind=kind, placement=placement):
+                    self.prepare(kind, escaped_settings_bytes(placement))
+                    plan = self.preview_ok(kind)
+                    diff = plan.get("unified-diff", "")
+                    added = [l for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++")]
+                    self.assertTrue(added, msg="fixture: the diff shows what is added")
+                    problems = diff_rule_violations(diff, len(plan["to-add"]), plan["to-add"])
+                    self.assertEqual(problems, [],
+                                     msg="a removed line is allowed only where a row is inserted (at most one per "
+                                         "row) and must reappear in its hunk changed only by insertions; "
+                                         "a breach means the file was re-rendered")
+
+    def test_the_two_layout_rules_can_fail_a_relaid_out_file_and_pass_an_insertion(self):
+        # Falsifiability controls for the byte, line and diff rules; they pass today.
+        old = ('{\n  "a": ["x", "y"],\n  "b": 1\n}\n').encode("utf-8")
+        inserted = ('{\n  "a": ["x", "y"],\n  "b": 1,\n  "c": 2\n}\n').encode("utf-8")
+        spread = ('{\n  "a": [\n    "x",\n    "y"\n  ],\n  "b": 1,\n  "c": 2\n}\n').encode("utf-8")
+        one_row = [{"args": []}]
+        self.assertTrue(lines_kept_by_insertions_only(old, inserted, one_row), msg="a comma and a new line pass")
+        self.assertFalse(lines_kept_by_insertions_only(old, spread, one_row), msg="a spread one-line array fails")
+        self.assertTrue(only_insertions(old, inserted), msg="byte rule passes for the insertion")
+
+        def diff_of(a, b):
+            return "".join(difflib.unified_diff(a.decode().splitlines(True), b.decode().splitlines(True)))
+        self.assertEqual(diff_rule_violations(diff_of(old, inserted), 1), [],
+                         msg="one changed line (the comma) for one inserted row is allowed")
+        self.assertNotEqual(diff_rule_violations(diff_of(old, spread), 1), [],
+                            msg="a spread array is a removed line that no single added line keeps")
+        self.assertNotEqual(diff_rule_violations("@@ -1 +1 @@\n-  \"k\": \"\\u0063at\"\n+  \"k\": \"cat\"\n", 1), [],
+                            msg="a decoded escape fails")
+        # Whitespace-only re-layouts that ADD whitespace: a deeper indent and padding inside a line.
+        row = {"args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]}
+        base = b'{\n  "a": ["p", "q"],\n  "b": 1\n}\n'
+        spliced = b'{\n  "a": ["p", "q"],\n  "b": 1,\n  "c": "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"\n}\n'
+        doubled = b'{\n    "a": ["p", "q"],\n    "b": 1,\n    "c": "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"\n}\n'
+        padded = b'{\n  "a": [ "p",  "q" ],\n  "b": 1,\n  "c": "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"\n}\n'
+        same_line = b'{\n  "a": ["p", "q", {"x": "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"}],\n  "b": 1\n}\n'
+        for label, text, expect in (("comma and new line", spliced, True), ("same-line splice", same_line, True),
+                                    ("double indent", doubled, False), ("padded line", padded, False)):
+            with self.subTest(layout=label):
+                self.assertEqual(lines_kept_by_insertions_only(base, text, [row]), expect,
+                                 msg="line rule on %s" % label)
+                self.assertEqual(diff_rule_violations(diff_of(base, text), 1, [row]) == [], expect,
+                                 msg="diff rule on %s" % label)
+        self.assertNotEqual(diff_rule_violations("@@ -1,2 +1,2 @@\n-a\n-b\n+a1\n+b1\n", 1), [],
+                            msg="two removed lines for one row fail")
+
+    def test_the_fixture_location_guard_fails_for_a_root_holding_a_claude_part(self):
+        # GUARD SELF-TEST. Positive control first: the real fixture root passes.
+        assert_outside_claude_folder(self, self.tmp)
+        # Each call is outside subTest and a SkipTest becomes a failure: a guard that skips instead of failing
+        # would otherwise pass assertRaises(AssertionError) and be recorded as a skip.
+        for bad in (self.tmp / ".claude" / "x", Path("C:/Users/someone/.claude/jobs/abc"), Path("/home/u/.CLAUDE/t")):
+            try:
+                assert_outside_claude_folder(self, bad)
+            except unittest.SkipTest:
+                self.fail("the guard SKIPPED for %s; it must fail" % bad)
+            except AssertionError:
+                continue
+            self.fail("the guard let %s pass; it must fail" % bad)
+
+    def test_a_key_on_the_insertion_path_written_with_an_escape_is_refused_and_nothing_changes(self):
+        mine = ('{"type": "command", "command": "py", "args": '
+                '["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/mine.py"]}')
+        cases = {
+            "hooks key": ('\n  "hooks": {', '\n  "\\u0068ooks": {'),
+            "event name": ('"UserPromptSubmit": [', '"\\u0055serPromptSubmit": ['),
+            "group hooks key": ('        "hooks": [\n          ' + mine, '        "\\u0068ooks": [\n          ' + mine),
+        }
+        for kind in ("addon", "hooks"):
+            for label, (plain, escaped) in cases.items():
+                with self.subTest(kind=kind, key=label):
+                    self.assertIn(plain, escaped_settings_text("same-matcher"), msg="fixture: the key is there")
+                    text = escaped_settings_text("same-matcher").replace(plain, escaped, 1)
+                    raw = b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8")
+                    self.prepare(kind, raw)
+                    before = snapshot(self.tmp)
+                    rc, out, parsed = self.preview_cli(kind)
+                    self.assertRefused(parsed, "unexpected-settings-shape",
+                                       "a key on the insertion path is written with an escape")
+                    self.assertEqual(rc, 2, msg="through the command line the exit code is 2")
+                    rc2, out2, parsed2 = self.apply_cli(kind, "0" * 64)
+                    self.assertRefused(parsed2, "unexpected-settings-shape", "the apply refuses it the same way")
+                    self.assertEqual(rc2, 2, msg="exit 2 for the apply too")
+                    self.assertEqual(self.settings_path().read_bytes(), raw, msg="the settings bytes are unchanged")
+                    self.assertEqual(self.backups(), [], msg="and no backup exists")
+                    self.assertTreeSame(before, "a refusal writes nothing, not even the add-on's hook files")
+
+
+class TestSettingsPlanHashControls(WriterHarness):
+    """Controls that pass today: the previewed hash applies exactly what was previewed."""
+
+    def test_the_previewed_hash_applies_and_the_written_bytes_equal_the_previews_new_bytes(self):
+        for kind in ("addon", "hooks"):
+            with self.subTest(kind=kind):
+                self.prepare(kind, escaped_settings_bytes("same-matcher"))
+                plan = self.preview_ok(kind)
+                previewed = self.new_bytes_of_preview(kind)
+                rc, out, applied = self.apply_cli(kind, plan["plan-sha256"])
+                self.assertEqual((rc, (applied or {}).get("status")), (0, "applied"), msg="%r" % (applied or out,))
+                self.assertEqual(self.settings_path().read_bytes(), previewed,
+                                 msg="the file holds exactly the bytes the preview computed")
+
+    def test_a_wrong_hash_is_refused_as_changed_since_preview_and_changes_nothing(self):
+        for kind in ("addon", "hooks"):
+            with self.subTest(kind=kind):
+                self.prepare(kind, escaped_settings_bytes("same-matcher"))
+                self.preview_ok(kind)
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.apply_cli(kind, "0" * 64)
+                self.assertRefused(parsed, "changed-since-preview", "the hash is not the previewed plan's")
+                self.assertEqual(rc, 2, msg="exit 2")
+                self.assertTreeSame(before, "nothing is written")
+
+    def test_a_file_changed_between_preview_and_apply_is_refused_and_changes_nothing(self):
+        for kind in ("addon", "hooks"):
+            with self.subTest(kind=kind):
+                raw = escaped_settings_bytes("same-matcher")
+                self.prepare(kind, raw)
+                plan = self.preview_ok(kind)
+                self.settings_path().write_bytes(raw + b"\r\n")
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.apply_cli(kind, plan["plan-sha256"])
+                self.assertRefused(parsed, "changed-since-preview", "the file changed after the preview")
+                self.assertEqual(rc, 2, msg="exit 2")
+                self.assertTreeSame(before, "nothing is written")
+
+
+# --------------------------------------------------------------------------------------
+# F3: the CodeGraph prerequisite
+# --------------------------------------------------------------------------------------
+class TestCodegraphPrerequisiteEntry(WriterHarness):
+    ADDON = "codegraph"
+    COMMAND_ENTRY = {"command": "codegraph", "args": ["serve"]}
+
+    def mcp_json(self, entry):
+        write_json(self.project / ".mcp.json", {"mcpServers": {"codegraph": entry}})
+
+    def project_settings(self, data, name="settings.json"):
+        write_json(self.project / ".claude" / name, data)
+
+    def refused(self, why):
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.preview_cli("addon")
+        self.assertRefused(parsed, "codegraph-mcp-not-configured", why)
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertTreeSame(before, "nothing is written")
+
+    def approval_notes(self, plan):
+        return [n for n in plan.get("notes", []) if re.search(r"(?i)approv", n)]
+
+    def test_an_empty_entry_is_refused(self):
+        self.mcp_json({})
+        self.refused("an entry that is {} starts no server")
+
+    def test_an_entry_listed_as_disabled_in_the_projects_settings_is_refused(self):
+        self.mcp_json(self.COMMAND_ENTRY)
+        self.project_settings({"enabledMcpjsonServers": ["codegraph"], "disabledMcpjsonServers": ["codegraph"]})
+        self.refused("an entry with a command that the project's settings list as disabled")
+
+    def test_an_entry_listed_as_disabled_in_this_projects_user_entry_is_refused(self):
+        self.mcp_json(self.COMMAND_ENTRY)
+        listing = {"enabledMcpjsonServers": ["codegraph"], "disabledMcpjsonServers": ["codegraph"]}
+        for folder in (self.user_home, self.home):
+            write_json(folder / ".claude.json", {"projects": {
+                str(self.project): dict(listing), str(self.project).replace("\\", "/"): dict(listing)}})
+        self.refused("an entry with a command that this project's entry in .claude.json lists as disabled")
+
+    def test_a_command_entry_found_only_in_the_project_file_with_no_approval_gives_one_note(self):
+        self.mcp_json(self.COMMAND_ENTRY)
+        plan = self.preview_ok("addon")
+        notes = self.approval_notes(plan)
+        self.assertEqual(len(notes), 1, msg="one plain note names the missing approval; notes were %r"
+                                             % (plan.get("notes"),))
+
+    def test_an_approved_command_entry_gives_a_plan_with_no_such_note(self):
+        # Control: passes today.
+        self.mcp_json(self.COMMAND_ENTRY)
+        self.project_settings({"enabledMcpjsonServers": ["codegraph"]})
+        plan = self.preview_ok("addon")
+        self.assertEqual(self.approval_notes(plan), [], msg="an approved server needs no note")
+
+    def test_a_url_entry_gives_a_plan_with_no_such_note(self):
+        # Control: passes today. A url entry in the user's own configuration needs no project approval.
+        for folder in (self.user_home, self.home):
+            write_json(folder / ".claude.json", {"mcpServers": {"codegraph": {"url": "https://example.invalid/mcp"}}})
+        plan = self.preview_ok("addon")
+        self.assertEqual(self.approval_notes(plan), [], msg="a url entry needs no note")
+
+
+# --------------------------------------------------------------------------------------
+# F9: linked folders
+# --------------------------------------------------------------------------------------
+class TestLinkedFolders(WriterHarness):
+    def cleanup_link(self, link):
+        def _remove():
+            try:
+                os.rmdir(str(link))
+            except OSError:
+                pass
+        self.addCleanup(_remove)  # runs before the temporary folder is removed: the link goes first
+
+    def link_folder(self, kind, folder):
+        """Make ``folder`` (".claude" or ".claude/hooks") of a fresh project a directory link to a folder outside
+        the project. For the hooks subcommand the folder already holds the vendored hook files and a settings
+        file, which move to the link's target, so the preview still works."""
+        self.prepare(kind, None)
+        project_folder = self.project / folder
+        target = self.tmp / ("elsewhere-%d-%s" % (self.projects, folder.replace("/", "-").strip(".")))
+        if kind == "hooks":
+            self.settings_path().write_bytes(b'{\n  "model": "opus"\n}\n')
+            os.rename(str(project_folder), str(target))
+        self.cleanup_link(project_folder)
+        make_directory_link(project_folder, target)
+        return target
+
+    def assert_refused_and_nothing_landed(self, kind, target):
+        plan = self.preview_ok(kind)  # the preview stays as it is: matching the linked-settings-file rule
+        target_before, tree_before = snapshot(target), snapshot(self.project)
+        rc, out, parsed = self.apply_cli(kind, plan["plan-sha256"])
+        self.assertRefused(parsed, "write-failed", "a folder the install writes into is a link to elsewhere")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertEqual(snapshot(target), target_before,
+                         msg="nothing landed in the link's target: no settings file, backup or hook file")
+        self.assertEqual(snapshot(self.project), tree_before, msg="and nothing changed in the project")
+
+    def test_a_project_claude_folder_that_is_a_link_is_refused_at_apply(self):
+        for kind in ("addon", "hooks"):
+            with self.subTest(kind=kind):
+                self.assert_refused_and_nothing_landed(kind, self.link_folder(kind, ".claude"))
+
+    def test_a_project_hooks_folder_that_is_a_link_is_refused_at_apply(self):
+        for kind in ("addon", "hooks"):
+            with self.subTest(kind=kind):
+                if kind == "addon":
+                    self.prepare(kind, None)
+                    (self.project / ".claude").mkdir()
+                    target = self.tmp / "elsewhere-claude-hooks-addon"
+                    self.cleanup_link(self.project / ".claude" / "hooks")
+                    make_directory_link(self.project / ".claude" / "hooks", target)
+                else:
+                    target = self.link_folder(kind, ".claude/hooks")
+                self.assert_refused_and_nothing_landed(kind, target)
+
+    def test_a_helper_destination_folder_that_is_a_link_is_refused_at_apply(self):
+        self.ADDON = "strict-shell-gate"  # its helpers include one under .claude/scripts
+        self.prepare("addon", None)
+        target = self.tmp / "elsewhere-scripts"
+        scripts = self.project / ".claude" / "scripts"
+        self.cleanup_link(scripts)
+        make_directory_link(scripts, target)
+        self.assert_refused_and_nothing_landed("addon", target)
+
+    def test_a_project_reached_through_a_linked_parent_folder_installs_normally(self):
+        # Control: passes today. The comparison is with the resolved project folder.
+        for kind in ("addon", "hooks"):
+            with self.subTest(kind=kind):
+                real_parent = self.tmp / ("real-parent-" + kind)
+                real_parent.mkdir()
+                link = self.tmp / ("link-parent-" + kind)
+                self.cleanup_link(link)
+                make_directory_link(link, real_parent)
+                self.project = link / "proj"
+                self.project.mkdir()
+                assert_outside_claude_folder(self, self.project)
+                if kind == "hooks":
+                    self.make_vendored()
+                plan = self.preview_ok(kind)
+                rc, out, applied = self.apply_cli(kind, plan["plan-sha256"])
+                self.assertEqual((rc, (applied or {}).get("status")), (0, "applied"),
+                                 msg="a linked PARENT folder does not stop the install: %r" % (applied or out,))
+                self.assertTrue((real_parent / "proj" / ".claude" / "settings.json").is_file(),
+                                msg="the settings file landed in the real project folder")
 
 
 if __name__ == "__main__":
