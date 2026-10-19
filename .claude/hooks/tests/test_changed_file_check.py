@@ -842,9 +842,17 @@ class GeneratedAttributeSourceTests(Base):
     def test_fixture_root_is_outside_any_claude_folder(self):
         parts = [part.lower() for part in Path(os.path.realpath(str(self.p.root))).parts]
         self.assertNotIn(".claude", parts, msg="the fixture must live under the system temporary folder")
-        # Positive control for the guard itself: a root under a .claude folder is refused (the call raises).
-        with self.assertRaises(AssertionError, msg="the guard must fail, not skip, for a root under .claude"):
-            assert_fixture_outside_claude_folder(self, self.p.root / ".claude" / "x")
+        # Positive control for the guard itself: a root under a .claude folder is refused. Each call is outside
+        # subTest and a SkipTest becomes a failure (a skip would pass assertRaises and be recorded as a skip).
+        for bad in (self.p.root / ".claude" / "x", Path("C:/Users/someone/.claude/jobs/abc"),
+                    Path("/home/u/.CLAUDE/t")):
+            try:
+                assert_fixture_outside_claude_folder(self, bad)
+            except unittest.SkipTest:
+                self.fail("the guard SKIPPED for %s; it must fail" % bad)
+            except AssertionError:
+                continue
+            self.fail("the guard let %s pass; it must fail" % bad)
 
     def test_a_new_uncovered_file_with_no_attribute_stops_at_turn_end(self):
         # (a) positive control: passes today.

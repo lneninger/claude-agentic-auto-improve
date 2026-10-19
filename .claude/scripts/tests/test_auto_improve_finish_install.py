@@ -3818,25 +3818,60 @@ def _is_subsequence(small, big):
     return at == len(small)
 
 
-def lines_kept_by_insertions_only(old, new):
+def _inserted_part(small, big):
+    """The bytes of ``big`` left over when ``small`` is matched greedily from the left."""
+    at, left = 0, bytearray()
+    for item in big:
+        if at < len(small) and small[at] == item:
+            at += 1
+        else:
+            left.append(item)
+    return bytes(left)
+
+
+def _holds_insertion_point(old_line, new_line, hook_paths):
+    """True when ``new_line`` is ``old_line`` plus an insertion at a point where a row goes: the inserted bytes
+    start with a comma (a row follows this element) or the line holds an inserted row's hook path. Added
+    whitespace alone (a deeper indent, padding inside a line) is neither."""
+    inserted = _inserted_part(old_line, new_line)
+    return inserted.startswith(b",") or any(path in new_line for path in hook_paths)
+
+
+def row_hook_paths(rows):
+    """The hook paths (as bytes) in the args of the rows a plan adds."""
+    return [a.encode("utf-8") for row in rows for a in row.get("args", []) if "/hooks/" in a]
+
+
+def lines_kept_by_insertions_only(old, new, rows=()):
     """True when the old lines appear in ``new`` in order, each changed only by insertions (each old line is a
-    subsequence of the new line it maps to). A whitespace-only re-layout fails: one old line would have to
-    map to several new lines. The alignment is exact (no greedy guess), so an inserted line that happens to
-    contain an old line's characters cannot steal its place."""
+    subsequence of the new line it maps to), a changed line holds an insertion point (see
+    _holds_insertion_point) and at most one old line changes per inserted row. A whitespace-only re-layout
+    fails, whether it spreads a line, indents deeper or pads inside a line that takes no row. The alignment
+    is exact (no greedy guess), so an inserted line that happens to contain an old line's characters cannot
+    steal its place."""
+    paths = row_hook_paths(rows)
     old_lines, new_lines = old.split(b"\n"), new.split(b"\n")
-    n, m = len(old_lines), len(new_lines)
-    reach = [[False] * (m + 1) for _ in range(n + 1)]
-    for j in range(m + 1):
-        reach[0][j] = True
+    n, m, inf = len(old_lines), len(new_lines), 10 ** 9
+    cost = [[inf] * (m + 1) for _ in range(n + 1)]
+    cost[0] = [0] * (m + 1)
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            reach[i][j] = reach[i][j - 1] or (reach[i - 1][j - 1] and _is_subsequence(old_lines[i - 1], new_lines[j - 1]))
-    return reach[n][m]
+            best = cost[i][j - 1]
+            if cost[i - 1][j - 1] < inf:
+                o, w = old_lines[i - 1], new_lines[j - 1]
+                if o == w:
+                    best = min(best, cost[i - 1][j - 1])
+                elif _is_subsequence(o, w) and _holds_insertion_point(o, w, paths):
+                    best = min(best, cost[i - 1][j - 1] + 1)
+            cost[i][j] = best
+    return cost[n][m] <= len(rows)
 
 
-def diff_rule_violations(diff, inserted_rows):
+def diff_rule_violations(diff, inserted_rows, rows=()):
     """Breaches of the T1 diff rule in a unified diff: at most one removed line per inserted row, and every
-    removed line reappears among the added lines of its hunk, changed only by insertions."""
+    removed line reappears among the added lines of its hunk, changed only by insertions at an insertion
+    point."""
+    paths = row_hook_paths(rows)
     hunks, current = [], None
     for line in diff.splitlines():
         if line.startswith("@@"):
@@ -3852,8 +3887,10 @@ def diff_rule_violations(diff, inserted_rows):
         problems.append("%d removed lines for %d inserted rows" % (removed_total, inserted_rows))
     for removed, added in hunks:
         for line in removed:
-            if not any(_is_subsequence(line, candidate) for candidate in added):
-                problems.append("removed line not kept by an added line: %r" % line[:80])
+            o = line.encode("utf-8")
+            if not any(_is_subsequence(o, c.encode("utf-8"))
+                       and _holds_insertion_point(o, c.encode("utf-8"), paths) for c in added):
+                problems.append("removed line not kept by an added line at an insertion point: %r" % line[:80])
     return problems
 
 
@@ -3990,7 +4027,7 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                             "byte; the first difference is at offset %d (the old text was re-rendered)"
                             % first_divergence(raw, new))
                     self.assertTrue(
-                        lines_kept_by_insertions_only(raw, new),
+                        lines_kept_by_insertions_only(raw, new, rows),
                         msg="line by line: every old line must appear in order, changed only by insertions "
                             "(a whitespace-only re-layout of a line fails this)")
                     self.assertLessEqual(len(new) - len(raw), 700 * len(rows),
@@ -4021,7 +4058,7 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                     diff = plan.get("unified-diff", "")
                     added = [l for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++")]
                     self.assertTrue(added, msg="fixture: the diff shows what is added")
-                    problems = diff_rule_violations(diff, len(plan["to-add"]))
+                    problems = diff_rule_violations(diff, len(plan["to-add"]), plan["to-add"])
                     self.assertEqual(problems, [],
                                      msg="a removed line is allowed only where a row is inserted (at most one per "
                                          "row) and must reappear in its hunk changed only by insertions; "
@@ -4032,8 +4069,9 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
         old = ('{\n  "a": ["x", "y"],\n  "b": 1\n}\n').encode("utf-8")
         inserted = ('{\n  "a": ["x", "y"],\n  "b": 1,\n  "c": 2\n}\n').encode("utf-8")
         spread = ('{\n  "a": [\n    "x",\n    "y"\n  ],\n  "b": 1,\n  "c": 2\n}\n').encode("utf-8")
-        self.assertTrue(lines_kept_by_insertions_only(old, inserted), msg="a comma and a new line pass")
-        self.assertFalse(lines_kept_by_insertions_only(old, spread), msg="a spread one-line array fails")
+        one_row = [{"args": []}]
+        self.assertTrue(lines_kept_by_insertions_only(old, inserted, one_row), msg="a comma and a new line pass")
+        self.assertFalse(lines_kept_by_insertions_only(old, spread, one_row), msg="a spread one-line array fails")
         self.assertTrue(only_insertions(old, inserted), msg="byte rule passes for the insertion")
 
         def diff_of(a, b):
@@ -4044,16 +4082,36 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                             msg="a spread array is a removed line that no single added line keeps")
         self.assertNotEqual(diff_rule_violations("@@ -1 +1 @@\n-  \"k\": \"\\u0063at\"\n+  \"k\": \"cat\"\n", 1), [],
                             msg="a decoded escape fails")
+        # Whitespace-only re-layouts that ADD whitespace: a deeper indent and padding inside a line.
+        row = {"args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]}
+        base = b'{\n  "a": ["p", "q"],\n  "b": 1\n}\n'
+        spliced = b'{\n  "a": ["p", "q"],\n  "b": 1,\n  "c": "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"\n}\n'
+        doubled = b'{\n    "a": ["p", "q"],\n    "b": 1,\n    "c": "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"\n}\n'
+        padded = b'{\n  "a": [ "p",  "q" ],\n  "b": 1,\n  "c": "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"\n}\n'
+        same_line = b'{\n  "a": ["p", "q", {"x": "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"}],\n  "b": 1\n}\n'
+        for label, text, expect in (("comma and new line", spliced, True), ("same-line splice", same_line, True),
+                                    ("double indent", doubled, False), ("padded line", padded, False)):
+            with self.subTest(layout=label):
+                self.assertEqual(lines_kept_by_insertions_only(base, text, [row]), expect,
+                                 msg="line rule on %s" % label)
+                self.assertEqual(diff_rule_violations(diff_of(base, text), 1, [row]) == [], expect,
+                                 msg="diff rule on %s" % label)
         self.assertNotEqual(diff_rule_violations("@@ -1,2 +1,2 @@\n-a\n-b\n+a1\n+b1\n", 1), [],
                             msg="two removed lines for one row fail")
 
     def test_the_fixture_location_guard_fails_for_a_root_holding_a_claude_part(self):
         # GUARD SELF-TEST. Positive control first: the real fixture root passes.
         assert_outside_claude_folder(self, self.tmp)
+        # Each call is outside subTest and a SkipTest becomes a failure: a guard that skips instead of failing
+        # would otherwise pass assertRaises(AssertionError) and be recorded as a skip.
         for bad in (self.tmp / ".claude" / "x", Path("C:/Users/someone/.claude/jobs/abc"), Path("/home/u/.CLAUDE/t")):
-            with self.subTest(root=str(bad)):
-                with self.assertRaises(AssertionError, msg="the guard must FAIL, never skip, for %s" % bad):
-                    assert_outside_claude_folder(self, bad)
+            try:
+                assert_outside_claude_folder(self, bad)
+            except unittest.SkipTest:
+                self.fail("the guard SKIPPED for %s; it must fail" % bad)
+            except AssertionError:
+                continue
+            self.fail("the guard let %s pass; it must fail" % bad)
 
     def test_a_key_on_the_insertion_path_written_with_an_escape_is_refused_and_nothing_changes(self):
         mine = ('{"type": "command", "command": "py", "args": '
