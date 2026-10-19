@@ -102,6 +102,7 @@ Implementation seams the tests rely on (all stated by the contract or the reposi
 
 import contextlib
 import datetime
+import difflib
 import hashlib
 import io
 import json
@@ -3809,6 +3810,53 @@ def only_insertions(old, new):
     return at == len(old)
 
 
+def _is_subsequence(small, big):
+    at = 0
+    for item in big:
+        if at < len(small) and small[at] == item:
+            at += 1
+    return at == len(small)
+
+
+def lines_kept_by_insertions_only(old, new):
+    """True when the old lines appear in ``new`` in order, each changed only by insertions (each old line is a
+    subsequence of the new line it maps to). A whitespace-only re-layout fails: one old line would have to
+    map to several new lines. The alignment is exact (no greedy guess), so an inserted line that happens to
+    contain an old line's characters cannot steal its place."""
+    old_lines, new_lines = old.split(b"\n"), new.split(b"\n")
+    n, m = len(old_lines), len(new_lines)
+    reach = [[False] * (m + 1) for _ in range(n + 1)]
+    for j in range(m + 1):
+        reach[0][j] = True
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            reach[i][j] = reach[i][j - 1] or (reach[i - 1][j - 1] and _is_subsequence(old_lines[i - 1], new_lines[j - 1]))
+    return reach[n][m]
+
+
+def diff_rule_violations(diff, inserted_rows):
+    """Breaches of the T1 diff rule in a unified diff: at most one removed line per inserted row, and every
+    removed line reappears among the added lines of its hunk, changed only by insertions."""
+    hunks, current = [], None
+    for line in diff.splitlines():
+        if line.startswith("@@"):
+            current = ([], [])
+            hunks.append(current)
+        elif current is not None and line.startswith("-"):
+            current[0].append(line[1:])
+        elif current is not None and line.startswith("+"):
+            current[1].append(line[1:])
+    removed_total = sum(len(removed) for removed, _added in hunks)
+    problems = []
+    if removed_total > inserted_rows:
+        problems.append("%d removed lines for %d inserted rows" % (removed_total, inserted_rows))
+    for removed, added in hunks:
+        for line in removed:
+            if not any(_is_subsequence(line, candidate) for candidate in added):
+                problems.append("removed line not kept by an added line: %r" % line[:80])
+    return problems
+
+
 def first_divergence(old, new):
     for i, (a, b) in enumerate(zip(old, new)):
         if a != b:
@@ -3941,6 +3989,10 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                         msg="removing the inserted bytes from the new file must give the old file byte for "
                             "byte; the first difference is at offset %d (the old text was re-rendered)"
                             % first_divergence(raw, new))
+                    self.assertTrue(
+                        lines_kept_by_insertions_only(raw, new),
+                        msg="line by line: every old line must appear in order, changed only by insertions "
+                            "(a whitespace-only re-layout of a line fails this)")
                     self.assertLessEqual(len(new) - len(raw), 700 * len(rows),
                                          msg="and the insertion is small: no layout changes were added")
                     self.assertEqual(new.count(b"\\u"), raw.count(b"\\u"),
@@ -3960,18 +4012,48 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                     self.assertEqual(parsed_settings(new), expected,
                                      msg="parsed, the new file is the old object plus the added rows")
 
-    def test_the_previews_unified_diff_holds_no_removed_line(self):
+    def test_the_previews_unified_diff_follows_the_insertion_only_rule(self):
         for kind in ("addon", "hooks"):
             for placement in PLACEMENTS:
                 with self.subTest(kind=kind, placement=placement):
                     self.prepare(kind, escaped_settings_bytes(placement))
-                    diff = self.preview_ok(kind).get("unified-diff", "")
-                    lines = diff.splitlines()
-                    removed = [l for l in lines if l.startswith("-") and not l.startswith("---")]
-                    added = [l for l in lines if l.startswith("+") and not l.startswith("+++")]
+                    plan = self.preview_ok(kind)
+                    diff = plan.get("unified-diff", "")
+                    added = [l for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++")]
                     self.assertTrue(added, msg="fixture: the diff shows what is added")
-                    self.assertEqual(removed, [], msg="and no removed line (a removed line means the file was "
-                                                      "re-rendered); first removed: %r" % (removed[:1],))
+                    problems = diff_rule_violations(diff, len(plan["to-add"]))
+                    self.assertEqual(problems, [],
+                                     msg="a removed line is allowed only where a row is inserted (at most one per "
+                                         "row) and must reappear in its hunk changed only by insertions; "
+                                         "a breach means the file was re-rendered")
+
+    def test_the_two_layout_rules_can_fail_a_relaid_out_file_and_pass_an_insertion(self):
+        # Falsifiability controls for the byte, line and diff rules; they pass today.
+        old = ('{\n  "a": ["x", "y"],\n  "b": 1\n}\n').encode("utf-8")
+        inserted = ('{\n  "a": ["x", "y"],\n  "b": 1,\n  "c": 2\n}\n').encode("utf-8")
+        spread = ('{\n  "a": [\n    "x",\n    "y"\n  ],\n  "b": 1,\n  "c": 2\n}\n').encode("utf-8")
+        self.assertTrue(lines_kept_by_insertions_only(old, inserted), msg="a comma and a new line pass")
+        self.assertFalse(lines_kept_by_insertions_only(old, spread), msg="a spread one-line array fails")
+        self.assertTrue(only_insertions(old, inserted), msg="byte rule passes for the insertion")
+
+        def diff_of(a, b):
+            return "".join(difflib.unified_diff(a.decode().splitlines(True), b.decode().splitlines(True)))
+        self.assertEqual(diff_rule_violations(diff_of(old, inserted), 1), [],
+                         msg="one changed line (the comma) for one inserted row is allowed")
+        self.assertNotEqual(diff_rule_violations(diff_of(old, spread), 1), [],
+                            msg="a spread array is a removed line that no single added line keeps")
+        self.assertNotEqual(diff_rule_violations("@@ -1 +1 @@\n-  \"k\": \"\\u0063at\"\n+  \"k\": \"cat\"\n", 1), [],
+                            msg="a decoded escape fails")
+        self.assertNotEqual(diff_rule_violations("@@ -1,2 +1,2 @@\n-a\n-b\n+a1\n+b1\n", 1), [],
+                            msg="two removed lines for one row fail")
+
+    def test_the_fixture_location_guard_fails_for_a_root_holding_a_claude_part(self):
+        # GUARD SELF-TEST. Positive control first: the real fixture root passes.
+        assert_outside_claude_folder(self, self.tmp)
+        for bad in (self.tmp / ".claude" / "x", Path("C:/Users/someone/.claude/jobs/abc"), Path("/home/u/.CLAUDE/t")):
+            with self.subTest(root=str(bad)):
+                with self.assertRaises(AssertionError, msg="the guard must FAIL, never skip, for %s" % bad):
+                    assert_outside_claude_folder(self, bad)
 
     def test_a_key_on_the_insertion_path_written_with_an_escape_is_refused_and_nothing_changes(self):
         mine = ('{"type": "command", "command": "py", "args": '
