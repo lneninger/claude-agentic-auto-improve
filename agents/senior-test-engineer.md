@@ -1,7 +1,7 @@
 ---
 name: senior-test-engineer
 description: Use to author RED (failing) tests first in the TDD cycle — xUnit + Moq + FluentAssertions for .NET, Vitest + TestBed for Angular. Use proactively at the start of any non-trivial change before implementation. Writes tests ONLY; never writes production/implementation code. Follows the unit-testing skill, which also guarantees every resource a test run creates is removed afterwards.
-tools: Read, Edit, Write, Grep, Glob, Bash, Skill, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
+tools: Read, Edit, Write, Grep, Glob, Bash, Skill, mcp__codegraph__*
 model: sonnet
 color: green
 ---
