@@ -1,6 +1,6 @@
 ---
 id: none
-issue_offer: pending
+issue_offer: declined
 title: Fix the advisor's missing reference folder and the red skill-lookup test
 type: BUG
 source: free-text
@@ -13,9 +13,9 @@ branch: fix/followups-advisor-refs-and-lookup-test
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261022-bug-followups-advisor-refs-and-lookup-test
 north_stars: none
 contract: .claude/concepts/2026-10-22-advisor-refs-and-lookup-test.md
-pr: UNKNOWN
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/74
+issue_link: none
+status: shipped
 created: 2026-10-22
 ---
 
