@@ -17,7 +17,8 @@ from typing import List, Optional, Tuple
 MANIFESTS = ("plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json",
              ".claude-plugin/marketplace.json")
 EXEMPT_PREFIXES = (".claude/work-items/", ".claude/scripts/tests/", ".github/", ".claude/concepts/",
-                   ".claude/north-stars/", ".claude/registries/")
+                   ".claude/north-stars/", ".claude/registries/", ".claude/orchestrator/results/",
+                   ".claude/reviews/")
 EXEMPT_NAMES = ("CLAUDE.md", "README.md", "CONTRIBUTING.md", "LICENSE", ".gitignore")
 
 
