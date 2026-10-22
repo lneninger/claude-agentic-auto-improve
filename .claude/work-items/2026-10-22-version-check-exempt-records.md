@@ -13,9 +13,9 @@ branch: fix/version-check-exempt-records
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261022-bug-version-check-exempt-records
 north_stars: none
 contract: none
-pr: UNKNOWN
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/75
+issue_link: none
+status: shipped
 created: 2026-10-22
 ---
 
