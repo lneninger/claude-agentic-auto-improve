@@ -166,6 +166,25 @@ worktree workflow.
 8. **If it is code, it must be true about itself.** See the rule below. An asset that is only
    safe because something elsewhere warns about it does not ship.
 
+## Referencing another plugin's skill
+
+An asset this plugin ships (a skill, an agent, a document) sometimes names a skill that another
+plugin owns. Such a mention is an **External skill reference**, and it follows four rules:
+
+1. **Fully qualified name.** Write `<plugin>:<skill>`, for example `frontend-design:frontend-design`.
+   A host built-in skill that no plugin ships has no prefix; cite it by its bare name and say it
+   is a host built-in, not from a plugin. Never invent a plugin name.
+2. **Advisory.** Say the word *advisory*. An external skill informs; it never decides.
+3. **Precedence.** State that this plugin's rules and the project's `review.documents` win where
+   they conflict with the external skill.
+4. **Absence.** State what happens when the plugin is not installed: continue without it. An
+   external reference is never a hard dependency, and no step halts because another plugin is
+   missing.
+
+This is distinct from an **internal reference** to this plugin's own skills or agents, written
+`agentic-auto-improve:<name>`. An internal reference may be required: the `ui-ux-designer` agent
+invokes `agentic-auto-improve:application-design` and stops if the skill cannot load.
+
 ## What may not ship
 
 **Anything this plugin ships must carry enough truth to be used safely by someone with none
