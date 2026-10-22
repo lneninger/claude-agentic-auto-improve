@@ -13,9 +13,9 @@ branch: fix/77-registries-version-gap
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261022-bug-77-registries-version-gap
 north_stars: none
 contract: .claude/concepts/2026-10-22-registries-version-gap.md
-pr: UNKNOWN
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/78
+issue_link: closes
+status: shipped
 created: 2026-10-22
 ---
 
