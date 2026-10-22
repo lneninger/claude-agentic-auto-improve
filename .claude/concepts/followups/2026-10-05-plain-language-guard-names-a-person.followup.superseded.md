@@ -1,3 +1,6 @@
+**Superseded by:** .claude/concepts/2026-10-18-remove-plain-language-hook.md (moot: the guard was removed)
+Only the guard-specific part is moot. The request to extend the genericity scan to every hook's user-facing text moved to `.claude/concepts/followups/2026-10-18-warn-on-rows-naming-unshipped-hooks.followup.md` (issue #71).
+
 # Follow-up — The shipped plain-language guard names one person in its messages
 
 **Parent contract:** `.claude/concepts/2026-10-05-working-agreements-session-start.md`

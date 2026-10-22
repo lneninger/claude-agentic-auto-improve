@@ -9,7 +9,7 @@ A hook that Claude Code launches from the PLUGIN folder must read each of its da
 <CLAUDE_PROJECT_DIR>/.claude/hooks/<name> first. Two kinds of data file, two fallbacks:
 
   advisory and pattern data   architecture-guard.rules.json, architecture-guard.exceptions.json,
-                              plain-language-guard.rules.json, integration-check.rules.json
+                              integration-check.rules.json
                               -> fall back to the plugin's template beside the script when the
                                  project has no such file.
   safety data                 db-destructive-guard.rules.json (read by BOTH database guards)
@@ -110,7 +110,7 @@ def run_hook(plugin: Path, hook: str, payload: dict, project: Path | None, extra
     temp = fresh("temp")
     cwd = fresh("cwd")  # neutral and empty: no .claude folder to pick up by accident
     env = dict(os.environ)
-    for key in ("CLAUDE_ARCH_GUARD", "CLAUDE_PLAIN_LANGUAGE_GUARD", "CLAUDE_INTEGRATION_CHECK",
+    for key in ("CLAUDE_ARCH_GUARD", "CLAUDE_INTEGRATION_CHECK",
                 "CLAUDE_DESTRUCTIVE_DB_OK", "CLAUDE_READONLY_GUARD", "CLAUDE_DB_RESEARCH_GUARD",
                 "DB_GUARD_FAULT_INJECTION", "CLAUDE_PROJECT_DIR"):
         env.pop(key, None)
@@ -145,7 +145,7 @@ def detail_of(proc) -> str:
 # ---------------------------------------------------------------------------
 print("\nINV-O3  the plugin ships a template for each advisory hook's data file")
 for name in ("architecture-guard.rules.json", "architecture-guard.exceptions.json",
-             "plain-language-guard.rules.json", "integration-check.rules.json"):
+             "integration-check.rules.json"):
     check("the plugin ships .claude/hooks/%s (the fallback template)" % name,
           (REAL_HOOKS / name).is_file(), "missing: %s" % (REAL_HOOKS / name))
 try:
@@ -158,8 +158,15 @@ check("the integration-check template names at least one backend marker and one 
 check("every template that exists parses as a JSON object",
       all(isinstance(json.loads((REAL_HOOKS / n).read_text(encoding="utf-8")), dict)
           for n in ("architecture-guard.rules.json", "architecture-guard.exceptions.json",
-                    "plain-language-guard.rules.json", "db-destructive-guard.rules.json")
+                    "db-destructive-guard.rules.json")
           if (REAL_HOOKS / n).is_file()))
+_SHIPPED_DATA = sorted(p.name for p in REAL_HOOKS.iterdir()
+                       if p.is_file() and p.name.endswith((".rules.json", ".exceptions.json")))
+check("the plugin ships exactly these data files: four guard files plus the agreements rules file",
+      _SHIPPED_DATA == ["architecture-guard.exceptions.json", "architecture-guard.rules.json",
+                        "db-destructive-guard.rules.json", "integration-check.rules.json",
+                        "working-agreements.rules.json"],
+      "shipped data files: %r" % (_SHIPPED_DATA,))
 
 # ---------------------------------------------------------------------------
 # 1. architecture-guard.py, rules file
@@ -229,52 +236,7 @@ check("the template's exceptions are not read when the project has a file: its i
       proc.returncode == 2, detail_of(proc))
 
 # ---------------------------------------------------------------------------
-# 3. plain-language-guard.py
-# ---------------------------------------------------------------------------
-print("\nINV-O3  plain-language-guard.py reads plain-language-guard.rules.json project-first")
-SENTENCE = " ".join(["filler"] * 12) + "."  # 12 words, no digit, no listed short form, no dash
-
-
-def transcript_for(text: str) -> Path:
-    folder = fresh("transcript")
-    path = folder / "t.jsonl"
-    entries = [
-        {"type": "user", "isSidechain": False,
-         "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}},
-        {"type": "assistant", "isSidechain": False,
-         "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}},
-    ]
-    path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
-    return path
-
-
-def stop_payload() -> dict:
-    return {"session_id": "datafiles-" + uuid.uuid4().hex[:10],
-            "transcript_path": str(transcript_for(SENTENCE)), "stop_hook_active": False}
-
-
-STRICT = {"max_sentence_words": 5, "stop_threshold": 1}
-LENIENT = {"max_sentence_words": 60, "stop_threshold": 50}
-plugin = make_scratch_plugin()
-write_json(plugin / ".claude" / "hooks" / "plain-language-guard.rules.json", STRICT)
-
-none_pl = make_project({})
-proc = run_hook(plugin, "plain-language-guard.py", stop_payload(), none_pl)
-check("control: no project rules file -> the template's strict limit stops a 12-word sentence (exit 2)  [passes today]",
-      proc.returncode == 2, detail_of(proc))
-lenient_pl = make_project({"plain-language-guard.rules.json": LENIENT})
-proc = run_hook(plugin, "plain-language-guard.py", stop_payload(), lenient_pl)
-check("the project's lenient rules file decides: the same sentence lets the turn end (exit 0)",
-      proc.returncode == 0, detail_of(proc))
-plugin2 = make_scratch_plugin()
-write_json(plugin2 / ".claude" / "hooks" / "plain-language-guard.rules.json", LENIENT)
-strict_pl = make_project({"plain-language-guard.rules.json": STRICT})
-proc = run_hook(plugin2, "plain-language-guard.py", stop_payload(), strict_pl)
-check("the project's strict rules file decides even when the template is lenient: the sentence stops the turn (exit 2)",
-      proc.returncode == 2, detail_of(proc))
-
-# ---------------------------------------------------------------------------
-# 4. integration-check.py
+# 3. integration-check.py
 # ---------------------------------------------------------------------------
 print("\nINV-O3  integration-check.py reads integration-check.rules.json project-first")
 
@@ -308,7 +270,7 @@ check("the template is not read when the project has a file: the template's mark
       not warned(proc), detail_of(proc))
 
 # ---------------------------------------------------------------------------
-# 5. both database guards, db-destructive-guard.rules.json (safety data: never a fallback)
+# 4. both database guards, db-destructive-guard.rules.json (safety data: never a fallback)
 # ---------------------------------------------------------------------------
 print("\nINV-O3  both database guards read db-destructive-guard.rules.json project-first and never fall back")
 _INSERT = "INS" + "ERT INTO"

@@ -50,7 +50,7 @@ THE INVARIANTS
          constant list. Both directions: an unresolvable command is a
          crash, an unregistered hook is a file nothing runs.
   INV-O1 (hook-server-modes contract, amendment 2026-10-09, sub-task 23; widened by the
-         dedupe contract, Revision 3, block 16) hooks.json registers exactly the fourteen
+         dedupe contract, Revision 3, block 16) hooks.json registers exactly the thirteen
          entries of the contract's table, exec form; the version obeys the merge-base rule
          with origin/master.
   INV-O2 (dedupe contract, Revision 3, block 16) the three add-ons under .claude/addons/ each
@@ -259,15 +259,15 @@ _dispatcher_file = ROOT / DISPATCHER_REL
 check("the post-edit dispatcher exists (its CHECKS list names the trackers hooks.json does not)",
       _dispatcher_file.is_file(), "missing: %s" % DISPATCHER_REL)
 _stop_dispatcher_file = ROOT / STOP_DISPATCHER_REL
-check("the Stop dispatcher exists (its CHECKS list names the two Stop members)",
+check("the Stop dispatcher exists (its CHECKS list names the Stop members)",
       _stop_dispatcher_file.is_file(), "missing: %s" % STOP_DISPATCHER_REL)
 dispatched = set()
 for _d in (_dispatcher_file, _stop_dispatcher_file):
     if _d.is_file():
         dispatched |= dispatcher_names(_d.read_text(encoding="utf-8", errors="replace"))
-check("the two dispatchers' CHECKS lists name at least the six members the contract assigns them",
+check("the two dispatchers' CHECKS lists name at least the five members the contract assigns them",
       {"integration-check.py", "critic-verdict-tracker.py", "contract-status-watcher.py",
-       "journal-post-approval-tracker.py", "plain-language-guard.py",
+       "journal-post-approval-tracker.py",
        "../scripts/concept_changed_check.py"} <= dispatched,
       "read %s" % sorted(dispatched))
 _cov = coverage_problems(on_disk, registered, dispatched, ROOT / ".claude" / "hooks")
@@ -547,7 +547,7 @@ check("control: the count scan reads a stated number",
 check("control: the count scan treats a README without a count as nothing stated",
       stated_case_count("no count is given here") is None)
 
-print("\nINV-O1  hooks.json registers exactly the fourteen entries of the contract's table, in exec form")
+print("\nINV-O1  hooks.json registers exactly the thirteen entries of the contract's table, in exec form")
 # Contract 2026-09-28-hook-server-modes (ScalpingMachine repository), amendment 2026-10-09 "Plugin is the
 # source of its hooks; fewer gates", INV-O1 and sub-task 23. It REPLACES sub-task 1's "INV-P1 hooks.json
 # registers one hook" block (plugin pull request #32), which pinned the dropped registration writer.
@@ -557,7 +557,7 @@ print("\nINV-O1  hooks.json registers exactly the fourteen entries of the contra
 # take no matcher in Claude Code; this repository writes ".*" there, so either spelling is accepted.
 EDIT_GROUP = "Edit|Write|MultiEdit|NotebookEdit"
 ANY_EVENT = "*any*"  # the matcher slot of an event that takes none: absent, empty or ".*"
-STOP_STATUS = "Checking the message reads plainly..."
+STOP_STATUS = "Checking changed files against approved contracts..."
 OWN = PLUGIN_ROOT_PREFIX + ".claude/hooks/"
 
 SHELL_GROUP = "Bash|PowerShell"
@@ -577,15 +577,13 @@ EXPECTED_TABLE = [
     ("PreToolUse", "Bash", "db-research-readonly-guard.py", (), False),
     ("PreToolUse", "PowerShell", "db-destructive-guard.py", (), False),
     ("PreToolUse", "PowerShell", "db-research-readonly-guard.py", (), False),
-    ("UserPromptSubmit", ANY_EVENT, "plain-language-guard.py", ("--carry-forward",), False),
     ("UserPromptSubmit", ANY_EVENT, "plan-question-advisor.py", (), False),
     ("PostToolUse", "Edit|Write|MultiEdit", "post-edit-dispatcher.py", (), True),
-    # The Stop row of plain-language-guard.py is replaced by the Stop dispatcher (not async, same status
-    # message); the guard is now its first member.
+    # The Stop dispatcher (not async, keeps a status message) runs the Changed-file check, its one member.
     ("Stop", ANY_EVENT, "stop-dispatcher.py", (), False),
     ("Stop", ANY_EVENT, "memory-pager.py", (), True),
 ]
-assert len(EXPECTED_TABLE) == 14
+assert len(EXPECTED_TABLE) == 13
 
 
 def entry_key(event, group_matcher, hook):
@@ -618,8 +616,8 @@ def table_problems(cfg: dict) -> list:
     for k in keys:
         if k not in EXPECTED_TABLE and k[2] is not None:
             problems.append("an entry outside the table: %r" % (k,))
-    if len(regs) != 14:
-        problems.append("it registers %d entries, not fourteen" % len(regs))
+    if len(regs) != 13:
+        problems.append("it registers %d entries, not thirteen" % len(regs))
     seen = {}
     for k in keys:
         if k[2] is not None:
@@ -630,8 +628,6 @@ def table_problems(cfg: dict) -> list:
     for (e, m, h), k in zip(regs, keys):
         if k[2] == "stop-dispatcher.py" and e == "Stop" and h.get("statusMessage") != STOP_STATUS:
             problems.append("the Stop dispatcher entry lost its statusMessage: %r" % h.get("statusMessage"))
-        if k[2] == "plain-language-guard.py" and e == "Stop":
-            problems.append("plain-language-guard.py must not keep its own Stop row (the Stop dispatcher runs it)")
     return problems
 
 
@@ -651,10 +647,10 @@ def good_cfg() -> dict:
     return {"hooks": hooks}
 
 
-check("hooks.json is exactly the fourteen entries of the table (events, matchers, scripts, extras, async)",
+check("hooks.json is exactly the thirteen entries of the table (events, matchers, scripts, extras, async)",
       not table_problems(_hooks_cfg),
       "\n".join(table_problems(_hooks_cfg)))
-check("hooks.json registers exactly fourteen entries in total", len(registrations_of(_hooks_cfg)) == 14,
+check("hooks.json registers exactly thirteen entries in total", len(registrations_of(_hooks_cfg)) == 13,
       "it registers %d" % len(registrations_of(_hooks_cfg)))
 # The hooks that must NEVER be in hooks.json: the five add-on hook files (a project gets them only through an
 # install skill) and the old name of the advisor (renamed angular-tailwind-advisor.py when it became an add-on).
@@ -722,7 +718,7 @@ check("control: a string-form entry for a cut hook is seen by the cut-hook fact"
 check("control: a hooks.json built from the table is accepted", table_problems(good_cfg()) == [],
       "\n".join(table_problems(good_cfg())))
 _c = good_cfg()
-_c["hooks"]["Stop"][0]["hooks"][0] = {"type": "command", "command": 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py"'}
+_c["hooks"]["Stop"][0]["hooks"][0] = {"type": "command", "command": 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/memory-pager.py"'}
 check("control: a string-form entry is rejected", bool(table_problems(_c)))
 _c = good_cfg()
 _c["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [
@@ -748,9 +744,6 @@ check("control: a Stop dispatcher entry without its statusMessage is rejected", 
 _c = good_cfg()
 _c["hooks"]["Stop"][0]["hooks"][0]["async"] = True
 check("control: a Stop dispatcher that is async is rejected", bool(table_problems(_c)) or not fact_status_message(_c))
-_c = good_cfg()
-_c["hooks"]["Stop"].append({"hooks": [{"type": "command", "command": "py", "args": ["-3", OWN + "plain-language-guard.py"]}]})
-check("control: plain-language-guard.py kept as its own Stop row is rejected", bool(table_problems(_c)))
 _c = good_cfg()
 _c["hooks"]["PreToolUse"] = [g for g in _c["hooks"]["PreToolUse"] if g.get("matcher") != SHELL_GROUP]
 check("control: the table without the shell launcher row is rejected",

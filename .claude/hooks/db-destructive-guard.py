@@ -390,7 +390,7 @@ _TGT_ALTER = "AL" + "TER"
 #
 # The hook is generic. Every name of this project's own databases and source
 # folders lives in db-destructive-guard.rules.json, the same shape as
-# architecture-guard.rules.json and plain-language-guard.rules.json.
+# architecture-guard.rules.json.
 #
 # THE LOADER FAILS CLOSED. If the rules file is missing, unreadable or empty,
 # the guard does not fall back to permitting anything: it treats EVERY database

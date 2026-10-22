@@ -204,6 +204,8 @@ def template_text(overrides=None, drop=(), extra=None):
 # (event, matcher, [hook file or (hook file, extra argument)])  -> 17 registrations, 16 files.
 # Amended by contract 2026-10-07-worktree-isolation-by-default, block 6: the concept gate is a gate-launch.py
 # row with the gate as its extra argument; the counts stay.
+# example-paired-hook.py is a FICTIONAL hook: one file registered twice, on prompt submit with an argument and at
+# Stop with none, so the suite keeps its only case of two registration keys told apart by their arguments.
 REGISTRATIONS = [
     ("PreToolUse", "Edit|Write|MultiEdit", [("gate-launch.py", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/concept-gate.py"),
                                             "architecture-guard.py"]),
@@ -216,8 +218,8 @@ REGISTRATIONS = [
     ("PostToolUse", "mcp__codegraph__.*", ["codegraph-turn-tracker.py"]),
     ("UserPromptSubmit", None, [
         "codegraph-turn-reset.py", "architecture-advisor.py", "plan-question-advisor.py",
-        ("plain-language-guard.py", "--carry-forward")]),
-    ("Stop", None, ["plain-language-guard.py", "memory-pager.py"]),
+        ("example-paired-hook.py", "--on-prompt")]),
+    ("Stop", None, ["example-paired-hook.py", "memory-pager.py"]),
 ]
 
 
@@ -1659,7 +1661,7 @@ class TestMerge(Base):
     def test_first_run_adds_seventeen_registrations_in_command_plus_args_form(self):
         plan, result = self.apply_to_fresh()
         self.assertEqual(len(self.need(plan, "to-add", "the preview lists what will be added")), 17,
-                         msg="16 hook files, plain-language-guard twice")
+                         msg="16 hook files, example-paired-hook twice")
         self.assertEqual(result.get("status"), "applied", msg="got %r" % result)
         regs = flat_registrations(self.read_settings())
         self.assertEqual(len(regs), 17, msg="17 registrations were written")
@@ -1679,26 +1681,26 @@ class TestMerge(Base):
         want = {(e, n, (reduce_arg(x),) if x else ()): m for e, m, n, x in _entries()}
         self.assertEqual(got, want, msg="matchers travel with their registrations")
 
-    def test_the_plain_language_guard_pair_stays_two_distinct_keys(self):
+    def test_a_file_registered_twice_with_different_arguments_stays_two_distinct_keys(self):
         plan, _ = self.apply_to_fresh()
         keys = [r.get("registration-key") for r in plan["to-add"]
-                if "plain-language-guard.py" in str(r.get("registration-key"))]
+                if "example-paired-hook.py" in str(r.get("registration-key"))]
         self.assertEqual(len(keys), 2, msg="one registration on Stop, one on UserPromptSubmit")
-        self.assertEqual(len(set(keys)), 2, msg="the keys differ: event and --carry-forward")
-        self.assertTrue(any("--carry-forward" in k for k in keys), msg="arguments are part of the key")
+        self.assertEqual(len(set(keys)), 2, msg="the keys differ: event and --on-prompt")
+        self.assertTrue(any("--on-prompt" in k for k in keys), msg="arguments are part of the key")
         pairs = [(e, x) for e, _m, n, x, _h in flat_registrations(self.read_settings())
-                 if n == "plain-language-guard.py"]
-        self.assertEqual(sorted(pairs), [("Stop", ()), ("UserPromptSubmit", ("--carry-forward",))],
+                 if n == "example-paired-hook.py"]
+        self.assertEqual(sorted(pairs), [("Stop", ()), ("UserPromptSubmit", ("--on-prompt",))],
                          msg="both were written")
 
     def test_only_one_of_the_pair_present_leaves_the_other_to_add(self):
         self.make_vendored()
         write_json(self.settings_path(), {"hooks": {"Stop": [{"hooks": [{
-            "type": "command", "command": 'py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/plain-language-guard.py"'}]}]}})
+            "type": "command", "command": 'py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/example-paired-hook.py"'}]}]}})
         plan = self.plan()
         added = [r.get("registration-key") for r in self.need(plan, "to-add")]
         self.assertEqual(len(added), 16, msg="the Stop registration is present; the other 16 are missing")
-        self.assertTrue(any("--carry-forward" in k for k in added),
+        self.assertTrue(any("--on-prompt" in k for k in added),
                         msg="the UserPromptSubmit registration with its argument is NOT the same key")
 
     def test_second_run_writes_nothing(self):
@@ -1817,12 +1819,12 @@ class TestMerge(Base):
         self.assertEqual(result.get("status"), "applied", msg="the remaining registrations are added")
 
     def test_skip_leaves_named_hooks_out(self):
-        plan, result = self.apply_to_fresh(skip=["memory-pager.py", "plain-language-guard.py"])
+        plan, result = self.apply_to_fresh(skip=["memory-pager.py", "example-paired-hook.py"])
         self.assertEqual(result.get("status"), "applied", msg="got %r" % result)
         names = [n for _e, _m, n, _x, _h in flat_registrations(self.read_settings())]
         self.assertNotIn("memory-pager.py", names, msg="skipped")
-        self.assertNotIn("plain-language-guard.py", names, msg="a skipped file leaves every registration of it out")
-        self.assertEqual(len(names), 14, msg="17 minus memory-pager and both plain-language-guard entries")
+        self.assertNotIn("example-paired-hook.py", names, msg="a skipped file leaves every registration of it out")
+        self.assertEqual(len(names), 14, msg="17 minus memory-pager and both example-paired-hook entries")
 
     # --- round two: M22/M27 coverage gaps, M29 disable-all-hooks -----------------------------------
     @staticmethod
@@ -1871,16 +1873,16 @@ class TestMerge(Base):
         self.assertEqual(len(self.need(self.plan(), "to-add")), 17,
                          msg="found through the plugin root, never a guessed path")
 
-    def test_the_real_plugin_hooks_json_yields_exactly_its_fourteen_registrations(self):
+    def test_the_real_plugin_hooks_json_yields_exactly_its_thirteen_registrations(self):
         # Amended by sub-task 23 (hook-server-modes amendment 2026-10-09, INV-O1): the real hooks.json now
-        # registers twelve entries, in exec form (fourteen after the dedupe contract, Revision 3: the shell launcher row and plan-question-advisor.py are added, the Stop row becomes the Stop dispatcher). The matcher is part of the comparison, because the
+        # registers twelve entries, in exec form (fourteen after the dedupe contract, Revision 3: the shell launcher row and plan-question-advisor.py are added, the Stop row becomes the Stop dispatcher; thirteen after the prompt-submit entry of the removed end-of-turn writing hook went). The matcher is part of the comparison, because the
         # database guards appear on several matchers of one event and must stay distinct entries.
         real = json.loads((SCRIPT_ROOT / ".claude/hooks/hooks.json").read_text(encoding="utf-8"))
         expected = sorted((event, g.get("matcher") or "", key_of(h)[0], key_of(h)[1])
                           for event, groups in real["hooks"].items()
                           for g in groups for h in g.get("hooks", []))
-        self.assertEqual(len(expected), 14,
-                         msg="independent parse of the REAL hooks.json: 14 registrations")
+        self.assertEqual(len(expected), 13,
+                         msg="independent parse of the REAL hooks.json: 13 registrations")
         self.make_vendored()  # every hook file named by the real hooks.json exists in the project
         # the fake plugin holds 16 hook files; the real one also holds the session-start hook and the dispatcher
         for extra_hook in ("working-agreements.py", "post-edit-dispatcher.py", "stop-dispatcher.py"):
@@ -1890,7 +1892,7 @@ class TestMerge(Base):
                             msg="fixture sanity: the temp project holds %s" % name)
         plan = fi.plan_hooks(self.project, "win32", claude_home=self.home, plugin_root=SCRIPT_ROOT)
         added = self.need(plan, "to-add", "registrations read from the real plugin's hooks.json")
-        self.assertEqual(len(added), 14, msg="all 14 real registrations are missing and to be added")
+        self.assertEqual(len(added), 13, msg="all 13 real registrations are missing and to be added")
         got = []
         for r in added:
             parsed = parse_registration_key(str(r.get("registration-key")))
@@ -1900,14 +1902,14 @@ class TestMerge(Base):
                          msg="the event, matcher and hook file of each entry equal those parsed from the real hooks.json")
 
     def test_the_independent_key_parsers_agree_on_a_known_registration_positive_control(self):
-        hook = {"type": "command", "command": 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py" --carry-forward'}
-        self.assertEqual(key_of(hook), ("plain-language-guard.py", ("--carry-forward",)),
+        hook = {"type": "command", "command": 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/example-paired-hook.py" --on-prompt'}
+        self.assertEqual(key_of(hook), ("example-paired-hook.py", ("--on-prompt",)),
                          msg="POSITIVE CONTROL: the helper reads a file name and its arguments")
-        self.assertEqual(parse_registration_key("UserPromptSubmit|plain-language-guard.py|--carry-forward"),
-                         ("plain-language-guard.py", ("--carry-forward",)),
+        self.assertEqual(parse_registration_key("UserPromptSubmit|example-paired-hook.py|--on-prompt"),
+                         ("example-paired-hook.py", ("--on-prompt",)),
                          msg="POSITIVE CONTROL: the key parser reads the same pair out of a key string")
-        self.assertEqual(parse_registration_key("Stop|plain-language-guard.py"),
-                         ("plain-language-guard.py", ()), msg="and no arguments when there are none")
+        self.assertEqual(parse_registration_key("Stop|example-paired-hook.py"),
+                         ("example-paired-hook.py", ()), msg="and no arguments when there are none")
 
     def test_a_missing_file_in_the_settings_preview_shows_in_the_diff(self):
         self.make_vendored()

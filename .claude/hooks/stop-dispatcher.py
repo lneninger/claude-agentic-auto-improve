@@ -2,10 +2,10 @@
 """
 stop-dispatcher.py -- ONE Stop hook in place of two.
 
-The plugin used to start one interpreter for the plain-language guard at Stop. The Changed-file
-check (../scripts/concept_changed_check.py) also has to run at Stop, and a second program start would add
-90 to 120 milliseconds to every turn. This dispatcher starts one process and runs both members
-one after another inside it, in the order of CHECKS, through the in-process runner
+This is the single Stop seam. The Changed-file check (../scripts/concept_changed_check.py) is its
+only member today. A later Stop member added to CHECKS costs no extra program start (a second start
+would add 90 to 120 milliseconds to every turn): this dispatcher starts one process and runs the
+members one after another inside it, in the order of CHECKS, through the in-process runner
 (_inprocess_hook.py). Each member gets the same input bytes it would have been given on its own.
 
 It follows post-edit-dispatcher.py. It differs in two ways, both forced by the Stop event:
@@ -18,7 +18,7 @@ It follows post-edit-dispatcher.py. It differs in two ways, both forced by the S
 What the members do is unchanged. They read their own off switches, keep their own state and
 print what they printed before. This file only gathers the pieces:
 
-  * Error text is passed through byte for byte, so the plain-language guard's text is identical
+  * Error text is passed through byte for byte, so a member's text is identical
     to running it alone.
   * Output is passed through byte for byte when one member spoke. When several spoke and every
     one printed a JSON object, the objects are merged into one (their systemMessage texts are
@@ -51,7 +51,6 @@ from pathlib import Path
 #: The Stop members, in the order they run. A hook file that is neither registered in hooks.json
 #: nor named here is a file nothing runs (the manifest suite checks this).
 CHECKS = [
-    "plain-language-guard.py",
     "../scripts/concept_changed_check.py",
 ]
 
