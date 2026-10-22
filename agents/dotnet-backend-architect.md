@@ -1,7 +1,7 @@
 ---
 name: dotnet-backend-architect
 description: Use for any C# / .NET 9 backend work in this solution — controllers, services, repositories, entities, EF Core configurations and migrations, DI wiring, Quartz jobs, and SignalR. Use proactively when a task touches any root named by the `backend.roots` slot of `.claude/project-profile.md`. Implements production code only after a RED test exists (TDD-first).
-tools: Read, Edit, Write, Grep, Glob, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
+tools: Read, Edit, Write, Grep, Glob, Bash, mcp__codegraph__*
 model: sonnet
 color: blue
 ---

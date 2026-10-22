@@ -1,7 +1,7 @@
 ---
 name: angular-senior-dev
 description: Use for any Angular 21 frontend work in this solution — standalone components, signal state services, HTTP services, route guards, interceptors, routing. Use proactively when a task touches any application root named by the `frontend.roots` slot of `.claude/project-profile.md`. Implements production code only after a RED Vitest test exists (TDD-first).
-tools: Read, Edit, Write, Grep, Glob, Bash, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
+tools: Read, Edit, Write, Grep, Glob, Bash, mcp__codegraph__*
 model: sonnet
 color: red
 ---
