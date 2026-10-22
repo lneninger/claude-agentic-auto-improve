@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-10-22
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-10-22, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/74; 2 checklist items from review reports, 0 with no structured evidence; not performed: none; owner confirmed resolved: none
 **Supersedes:** `.claude/concepts/followups/2026-10-22-advisor-phantom-design-refs.followup.md` (a stub; renamed to `.followup.superseded.md` by sub-task 1)
 **Work Item Brief:** `.claude/work-items/2026-10-22-followups-advisor-refs-and-lookup-test.md`
 **Tracking issue:** none. The brief puts opening any GitHub issue out of scope.
@@ -318,11 +319,11 @@ PRIOR_FINDINGS:
 
 `pr_merged.py` fills this list when the contract's work is merged and nothing is pending: a line is checked only when an effective review report's Gate Output says `met`, and every other line stays unchecked with the reason. Do not tick lines by hand.
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [x] Implementation matches Data Shapes exactly — evidence: .claude/reviews/2026-10-22-advisor-refs-and-lookup-test/t2-review-fullstack-code-reviewer.md
+- [x] Reused Mechanisms are actually reused (no parallel implementations introduced) — evidence: .claude/reviews/2026-10-22-advisor-refs-and-lookup-test/t2-review-fullstack-code-reviewer.md
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — not applicable (.claude/reviews/2026-10-22-advisor-refs-and-lookup-test/t2-review-fullstack-code-reviewer.md)
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — not applicable (.claude/reviews/2026-10-22-advisor-refs-and-lookup-test/t2-review-fullstack-code-reviewer.md)
+- [ ] Integration surfaces reflected on both backend and frontend sides — not applicable (.claude/reviews/2026-10-22-advisor-refs-and-lookup-test/t2-review-fullstack-code-reviewer.md)
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — not applicable (.claude/reviews/2026-10-22-advisor-refs-and-lookup-test/t2-review-fullstack-code-reviewer.md)
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — not applicable (.claude/reviews/2026-10-22-advisor-refs-and-lookup-test/t2-review-fullstack-code-reviewer.md)
+- [x] `Status` flipped to `implemented`

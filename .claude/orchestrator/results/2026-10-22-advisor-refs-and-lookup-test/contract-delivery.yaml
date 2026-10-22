@@ -1,0 +1,15 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/74
+number: 74
+head_ref: fix/followups-advisor-refs-and-lookup-test
+base_ref: master
+base_is_default: true
+commit: 1c1cf4ff01d76fb640081c7043c6189ded648b30
+merged_at: '2026-10-22T20:52:43Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-10-22T20:54:19.955575+00:00'
+blocks_recorded:
+- t1-advisor-nudge-lookup-blocks-and-version
+- t2-review
+blocks_already_recorded: []
