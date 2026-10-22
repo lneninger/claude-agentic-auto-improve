@@ -39,8 +39,13 @@ no baseline, or an unreadable one, counts every uncommitted file (the stricter r
 
 It stops only for a file it has not stopped for before in this session, lists only those new
 files, never stops twice for the same set, and yields (noted) when ``stop_hook_active`` is set, so
-it can never hold a session. A file git marks ``linguist-generated`` is always noted, never
-stopped: generator output is not written by a tool call.
+it can never hold a session. A file that the COMMITTED attribute files of ``HEAD`` mark
+``linguist-generated`` is only noted at turn end, never stopped: generator output is not written by a
+tool call. An attribute that is not committed does not count (an untracked ``.gitattributes``, the
+private ``.git/info/attributes`` file, a user-wide attributes file), and a ``linguist-generated`` line
+in ``info/attributes`` turns the exemption off for every file in the run. With no ``HEAD``, or when git
+refuses ``--source`` (before 2.40), nothing counts as generated. At ``--staged`` a generated file does
+not stop the commit but is no longer silent: one standard-error line names it.
 
 FAILS OPEN
 ----------
@@ -53,7 +58,9 @@ GIT CALLS (each with a 5 second limit; no other subprocess, no network)
 -----------------------------------------------------------------------
   1. ``git status --porcelain=v1 -z --untracked-files=all``
   2. ``git hash-object --stdin-paths`` (content hashes, one call)
-  3. ``git check-attr -z --stdin linguist-generated``
+  3. ``git rev-parse --git-path info/attributes`` (where the private attributes file is)
+  4. ``git check-attr --source HEAD -z --stdin linguist-generated``, with the user-wide and system
+     attribute files switched off for that call
 
 STATE (in the system temporary folder, named by the session id)
 ---------------------------------------------------------------
@@ -117,6 +124,11 @@ STAGED_PARAGRAPH = (
     "These staged files are not covered by any approved contract, so the commit is refused. "
     "Run /design-first or pin the contract that covers them, then commit again."
 )
+
+
+#: The one standard-error line at ``--staged`` naming staged files that a committed attribute marks generated.
+#: They no longer pass in silence; they still do not stop the commit.
+GENERATED_STAGED_LINE = "Changed-file check: generated files are staged and not judged against a contract: %s"
 
 
 class CannotCheck(Exception):
@@ -191,15 +203,16 @@ def _tree_root(start: str) -> str:
     raise CannotCheck("%s is not inside a git working tree" % start)
 
 
-def _git(root: str, args: list[str], data: bytes = b"") -> bytes:
+def _git(root: str, args: list[str], data: bytes = b"", extra_env: dict | None = None) -> bytes:
     """Run one git call with a time limit and return its output.
 
     Output goes through temporary files, not pipes: if the time limit passes and git is killed, a
     child it started could still hold a pipe open and make the wait for the pipe last as long as
-    that child does. Files have no such wait.
+    that child does. Files have no such wait. ``extra_env`` adds variables for this one call.
     """
     env = dict(os.environ)
     env["GIT_OPTIONAL_LOCKS"] = "0"  # a read-only look must not take the index lock
+    env.update(extra_env or {})
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     with tempfile.TemporaryFile() as fin, tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
         fin.write(data)
@@ -261,12 +274,42 @@ def _hashes(root: str, rels: list[str]) -> dict[str, str]:
     return result
 
 
+def _private_attributes_mark_generated(root: str) -> bool:
+    """True when the repository's private ``info/attributes`` file holds a ``linguist-generated`` line, or
+    when that cannot be told. ``git status`` never shows this file, so a session could use it to hide files."""
+    try:
+        where = os.fsdecode(_git(root, ["rev-parse", "--git-path", "info/attributes"])).strip()
+    except CannotCheck:
+        return True
+    path = Path(where) if os.path.isabs(where) else Path(root) / where
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return any("linguist-generated" in line for line in text.splitlines()
+               if line.strip() and not line.lstrip().startswith("#"))
+
+
 def _generated(root: str, rels: list[str]) -> set[str]:
-    """The paths git marks ``linguist-generated`` (set, or true). One git call."""
-    if not rels:
+    """The paths the COMMITTED attribute files of ``HEAD`` mark ``linguist-generated`` (set, or true).
+
+    Only committed attributes count: an untracked ``.gitattributes`` or a user-wide attributes file must
+    not hide a file, so the call names ``--source HEAD`` and switches the user-wide and system attribute
+    files off for that one call. A ``linguist-generated`` line in ``info/attributes`` voids the exemption for
+    every file in the run (this does not depend on how git ranks that file against ``--source``). With no
+    ``HEAD``, or when git refuses ``--source`` (older than 2.40), no file counts as generated: every fault
+    leans towards a stop. Two git calls.
+    """
+    if not rels or _private_attributes_mark_generated(root):
         return set()
     data = b"".join(rel.encode("utf-8") + b"\0" for rel in rels)
-    out = _git(root, ["check-attr", "-z", "--stdin", "linguist-generated"], data)
+    try:
+        out = _git(root, ["-c", "core.attributesFile=" + os.devnull, "check-attr", "--source", "HEAD", "-z",
+                          "--stdin", "linguist-generated"], data, extra_env={"GIT_ATTR_NOSYSTEM": "1"})
+    except CannotCheck:
+        return set()
     fields = out.split(b"\0")
     found: set[str] = set()
     for at in range(0, len(fields) - 2, 3):
@@ -482,11 +525,16 @@ def run_staged() -> int:
             return 0
         uncovered = _uncovered(gate, root, staged)
         generated_paths = _generated(root, [rel for rel, _reason in uncovered])
+        generated = [item for item in uncovered if item[0] in generated_paths]
         stoppable = [item for item in uncovered if item[0] not in generated_paths]
         if not stoppable:
+            if generated:
+                _write_stderr(GENERATED_STAGED_LINE % _names(generated))
             return 0
         _log("block", "", {"files": [rel for rel, _r in stoppable], "mode": "staged"}, file=stoppable[0][0])
         _write_stderr(_stop_text(gate, STAGED_PARAGRAPH, root, stoppable, 0))
+        if generated:
+            _write_stderr(GENERATED_STAGED_LINE % _names(generated))
         return 2
     except BaseException as exc:  # noqa: BLE001
         if isinstance(exc, KeyboardInterrupt):

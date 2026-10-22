@@ -226,6 +226,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract removes or renames a hook file, or changes how a hook is registered, and documents the effect on existing installs
 - **Tags:** hooks, removal, vendored-install, registrations, readme-note
 
+### 2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-10-22-webdesign-plugin-skills.md
+- **Lesson:** When the user accepts a critic finding or answers an Open Question in a way that changes a Data Shape, edit that shape (value-object fields, halt table rows, convention clauses) in the same pass that flips Status. A one-line "accepted all recommendations" note leaves the implementer to invent the change and the reviewer to judge it as divergence.
+- **Apply when:** a contract's Open Questions or Critique section records an answer or acceptance, and the Data Shapes, Invariants or New Mechanisms text still reads as it did before that answer (here: no `root-undeterminable` halt row, and no host built-in clause for `dataviz`)
+- **Tags:** design-first, contract-amendment, critic-warn, open-questions, data-shapes
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

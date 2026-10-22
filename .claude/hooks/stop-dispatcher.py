@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-stop-dispatcher.py -- ONE Stop hook in place of two.
+stop-dispatcher.py -- the one Stop seam.
 
 This is the single Stop seam. The Changed-file check (../scripts/concept_changed_check.py) is its
 only member today. A later Stop member added to CHECKS costs no extra program start (a second start

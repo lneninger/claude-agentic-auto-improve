@@ -38,6 +38,7 @@ overwrites a file that differs.
 from __future__ import annotations
 
 import argparse
+import copy
 import difflib
 import hashlib
 import json
@@ -148,6 +149,8 @@ CODE_SEARCH_NOTE = (
     "first checks that the CodeGraph MCP server is configured."
 )
 
+#: The folders (relative to the project) every apply checks for a link before it writes.
+WRITE_FOLDERS = (".claude", ".claude/hooks")
 ADDONS_REL = ".claude/addons"
 ADDON_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ADDON_HELPER_ROOTS = (".claude/hooks/", ".claude/scripts/")
@@ -1303,15 +1306,259 @@ def _plugin_hooks_json(root: Optional[Path]) -> Optional[Path]:
     return None
 
 
+# --- the settings text splice ---------------------------------------------------------------
+#
+# The writer adds a row to an existing settings.json by INSERTING text into the original text. A position
+# reader records where the values on the path to the insertion point start and end; everything else is
+# skipped, never parsed into a new layout. So every byte outside the inserted ranges is the original byte.
+
+class _SpliceRefused(Exception):
+    """A row cannot be inserted into the text safely. Names the container and the reason."""
+
+    def __init__(self, container: str, why: str) -> None:
+        super().__init__(why)
+        self.container = container
+        self.why = why
+        self.row = ""
+
+
+_JSON_SPACE = " \t\r\n"
+_STRING_AT = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+_QUOTE_OR_BRACKET = re.compile(r'["\[\]{}]')
+_SCALAR_AT = re.compile(r"[^,\]}\s]+")
+
+
+def _scan_space(text: str, i: int) -> int:
+    while i < len(text) and text[i] in _JSON_SPACE:
+        i += 1
+    return i
+
+
+def _scan_value_end(text: str, i: int) -> int:
+    """The index just after the value that starts at ``i`` (a string, a scalar, or a whole object or list)."""
+    if text[i] == '"':
+        return _STRING_AT.match(text, i).end()  # type: ignore[union-attr]
+    if text[i] in "{[":
+        depth, pos = 0, i
+        while True:
+            hit = _QUOTE_OR_BRACKET.search(text, pos)
+            if hit is None:
+                raise ValueError("unterminated value")
+            if hit.group() == '"':
+                pos = _STRING_AT.match(text, hit.start()).end()  # type: ignore[union-attr]
+                continue
+            depth += 1 if hit.group() in "{[" else -1
+            pos = hit.end()
+            if depth == 0:
+                return pos
+    return _SCALAR_AT.match(text, i).end()  # type: ignore[union-attr]
+
+
+class _Box:
+    """The spans of one object or list: where it opens and closes, and each member's key and value."""
+
+    def __init__(self, name: str, opener: str, start: int, close: int,
+                 members: List[Tuple[int, int, int, int]]) -> None:
+        self.name, self.opener, self.start, self.close, self.members = name, opener, start, close, members
+
+
+def _open_box(text: str, start: int, name: str) -> _Box:
+    """Read the object or list that starts at ``start``: the span of each direct member, nothing deeper."""
+    opener = text[start]
+    if opener not in "{[":
+        raise _SpliceRefused(name, "it is not an object or a list")
+    closer = "}" if opener == "{" else "]"
+    members: List[Tuple[int, int, int, int]] = []
+    i = _scan_space(text, start + 1)
+    if text[i] == closer:
+        return _Box(name, opener, start, i, members)
+    while True:
+        key_start = key_end = -1
+        if opener == "{":
+            key_start = i
+            key_end = _STRING_AT.match(text, i).end()  # type: ignore[union-attr]
+            i = _scan_space(text, key_end)
+            if text[i] != ":":
+                raise ValueError("no colon after a key")
+            i = _scan_space(text, i + 1)
+        value_end = _scan_value_end(text, i)
+        members.append((key_start, key_end, i, value_end))
+        i = _scan_space(text, value_end)
+        if text[i] == ",":
+            i = _scan_space(text, i + 1)
+        elif text[i] == closer:
+            return _Box(name, opener, start, i, members)
+        else:
+            raise ValueError("neither a comma nor the end of the container")
+
+
+def _member_named(text: str, box: _Box, key: str) -> Optional[int]:
+    """Index of the member whose key is ``key``, or None. A key written with a backslash escape is refused:
+    refusing is simpler and safer than decoding keys while splicing."""
+    for n, (key_start, key_end, _vs, _ve) in enumerate(box.members):
+        raw = text[key_start:key_end]
+        if "\\" in raw:
+            if json.loads(raw) == key:
+                raise _SpliceRefused(box.name, 'the key "%s" is written with an escape' % key)
+        elif raw[1:-1] == key:
+            return n
+    return None
+
+
+def _inline_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _block_json(value: Any, indent: str, unit: str, newline: str) -> str:
+    """``value`` spread over lines the way a person lays out settings: an object, or a list holding objects,
+    one member per line; a list of plain values on one line. The first line carries no leading indent."""
+    if isinstance(value, dict) and value:
+        inner = indent + unit
+        rows = [inner + _inline_json(k) + ": " + _block_json(v, inner, unit, newline) for k, v in value.items()]
+        return "{" + newline + ("," + newline).join(rows) + newline + indent + "}"
+    if isinstance(value, list) and any(isinstance(v, (dict, list)) for v in value):
+        inner = indent + unit
+        rows = [inner + _block_json(v, inner, unit, newline) for v in value]
+        return "[" + newline + ("," + newline).join(rows) + newline + indent + "]"
+    return _inline_json(value)
+
+
+def _splice_in(text: str, box: _Box, key: Optional[str], value: Any, unit: str, newline: str
+               ) -> Tuple[int, str]:
+    """Where to insert one new member (``key`` set) or element (``key`` None) in ``box``, and the text to insert.
+
+    Non-empty container: a comma and the new item right after the last element; on a new line indented like
+    the last element when the container is spread over lines, after ``, `` when it is written on one line.
+    Empty container: inside it on the same line when it is written on one line; on its own line, one indent
+    unit deeper than the line that opens it, when its brackets are on separate lines.
+    """
+    def item(block: bool, indent: str) -> str:
+        body = _block_json(value, indent, unit, newline) if block else _inline_json(value)
+        return (_inline_json(key) + ": " + body) if key is not None else body
+
+    if not box.members:
+        inner = text[box.start + 1:box.close]
+        if "\n" not in inner:
+            return box.start + 1, item(False, "")
+        opening_line = text[text.rfind("\n", 0, box.start) + 1:box.start]
+        indent = opening_line[:len(opening_line) - len(opening_line.lstrip(" \t"))] + unit
+        return box.start + 1 + inner.index("\n") + 1, indent + item(True, indent) + newline
+    key_start, _key_end, value_start, value_end = box.members[-1]
+    first = key_start if box.opener == "{" else value_start
+    j = first
+    while j > 0 and text[j - 1] in " \t":
+        j -= 1
+    if j > 0 and text[j - 1] == "\n":
+        indent = text[j:first]
+        return value_end, "," + newline + indent + item(True, indent)
+    if "\n" in text[box.start:box.close]:
+        raise _SpliceRefused(box.name, "its last element does not start a line, but the container is spread "
+                                       "over several lines")
+    return value_end, ", " + item(False, "")
+
+
+def _row_insertion(text: str, event: str, matcher: Optional[str], hook: Dict[str, Any], unit: str,
+                   newline: str) -> Tuple[int, str]:
+    """Where today's placement rule puts one row in ``text``, and what to insert there.
+
+    The row joins the first group of the event's list whose matcher equals the row's matcher. Without one a
+    new group goes at the end of the event's list; without that list a new event entry goes at the end of
+    the ``hooks`` object; without a ``hooks`` object one goes at the end of the top-level object.
+    """
+    settings = json.loads(text, object_pairs_hook=_strict_pairs)
+    group: Dict[str, Any] = {"matcher": matcher, "hooks": [hook]} if matcher is not None else {"hooks": [hook]}
+    root = _open_box(text, _scan_space(text, 0), "the top-level object")
+    if "hooks" not in settings:
+        return _splice_in(text, root, "hooks", {event: [group]}, unit, newline)
+    hooks_box = _open_box(text, root.members[_member_named(text, root, "hooks")][2], 'the "hooks" object')
+    if event not in settings["hooks"]:
+        return _splice_in(text, hooks_box, event, [group], unit, newline)
+    list_box = _open_box(text, hooks_box.members[_member_named(text, hooks_box, event)][2],
+                         'the "%s" list' % event)
+    groups = settings["hooks"][event]
+    index = next((i for i, g in enumerate(groups) if g.get("matcher") == matcher), None)
+    if index is None:
+        return _splice_in(text, list_box, None, group, unit, newline)
+    group_box = _open_box(text, list_box.members[index][2], 'a group of the "%s" list' % event)
+    _member_named(text, group_box, "matcher")  # only to refuse an escaped key
+    at = _member_named(text, group_box, "hooks")
+    if at is None:
+        return _splice_in(text, group_box, "hooks", [hook], unit, newline)
+    inner = _open_box(text, group_box.members[at][2], 'the "hooks" list of a group of "%s"' % event)
+    return _splice_in(text, inner, None, hook, unit, newline)
+
+
+def _add_range(ranges: List[Tuple[int, int]], pos: int, length: int) -> List[Tuple[int, int]]:
+    """Record an insertion at ``pos``: shift the earlier ranges that follow it, split one that holds it."""
+    moved: List[Tuple[int, int]] = []
+    for start, end in ranges:
+        if end <= pos:
+            moved.append((start, end))
+        elif start >= pos:
+            moved.append((start + length, end + length))
+        else:
+            moved.extend([(start, pos), (pos + length, end + length)])
+    moved.append((pos, pos + length))
+    return sorted(moved)
+
+
+def _without_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
+    kept, at = [], 0
+    for start, end in ranges:
+        kept.append(text[at:start])
+        at = max(at, end)
+    kept.append(text[at:])
+    return "".join(kept)
+
+
+def _splice_rows(text: str, settings: Any, to_add: List[_Registration], platform: str, unit: str,
+                 newline: str) -> str:
+    """The text with every row of ``to_add`` inserted, or a _SpliceRefused. Three checks run before it returns:
+    the new text parses strictly, parsed it equals the object the in-memory merge gives, and removing the
+    inserted ranges gives back the original text."""
+    expected = copy.deepcopy(settings)
+    current: str = text
+    ranges: List[Tuple[int, int]] = []
+    for reg in to_add:
+        hook = _written_hook(reg, platform)
+        groups = expected.setdefault("hooks", {}).setdefault(reg.event, [])
+        group = next((g for g in groups if g.get("matcher") == reg.matcher), None)
+        if group is None:
+            group = {"matcher": reg.matcher, "hooks": []} if reg.matcher is not None else {"hooks": []}
+            groups.append(group)
+        group.setdefault("hooks", []).append(hook)
+        try:
+            pos, inserted = _row_insertion(current, reg.event, reg.matcher, hook, unit, newline)
+        except _SpliceRefused as exc:
+            exc.row = reg.key
+            raise
+        current = current[:pos] + inserted + current[pos:]
+        ranges = _add_range(ranges, pos, len(inserted))
+    try:
+        parsed = json.loads(current, object_pairs_hook=_strict_pairs)
+    except ValueError as exc:
+        raise _SpliceRefused("the new text", "the self-check could not parse it: %s" % exc)
+    if parsed != expected:
+        raise _SpliceRefused("the new text", "the self-check found it differs from the merged object")
+    if _without_ranges(current, ranges) != text:
+        raise _SpliceRefused("the new text", "the self-check found a changed byte outside the inserted ranges")
+    return current
+
+
 def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Registration]
                         ) -> Tuple[Optional[Result], Dict[str, Any]]:
     """The one settings.json merge both the vendored hooks step and an add-on install use.
 
-    Reads the project's settings.json strictly, finds which of ``regs`` no layer registers yet, and
-    renders the file with those rows appended in exec form (the existing text, indent, line ending and
-    byte order mark are kept). Writes nothing. Returns (refusal, {}) or (None, edit) where edit carries
-    the target, the old and new bytes, the rows to add, the rows already present, notes, whether any
-    layer disables hooks, and the unified diff.
+    Reads the project's settings.json strictly, finds which of ``regs`` no layer registers yet, and builds
+    the new bytes by INSERTING each row as text into the original text: a comma and the row's own lines
+    (or its text on the same line, in a container written on one line). Every byte outside the inserted
+    text is the original byte, so the escapes, indent, one-line lists, line endings and byte order mark of
+    the existing file stay as they are. With no settings file yet there is nothing to keep, and the new file
+    is rendered whole. A shape the writer cannot insert into safely (a key on the insertion path written with
+    an escape, say) is refused as ``unexpected-settings-shape``; it never falls back to rendering the whole
+    file. Writes nothing. Returns (refusal, {}) or (None, edit) where edit carries the target, the old and
+    new bytes, the rows to add, the rows already present, notes, whether any layer disables hooks, and the
+    unified diff.
     """
     target = project / ".claude" / "settings.json"
     try:
@@ -1345,17 +1592,30 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
     newline = "\r\n" if "\r\n" in text else "\n"
     indent_match = re.search(r"\n([ \t]+)\S", text)
     indent = indent_match.group(1) if indent_match else "  "
-    new_settings = settings
-    for reg in to_add:
-        groups = new_settings.setdefault("hooks", {}).setdefault(reg.event, [])
-        group = next((g for g in groups if g.get("matcher") == reg.matcher), None)
-        if group is None:
-            group = {"matcher": reg.matcher, "hooks": []} if reg.matcher is not None else {"hooks": []}
-            groups.append(group)
-        group.setdefault("hooks", []).append(_written_hook(reg, platform))
     new_text = ""
-    if to_add:
+    if to_add and old_bytes is None:
+        # No file yet: nothing to keep, so the new file is rendered whole.
+        new_settings = settings
+        for reg in to_add:
+            groups = new_settings.setdefault("hooks", {}).setdefault(reg.event, [])
+            group = next((g for g in groups if g.get("matcher") == reg.matcher), None)
+            if group is None:
+                group = {"matcher": reg.matcher, "hooks": []} if reg.matcher is not None else {"hooks": []}
+                groups.append(group)
+            group.setdefault("hooks", []).append(_written_hook(reg, platform))
         new_text = json.dumps(new_settings, indent=indent, ensure_ascii=False).replace("\n", newline) + newline
+    elif to_add:
+        try:
+            new_text = _splice_rows(text, settings, to_add, platform, indent, newline)
+        except _SpliceRefused as exc:
+            return refusal("unexpected-settings-shape",
+                           "settings.json: the row for %s could not be inserted into %s (%s), so nothing was "
+                           "written. Add the row by hand, or make the file's shape plainer and run this again"
+                           % (exc.row or "the new rows", exc.container, exc.why), target), {}
+        except (ValueError, IndexError, AttributeError, RecursionError) as exc:
+            return refusal("unexpected-settings-shape",
+                           "settings.json: the text around the insertion point could not be read safely (%s), "
+                           "so nothing was written. Add the rows by hand" % exc, target), {}
     bom = b"\xef\xbb\xbf" if old_bytes is not None and old_bytes.startswith(b"\xef\xbb\xbf") else b""
     diff = "".join(difflib.unified_diff(text.splitlines(keepends=True), new_text.splitlines(keepends=True),
                                         fromfile=str(target), tofile=str(target))) if to_add else ""
@@ -1459,6 +1719,26 @@ def _backup_write(target: Path, data: bytes) -> Path:
             n += 1
 
 
+def _linked_folder_refusal(project: Path, folders: Sequence[str], target: Path) -> Optional[Result]:
+    """A refusal (``write-failed``) when a folder the apply will write into is not in its own place.
+
+    Each folder (a path relative to the project) is resolved with ``os.path.realpath``, which follows a
+    directory junction on Windows and a symbolic link elsewhere, and compared with the same relative place
+    under the RESOLVED project folder. So a project reached through a linked parent folder still installs,
+    and a ``.claude`` or ``.claude/hooks`` folder that points somewhere else is refused before any write.
+    """
+    base = os.path.realpath(str(project))
+    for rel in folders:
+        expected = os.path.join(base, *rel.split("/"))
+        actual = os.path.realpath(str(project / Path(*rel.split("/"))))
+        if _norm(actual) != _norm(expected):
+            return refusal("write-failed",
+                           "%s is a link: it resolves to %s, not to %s inside the project. The apply would write "
+                           "into the link's target, so nothing was written. Replace the link with a real folder "
+                           "or edit the target by hand" % (rel, actual, expected), target)
+    return None
+
+
 def apply_hooks(
     project: Path,
     expect_sha256: str,
@@ -1499,6 +1779,9 @@ def apply_hooks(
                        "same flags", target)
     if not payload["to-add"]:
         return {"status": "nothing-to-do", "target": str(target)}
+    linked = _linked_folder_refusal(project, WRITE_FOLDERS, target)
+    if linked:
+        return linked
     for reg in payload["to-add"]:
         hook_path = project / ".claude" / "hooks" / reg.file
         if not hook_path.is_file():
@@ -1596,28 +1879,87 @@ def _addon_listing(root: Path) -> List[Dict[str, Any]]:
     return found
 
 
-def _mcp_servers_in(data: Any) -> Set[str]:
+def _mcp_servers_in(data: Any) -> Dict[str, Any]:
+    """The ``mcpServers`` entries of a parsed file, by server name; empty when there are none."""
     servers = data.get("mcpServers") if isinstance(data, dict) else None
-    return set(servers) if isinstance(servers, dict) else set()
+    return dict(servers) if isinstance(servers, dict) else {}
+
+
+def _starts_a_server(entry: Any) -> bool:
+    """An entry starts a server only when it is an object with a non-empty ``command`` or ``url`` string."""
+    return isinstance(entry, dict) and any(isinstance(entry.get(k), str) and entry[k].strip()
+                                           for k in ("command", "url"))
+
+
+def _lists_server(data: Any, key: str, server: str) -> bool:
+    values = data.get(key) if isinstance(data, dict) else None
+    return isinstance(values, list) and server in values
+
+
+def _mcp_server_state(server: str, project: Path, claude_home: Optional[Path]) -> Dict[str, Any]:
+    """Whether ``server`` is usable, and why not when it is not.
+
+    Returns ``{"ok": bool, "why": str, "note": Optional[str]}``. ``ok`` needs a real entry (an object with a
+    non-empty ``command`` or ``url``) in the project's .mcp.json, in the user's Claude configuration file
+    (``.claude.json``, in the home directory or the Claude config directory) or in that file's entry for this
+    project (an entry under another project's path does not count), AND no listing of the server in
+    ``disabledMcpjsonServers`` in any of four layers: the project's .claude/settings.json and
+    .claude/settings.local.json, the user's settings.json, and this project's entry in .claude.json.
+    ``note`` is set when the server is found only in the project's .mcp.json and no layer approves it
+    (``enableAllProjectMcpServers`` or ``enabledMcpjsonServers``): a note for the preview, never a refusal.
+    """
+    project_file = project / ".mcp.json"
+    user_files = sorted({Path(os.path.expanduser("~")) / ".claude.json", _claude_home(claude_home) / ".claude.json"})
+    wanted = {_norm(project), _norm(project.resolve()), project.as_posix()}
+    found: List[Tuple[str, Any, bool]] = []  # (where, entry, needs the project's approval)
+    in_project_file = _mcp_servers_in(_load_json_lenient(project_file))
+    if server in in_project_file:
+        found.append(("the project's .mcp.json", in_project_file[server], True))
+    layers: List[Tuple[str, Any]] = [
+        (str(project / ".claude" / "settings.json"), _load_json_lenient(project / ".claude" / "settings.json")),
+        (str(project / ".claude" / "settings.local.json"),
+         _load_json_lenient(project / ".claude" / "settings.local.json")),
+        (str(_claude_home(claude_home) / "settings.json"), _load_json_lenient(_claude_home(claude_home) / "settings.json")),
+    ]
+    for path in user_files:
+        data = _load_json_lenient(path)
+        if server in _mcp_servers_in(data):
+            found.append((str(path), _mcp_servers_in(data)[server], False))
+        projects = data.get("projects") if isinstance(data, dict) else None
+        for key, project_entry in (projects.items() if isinstance(projects, dict) else []):
+            if _norm(key) in wanted or str(key).replace("\\", "/") in wanted:
+                layers.append(("%s, entry for this project" % path, project_entry))
+                if server in _mcp_servers_in(project_entry):
+                    found.append(("%s, entry for this project" % path, _mcp_servers_in(project_entry)[server], False))
+    if not found:
+        return {"ok": False, "note": None, "why": (
+            "the %s MCP server is not configured. Looked in the project's .mcp.json, in the user's Claude "
+            "configuration file (.claude.json) and in that file's entry for this project" % server)}
+    real = [item for item in found if _starts_a_server(item[1])]
+    if not real:
+        return {"ok": False, "note": None, "why": (
+            "the %s MCP server has an entry (%s) but it has no command and no url, so it starts no server"
+            % (server, "; ".join(where for where, _e, _a in found)))}
+    for where, data in layers:
+        if _lists_server(data, "disabledMcpjsonServers", server):
+            return {"ok": False, "note": None, "why": (
+                "the %s MCP server is listed in disabledMcpjsonServers in %s, so it does not run" % (server, where))}
+    note = None
+    if all(needs for _where, _entry, needs in real):
+        approved = any((isinstance(data, dict) and data.get("enableAllProjectMcpServers") is True)
+                       or _lists_server(data, "enabledMcpjsonServers", server) for _where, data in layers)
+        if not approved:
+            note = ("the %s MCP server is defined only in the project's .mcp.json and no setting approves it "
+                    "(enabledMcpjsonServers or enableAllProjectMcpServers). Claude Code asks for approval "
+                    "when a session starts; until it is approved the server does not run and the gate would "
+                    "block every source read" % server)
+    return {"ok": True, "note": note, "why": ""}
 
 
 def _mcp_server_configured(server: str, project: Path, claude_home: Optional[Path]) -> bool:
-    """True when ``server`` is configured in the project's .mcp.json, in the user's Claude configuration
-    file (``.claude.json``, in the home directory or the Claude config directory), or in that file's entry
-    for this project. An entry under another project's path does not count."""
-    if server in _mcp_servers_in(_load_json_lenient(project / ".mcp.json")):
-        return True
-    user_files = {Path(os.path.expanduser("~")) / ".claude.json", _claude_home(claude_home) / ".claude.json"}
-    wanted = {_norm(project), _norm(project.resolve()), project.as_posix()}
-    for path in sorted(user_files):
-        data = _load_json_lenient(path)
-        if server in _mcp_servers_in(data):
-            return True
-        projects = data.get("projects") if isinstance(data, dict) else None
-        for key, entry in (projects.items() if isinstance(projects, dict) else []):
-            if (_norm(key) in wanted or str(key).replace("\\", "/") in wanted) and server in _mcp_servers_in(entry):
-                return True
-    return False
+    """True when ``server`` has a real entry (a non-empty command or url) that no layer lists as disabled.
+    See _mcp_server_state for the places looked in and for the approval note."""
+    return bool(_mcp_server_state(server, project, claude_home)["ok"])
 
 
 def _fold_text_bytes(data: bytes) -> bytes:
@@ -1693,15 +2035,17 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
     problem, manifest = _read_addon_manifest(folder)
     if problem:
         return problem, {}
+    approval_notes: List[str] = []
     for need in manifest["prerequisites"]:
-        if not _mcp_server_configured(need["name"], project, claude_home):
+        state = _mcp_server_state(need["name"], project, claude_home)
+        if not state["ok"]:
             return refusal(
                 "codegraph-mcp-not-configured",
-                "the %s MCP server is not configured, so the %s add-on is not installed. Looked in the "
-                "project's .mcp.json, in the user's Claude configuration file (.claude.json) and in that "
-                "file's entry for this project. A gate installed without the server blocks every source read "
-                "and gives the agent no way past it. Configure the server first, then run this again."
-                % (need["name"], name), project / ".mcp.json"), {}
+                "%s, so the %s add-on is not installed. A gate installed without a working server blocks "
+                "every source read and gives the agent no way past it. Fix the server first, then run this "
+                "again." % (state["why"], name), project / ".mcp.json"), {}
+        if state["note"]:
+            approval_notes.append(state["note"])
     problem, ops = _addon_file_ops(project, root, folder, manifest)
     if problem:
         return problem, {}
@@ -1723,7 +2067,8 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
         "to-add": [{"event": r.event, "matcher": r.matcher, "command": _written_hook(r, platform)["command"],
                     "args": _written_hook(r, platform)["args"], "registration-key": r.key} for r in to_add],
         "already-present": edit["present"], "interpreter": "py -3" if platform == "win32" else "python3",
-        "disable-all-hooks": edit["disabled"], "unified-diff": edit["diff"], "notes": edit["notes"],
+        "disable-all-hooks": edit["disabled"], "unified-diff": edit["diff"],
+        "notes": list(edit["notes"]) + approval_notes,
         "kill-switches": [k for k in manifest.get("kill_switches", []) if isinstance(k, str)],
         "new-session-note": NEW_SESSION_NOTE,
     }
@@ -1772,6 +2117,10 @@ def apply_addon(
     copies = [o for o in payload["ops"] if o["action"] == "copy"]
     if not copies and not payload["to-add"]:
         return {"status": "nothing-to-do", "target": str(target), "add-on": name}
+    destinations = [posixpath.dirname(op["path"]) for op in copies]
+    linked = _linked_folder_refusal(project, list(dict.fromkeys(list(WRITE_FOLDERS) + destinations)), target)
+    if linked:
+        return linked
     if payload["to-add"]:
         launcher = "py" if platform == "win32" else "python3"
         if not shutil.which(launcher):

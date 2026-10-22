@@ -6,7 +6,7 @@ Mechanisms ("The in-process dispatcher") and block 16.
 
 WHAT THE DISPATCHER IS
 ----------------------
-One Stop hook in place of two. It follows ``post-edit-dispatcher.py`` (one process, the members run one
+The one Stop seam. It follows ``post-edit-dispatcher.py`` (one process, the members run one
 after another through ``_inprocess_hook.run_script``, in the order of its ``CHECKS`` list), with two
 differences forced by the Stop event: it is not asynchronous, and it exits 2 when any member exits 2,
 writing every member's error text in member order. Any other member code is ignored (fail open), and its

@@ -171,9 +171,13 @@ What the plugin registers. Every entry is in exec form (`"command": "py"`, `"arg
   rule for files a shell command or a program writes, which the edit-tool gate cannot see. At
   the end of a turn it asks git which files changed since the session started and judges each
   through `concept-gate.py`'s own matcher. It stops the turn once for a file no approved
-  contract covers, never twice for the same set, and only notes files git marks
-  `linguist-generated`. `concept_changed_check.py --staged` runs the same judgement on the
-  staged files at commit time. It fails open when git is missing or slow.
+  contract covers, never twice for the same set, and only notes files that the committed
+  attribute files of `HEAD` mark `linguist-generated` (an untracked `.gitattributes`, the private
+  `.git/info/attributes` file and a user-wide attributes file never count, and a
+  `linguist-generated` line in `info/attributes` turns the exemption off for the whole run).
+  `concept_changed_check.py --staged` runs the same judgement on the staged files at commit time;
+  generated files do not stop the commit, but one line on standard error names them. It fails
+  open when git is missing or slow.
 - **`plan-question-advisor`** adds a short reminder to prompts sent in plan mode, pointing at
   the `plan-questions` skill.
 - **`post-edit-dispatcher`** runs four small checks after an edit inside one process, in this
@@ -218,7 +222,7 @@ turns the contract-lookup index off for concept-gate, which then reads every con
 To take the assets without the enforcement, vendor the repository instead of installing it and
 register only the hooks you want.
 
-**Removed in 0.9.12:** the end-of-turn writing hook `plain-language-guard.py`, with its
+**Removed in 0.9.17:** the end-of-turn writing hook `plain-language-guard.py`, with its
 `plain-language-guard.rules.json`. The plain-language agreement stays; only the checker is gone.
 If your project vendored a copy, take it out in this order. First remove every row that runs
 the hook from your `settings.json`: one on prompt submit, and in installs registered before 0.9.8
@@ -247,13 +251,16 @@ default install runs none of them:
 | Add-on | Skill |
 |---|---|
 | `angular-tailwind` | `/auto-improve-angular-tailwind-install` |
-| `codegraph` | `/auto-improve-codegraph-install` (stops with a plain message when the CodeGraph MCP server is not configured) |
+| `codegraph` | `/auto-improve-codegraph-install` (stops with a plain message when the CodeGraph MCP server is not configured, has no command or url, or is listed as disabled) |
 | `strict-shell-gate` | `/auto-improve-strict-shell-gate-install` |
 
 Each skill runs `auto_improve_finish_install.py addon --name <add-on>`. The script copies the
 add-on's hook files and the helper files its `addon.json` names (a helper only when the project
 lacks it), then writes the rows in exec form on `${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>`, through
-the same preview, plan hash, backup and symbolic-link refusal as the hooks step. It never removes
+the same preview, plan hash, backup and symbolic-link refusal as the hooks step. The rows are
+inserted into the existing `settings.json` as text, so every other byte of the file (escapes,
+one-line lists, line endings, byte order mark) stays as it was, and a folder it would write into
+that is a link to somewhere else (a junction on Windows) is refused. It never removes
 a row or a file and never overwrites a file that differs; start a new session afterwards, because
 hooks are read when a session starts. To remove an add-on, delete its rows from
 `.claude/settings.json` and its hook files from `.claude/hooks/` by hand. `plugin_doctor.py
@@ -352,9 +359,9 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 22 skills | yes | yes | yes |
+| 28 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
-| 12 hooks | yes | no | no |
+| 13 hooks | yes | no | no |
 | 6 working agreements, delivered by a hook | yes | no | no |
 | scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
 
@@ -417,7 +424,7 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          25 generic skills          (plugin root -- all three providers)
+skills/          28 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    6 shipped working agreements, delivered at session start
@@ -467,7 +474,10 @@ git-commit, ship, debug, north-star, north-star-review, list-contracts,
 contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
 validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install,
 auto-improve-angular-tailwind-install, auto-improve-codegraph-install,
-auto-improve-strict-shell-gate-install.
+auto-improve-strict-shell-gate-install, unit-testing, application-design, website-design.
+
+A skill or agent that mentions a skill owned by another plugin follows the rule in
+[CONTRIBUTING.md](CONTRIBUTING.md) → "Referencing another plugin's skill".
 
 `auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
 skill, run once per project after the plugin is installed. Its name carries the plugin's name
@@ -582,11 +592,11 @@ cite scripts in `.claude/scripts/`, and every concept contract is a copy of
 `templates/concept-contract.md`. The contract sub-task loop is the newest of these:
 `pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
 both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
-`scripts/tests/test_pr_merged.py`, 484 cases including the placeholder trap that an
+`scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 223 cases. `scripts/tests/test_script_path_resolution.py` is the
-177-check suite for the two-layer path resolver. Shipping the resolver without its suite
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 242 cases. `scripts/tests/test_script_path_resolution.py` is the
+182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
 ## Quick start in a new project
@@ -664,7 +674,7 @@ would ship the part that can be wrong and leave behind the part that would say s
 
    *By hand instead:* register the hooks in your `.claude/settings.json`, pathing every command through
    `$CLAUDE_PROJECT_DIR/.claude/hooks/`. `.claude/hooks/hooks.json` in this repository is
-   the worked example: it registers all fourteen against the right events and matchers, so
+   the worked example: it registers all thirteen against the right events and matchers, so
    copy its entries and swap `${CLAUDE_PLUGIN_ROOT}` for `$CLAUDE_PROJECT_DIR`. A plugin
    install does this step for you and needs no `settings.json` edit, and a project that
    installs the plugin registers none of these hooks itself. A vendored copy of
