@@ -351,7 +351,7 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 22 skills | yes | yes | yes |
+| 28 skills | yes | yes | yes |
 | 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
 | 12 hooks | yes | no | no |
 | 6 working agreements, delivered by a hook | yes | no | no |
@@ -416,7 +416,7 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          25 generic skills          (plugin root -- all three providers)
+skills/          28 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    6 shipped working agreements, delivered at session start
@@ -466,7 +466,10 @@ git-commit, ship, debug, north-star, north-star-review, list-contracts,
 contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
 validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install,
 auto-improve-angular-tailwind-install, auto-improve-codegraph-install,
-auto-improve-strict-shell-gate-install.
+auto-improve-strict-shell-gate-install, unit-testing, application-design, website-design.
+
+A skill or agent that mentions a skill owned by another plugin follows the rule in
+[CONTRIBUTING.md](CONTRIBUTING.md) → "Referencing another plugin's skill".
 
 `auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
 skill, run once per project after the plugin is installed. Its name carries the plugin's name
