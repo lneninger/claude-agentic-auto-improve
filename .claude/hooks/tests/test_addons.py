@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -140,6 +141,88 @@ class AngularTailwindAddonTests(AddonCase):
                           "names the project's reference document (the installed copy found its helper): "
                           + run.describe())
         self.assertNoFallbackBanner(run)
+
+    def test_the_layout_nudge_names_the_design_skills_and_no_path_and_is_suppressed_when_they_are_named(self):
+        LAYOUT = "design the dashboard layout"
+        REFERENCE_DOC = "docs/FIXTURE_UI_RULES.md"
+        self.write(".claude/hooks/architecture-guard.rules.json", json.dumps({
+            "frontend_projects_root": "apps", "reference_documents": [REFERENCE_DOC]}))
+
+        def context_of(run: Run) -> str:
+            out = json.loads(run.out) if run.out.strip() else {}
+            return (out.get("hookSpecificOutput") or {}).get("additionalContext", "")
+
+        def nudge_region(context: str) -> str:
+            # The nudge starts at the second "[architecture-advisor]" line (the first is the CSS reminder).
+            marker = "[architecture-advisor]"
+            first = context.find(marker)
+            second = context.find(marker, first + 1) if first >= 0 else -1
+            return context[second:] if second >= 0 else ""
+
+        def path_tokens(text: str) -> list[str]:
+            # A path is a token holding a separator (/ or \) plus one of: $ % ~, a leading / or ., or a
+            # file extension. Only brackets and quotes are stripped from the token edges (never ".").
+            found = []
+            for raw in text.split():
+                tok = raw.strip("()[]{}<>`'\"")
+                if not tok or ("/" not in tok and "\\" not in tok):
+                    continue
+                last = re.split(r"[\\/]", tok)[-1]
+                if any(c in tok for c in "$%~") or tok[0] in "/." or re.search(r"\.\w+$", last):
+                    found.append(tok)
+            return found
+
+        # Control (as in the "no reminder" row): a UI prompt with no layout word gets the CSS reminder, no nudge.
+        plain = self.run_hook(self.HOOK, {"prompt": "restyle the component styles"})
+        with self.subTest(row="d: no layout word, no nudge"):
+            self.assertIn("Tailwind", plain.out, msg="control: a UI prompt does get the reminder: " + plain.describe())
+            self.assertEqual(nudge_region(context_of(plain)), "",
+                             msg="(d) a UI prompt with no layout word gets no layout nudge: " + plain.describe())
+
+        # (a) a layout prompt gets a nudge naming the two plugin skills, the INV-1 clauses, and no old catalog / path.
+        run = self.run_hook(self.HOOK, {"prompt": LAYOUT})
+        context = context_of(run)
+        region = nudge_region(context)
+        with self.subTest(row="a: nudge names the skills and carries the INV-1 clauses"):
+            self.assertEqual(run.rc, 0, msg="an advisor never blocks: " + run.describe())
+            self.assertNotEqual(region, "", msg="(a) a layout prompt gets a nudge (a second [architecture-advisor] "
+                                                "block): " + run.describe())
+            for needle in ("agentic-auto-improve:application-design", "agentic-auto-improve:website-design"):
+                self.assertIn(needle, region, msg="(a) the nudge names the plugin skill " + needle + ": " + region)
+            self.assertEqual(region.count("agentic-auto-improve:"), 2,
+                             msg="(a) exactly the two plugin skills are named, no third: " + region)
+            for clause in ("advisory", "review.documents", "the project file wins", "carry on without them"):
+                self.assertIn(clause, region, msg="(a) INV-1 clause %r must be in the nudge: %s" % (clause, region))
+            for banned in ("ui-ux-pro-max", "~/", ".claude/references/"):
+                self.assertNotIn(banned, region, msg="(a) the nudge must not name the phantom catalog %r: %s"
+                                                     % (banned, region))
+            self.assertIn(REFERENCE_DOC, context,
+                          msg="control: the configured reference document is listed by the reminder: "
+                              + run.describe())
+            self.assertNotIn(REFERENCE_DOC, region,
+                             msg="(a) the nudge region must not name the configured reference document: " + region)
+
+        # (b) no path-shaped token in the nudge region; positive controls prove the extractor can fail.
+        with self.subTest(row="b: no path-shaped token"):
+            planted_paths = ["~/.claude/x.md", "/usr/share/refs/patterns.md",
+                             "${CLAUDE_PLUGIN_ROOT}/skills/x/SKILL.md", "skills\\x\\y.md",
+                             "C:\\tmp\\z.txt", "./refs/x.md", "docs/a.json"]
+            self.assertEqual(path_tokens(" ".join(planted_paths)), planted_paths,
+                             msg="control: the extractor must catch exactly one token per planted path shape")
+            self.assertEqual(path_tokens("see Layout/UX hint"), [], msg="control: Layout/UX is not a path")
+            self.assertEqual(path_tokens(region), [],
+                             msg="(b) the nudge names no filesystem path of any kind: " + region)
+
+        # (c) a layout prompt that already names a design skill gets no nudge (it carries a layout keyword,
+        # so the old hook, which only knew reference filenames, still nudged it). INV-3 is case-insensitive.
+        for named in ("application-design", "website-design", "Website-Design"):
+            with self.subTest(row="c: names %s" % named):
+                named_run = self.run_hook(self.HOOK, {"prompt": "%s using %s" % (LAYOUT, named)})
+                self.assertIn("Tailwind", named_run.out,
+                              msg="control: the CSS reminder still prints: " + named_run.describe())
+                self.assertEqual(nudge_region(context_of(named_run)), "",
+                                 msg="(c) a prompt that already names %s gets no nudge: %s"
+                                     % (named, named_run.describe()))
 
     def test_a_prompt_that_is_not_about_ui_gets_no_reminder(self):
         ui = self.run_hook(self.HOOK, {"prompt": "restyle the dashboard component layout"})

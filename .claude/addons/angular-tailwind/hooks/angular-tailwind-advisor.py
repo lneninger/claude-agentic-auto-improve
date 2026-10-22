@@ -133,27 +133,23 @@ TRIGGER_KEYWORDS = {
     "dashboard", "dialog", "card", "panel", "sidebar", "button", "widget",
 }
 
-# Narrower keyword set for the ui-ux-pro-max reference nudge. Triggers ONLY
+# Narrower keyword set for the design-skill nudge. Triggers ONLY
 # when the prompt looks like a layout-design request, not every UI mention.
-PRO_MAX_LAYOUT_KEYWORDS = {
+DESIGN_NUDGE_KEYWORDS = {
     "dashboard", "layout", "page", "list-view", "listview",
     "form-layout", "card-layout", "table-layout",
     "blade", "panel-layout",
 }
 
-PRO_MAX_REFERENCE_FILES = (
-    "product-patterns.md",
-    "ux-guidelines.md",
-    "chart-decisions.md",
-    "finance-palettes.md",
-)
+# The nudge is skipped when the prompt already names one of these skills.
+DESIGN_NUDGE_SKILLS = ("application-design", "website-design")
 
-PRO_MAX_NUDGE = """\
+DESIGN_NUDGE = """\
 [architecture-advisor] Layout/UX hint: this looks like a layout-design request.
-Before writing, glance at:
-  ~/.claude/references/ui-ux-pro-max/product-patterns.md (Blade + dense-metrics-grid + 6 product patterns)
-  ~/.claude/references/ui-ux-pro-max/ux-guidelines.md   (~60 severity-flagged UX rules)
-The reference catalog is advisory, NOT authoritative -- when it disagrees with a document in the "Reference files" list above, the project file wins. Palette hexes there are chart-config-only colors, NEVER theme-token replacements.
+Before writing, consider these plugin skills (advisory):
+  agentic-auto-improve:application-design  for application screens
+  agentic-auto-improve:website-design      for website pages
+They are advisory, NOT authoritative -- when they disagree with the project's review.documents or a document in the "Reference files" list above, the project file wins. If the skills are not installed, carry on without them.
 """
 
 REMINDER = """\
@@ -244,13 +240,13 @@ def main() -> None:
     if extra_blocks:
         additional_context += "\n\n" + "\n\n".join(extra_blocks)
 
-    # Narrow ui-ux-pro-max layout nudge. Fires only when:
+    # Narrow design-skill layout nudge. Fires only when:
     #   - prompt contains a layout-specific keyword (not just "ui" / "component")
-    #   - prompt does NOT already mention any of the reference filenames
+    #   - prompt does NOT already mention one of the design skills
     prompt_lower = prompt_text.lower()
-    if any(k in tokens for k in PRO_MAX_LAYOUT_KEYWORDS):
-        if not any(ref in prompt_lower for ref in PRO_MAX_REFERENCE_FILES):
-            additional_context += "\n\n" + PRO_MAX_NUDGE
+    if any(k in tokens for k in DESIGN_NUDGE_KEYWORDS):
+        if not any(skill in prompt_lower for skill in DESIGN_NUDGE_SKILLS):
+            additional_context += "\n\n" + DESIGN_NUDGE
 
     output = {
         "hookSpecificOutput": {
