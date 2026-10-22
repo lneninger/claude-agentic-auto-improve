@@ -4,6 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import check_version_bump as cvb  # noqa: E402
+import plugin_doctor  # noqa: E402
 
 
 class EvaluateTests(unittest.TestCase):
@@ -65,6 +66,44 @@ class EvaluateTests(unittest.TestCase):
         # same-stem near-misses pin the trailing slash of each new prefix
         self.assertTrue(cvb.is_shipped(".claude/reviews-old/x.md"))
         self.assertTrue(cvb.is_shipped(".claude/orchestrator/results-archive/x.yaml"))
+
+    def test_every_file_plugin_doctor_copies_into_projects_counts_as_shipped(self):
+        sources = [r.source for r in plugin_doctor.REQUIREMENTS if r.source]
+        not_shipped = [s for s in sources if not cvb.is_shipped(s)]
+        self.assertEqual(not_shipped, [], f"plugin_doctor copies these into user projects but they are not shipped: {not_shipped}")
+        # guard against a vacuous pass
+        for expected in (
+            ".claude/templates/concept-contract.md",
+            ".claude/registries/MECHANISMS.md",
+            ".claude/registries/VOCABULARY.md",
+            ".claude/registries/JOURNAL.md",
+            ".claude/project-profile.md",
+        ):
+            self.assertIn(expected, sources)
+
+    def test_a_registry_change_needs_a_bump(self):
+        changed = [".claude/registries/JOURNAL.md"]
+        self.assertEqual(cvb.evaluate(changed, ["0.9.17"], ["0.9.17"])[0], 1)
+        self.assertEqual(cvb.evaluate(changed, ["0.9.17"], ["0.9.18"])[0], 0)
+
+    def test_files_under_exempt_folders_are_not_shipped_but_orchestrator_state_is(self):
+        for exempt in (
+            ".claude/concepts/x.md",
+            ".claude/work-items/x.md",
+            ".claude/north-stars/x.md",
+            ".claude/orchestrator/results/x/y.yaml",
+            ".claude/reviews/x/y.md",
+        ):
+            self.assertFalse(cvb.is_shipped(exempt), exempt)
+        self.assertFalse(cvb.is_shipped(".github/workflows/x.yml"))
+        self.assertTrue(cvb.is_shipped(".claude/orchestrator/state/x.yaml"))
+        # same-stem near-misses pin the trailing slash of each exempt folder
+        for near_miss in (
+            ".claude/concepts-old/x.md",
+            ".claude/work-items-old/x.md",
+            ".claude/north-stars-old/x.md",
+        ):
+            self.assertTrue(cvb.is_shipped(near_miss), near_miss)
 
     def test_an_unreadable_version_is_never_an_allow(self):
         self.assertEqual(cvb.evaluate([".claude/hooks/a.py"], ["bad"], ["0.8.6"])[0], 2)

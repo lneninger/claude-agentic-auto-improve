@@ -16,8 +16,10 @@ from typing import List, Optional, Tuple
 
 MANIFESTS = ("plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json",
              ".claude-plugin/marketplace.json")
+# A file plugin_doctor copies into user projects is shipped, so it must not be listed here;
+# enforced by test_check_version_bump.py.
 EXEMPT_PREFIXES = (".claude/work-items/", ".claude/scripts/tests/", ".github/", ".claude/concepts/",
-                   ".claude/north-stars/", ".claude/registries/", ".claude/orchestrator/results/",
+                   ".claude/north-stars/", ".claude/orchestrator/results/",
                    ".claude/reviews/")
 EXEMPT_NAMES = ("CLAUDE.md", "README.md", "CONTRIBUTING.md", "LICENSE", ".gitignore")
 
