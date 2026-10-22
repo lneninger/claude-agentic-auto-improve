@@ -34,14 +34,28 @@ When Step 0 selected any of Steps 1 to 4, try `land_contract.py --verify-here` f
 1. **Find the script**, the same way `/advance` finds it:
 
    ```bash
-   LANDER=$(ls .claude/scripts/land_contract.py          "$CLAUDE_PLUGIN_ROOT/.claude/scripts/land_contract.py"          ~/.claude/plugins/cache/*/agentic-auto-improve/*/.claude/scripts/land_contract.py          2>/dev/null | head -1)
-   ```
-
-2. **Read its `--help`.** An older script does not know the flag and would exit 2 on it:
-
-   ```bash
+   LANDER=
+   S=.claude/scripts/land_contract.py
+   if [ -f "$S" ]; then LANDER=$S
+   elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then LANDER=$CLAUDE_PLUGIN_ROOT/$S
+   else
+     # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+     CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+     ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+     REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+     MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+       P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+       [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+     done)
+     NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+     LANDER=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+       [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+     done)
+   fi
    py -3 "$LANDER" --help
    ```
+
+2. **Read its `--help`.** The last line of the block above prints it. An older script does not know the flag and would exit 2 on it. An empty `LANDER` makes that line fail, which is expected: arm 1 below decides on the empty value.
 
 3. **Pick the arm, first match wins.** Arm 1 is decided before anything is launched; arms 2 to 6 are decided from the locator after the run has ended.
 
