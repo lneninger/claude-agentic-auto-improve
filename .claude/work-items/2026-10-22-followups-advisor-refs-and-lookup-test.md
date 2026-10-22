@@ -63,3 +63,6 @@ M — a hook text change with a new test, plus two skill blocks that a pinned te
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-10-22: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/74); contract 2026-10-22-advisor-refs-and-lookup-test flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed: none
