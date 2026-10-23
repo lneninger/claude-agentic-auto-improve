@@ -55,3 +55,6 @@ M — a policy decision, a change to a shipped script's classification rule, and
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-10-23: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/78); contract 2026-10-22-registries-version-gap flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #77: none
