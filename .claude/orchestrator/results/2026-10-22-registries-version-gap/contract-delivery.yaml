@@ -1,0 +1,15 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/78
+number: 78
+head_ref: fix/77-registries-version-gap
+base_ref: master
+base_is_default: true
+commit: d244e861c75196b42c23db4c1dabc913ca75ba43
+merged_at: '2026-10-23T01:16:11Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-10-23T01:31:46.299093+00:00'
+blocks_recorded:
+- t1-version-check
+- t2-review
+blocks_already_recorded: []
