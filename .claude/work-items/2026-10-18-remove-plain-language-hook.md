@@ -1,6 +1,6 @@
 ---
 id: none
-issue_offer: pending
+issue_offer: declined
 title: Remove the plain-language guard hook from the plugin
 type: CHORE
 source: free-text
@@ -15,9 +15,9 @@ north_stars: none
 parent_issue: none
 base: master
 contract: .claude/concepts/2026-10-18-remove-plain-language-hook.md
-pr: UNKNOWN
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/82
+issue_link: none
+status: shipped
 created: 2026-10-18
 ---
 
