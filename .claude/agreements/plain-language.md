@@ -16,4 +16,4 @@ Write for the user and for anyone new to the project. A person who did not watch
 
 **Questions a newcomer can answer**: name the real things involved and say what goes wrong in plain terms. Never ask about something only you have seen.
 
-The end-of-turn writing checker catches some of these breaks. It cannot catch the first one.
+No automatic checker enforces any of these rules.

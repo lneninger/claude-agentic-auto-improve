@@ -219,6 +219,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract compares working-tree files with committed content before deleting or skipping them
 - **Tags:** autocrlf, crlf, hash-object, cleanup, windows
 
+### 2026-10-22 — Describe a broken install by the rows each install age really has
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-18-remove-plain-language-hook.md
+- **Lesson:** When a contract documents what breaks if a project deletes a shipped hook file but keeps its rows, read how each registration was written in each plugin version. Since 0.9.8 the guard had one prompt-submit row and ran at Stop only through the dispatcher, so only older installs had a direct Stop row. A real call of the launcher confirms the exit code, not which rows exist.
+- **Apply when:** a contract removes or renames a hook file, or changes how a hook is registered, and documents the effect on existing installs
+- **Tags:** hooks, removal, vendored-install, registrations, readme-note
+
 ### 2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval
 - **Trigger:** post-impl divergence
 - **Source contract:** .claude/concepts/2026-10-22-webdesign-plugin-skills.md

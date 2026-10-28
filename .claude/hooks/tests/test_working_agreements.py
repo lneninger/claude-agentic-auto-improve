@@ -426,6 +426,16 @@ def case_real_plain_language_names_the_unenforceable_part():
           "the element rule must say plainly that no automatic checker catches a break of it")
 
 
+def case_real_plain_language_claims_no_checker_exists():
+    f = REAL_AGREEMENTS / "plain-language.md"
+    check(f.is_file(), "plain-language.md must ship in %s" % REAL_AGREEMENTS)
+    flat = re.sub(r"\s+", " ", f.read_text(encoding="utf-8").lower())
+    check("writing checker catches" not in flat,
+          "A2: the agreement must not claim an end-of-turn writing checker exists (the checker was removed)")
+    check("no automatic checker enforces any of these rules." in flat,
+          "A2: the agreement must close with the sentence 'No automatic checker enforces any of these rules.'")
+
+
 def case_opening_paragraph_states_precedence_inv13():
     box = Box()
     try:
@@ -2027,6 +2037,7 @@ def build_cases():
         add("INV-14 the real folder ships %s and the envelope carries it" % n, _make_real_case(n))
     add("seven plain-language labels in the file and the envelope", case_real_plain_language_has_seven_labels_in_file_and_envelope)
     add("plain-language says no automatic checker catches the element rule", case_real_plain_language_names_the_unenforceable_part)
+    add("plain-language claims no checker exists and closes with the new sentence", case_real_plain_language_claims_no_checker_exists)
     add("INV-13 the opening paragraph states precedence", case_opening_paragraph_states_precedence_inv13)
     add("recommendations agreement defers to gates and asks one question at a time", case_real_recommendations_agreement_defers_to_gates)
     add("INV-14 the shipped folder is exactly the six required files", case_real_shipped_folder_is_exactly_the_six_required_files)

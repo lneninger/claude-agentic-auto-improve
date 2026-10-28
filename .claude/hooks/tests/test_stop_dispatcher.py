@@ -6,11 +6,11 @@ Mechanisms ("The in-process dispatcher") and block 16.
 
 WHAT THE DISPATCHER IS
 ----------------------
-One Stop hook in place of two. It follows ``post-edit-dispatcher.py`` (one process, the members run one
+The one Stop seam. It follows ``post-edit-dispatcher.py`` (one process, the members run one
 after another through ``_inprocess_hook.run_script``, in the order of its ``CHECKS`` list), with two
 differences forced by the Stop event: it is not asynchronous, and it exits 2 when any member exits 2,
 writing every member's error text in member order. Any other member code is ignored (fail open), and its
-own failure exits 0. Its members, in order: ``plain-language-guard.py``, then ``../scripts/concept_changed_check.py``.
+own failure exits 0. Its one member: ``../scripts/concept_changed_check.py`` (the Changed-file check).
 
 WHAT IS PINNED
 --------------
@@ -18,7 +18,8 @@ WHAT IS PINNED
   * any member exiting 2 gives exit 2, with EVERY member's error text in member order; a member that
     exits 2 never stops the next member from running;
   * a member exiting 1, and a member that raises, are ignored (exit 0) and the next member still runs;
-  * ``plain-language-guard.py``'s exit code and its error text are BYTE-IDENTICAL to running it alone;
+  * a member's exit code, standard output and error text are BYTE-IDENTICAL to running it alone (a stub
+    that writes fixed bytes, including a non-ASCII character, and exits 2);
   * a member's ``systemMessage`` reaches the dispatcher's output (the Changed-file check's "noted" outcome
     is a systemMessage; a dispatcher that swallowed it would turn "noted" into silence);
   * the dispatcher's own failure (it cannot load the in-process runner; empty input) exits 0;
@@ -30,13 +31,15 @@ WHAT IS PINNED
 HOW IT IS TESTED
 ----------------
 Order, exit rules and failure handling run against STUB members: a temporary hooks folder holds a copy of
-the real ``stop-dispatcher.py`` and ``_inprocess_hook.py`` and two stub files named like the real members.
+the real ``stop-dispatcher.py`` and ``_inprocess_hook.py`` and stub files named like the members.
 A stub records its name and process id in a trace file and then behaves as an environment variable tells it
-(exit code, error text, output text, or a raised exception). The byte-identity row uses the REAL
-``plain-language-guard.py`` beside a silent stub of the Changed-file check.
+(exit code, error text, output text, or a raised exception).
 
-RED TODAY: ``stop-dispatcher.py`` does not exist yet (block 17 adds it); every row fails with a message
-that says so. Nothing here imports the dispatcher.
+The real dispatcher has ONE member, so the rows about SEVERAL members (order, error texts in order, exit 2
+not stopping the next, exit 1, raise, a missing first or second member) run on a TEST COPY of the
+dispatcher whose ``CHECKS`` literal is rewritten to ``["first-stub.py", CONCEPT]``. The Workspace asserts
+that the rewrite happened, so a renamed constant fails loudly instead of silently testing one member. The
+one-member rows (``OneMemberTests``) and the identity row run on the dispatcher UNCHANGED.
 
 Run:
     py -3 .claude/hooks/tests/test_stop_dispatcher.py
@@ -46,6 +49,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,9 +60,9 @@ from pathlib import Path
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent
 DISPATCHER = HOOKS_DIR / "stop-dispatcher.py"
-PLAIN = "plain-language-guard.py"
 CONCEPT = "../scripts/concept_changed_check.py"
-MEMBERS = [PLAIN, CONCEPT]
+FIRST = "first-stub.py"  # the stand-in first member of the test copy (the real list has one member)
+MEMBERS = [FIRST, CONCEPT]  # the members of the TEST COPY
 
 STUB_SOURCE = '''\
 import json, os, sys
@@ -84,15 +88,29 @@ def require_dispatcher() -> None:
 
 
 class Workspace:
-    """A temporary hooks folder holding the real dispatcher, the real runner and stub members."""
+    """A temporary hooks folder holding a dispatcher, the real runner and stub members.
 
-    def __init__(self, *, with_runner: bool = True):
+    ``multi=True`` (the default) installs a TEST COPY of the dispatcher whose CHECKS literal is rewritten to
+    ``MEMBERS``; ``multi=False`` installs the real dispatcher byte for byte and stubs its real members."""
+
+    def __init__(self, *, with_runner: bool = True, multi: bool = True):
         self.root = Path(tempfile.mkdtemp(prefix="stopdisp_"))
         self.hooks = self.root / "hooks"
         self.hooks.mkdir()
         self.trace = self.root / "trace.jsonl"
         require_dispatcher()
-        shutil.copyfile(DISPATCHER, self.hooks / "stop-dispatcher.py")
+        if multi:
+            source = DISPATCHER.read_text(encoding="utf-8")
+            rewritten, hits = re.subn(r"^CHECKS = \[.*?\]", "CHECKS = %s" % json.dumps(MEMBERS), source,
+                                      count=1, flags=re.DOTALL | re.MULTILINE)
+            if hits != 1 or rewritten == source:
+                raise AssertionError("the CHECKS literal of stop-dispatcher.py could not be rewritten for the "
+                                     "several-member rows (was the constant renamed?)")
+            (self.hooks / "stop-dispatcher.py").write_text(rewritten, encoding="utf-8")
+            self.members = list(MEMBERS)
+        else:
+            shutil.copyfile(DISPATCHER, self.hooks / "stop-dispatcher.py")
+            self.members = [CONCEPT]
         if with_runner:
             shutil.copyfile(HOOKS_DIR / "_inprocess_hook.py", self.hooks / "_inprocess_hook.py")
         # Revision 8, I.5 (the one sanctioned fixture change): the error-log helper and its path helper sit
@@ -107,7 +125,7 @@ class Workspace:
         self.temp.mkdir()
         self.session_id = "s-stop-" + uuid.uuid4().hex
         (self.root / "scripts").mkdir()  # the second member lives in the scripts folder beside hooks
-        for name in MEMBERS:
+        for name in self.members:
             (self.hooks / name).write_text(STUB_SOURCE, encoding="utf-8")
 
     def close(self) -> None:
@@ -144,21 +162,26 @@ class StopDispatcherTests(unittest.TestCase):
         self.ws = Workspace()
         self.addCleanup(self.ws.close)
 
-    def test_the_checks_list_names_the_two_members_in_order(self):
+    def test_the_checks_list_names_the_one_member(self):
         tree = ast.parse(DISPATCHER.read_text(encoding="utf-8"))
         checks = None
         for node in tree.body:
             if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "CHECKS" for t in node.targets):
                 checks = ast.literal_eval(node.value)
-        self.assertEqual(checks, MEMBERS,
-                         msg="CHECKS (read as a literal, as the drift check reads it) must be "
-                             "plain-language-guard.py then ../scripts/concept_changed_check.py")
+        self.assertEqual(checks, [CONCEPT],
+                         msg="CHECKS (read as a literal, as the drift check reads it) must hold exactly one "
+                             "member, ../scripts/concept_changed_check.py")
+
+    def test_the_test_copy_really_has_several_members(self):
+        text = (self.ws.hooks / "stop-dispatcher.py").read_text(encoding="utf-8")
+        self.assertIn("CHECKS = %s" % json.dumps(MEMBERS), text,
+                      msg="the several-member rows must run on a copy whose CHECKS literal was rewritten")
 
     def test_members_run_in_order_in_the_dispatchers_own_process(self):
         pid, code, _out, err = self.ws.run()
         rows = self.ws.trace_rows()
         self.assertEqual([r["member"] for r in rows], MEMBERS,
-                         msg="both members must run, in CHECKS order: " + err[:300])
+                         msg="both members of the test copy must run, in CHECKS order: " + err[:300])
         self.assertEqual({r["pid"] for r in rows}, {pid},
                          msg="the members run in ONE process (the dispatcher's own), not one program start each")
         self.assertEqual(code, 0, msg="two silent members give exit 0: " + err[:300])
@@ -167,12 +190,12 @@ class StopDispatcherTests(unittest.TestCase):
         self.assertEqual(rows[0]["stdin"], rows[1]["stdin"], msg="both members get the same input")
 
     def test_any_member_exit_2_gives_exit_2_with_every_members_error_text_in_order(self):
-        _pid, code, _out, err = self.ws.run({PLAIN: {"code": 2, "err": "PLAIN-STOP-TEXT\n"},
+        _pid, code, _out, err = self.ws.run({FIRST: {"code": 2, "err": "FIRST-STOP-TEXT\n"},
                                              CONCEPT: {"code": 2, "err": "CONCEPT-STOP-TEXT\n"}})
         self.assertEqual(code, 2, msg="a member exit 2 must give exit 2: " + err[:300])
-        self.assertIn("PLAIN-STOP-TEXT", err, msg="the first member's error text must be written")
+        self.assertIn("FIRST-STOP-TEXT", err, msg="the first member's error text must be written")
         self.assertIn("CONCEPT-STOP-TEXT", err, msg="the second member's error text must be written")
-        self.assertLess(err.index("PLAIN-STOP-TEXT"), err.index("CONCEPT-STOP-TEXT"),
+        self.assertLess(err.index("FIRST-STOP-TEXT"), err.index("CONCEPT-STOP-TEXT"),
                         msg="error texts come in member order")
         self.assertEqual([r["member"] for r in self.ws.trace_rows()], MEMBERS,
                          msg="a member that exits 2 must not stop the next member from running")
@@ -183,24 +206,24 @@ class StopDispatcherTests(unittest.TestCase):
         self.assertIn("CONCEPT-STOP-TEXT", err, msg="its text must reach the error stream")
 
     def test_the_first_member_alone_exiting_2_gives_exit_2_and_the_second_still_runs(self):
-        _pid, code, _out, err = self.ws.run({PLAIN: {"code": 2, "err": "PLAIN-STOP-TEXT\n"}})
-        self.assertEqual(code, 2, msg="the plain-language guard stopping the turn must stop the turn: " + err[:300])
+        _pid, code, _out, err = self.ws.run({FIRST: {"code": 2, "err": "FIRST-STOP-TEXT\n"}})
+        self.assertEqual(code, 2, msg="the first member stopping the turn must stop the turn: " + err[:300])
         self.assertEqual([r["member"] for r in self.ws.trace_rows()], MEMBERS,
                          msg="the second member still runs after the first exits 2")
 
     def test_a_member_exit_1_is_ignored_and_the_next_member_still_runs(self):
-        _pid, code, _out, err = self.ws.run({PLAIN: {"code": 1, "err": "plain crashed\n"}})
+        _pid, code, _out, err = self.ws.run({FIRST: {"code": 1, "err": "plain crashed\n"}})
         self.assertEqual(code, 0, msg="exit 1 is ignored (fail open): " + err[:300])
         self.assertEqual([r["member"] for r in self.ws.trace_rows()], MEMBERS,
                          msg="the member after an exit-1 member still runs")
         # Control: the same harness reports exit 2, so the exit-0 above is the dispatcher's rule.
         ws2 = Workspace()
         self.addCleanup(ws2.close)
-        _pid, code2, _out, _err = ws2.run({PLAIN: {"code": 1}, CONCEPT: {"code": 2, "err": "X\n"}})
+        _pid, code2, _out, _err = ws2.run({FIRST: {"code": 1}, CONCEPT: {"code": 2, "err": "X\n"}})
         self.assertEqual(code2, 2, msg="control: an exit-1 member does not hide a later member's exit 2")
 
     def test_a_member_that_raises_is_ignored_and_the_next_member_still_runs(self):
-        _pid, code, _out, err = self.ws.run({PLAIN: {"raise": True}})
+        _pid, code, _out, err = self.ws.run({FIRST: {"raise": True}})
         self.assertEqual(code, 0, msg="a raised member is ignored (fail open): " + err[:300])
         self.assertEqual([r["member"] for r in self.ws.trace_rows()], MEMBERS,
                          msg="the member after a raised member still runs")
@@ -216,7 +239,7 @@ class StopDispatcherTests(unittest.TestCase):
     def test_the_dispatchers_own_failure_exits_0(self):
         ws = Workspace(with_runner=False)
         self.addCleanup(ws.close)
-        _pid, code, _out, err = ws.run({PLAIN: {"code": 2, "err": "WOULD-STOP\n"}})
+        _pid, code, _out, err = ws.run({FIRST: {"code": 2, "err": "WOULD-STOP\n"}})
         self.assertEqual(code, 0,
                          msg="with no in-process runner the dispatcher cannot run its members, and a "
                              "dispatcher that cannot work must exit 0, never hold a session: " + err[:300])
@@ -287,7 +310,7 @@ class MissingMemberTests(unittest.TestCase):
 
     def test_on_exit_2_the_notice_follows_the_first_members_unchanged_text_and_is_not_repeated(self):
         self._remove_second()
-        text = "PLAIN-STOP-TEXT\n"
+        text = "FIRST-STOP-TEXT\n"
         _pid, code, out, err = self.ws.run({self.first: {"code": 2, "err": text}})
         self.assertEqual(code, 2, msg="the first member's exit 2 still stops the turn: " + err[:300])
         # The stub runs inside the dispatcher through a text wrapper (_inprocess_hook.run_script) whose newline
@@ -316,75 +339,90 @@ class MissingMemberTests(unittest.TestCase):
         self.assertIn("CONCEPT-STOP-TEXT", err, msg="its error text reaches stderr")
 
 
-class PlainLanguageGuardIdentityTests(unittest.TestCase):
-    """The real plain-language-guard.py through the dispatcher equals the same guard run alone, byte for byte."""
+class OneMemberTests(unittest.TestCase):
+    """The REAL dispatcher, unchanged, with its one member stubbed: the Changed-file check."""
 
-    def _transcript(self, folder: Path, text: str) -> Path:
-        path = folder / "transcript.jsonl"
-        rows = [
-            {"type": "user", "isSidechain": False,
-             "message": {"role": "user", "content": [{"type": "text", "text": "please do it"}]}},
-            {"type": "assistant", "isSidechain": False,
-             "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}},
-        ]
-        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-        return path
+    def setUp(self) -> None:
+        self.ws = Workspace(multi=False)
+        self.addCleanup(self.ws.close)
+
+    def test_a_silent_member_gives_exit_0_and_says_nothing(self):
+        _pid, code, out, err = self.ws.run()
+        self.assertEqual([r["member"] for r in self.ws.trace_rows()], [CONCEPT],
+                         msg="the one member must run: " + err[:300])
+        self.assertEqual(code, 0, msg="a silent member gives exit 0: " + err[:300])
+        self.assertEqual(out, "",
+                         msg="nothing on standard output: the real CHECKS list must name no other member "
+                             "(a member file that is absent from the folder would print a missing notice): "
+                             + out[:300])
+        self.assertEqual(err, "", msg="nothing on standard error when the one member is silent")
+        self.assertEqual(self.ws.error_log_rows(), [],
+                         msg="no member-missing line: the real CHECKS list names only files that exist")
+
+    def test_the_member_exit_2_stops_the_turn(self):
+        _pid, code, _out, err = self.ws.run({CONCEPT: {"code": 2, "err": "CONCEPT-STOP-TEXT\n"}})
+        self.assertEqual(code, 2, msg="the Changed-file check stopping the turn must stop the turn: " + err[:300])
+        self.assertIn("CONCEPT-STOP-TEXT", err, msg="its text must reach the error stream")
+        self.assertNotIn("not run", err, msg="no missing-member notice trails the text: the list has one member")
+
+    def test_the_member_system_message_passes_through(self):
+        message = json.dumps({"systemMessage": "NOTED-FILES-TEXT"})
+        _pid, code, out, err = self.ws.run({CONCEPT: {"code": 0, "out": message}})
+        self.assertEqual(code, 0, msg="a noted outcome does not stop the turn: " + err[:300])
+        self.assertEqual(system_messages(out), ["NOTED-FILES-TEXT"],
+                         msg="the member's systemMessage is the only message on the output")
+
+
+IDENTITY_STUB = '''import sys
+sys.stdin.read()
+sys.stdout.write("OUT-FIXED \u00e9\u2014 caf\u00e9 done")
+sys.stderr.write("ERR-FIXED \u2026 na\u00efve stop")
+sys.exit(2)
+'''
+
+
+class StubIdentityTests(unittest.TestCase):
+    """A stub member through the real dispatcher equals the same stub run alone, byte for byte."""
 
     def _folder(self, root: Path) -> Path:
         hooks = root / "hooks"
         hooks.mkdir()
-        for item in HOOKS_DIR.iterdir():
-            if item.is_file() and item.suffix in (".py", ".json") and item.name not in (CONCEPT, "bash-gate.py"):
-                shutil.copyfile(item, hooks / item.name)
+        for name in ("_inprocess_hook.py", "_error_log.py", "_project_paths.py"):
+            shutil.copyfile(HOOKS_DIR / name, hooks / name)
         (root / "scripts").mkdir(exist_ok=True)
-        (hooks / CONCEPT).write_text("import sys\nsys.stdin.read()\nsys.exit(0)\n", encoding="utf-8")
+        (hooks / CONCEPT).write_text(IDENTITY_STUB, encoding="utf-8")
         shutil.copyfile(DISPATCHER, hooks / "stop-dispatcher.py")
         return hooks
 
-    def _run(self, script: Path, root: Path, payload: dict):
-        project = root / "project"
+    def _run(self, script: Path, root: Path):
         temp = root / "temp"
-        (project / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
         temp.mkdir(exist_ok=True)
+        (root / "home" / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
-        env.update({"CLAUDE_PROJECT_DIR": str(project), "TEMP": str(temp), "TMP": str(temp),
-                    "HOME": str(root / "home"), "USERPROFILE": str(root / "home"),
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    # Both runs write UTF-8, so the comparison does not depend on the console code page
-                    # (the guard's text holds an ellipsis, which a legacy code page encodes differently).
+        env.update({"TEMP": str(temp), "TMP": str(temp), "HOME": str(root / "home"),
+                    "USERPROFILE": str(root / "home"), "PYTHONDONTWRITEBYTECODE": "1",
                     "PYTHONIOENCODING": "utf-8"})
+        payload = {"session_id": "s-ident-" + uuid.uuid4().hex, "stop_hook_active": False}
         proc = subprocess.run([sys.executable, "-B", str(script)], input=json.dumps(payload).encode("utf-8"),
                               capture_output=True, env=env, timeout=60)
         return proc.returncode, proc.stdout, proc.stderr
 
-    def _compare(self, text: str, expect_code: int) -> None:
+    def test_exit_code_output_and_error_text_are_byte_identical(self):
         require_dispatcher()
-        alone_root = Path(tempfile.mkdtemp(prefix="pl_alone_"))
-        disp_root = Path(tempfile.mkdtemp(prefix="pl_disp_"))
+        alone_root = Path(tempfile.mkdtemp(prefix="id_alone_"))
+        disp_root = Path(tempfile.mkdtemp(prefix="id_disp_"))
         self.addCleanup(shutil.rmtree, alone_root, True)
         self.addCleanup(shutil.rmtree, disp_root, True)
-        results = []
-        for root, name in ((alone_root, PLAIN), (disp_root, "stop-dispatcher.py")):
-            hooks = self._folder(root)
-            transcript = self._transcript(root, text)
-            payload = {"session_id": "s-ident", "transcript_path": str(transcript), "stop_hook_active": False}
-            results.append(self._run(hooks / name, root, payload))
-        (alone_code, alone_out, alone_err), (disp_code, disp_out, disp_err) = results
-        self.assertEqual(alone_code, expect_code,
-                         msg="fixture sanity: the guard alone must give exit %d for this text: %r"
-                             % (expect_code, alone_err[:300]))
-        self.assertEqual(disp_code, alone_code, msg="the dispatcher's exit code must equal the guard's")
-        self.assertEqual(disp_err, alone_err, msg="the guard's error text must be byte-identical through the "
-                                                  "dispatcher")
-        self.assertEqual(disp_out, alone_out, msg="the guard's output must be byte-identical through the "
-                                                  "dispatcher")
-
-    def test_a_stopped_message_is_byte_identical(self):
-        text = " ".join("%s." % " ".join(["filler%d" % i] * 42) for i in range(6))
-        self._compare(text, 2)
-
-    def test_a_clean_message_is_byte_identical(self):
-        self._compare("I read the guard file and it looks right. Nothing else to change.", 0)
+        alone_hooks = self._folder(alone_root)
+        disp_hooks = self._folder(disp_root)
+        alone_code, alone_out, alone_err = self._run(alone_hooks / CONCEPT, alone_root)
+        disp_code, disp_out, disp_err = self._run(disp_hooks / "stop-dispatcher.py", disp_root)
+        self.assertEqual(alone_code, 2, msg="fixture sanity: the stub alone exits 2: %r" % alone_err[:300])
+        self.assertIn("é".encode("utf-8"), alone_out, msg="fixture sanity: the stub writes a non-ASCII character")
+        self.assertEqual(disp_code, alone_code, msg="the dispatcher's exit code must equal the member's")
+        self.assertEqual(disp_out, alone_out, msg="the member's output must be byte-identical through the dispatcher")
+        self.assertEqual(disp_err, alone_err, msg="the member's error text must be byte-identical through the "
+                                                  "dispatcher (no trailing notice, no extra line)")
 
 
 if __name__ == "__main__":

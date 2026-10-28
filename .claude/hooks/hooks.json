@@ -23,16 +23,15 @@
     "per-platform branch available in this format, so the choice is documented",
     "rather than solved.",
     "",
-    "WHAT IS REGISTERED (fourteen entries). The gates are the concept gate, the",
-    "architecture guard and the plain-language guard. As of operator decision 8 of",
+    "WHAT IS REGISTERED (thirteen entries). The gates are the concept gate and the",
+    "architecture guard. As of operator decision 8 of",
     "2026-10-09 this plugin also registers BOTH database guards itself:",
     "db-destructive-guard.py on the edit group, Bash and PowerShell, and",
     "db-research-readonly-guard.py on Bash and PowerShell (it left the edit group).",
     "The four post-edit trackers run inside ONE asynchronous dispatcher,",
     "post-edit-dispatcher.py, so an edit starts one process instead of four. At Stop",
-    "ONE dispatcher, stop-dispatcher.py (not asynchronous), runs the plain-language",
-    "guard and then the Changed-file check, .claude/scripts/concept_changed_check.py, in one",
-    "process.",
+    "ONE dispatcher, stop-dispatcher.py (not asynchronous), runs the Changed-file",
+    "check, .claude/scripts/concept_changed_check.py.",
     "plan-question-advisor.py is a default hook on UserPromptSubmit.",
     "",
     "THE SHELL ROW. gate-launch.py concept-gate.py on Bash|PowerShell runs the",
@@ -158,11 +157,6 @@
           {
             "type": "command",
             "command": "py",
-            "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plain-language-guard.py", "--carry-forward"]
-          },
-          {
-            "type": "command",
-            "command": "py",
             "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/plan-question-advisor.py"]
           }
         ]
@@ -175,7 +169,7 @@
             "type": "command",
             "command": "py",
             "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/stop-dispatcher.py"],
-            "statusMessage": "Checking the message reads plainly..."
+            "statusMessage": "Checking changed files against approved contracts..."
           },
           {
             "type": "command",
