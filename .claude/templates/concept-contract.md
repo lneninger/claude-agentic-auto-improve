@@ -7,6 +7,7 @@
 **Supersedes:** <optional — path to a prior contract this replaces>
 **Work Item Brief:** <optional — path to the brief under .claude/work-items/ this contract serves; pr_merged.py links the contract to it>
 **Tracking issue:** <optional — #<n>, the one issue that tracks this contract's follow-ups and its Not-performed disclosures>
+**Budget:** 12,000 tokens
 
 > **Protocol:** filled in by `data-architect`. Implementer agents (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`, `senior-test-engineer`, `ui-ux-designer`) refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
 >
@@ -17,6 +18,8 @@
 > - `archived` — obsolete or deprioritized. Hook SKIPS this contract entirely.
 > - `superseded` — replaced by another contract (add `Supersedes:` pointing to replacement). Hook SKIPS.
 > - `rejected` — user declined after reviewing the draft. Hook SKIPS.
+>
+> **Budget rule:** a contract stays within the **Budget:** line above, estimated at four characters per token. If the project carries `.claude/hooks/memory-health.py`, `py -3 .claude/hooks/memory-health.py` reports a contract over budget; it never blocks on one. When a contract is revised, resolved questions shrink to one line each (the question, and the answer with its date), and every superseded critique round moves out of the contract to `.claude/contract-history/<slug>.round-<n>.md`. That folder sits OUTSIDE `.claude/concepts/` on purpose: `concept-gate` reads every file under `.claude/concepts/`, so a history file placed inside it would be taken for a contract.
 >
 > **Management commands:**
 > - `/list-contracts` — show all contracts and their statuses

@@ -366,9 +366,10 @@ RX_FIRST_DIV_CLASS = re.compile(r'<div\s+class="([^"]+)"')
 RX_ROOT_HAS_HEIGHT = re.compile(r"\b(?:h-full|flex-1|max-h-|min-h-screen)\b")
 
 # SCSS allow-contexts (wrap the raw property check):
-# If a line is inside a ::ng-deep, @keyframes, @media, @supports, @apply block,
-# raw properties are OK. We approximate with a line-level scan that tracks
-# nesting depth of allowed blocks.
+# Raw properties are OK inside @keyframes, @media, @supports and @apply blocks,
+# and inside ::ng-deep blocks EXCEPT in a ViewEncapsulation.None component
+# (where ::ng-deep is not an allowing context; scoped selectors are instead).
+# We approximate with a line-level scan that tracks nesting depth of allowed blocks.
 RX_NG_DEEP = re.compile(r":host\s*::ng-deep|::ng-deep")
 RX_KEYFRAMES = re.compile(r"@keyframes\b|@-webkit-keyframes\b")
 RX_MEDIA = re.compile(r"@media\b|@supports\b")
@@ -578,10 +579,161 @@ def scan_component_ts(content: str, path: Path, exemptions: dict) -> list[Violat
     return violations
 
 
+RX_ELEMENT_NAME = re.compile(r"^[a-zA-Z][\w-]*$")
+RX_ENCAPSULATION_KEY = re.compile(r"\bencapsulation\s*:\s*([\w.]+)")
+RX_COMPONENT_SELECTOR = re.compile(r"\bselector\s*:\s*(['\"])([^'\"]*)\1")
+RX_DEAD_HOST = re.compile(r":host\b")
+
+DEAD_HOST_SUGGESTION = (
+    "`:host` matches nothing in a ViewEncapsulation.None component, so the "
+    "browser discards this rule. Scope it under the component's element "
+    "selector instead, for example `my-widget .vendor-class`."
+)
+RAW_PROPERTY_SUGGESTION = (
+    "This property has a 1:1 Tailwind utility. Move it to the template as a "
+    "class. In a ViewEncapsulation.None component, a rule scoped under the "
+    "component's element selector may keep it here."
+)
+
+
+def strip_ts_comments(source: str) -> str:
+    """Remove `//` comments (to the line end) and turn each `/* */` into one space; strings stay intact."""
+    out: list[str] = []
+    i, n = 0, len(source)
+    quote = ""
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if quote:
+            out.append(ch)
+            if ch == "\\" and nxt:
+                out.append(nxt)
+                i += 2
+                continue
+            if ch == quote or (ch == "\n" and quote != "`"):
+                # A '/" string also ends at a line break, so a regex literal
+                # like /'/ cannot swallow the rest of the file.
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+            out.append(ch)
+        elif ch == "/" and nxt == "/":
+            while i < n and source[i] != "\n":
+                i += 1
+            continue
+        elif ch == "/" and nxt == "*":
+            end = source.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            out.append(" ")
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def classify_sibling_component(scss_path: Path) -> tuple[str, str]:
+    """
+    Return (mode, element_scope) for the component that owns ``scss_path``.
+
+    Reads ``<stem>.component.ts`` next to the stylesheet as strict UTF-8. Mode is
+    'none' only for a recognised ViewEncapsulation.None spelling (any identifier
+    ending in .None, or the number 2); every other outcome -- missing or
+    undecodable file, other encapsulation, no recognised value -- is
+    'unclassified' or 'default', which keep today's warnings. Never raises.
+    """
+    try:
+        ts_path = scss_path.with_name(scss_path.name[: -len(".scss")] + ".ts")
+        source = strip_ts_comments(ts_path.read_text(encoding="utf-8"))
+        key = RX_ENCAPSULATION_KEY.search(source)
+        if key is None:
+            return ("unclassified" if "ViewEncapsulation" in source else "default", "")
+        value = key.group(1)
+        if value == "2" or value.endswith(".None"):
+            start = source.find("@Component(")
+            sel = RX_COMPONENT_SELECTOR.search(source, start) if start >= 0 else None
+            scope = sel.group(2).strip() if sel else ""
+            return ("none", scope if RX_ELEMENT_NAME.match(scope) else "")
+        return ("unclassified", "")
+    except Exception:  # noqa: BLE001 -- any failure means today's behaviour
+        return ("unclassified", "")
+
+
+def _split_depth0_commas(selector: str) -> list[str]:
+    """Split a selector list at commas that sit outside parentheses/brackets."""
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in selector:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return parts
+
+
+def _member_is_scoped(member: str, scope: str) -> bool:
+    """True when ``member`` begins with ``scope`` followed by a permitted continuation."""
+    member = member.strip()
+    if not scope or not member.startswith(scope):
+        return False
+    rest = member[len(scope):]
+    if not rest:
+        return True
+    if rest[0] in ".[:#>":
+        return True
+    if rest[0].isspace():
+        rest = rest.lstrip()
+        return not rest or rest[0] not in "~+"
+    return False
+
+
+def selector_is_scoped(selector: str, scope: str) -> bool:
+    """True when EVERY depth-0 comma member of ``selector`` is scoped under ``scope``."""
+    return all(_member_is_scoped(m, scope) for m in _split_depth0_commas(selector))
+
+
+def _strip_selector_comment(line: str) -> str:
+    """Drop a `//` comment (rest of line) or an unclosed `/*`; a closed `/* */` becomes one space (quote aware)."""
+    quote = ""
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "/" and i + 1 < n and line[i + 1] == "/":
+            return line[:i].rstrip()
+        elif ch == "/" and i + 1 < n and line[i + 1] == "*":
+            end = line.find("*/", i + 2)
+            if end == -1:
+                return line[:i].rstrip()
+            # A closed block comment becomes one space; scanning goes on.
+            line = line[:i] + " " + line[end + 2:]
+            n = len(line)
+            continue
+        i += 1
+    return line.rstrip()  # a comment that ended the line leaves a space behind
+
+
 def scan_component_scss(content: str, path: Path, exemptions: dict) -> list[Violation]:
     """
     SCSS scanner -- warns on raw property rules outside allowed contexts.
-    Allowed contexts: ::ng-deep, @keyframes, @media, @supports, @apply.
+    Allowed contexts: ::ng-deep (encapsulated or unclassified components only),
+    @keyframes, @media, @supports, @apply, and -- in a ViewEncapsulation.None
+    component -- a block whose every selector is scoped under the component's
+    element selector. In such a component `:host` matches nothing, so a `:host`
+    line is reported as 'scss-warn:dead-host' and opens no context.
 
     Non-blocking by design: returns violations with rule prefix 'scss-warn:'
     which the caller treats as WARN not BLOCK. This lets cleanup work proceed
@@ -590,10 +742,14 @@ def scan_component_scss(content: str, path: Path, exemptions: dict) -> list[Viol
     if file_rule_exempted(path, "scss-raw-property", exemptions):
         return []
 
+    mode, scope = classify_sibling_component(path)
+    unencapsulated = mode == "none"
+
     violations: list[Violation] = []
     violations.extend(scan_external_rules(content, path, "scss", exemptions))
     depth = 0
     allowed_depth = 0  # depth inside an allowed block
+    pending_selector = ""  # preceding selector lines that end in a comma
 
     lines = content.splitlines()
     for i, line in enumerate(lines, start=1):
@@ -603,10 +759,28 @@ def scan_component_scss(content: str, path: Path, exemptions: dict) -> list[Viol
 
         # Track entering allowed contexts.
         enters_allowed = bool(
-            RX_NG_DEEP.search(stripped)
+            (RX_NG_DEEP.search(stripped) and not unencapsulated)
             or RX_KEYFRAMES.search(stripped)
             or RX_MEDIA.search(stripped)
         )
+        if unencapsulated:
+            if RX_DEAD_HOST.search(stripped):
+                violations.append(Violation(
+                    rule="scss-warn:dead-host",
+                    line_no=i,
+                    line_text=stripped,
+                    suggestion=DEAD_HOST_SUGGESTION,
+                ))
+            sel_line = _strip_selector_comment(stripped)
+            if "{" in sel_line:
+                selector = (pending_selector + " " + sel_line.split("{", 1)[0]).strip()
+                pending_selector = ""
+                if scope and not sel_line.startswith("@") and selector_is_scoped(selector, scope):
+                    enters_allowed = True
+            elif sel_line.endswith(","):
+                pending_selector += " " + sel_line
+            else:
+                pending_selector = ""
 
         # Count braces on this line.
         open_braces = stripped.count("{")
@@ -621,11 +795,7 @@ def scan_component_scss(content: str, path: Path, exemptions: dict) -> list[Viol
                         rule="scss-warn:raw-property",
                         line_no=i,
                         line_text=stripped,
-                        suggestion=(
-                            "This property has a 1:1 Tailwind utility. Move it to the "
-                            "template as a class. Component SCSS should only hold "
-                            "::ng-deep, @keyframes, @media, and @apply blocks."
-                        ),
+                        suggestion=RAW_PROPERTY_SUGGESTION,
                     ))
 
         # Update depth trackers.
@@ -757,6 +927,35 @@ def emit_warnings(file_path: str, warnings: list[Violation]) -> None:
     print("\n".join(out), file=sys.stderr)
 
 
+def emit_scss_warnings(file_path: str, warnings: list[Violation]) -> None:
+    """
+    Print stylesheet warnings grouped by rule, in first-occurrence order.
+
+    Each group shows its heading, up to ten offending lines and that rule's
+    suggestion once. Template warnings keep using emit_warnings unchanged.
+    """
+    bar = "-" * 62
+    groups: dict[str, list[Violation]] = {}
+    for v in warnings:
+        groups.setdefault(v.rule, []).append(v)
+    out = [
+        "",
+        bar,
+        f"[architecture-guard] WARN -- component SCSS warnings: {file_path}",
+        bar,
+    ]
+    for rule, items in groups.items():
+        out.append(f"  [{rule}]")
+        for v in items[:10]:
+            out.append(f"  line {v.line_no}: {v.line_text[:100]}")
+        if len(items) > 10:
+            out.append(f"  ... and {len(items) - 10} more")
+        out.append(f"  -> {items[0].suggestion}")
+    out.append(bar)
+    out.append("")
+    print("\n".join(out), file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -819,7 +1018,7 @@ def main() -> None:
             })
             # SCSS violations are WARN only.
             if vs:
-                emit_warnings(file_path_str, vs)
+                emit_scss_warnings(file_path_str, vs)
 
     if blocking:
         print(format_block_message(target_for_block, blocking), file=sys.stderr)

@@ -96,6 +96,31 @@ Lifecycle hooks that keep the index fresh (not part of the retired gate): `Sessi
 `codegraph sync-if-dirty`; PostToolUse on Edit/Write/MultiEdit → `codegraph mark-dirty` (async);
 `Stop` → `codegraph sync-if-dirty`.
 
+## When the `codegraph` add-on is installed
+
+A project that ran `/auto-improve-codegraph-install` has the block back, as three hooks that share
+one marker file, `<project>/.claude/.codegraph-used-this-turn`:
+
+| Hook | Event | Effect |
+|---|---|---|
+| `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the marker file is missing and the target is a source path. The message names the CodeGraph tool to use instead. |
+| `codegraph-turn-tracker.py` | PostToolUse on `mcp__codegraph__*` | Creates the marker file. |
+| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the marker file, so every new user turn opens a fresh investigation budget. |
+
+**The installed guard still blocks every source read when no CodeGraph server is configured.** It
+checks the marker file and nothing else; it never asks whether a CodeGraph server exists. With no
+server there is no `mcp__codegraph__*` call, so nothing creates the marker and every `Read` / `Grep`
+/ `Glob` on a source path stays blocked. That did not end in 0.7.0; the add-on's copy of the guard
+has the same behaviour. Workaround: read through Bash (`cat`, `sed -n`), which the gate does not
+intercept. A source path under `.claude/worktrees/` is gated like any other source path: the guard
+strips the worktree segment before it tests the path against the allowlist.
+
+**Escape hatch.** The **user** (not an agent) sets `CLAUDE_SKIP_CG=1` in the environment for one
+session. To stop the block for good, remove the three hooks' rows from the project's
+`settings.json`. The install skill refuses to run when no CodeGraph server is configured, but a
+project that removes or disables the server afterwards keeps the installed hooks and their block.
+The README's "Retired hooks" section lists the add-ons and their skills.
+
 ## Allowlist — paths the retired gate skipped
 
 - **Extensions:** `.md`, `.json`, `.yaml`, `.toml`, `.ini`, `.env`, `.lock`, `.log`, `.csv`, `.sql`,
@@ -113,7 +138,7 @@ real ones, while `codegraph status` says "up to date". **Trust it for relationsh
 existence or inventories.** Confirm on disk before asserting a file exists or that a count is
 complete.
 
-**The retired gate had no escape without an index.** Before 0.7.0 the hook still hard-blocked `Read`/`Grep`/`Glob` when the MCP server was absent, which is one reason it was retired.
+**The gate has no escape without an index.** Before 0.7.0 the hook still hard-blocked `Read`/`Grep`/`Glob` when the MCP server was absent, which is one reason it was retired. The add-on's copy of the guard does the same; see "When the `codegraph` add-on is installed" above.
 
 ## Index health
 

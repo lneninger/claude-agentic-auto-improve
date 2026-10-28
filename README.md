@@ -232,6 +232,12 @@ prompt. Start a new session afterwards. The hook's optional leftovers,
 `.claude/state/plain-language-guard-<session>.json` and `.claude/logs/plain-language-guard.log`,
 are never read again and you may delete them by hand.
 
+**Changed in 0.9.21:** `architecture-guard.py` knows a component without view encapsulation
+(`ViewEncapsulation.None`): `:host` matches nothing there, so it warns about a `:host` rule and
+accepts a rule scoped under the component's element selector. The `angular-tailwind` add-on's
+reminder says the same. The CodeGraph decision table gains a section for projects that installed
+the `codegraph` add-on, and the contract template gains a token budget line and rule.
+
 ### Retired hooks, and how to restore one
 
 Version 0.7.0 retired six hooks. Version 0.9.8 brought `plan-question-advisor.py` back as a
