@@ -160,8 +160,11 @@ REMINDER = """\
   Dynamic [style.prop]="expr()" bindings ARE allowed for runtime-computed values.
 
 * Component SCSS (.component.scss): near-empty. Only allowed content is
-  ::ng-deep / @keyframes / @media / @supports / @apply blocks. Raw property
-  rules belong in the template as Tailwind classes.
+  third-party overrides / @keyframes / @media / @supports / @apply blocks.
+  Overrides use :host ::ng-deep, but in a ViewEncapsulation.None component
+  :host matches nothing, so scope them under the component's element selector
+  (for example `my-widget .vendor-class`). Raw property rules belong in the
+  template as Tailwind classes.
 
 * Banned: text-gray-*, bg-gray-*, border-gray-* -> use text-on-surface-variant,
   bg-surface-variant, border-outline-variant (from the Material @theme bridge).
@@ -175,9 +178,9 @@ REMINDER = """\
 * Banned: inline overflow-y-auto / sticky top-0 for scroll containers -> use
   the global scroll-edge / scroll-edge-content / scroll-edge-header classes.
 
-The PreToolUse architecture-guard.py hook WILL reject writes that violate
-these rules. Get it right the first time -- don't trial-and-error against
-the guard.
+The PreToolUse architecture-guard.py hook blocks template and decorator
+violations and only warns on stylesheets. Get it right the first time --
+don't trial-and-error against the guard.
 """
 
 
