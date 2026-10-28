@@ -657,6 +657,30 @@ def _audit(record: dict) -> None:
 # ---------------------------------------------------------------------------
 # Tool input extraction.
 # ---------------------------------------------------------------------------
+def _edit_pair_text(old: str, new: str) -> list[str]:
+    """The text of one Edit pair the guard scans.
+
+    An edit whose new_string holds no destructive pattern writes none, so removing existing
+    destructive code (the old_string) is not itself destructive and old_string is left out.
+    Any pattern in new_string, a different one or the same one kept, scans both strings as
+    before. A scan error also scans both (fail closed)."""
+    try:
+        if not _holds_destructive_pattern(new):
+            return [new]
+    except Exception:  # noqa: BLE001 -- fail closed: an unreadable new_string scans as before
+        pass
+    return [old, new]
+
+
+def _holds_destructive_pattern(text: str) -> bool:
+    """True when any destructive pattern, protected-target statement or parsed dynamic label matches."""
+    if any(rx.search(text) for _label, rx in DESTRUCTIVE_RE):
+        return True
+    if PROTECTED_DESTRUCTIVE_TARGET_RE.search(text):
+        return True
+    return bool(_dynamic_labels(text, False))
+
+
 def _extract_text(payload: dict) -> str:
     """Extract the user-controlled text from the tool input we want to scan."""
     tool_name = payload.get("tool_name") or ""
@@ -672,13 +696,13 @@ def _extract_text(payload: dict) -> str:
         parts.append(str(tool_input.get("content", "")))
     elif tool_name in ("Edit",):
         parts.append(str(tool_input.get("file_path", "")))
-        parts.append(str(tool_input.get("old_string", "")))
-        parts.append(str(tool_input.get("new_string", "")))
+        parts.extend(_edit_pair_text(str(tool_input.get("old_string", "")),
+                                     str(tool_input.get("new_string", ""))))
     elif tool_name in ("MultiEdit",):
         parts.append(str(tool_input.get("file_path", "")))
         for edit in tool_input.get("edits", []) or []:
-            parts.append(str(edit.get("old_string", "")))
-            parts.append(str(edit.get("new_string", "")))
+            parts.extend(_edit_pair_text(str(edit.get("old_string", "")),
+                                         str(edit.get("new_string", ""))))
     elif tool_name in ("NotebookEdit",):
         parts.append(str(tool_input.get("notebook_path", "")))
         parts.append(str(tool_input.get("new_source", "")))

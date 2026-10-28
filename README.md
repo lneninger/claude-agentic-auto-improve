@@ -222,7 +222,7 @@ turns the contract-lookup index off for concept-gate, which then reads every con
 To take the assets without the enforcement, vendor the repository instead of installing it and
 register only the hooks you want.
 
-**Removed in 0.9.17:** the end-of-turn writing hook `plain-language-guard.py`, with its
+**Removed in 0.9.20:** the end-of-turn writing hook `plain-language-guard.py`, with its
 `plain-language-guard.rules.json`. The plain-language agreement stays; only the checker is gone.
 If your project vendored a copy, take it out in this order. First remove every row that runs
 the hook from your `settings.json`: one on prompt submit, and in installs registered before 0.9.8

@@ -2082,6 +2082,43 @@ CASES += [
 ]
 
 
+# ---- Deletion-only edits (contract 2026-10-21-tests-behind-database-removal, sub-task t3 blocked) ----
+# An Edit or MultiEdit that only REMOVES database-removal code writes none of it, so it must not block.
+# Anything that puts such code in new_string (a different statement, or the same one kept) still does.
+_ED_CALL = "ctx.Database." + "Ensure" + "Deleted" + "Async(ct);"
+_ED_CALL_OTHER = "other.Database." + "Ensure" + "Deleted" + "();"
+_DROP_BATCH = f'await Exec(master, "{_DROP_DB} [" + db + "]");'
+_DROP_PROT = f'await Exec(master, "{_DROP_DB} [{_DB_PROT}]");'
+_TEARDOWN_CALL = "await DisposableTestDatabase.RemoveAtTeardownAsync(ConnectionString);"
+_FIXTURE_PATH = "d:/Dev/Foo/tests/ScalpingMachine.Services.Tests/Auth/SomeLocalDbTests.cs"
+
+
+def _edit_pair(old: str, new: str, path: str = _FIXTURE_PATH) -> dict:
+    return {"tool_name": "Edit", "tool_input": {"file_path": path, "old_string": old, "new_string": new}}
+
+
+def _multi(edits: list[tuple[str, str]], path: str = _FIXTURE_PATH) -> dict:
+    return {"tool_name": "MultiEdit", "tool_input": {
+        "file_path": path,
+        "edits": [{"old_string": o, "new_string": n} for o, n in edits]}}
+
+
+CASES += [
+    _ok("del.1 Edit deletes the EF removal call, new_string is the teardown call", _edit_pair(_ED_CALL, _TEARDOWN_CALL)),
+    _ok("del.2 Edit deletes the raw SQL removal batch, new_string is the teardown call", _edit_pair(_DROP_BATCH, _TEARDOWN_CALL)),
+    _ok("del.3 Edit deletes the removal call and leaves nothing", _edit_pair(_ED_CALL, "")),
+    _ok("del.4 Edit deletes a removal batch aimed at the protected name, new_string empty", _edit_pair(_DROP_PROT, "")),
+    _ok("del.5 MultiEdit where every edit only deletes removal code", _multi([(_ED_CALL, _TEARDOWN_CALL), (_DROP_BATCH, "")])),
+    _blk("del.6 Edit swaps one EF removal call for another", _edit_pair(_ED_CALL, _ED_CALL_OTHER)),
+    _blk("del.7 Edit keeps the removal call in new_string", _edit_pair(_ED_CALL, _ED_CALL + "\n" + _TEARDOWN_CALL)),
+    _blk("del.8 Edit swaps a removal batch for a removal batch aimed at the protected name", _edit_pair(_DROP_BATCH, _DROP_PROT)),
+    _blk("del.9 Edit adds a removal batch where there was none", _edit_pair("var x = 1;", _DROP_BATCH)),
+    _blk("del.10 MultiEdit: one edit only deletes, the next adds a removal batch",
+         _multi([(_ED_CALL, _TEARDOWN_CALL), ("var x = 1;", _DROP_BATCH)])),
+    _blk("del.11 Write of a file holding the EF removal call", _write(_FIXTURE_PATH, _ED_CALL)),
+    _blk("del.12 Bash command holding a removal batch for an unnamed target", _bash(f'sqlcmd -E -Q "{_DROP_DB} [x]"')),
+]
+
 # Self-checks that are not hook payloads. Each returns (passed, detail).
 def _check_isolation_overrides_an_inherited_project_dir() -> tuple[bool, str]:
     """Round 2 (W1): a legacy case, run with a DECOY inherited CLAUDE_PROJECT_DIR, must not write there.

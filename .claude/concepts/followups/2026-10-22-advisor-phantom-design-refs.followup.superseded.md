@@ -1,11 +1,12 @@
 # Follow-up — Point the angular-tailwind advisor's layout nudge at the new design skills
 
+**Superseded by:** .claude/concepts/2026-10-22-advisor-refs-and-lookup-test.md
 **Parent contract:** `.claude/concepts/2026-10-22-webdesign-plugin-skills.md`
 **Derived from:** Adjacent Areas row noticed by the architect (not in the area map; the scan had no areas to score), area `angular-tailwind add-on`, score `n/a`
 **Date:** 2026-10-22
-**Status:** stub
+**Status:** superseded
 **Estimated scope:** small
-**Issue:** pending
+**Issue:** not opened (out of scope per the brief)
 
 ## What was noticed
 
