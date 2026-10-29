@@ -16,7 +16,7 @@ Read the `test.roots` slot of `.claude/project-profile.md` before placing or sea
 - xUnit 2.9, Moq 4.20, FluentAssertions 6.12, EF Core InMemory 9.0.
 - Arrange / Act / Assert. Every assertion carries a `because:` clause naming the invariant.
 - InMemory databases get a per-test `Guid.NewGuid().ToString()` name. The test class implements `IDisposable` and disposes the context. Ignore `InMemoryEventId.TransactionIgnoredWarning`.
-- Real-SQL constraints (unique indexes, cascade) use a LocalDB integration test that builds its own disposable connection string. Never load the development connection string.
+- Real-SQL constraints (unique indexes, cascade) use a LocalDB integration test. Get the database from the project's test resource owner (see section 3, rule 6), never from a hand-built connection string and never from the development connection string. If the project has no owner yet, create one first, following `references/resource-owner.md`.
 - Class names: `<Sut><MethodOrScenario>Tests`. Prefer narrow-shape DTOs over broad object graphs in assertions.
 
 **Angular** (Vitest)
@@ -38,6 +38,7 @@ Rules:
 3. **Remove before reporting.** The shell command that runs the tests is followed by the cleanup in the same command, so a failed test command still cleans up: run the tests, keep the exit code, run the cleanup, then exit with the kept code.
 4. **A cleanup failure is a finding, not a silent skip.** If a tracked resource cannot be removed, name it and the reason in the report's Problems section, and leave the test verdict unchanged.
 5. **Verify the result.** After cleanup, confirm the tracked resources are gone: the directory is absent, the process has ended, the database no longer lists.
+6. **One owner per resource kind.** A single object, the test resource owner, creates, names, sets up and removes each kind of resource a run needs: a database, a file, a container, a process or a queue. Callers never do any of those steps by hand. The owner follows fixed code standards and learned rules (the disposable-name rule, remove-then-rethrow on a failed setup, always dispose it, a failed removal named and never skipped). Two checks keep it honest: a source-scan test that fails any file outside a closed, justified allow-list that creates, names or removes a resource by hand, and a runtime leftover count after the suite. The full contract, the reason for each standard, what each check cannot see, and what to do when the project has no owner yet are in `references/resource-owner.md`. Read it before writing code that creates a resource.
 
 ## 4. The report: results, not resources
 
@@ -57,3 +58,4 @@ Report these, quoting real output and never summarizing from memory:
 - Reporting a table of created databases, folders or ports in place of results.
 - Removing a resource by pattern or wildcard instead of by the tracked handle.
 - Running a destructive command against a name that lacks a disposable suffix.
+- Creating, naming or removing a database, folder, container, process or queue inside a test instead of asking the project's test resource owner.
