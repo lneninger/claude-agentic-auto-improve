@@ -69,3 +69,6 @@ XL — a new set of shipped documents, a new skill, a new uninstall skill, a man
 
 ## Routing
 non-trivial → /design-first (mandatory)
+
+## Run log
+- 2026-10-29: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/97, https://github.com/lneninger/claude-agentic-auto-improve/pull/99, https://github.com/lneninger/claude-agentic-auto-improve/pull/101, https://github.com/lneninger/claude-agentic-auto-improve/pull/102, https://github.com/lneninger/claude-agentic-auto-improve/pull/103, https://github.com/lneninger/claude-agentic-auto-improve/pull/104, https://github.com/lneninger/claude-agentic-auto-improve/pull/105, https://github.com/lneninger/claude-agentic-auto-improve/pull/106, https://github.com/lneninger/claude-agentic-auto-improve/pull/107, https://github.com/lneninger/claude-agentic-auto-improve/pull/109); contract 2026-10-28-angular-tailwind-rule-documents flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #86: Implementation matches Data Shapes exactly | New Mechanisms (if any) promoted to `MECHANISMS.md` | New vocabulary terms promoted to `VOCABULARY.md`
