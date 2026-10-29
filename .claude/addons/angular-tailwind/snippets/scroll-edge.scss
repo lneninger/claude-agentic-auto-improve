@@ -1,0 +1,23 @@
+/* agentic-auto-improve:scroll-edge begin */
+/*
+ * Scroll container pattern. Three classes, added once to the global stylesheet,
+ * after Tailwind and the theme bridge are loaded.
+ *
+ * The header background is a named setting: --scroll-edge-header-bg.
+ * Set it on any parent element to change it. The default is the Material
+ * surface colour. The wrapper has no overflow-hidden; add it on the element
+ * yourself if you want it.
+ */
+.scroll-edge {
+  @apply relative;
+}
+
+.scroll-edge-content {
+  @apply absolute inset-0 overflow-y-auto;
+}
+
+.scroll-edge-header {
+  @apply sticky top-0 z-10;
+  background-color: var(--scroll-edge-header-bg, var(--mat-sys-surface));
+}
+/* agentic-auto-improve:scroll-edge end */
