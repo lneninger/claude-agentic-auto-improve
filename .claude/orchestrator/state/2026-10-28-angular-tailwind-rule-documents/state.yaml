@@ -30,9 +30,9 @@ sub_tasks:
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-90-t4-add-on-removal.md
   t5-stylesheet-snippet-install:
-    status: pending
-    branch: null
-    pull_request: null
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t5-stylesheet-snippet-install
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/103
     issue: 91
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-91-t5-stylesheet-snippet-install.md
