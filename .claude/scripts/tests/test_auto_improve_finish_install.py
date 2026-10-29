@@ -3369,6 +3369,18 @@ ADVISOR_RELEASE_ONE = "# the disabled hook, an older release\nimport sys\nsys.ex
 ADVISOR_RELEASE_TWO = "# the disabled hook, an even older release (kept an extra option)\n"
 
 
+#: The snippet the plugin ships, and the manifest entry that names it.
+REAL_SNIPPET = (Path(__file__).resolve().parents[3] / ".claude" / "addons" / "angular-tailwind" / "snippets"
+                / "scroll-edge.scss")
+SNIPPET_MANIFEST = {"file": "snippets/scroll-edge.scss",
+                    "selectors": [".scroll-edge", ".scroll-edge-content", ".scroll-edge-header"],
+                    "begin": "/* agentic-auto-improve:scroll-edge begin */",
+                    "end": "/* agentic-auto-improve:scroll-edge end */"}
+SNIPPET_CLASSES = SNIPPET_MANIFEST["selectors"]
+STYLES_REL = "web/src/styles.scss"
+STYLES_ORIGINAL = "@use 'tailwindcss';\n\nbody {\n  margin: 0;\n}\n"
+
+
 def _released(*texts):
     return [hashlib.sha256(t.encode("utf-8")).hexdigest() for t in texts]
 
@@ -3383,6 +3395,7 @@ ADDON_SPECS = {
         "prerequisites": [],
         "kill": None,
         "documents": ANGULAR_DOCS,
+        "snippet": True,
         "disabled": [{
             af.DISABLED_HOOK: DISABLED_ADVISOR, af.DISABLED_FORMER: [DISABLED_FORMER],
             af.DISABLED_ROW: {af.ROW_EVENT: "UserPromptSubmit", af.ROW_ARGS: []},
@@ -3441,6 +3454,11 @@ def build_fake_addons(root):
             (folder / "documents").mkdir(parents=True, exist_ok=True)
             for document in spec["documents"]:
                 (folder / "documents" / document).write_text("# %s\n\nThe rules.\n" % document, encoding="utf-8")
+        if spec.get("snippet"):
+            # The fake ships the real snippet bytes, so the tests check what a project would receive.
+            manifest[af.KEY_SNIPPET] = copy.deepcopy(SNIPPET_MANIFEST)
+            (folder / "snippets").mkdir(parents=True, exist_ok=True)
+            (folder / "snippets" / "scroll-edge.scss").write_bytes(REAL_SNIPPET.read_bytes())
         if spec.get("disabled"):
             manifest[af.KEY_DISABLED] = copy.deepcopy(spec["disabled"])
             for entry in spec["disabled"]:
@@ -5065,6 +5083,163 @@ class TestAddonRemoval(AddonHarness):
         self.assertEqual(rc, 0)
         self.assertIn("bash-gate.py", out.getvalue())
         self.assertIn("delete", out.getvalue())
+
+
+# ======================================================================================
+# Sub-task 5: the stylesheet snippet (``addon --stylesheet <rel>``). Contract: Stylesheet snippet, I-9, Q7, Q12.
+# ======================================================================================
+class TestAddonStylesheet(AddonHarness):
+    def setUp(self):
+        super().setUp()
+        # frontend.roots names ``web``, so web/src/styles.scss is the candidate the preview offers.
+        self.put_profile(template_text(overrides={"frontend.roots": "`web`"}))
+        self.styles = self.project / STYLES_REL
+        self.styles.parent.mkdir(parents=True, exist_ok=True)
+        self.styles.write_bytes(STYLES_ORIGINAL.encode("utf-8"))
+
+    def style_argv(self, apply=False, sha=None, rels=(STYLES_REL,)):
+        argv = self.addon_argv("angular-tailwind", apply=apply, sha=sha)
+        for rel in rels:
+            argv += ["--stylesheet", rel]
+        return argv
+
+    def style_preview(self, rels=(STYLES_REL,)):
+        rc, out, parsed = self.cli(self.style_argv(rels=rels))
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "plan"), msg="a plan: %r" % (parsed or out,))
+        return parsed
+
+    def style_apply(self, plan, rels=(STYLES_REL,)):
+        return self.cli(self.style_argv(apply=True, sha=plan["plan-sha256"], rels=rels))
+
+    def defined(self, text):
+        return [c for c in SNIPPET_CLASSES if re.search(r"(?m)^%s\s*\{" % re.escape(c), text)]
+
+    def test_without_the_option_the_plan_lists_the_candidates_and_writes_nothing(self):
+        (self.project / "web" / "src" / "styles.css").write_text("/* css */\n", encoding="utf-8")
+        before = snapshot(self.tmp)
+        plan = self.style_preview(rels=())
+        self.assertTreeSame(before, "a preview writes nothing")
+        self.assertEqual(plan["stylesheet"]["candidates"], ["web/src/styles.css", "web/src/styles.scss"],
+                         msg="each frontend.roots entry's src/styles.scss or .css that exists, and no other")
+        self.assertEqual(plan["stylesheet"]["targets"], [], msg="and none is chosen")
+        self.install_addon("angular-tailwind")
+        self.assertEqual(self.styles.read_bytes(), STYLES_ORIGINAL.encode("utf-8"),
+                         msg="an install without the option never touches a stylesheet")
+
+    def test_the_install_appends_the_snippet_inside_its_markers_and_defines_all_three_classes(self):
+        plan = self.style_preview()
+        self.assertEqual([(t["path"], t["action"]) for t in plan["stylesheet"]["targets"]],
+                         [(STYLES_REL, "append")], msg="the plan names the append")
+        self.assertIn("+.scroll-edge-header", plan["stylesheet"]["unified-diff"], msg="and shows it")
+        rc, out, parsed = self.style_apply(plan)
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="%r" % (parsed or out,))
+        after = self.styles.read_text(encoding="utf-8")
+        self.assertEqual(self.defined(after), SNIPPET_CLASSES, msg="all three definitions exist")
+        self.assertTrue(after.startswith(STYLES_ORIGINAL), msg="the project's own text is kept, in front")
+        self.assertTrue(after.endswith(REAL_SNIPPET.read_text(encoding="utf-8")),
+                        msg="and the snippet is last, begin marker to end marker")
+        self.assertEqual(after.count(SNIPPET_MANIFEST["begin"]), 1)
+        self.assertEqual(parsed.get("stylesheets"), [STYLES_REL], msg="the answer names what it wrote")
+
+    def test_a_second_install_changes_nothing(self):
+        plan = self.style_preview()
+        self.style_apply(plan)
+        before = snapshot(self.tmp)
+        second = self.style_preview()
+        self.assertEqual([t["action"] for t in second["stylesheet"]["targets"]], ["present"])
+        rc, out, parsed = self.style_apply(second)
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg="%r" % (parsed or out,))
+        self.assertTreeSame(before, "the tree is byte-identical: no stylesheet line, no profile line, no backup")
+
+    def test_a_project_definition_is_reported_as_present_and_left_alone(self):
+        own = (STYLES_ORIGINAL + "\n.scroll-edge {\n  position: relative;\n}\n.scroll-edge-content { inset: 0; }\n"
+               ".scroll-edge-header, .sticky-thing {\n  top: 0;\n}\n")
+        self.styles.write_bytes(own.encode("utf-8"))
+        self.install_addon("angular-tailwind")  # documents and profile first, so only the stylesheet is in question
+        before = snapshot(self.tmp)
+        plan = self.style_preview()
+        self.assertEqual([(t["path"], t["action"]) for t in plan["stylesheet"]["targets"]],
+                         [(STYLES_REL, "present")], msg="reported as present")
+        rc, out, parsed = self.style_apply(plan)
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg="%r" % (parsed or out,))
+        self.assertEqual(self.styles.read_bytes(), own.encode("utf-8"), msg="and not one byte of it changes")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_comment_or_a_use_of_a_class_is_not_a_definition(self):
+        text = STYLES_ORIGINAL + "/* .scroll-edge { } */\n.card {\n  @extend .scroll-edge-header;\n}\n"
+        self.styles.write_bytes(text.encode("utf-8"))
+        plan = self.style_preview()
+        self.assertEqual(plan["stylesheet"]["targets"][0]["action"], "append",
+                         msg="a commented-out rule and an @extend define nothing")
+
+    def test_some_classes_defined_is_refused_and_nothing_is_written(self):
+        own = STYLES_ORIGINAL + "\n.scroll-edge {\n  position: relative;\n}\n"
+        self.styles.write_bytes(own.encode("utf-8"))
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.style_argv())
+        self.assertRefused(parsed, "stylesheet-partial-snippet", "one of the three classes is defined")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertIn(".scroll-edge-content", parsed["message"], msg="the message names what is missing")
+        self.assertTreeSame(before, "not even the documents are copied")
+
+    def test_markers_without_the_classes_are_refused_not_appended_twice(self):
+        own = STYLES_ORIGINAL + SNIPPET_MANIFEST["begin"] + "\n" + SNIPPET_MANIFEST["end"] + "\n"
+        self.styles.write_bytes(own.encode("utf-8"))
+        rc, out, parsed = self.cli(self.style_argv())
+        self.assertRefused(parsed, "stylesheet-partial-snippet", "the block is there but the classes are not")
+
+    def test_a_missing_or_outside_stylesheet_is_refused(self):
+        outside = self.tmp / "outside.scss"
+        outside.write_text("body {}\n", encoding="utf-8")
+        for rel in ("web/src/nope.scss", "../outside.scss", str(outside), "web"):
+            with self.subTest(rel=rel):
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.cli(self.style_argv(rels=(rel,)))
+                self.assertRefused(parsed, "stylesheet-missing", "not a file inside the project")
+                self.assertEqual(rc, 2)
+                self.assertTreeSame(before, "nothing is written")
+
+    def test_a_stylesheet_that_changes_after_the_preview_is_refused(self):
+        plan = self.style_preview()
+        self.styles.write_bytes(STYLES_ORIGINAL.encode("utf-8") + b"/* edited */\n")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.style_apply(plan)
+        self.assertRefused(parsed, "changed-since-preview", "the plan hash covers the stylesheet bytes (I-9)")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_line_endings_and_a_missing_final_newline_are_handled(self):
+        for label, original in (("crlf", STYLES_ORIGINAL.replace("\n", "\r\n")),
+                                ("no final newline", "body {\n  margin: 0;\n}"),
+                                ("empty", "")):
+            with self.subTest(file=label):
+                self.styles.write_bytes(original.encode("utf-8"))
+                plan = self.style_preview()
+                rc, out, parsed = self.style_apply(plan)
+                self.assertEqual(rc, 0, msg="%r" % (parsed or out,))
+                raw = self.styles.read_bytes()
+                self.assertTrue(raw.startswith(original.encode("utf-8")), msg="the old bytes come first")
+                self.assertEqual(self.defined(raw.decode("utf-8")), SNIPPET_CLASSES)
+                if label == "crlf":
+                    self.assertNotIn(b"\n", raw.replace(b"\r\n", b""), msg="every line ending is CRLF")
+                elif label == "no final newline":
+                    self.assertIn(b"}\n\n/* agentic", raw, msg="the snippet starts on a line of its own")
+
+    def test_the_text_rendering_names_the_stylesheet(self):
+        argv = self.style_argv()
+        argv.remove("--json")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(fi.main(argv), 0)
+        self.assertIn(STYLES_REL, out.getvalue())
+        self.assertIn("append", out.getvalue())
+
+    def test_the_removal_leaves_the_appended_snippet_in_place(self):
+        plan = self.style_preview()
+        self.style_apply(plan)
+        appended = self.styles.read_bytes()
+        self.cli(["addon-remove", "--name", "angular-tailwind", "--project", str(self.project), "--json",
+                  "--claude-home", str(self.home)])
+        self.assertEqual(self.styles.read_bytes(), appended, msg="Q7: the removal never takes the snippet out")
 
 
 if __name__ == "__main__":

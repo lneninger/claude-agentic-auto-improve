@@ -1,6 +1,6 @@
 ---
 name: auto-improve-angular-tailwind-install
-description: "Install the angular-tailwind add-on of the agentic-auto-improve plugin in this project: four rule documents (Angular code, Angular Material, Tailwind styling, UI patterns) copied into .claude/references/angular-tailwind/ and listed in the project profile's review.documents slot. Installs no hook and writes no settings.json row. Previews the files and the profile change, asks for one confirmation, then writes. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-angular-tailwind-install, 'install the angular tailwind add-on', 'add the Angular and Tailwind rule documents', or 'turn on the UI rules'. Never overwrites a file that differs and never removes a row."
+description: "Install the angular-tailwind add-on of the agentic-auto-improve plugin in this project: four rule documents (Angular code, Angular Material, Tailwind styling, UI patterns) copied into .claude/references/angular-tailwind/ and listed in the project profile's review.documents slot, plus, on request, the scroll-edge classes appended to the project's global stylesheet. Installs no hook and writes no settings.json row. Previews the files and the profile change, asks for one confirmation, then writes. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-angular-tailwind-install, 'install the angular tailwind add-on', 'add the Angular and Tailwind rule documents', or 'turn on the UI rules'. Never overwrites a file that differs and never removes a row."
 user_invocable: true
 ---
 
@@ -25,7 +25,8 @@ add-on: a typing mistake there can switch every check off, or block every action
 The script never removes a row or a file. It never overwrites a file that differs from the
 plugin's copy. It copies a helper file only when the project lacks it. In the project profile it
 writes exactly one thing: it appends its own document paths to the `review.documents` slot. It
-changes no other slot and no other entry in that slot.
+changes no other slot and no other entry in that slot. In a stylesheet it writes exactly one thing, and
+only when you name the file: the scroll-edge snippet, appended at the end.
 
 ## Step 0: Find the script
 
@@ -84,19 +85,38 @@ The install writes **no hook file and no `settings.json` row**, and the add-on d
 
 It needs one helper, `.claude/hooks/_project_paths.py`, which the install copies only if the project lacks it.
 
+It also carries a small stylesheet snippet: three classes, `.scroll-edge`, `.scroll-edge-content` and `.scroll-edge-header`,
+that the scroll container pattern (`UI-UX-PATTERNS.md`) and the guard's scroll-edge rule rely on. The header background is the
+setting `--scroll-edge-header-bg` (default: the Material surface colour). The wrapper has no `overflow-hidden`; add it on the
+element yourself if you want it. The snippet goes at the end of the project's global stylesheet, after Tailwind and the theme
+bridge, between the comments `/* agentic-auto-improve:scroll-edge begin */` and `... end */`.
+
 ## Step 1: Preview (writes nothing)
 
 ```bash
 $PY "$FI" addon --name angular-tailwind --project . --json
 ```
 
+Without `--stylesheet` the preview only lists candidates and writes nothing: the answer's `stylesheet.candidates` holds each
+`frontend.roots` entry's `src/styles.scss` or `src/styles.css` that exists. If there is one candidate, recommend it. If there are
+several, or none, ask the user which file is the global stylesheet (the one that imports Tailwind). Then run the preview again
+with the choice (repeat the option for more than one file); an answer of "none" skips the snippet:
+
+```bash
+$PY "$FI" addon --name angular-tailwind --project . --stylesheet <relative path> --json
+```
+
+`stylesheet.targets` then says, for each file, `append` (none of the three classes is defined, so the snippet would be added) or
+`present` (all three are defined already, by this install or by the project; the file is not touched), and
+`stylesheet.unified-diff` shows the appended text.
+
 The answer carries `files` (each file with its kind, `document` or `helper`, and its action: `copy`, `present` or `keep-existing`),
 `profile` (the `review.documents` slot: `adds` the paths it would append, `already-listed` the paths it skips, `before` and `after`
 the slot text, and a `unified-diff`), `to-add` (settings rows; empty for this add-on), `notes`, `kill-switches` (empty),
 `disabled-hooks`, `target`, `plugin-root` and `plan-sha256`.
 **Keep `plan-sha256`.** The apply needs it as `--expect-sha256`. It covers the settings bytes, the profile bytes before and
-after, and every file the install would copy, so anything that moves between the preview and the write is refused as
-`changed-since-preview`.
+after, the bytes of each named stylesheet before and after, and every file the install would copy, so anything that moves between
+the preview and the write is refused as `changed-since-preview`.
 
 How the slot is written: a slot that still holds its placeholder, or `none`, becomes the list of the four paths. A slot the team
 wrote keeps its text, and the missing paths are appended after it. A path that is already listed (with or without backticks,
@@ -109,6 +129,8 @@ Show the user, in plain words:
 - the documents it would copy into `.claude/references/angular-tailwind/`, and any helper into `.claude/hooks/`, with the
   action for each. A file marked `present` is already identical and is not touched. A helper marked `keep-existing` is kept as it is.
 - the `profile` change: the slot before, the slot after, and the `unified-diff`.
+- the `stylesheet` change, when a file was named: which file gets the snippet, or that it already defines the classes.
+  The removal never takes the snippet out again, so say that it stays in the stylesheet after an uninstall.
 - that no hook is installed and no row is written to `settings.json`.
 - any `notes`.
 
@@ -124,11 +146,14 @@ Declining writes nothing.
 On a yes, apply with the `plan-sha256` from the preview:
 
 ```bash
-$PY "$FI" addon --name angular-tailwind --project . --apply --expect-sha256 <plan-sha256 from the preview>
+$PY "$FI" addon --name angular-tailwind --project . [--stylesheet <relative path>] --apply --expect-sha256 <plan-sha256 from the preview>
 ```
 
-The script copies the documents first and updates the profile last, so the profile never lists a file that is not there.
-`settings.json` is not touched, so there is no backup to print. The answer lists `copied` and `registered` (the paths appended to the slot).
+Pass the same `--stylesheet` options as in the preview that gave the hash; the hash covers them.
+
+The script copies the documents first, then updates the profile, then appends the snippet, so the profile never lists a file that is not there.
+`settings.json` is not touched, so there is no backup to print. The answer lists `copied`, `registered` (the paths appended to the slot)
+and `stylesheets` (the files the snippet was appended to).
 
 If the answer says `nothing-to-do`, the add-on was already installed. Nothing was written.
 
@@ -150,6 +175,12 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 - `addon-file-differs`: one of the four documents already exists in the project and is not the
   plugin's copy. Name the file. The script will not overwrite it. The user compares it with the
   plugin's copy and renames or removes it by hand, then runs this skill again.
+- `stylesheet-partial-snippet`: the named stylesheet defines some of the three classes and not the others, or holds the snippet's
+  markers without all three classes. Nothing was written, not even the documents. Name the file and the classes the message says are
+  missing. The user adds the missing class by hand (copy it from `.claude/addons/angular-tailwind/snippets/scroll-edge.scss` in the
+  plugin) or removes the half-installed block, then runs this skill again. Do not edit the stylesheet yourself.
+- `stylesheet-missing`: the named path is not a file inside the project. Nothing was written. Ask for the right path (the preview lists
+  the candidates).
 - `changed-since-preview`: something moved after the preview. Go back to the preview, show the
   new plan, and ask again. Never reuse the old hash.
 - `write-failed`: for example `.claude/settings.json` is a symbolic link. Nothing was written.
@@ -160,15 +191,19 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 
 ## How to remove it
 
-This install never removes anything. The removal is its own skill, `/auto-improve-angular-tailwind-uninstall`.
+This install never removes anything. The removal is its own skill, `/auto-improve-angular-tailwind-uninstall`. It leaves the
+stylesheet snippet where it is, because the snippet lives in the project's own stylesheet; delete the block between the two marker
+comments by hand if you want it gone.
 It also cleans a project that installed the old advisor hook under either of its file names, which is
 what `disabled-hook-present` asks for.
 
 ## Closing
 
 End with a short summary: what was copied, which paths were registered in `review.documents`, and what was
-**not** written and why (no hook, no row, no `settings.json`). Say that running this skill again
-changes nothing: identical files are left alone and a path that is already listed is not listed twice.
+**not** written and why (no hook, no row, no `settings.json`), and whether the stylesheet snippet was appended or skipped. Say that
+running this skill again changes nothing: identical files are left alone, a path that is already listed is not listed twice, and a
+stylesheet that defines the classes is not touched. If the snippet was appended, remind the user that Tailwind 4's `@apply` in it is
+checked by the project's own build, not by this install: run the build once.
 
 ## Anti-patterns
 
@@ -182,6 +217,8 @@ changes nothing: identical files are left alone and a path that is already liste
 - **Hand-editing `settings.json` or deleting the old advisor row or file yourself.** Run the uninstall skill:
   it removes the row first, because a row that points at a missing script blocks every prompt.
 - **Overwriting a document that differs.** The script refuses; do not copy over it yourself.
+- **Choosing the stylesheet for the user, or appending the snippet by hand.** Offer the candidates and let the user pick; the script
+  decides whether the classes are already defined and writes the block between its markers.
 
 ## When NOT to use
 
