@@ -6,7 +6,7 @@
 **Status:** approved
 **Supersedes:** none
 **Work Item Brief:** .claude/work-items/2026-10-28-84-angular-tailwind-rule-documents.md
-**Tracking issue:** #84
+**Tracking issue:** #86
 **Budget:** 12,000 tokens
 
 ---
