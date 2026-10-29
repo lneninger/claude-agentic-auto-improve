@@ -37,9 +37,9 @@ sub_tasks:
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-91-t5-stylesheet-snippet-install.md
   t6-guard-messages:
-    status: pending
-    branch: null
-    pull_request: null
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t6-guard-messages
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/104
     issue: 92
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-92-t6-guard-messages.md
