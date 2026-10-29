@@ -2,8 +2,8 @@ contract: 2026-10-28-angular-tailwind-rule-documents
 started_at: '2026-10-29T00:15:15.704216+00:00'
 sub_tasks:
   t1-rule-documents:
-    status: pending
-    branch: null
+    status: awaiting-merge
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t1-rule-documents
     pull_request: null
     issue: 87
     base: feature/84-angular-tailwind-rule-documents
