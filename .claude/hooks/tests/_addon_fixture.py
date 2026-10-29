@@ -19,6 +19,9 @@ THE TWO FUNCTIONS EVERY SUITE USES
     Anything else FAILS the calling test (``AddonFixtureError``, an ``AssertionError``). It never skips:
     a skipped case is a case nobody notices has stopped running.
 
+``install_disabled(add_on, project=None)``
+    The same copy for the add-on's DISABLED hooks (the manifest's ``disabled`` list) and its helpers.
+
 ``install(add_on, project=None)``
     Builds a project (a new temporary folder, or the folder given) and copies into its ``.claude/hooks/``
     the add-on's hook files AND every helper the add-on's manifest names, exactly as the install
@@ -66,9 +69,47 @@ KEY_ROWS = "registrations"
 KEY_PREREQUISITES = "prerequisites"
 KEY_KILL_SWITCHES = "kill_switches"
 KEY_INSTALL_SKILL = "install_skill"
+KEY_UNINSTALL_SKILL = "uninstall_skill"
+KEY_DOCUMENTS = "documents"
+KEY_SNIPPET = "stylesheet_snippet"
+KEY_DISABLED = "disabled"
+#: Fields of one disabled hook entry.
+DISABLED_HOOK, DISABLED_FORMER, DISABLED_ROW, DISABLED_NOTE, DISABLED_HASHES = (
+    "hook", "former_names", "registration", "note", "released_sha256")
 #: Fields of one registration row.
 ROW_EVENT, ROW_MATCHER, ROW_HOOK, ROW_ARGS, ROW_ASYNC, ROW_STATUS = (
     "event", "matcher", "hook", "args", "async", "statusMessage")
+
+#: THE ROW FORMS OLDER INSTALLS CARRY for the retired angular-tailwind advisor, as read from git history
+#: (``git log -S`` over ``.claude/hooks/hooks.json``, the add-on folder and the finish-install script). Each
+#: form is the hook dict of one ``UserPromptSubmit`` row (no matcher) that names the advisor file ``<file>``:
+#:   ``plugin-string``   the plugin's own hooks.json up to 0.6.x (commit 9beb09f: ``py -3 "${CLAUDE_PLUGIN_ROOT}/
+#:                       .claude/hooks/architecture-advisor.py"``), which a project copied by hand into its
+#:                       settings.json. 0.7.0 (304ca12) took the row out of hooks.json, so a plugin install no
+#:                       longer registers it;
+#:   ``project-string``  the same string with the project path variable, the form a hand copy of a vendored
+#:                       hook takes;
+#:   ``exec-py``         the exec form the finish-install writer has written since 05a1784, and the add-on
+#:                       install of 0.9.9 to 0.9.21 (5876b17): ``"command": "py", "args": ["-3", <path>]``;
+#:   ``exec-python3``    the same on macOS and Linux (``"command": "python3"``).
+#: A test that cleans an old install builds one project per form and per file name (current or former).
+OLD_ROW_FORMS = ("plugin-string", "project-string", "exec-py", "exec-python3")
+OLD_ROW_EVENT = "UserPromptSubmit"
+
+
+def old_row(form: str, file: str) -> dict:
+    """The hook dict of one old-install row of ``form`` that names the hook file ``file``."""
+    project_path = "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + file
+    if form == "plugin-string":
+        return {"type": "command", "command": 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/%s"' % file}
+    if form == "project-string":
+        return {"type": "command", "command": 'py -3 "%s"' % project_path}
+    if form == "exec-py":
+        return {"type": "command", "command": "py", "args": ["-3", project_path]}
+    if form == "exec-python3":
+        return {"type": "command", "command": "python3", "args": [project_path]}
+    raise AddonFixtureError("no old row form %r (known: %s)" % (form, ", ".join(OLD_ROW_FORMS)))
+
 
 _TEMP_FOLDERS: list[Path] = []
 
@@ -164,8 +205,25 @@ def manifest(add_on: str, file: str | None = None) -> dict:
 def hook_files(add_on: str) -> list[str]:
     """The hook file names the manifest lists."""
     names = manifest(add_on, KNOWN_HOOKS.get(add_on)).get(KEY_HOOKS)
-    if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
+    # An add-on may ship documents only (angular-tailwind), so the list may be empty; it must still be a list.
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise AddonFixtureError("manifest of %r has no %r list of file names" % (add_on, KEY_HOOKS))
+    return list(names)
+
+
+def disabled_entries(add_on: str) -> list[dict]:
+    """The disabled hook entries of the manifest (an empty list when it declares none)."""
+    entries = manifest(add_on, KNOWN_HOOKS.get(add_on)).get(KEY_DISABLED, [])
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        raise AddonFixtureError("manifest of %r has a %r that is not a list of entries" % (add_on, KEY_DISABLED))
+    return list(entries)
+
+
+def disabled_hook_files(add_on: str) -> list[str]:
+    """The current file names of the manifest's disabled hooks."""
+    names = [e.get(DISABLED_HOOK) for e in disabled_entries(add_on)]
+    if not names or not all(isinstance(n, str) for n in names):
+        raise AddonFixtureError("manifest of %r declares no disabled hook with a %r name" % (add_on, DISABLED_HOOK))
     return list(names)
 
 
@@ -180,15 +238,26 @@ def helper_paths(add_on: str) -> list[str]:
 def registrations(add_on: str) -> list[dict]:
     """The registration rows the manifest lists."""
     rows = manifest(add_on, KNOWN_HOOKS.get(add_on)).get(KEY_ROWS)
-    if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise AddonFixtureError("manifest of %r has no %r list of rows" % (add_on, KEY_ROWS))
     return list(rows)
 
 
 def install(add_on: str, project: Path | str | None = None) -> list[Path]:
     """Install ``add_on`` into ``project`` (a new temporary project when None); return the hook paths."""
+    return _copy_into(add_on, project, hook_files(add_on))
+
+
+def install_disabled(add_on: str, project: Path | str | None = None) -> list[Path]:
+    """Copy the add-on's DISABLED hooks and its helpers into ``project``; return the hook paths.
+
+    No install writes a disabled hook, so a suite that still tests one (the retired angular-tailwind
+    advisor) installs it through this function and nowhere else."""
+    return _copy_into(add_on, project, disabled_hook_files(add_on))
+
+
+def _copy_into(add_on: str, project: Path | str | None, files: list[str]) -> list[Path]:
     target = Path(project) if project is not None else new_project()
-    files = hook_files(add_on)
     helpers = helper_paths(add_on)
     hooks_dir = target / ".claude" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)

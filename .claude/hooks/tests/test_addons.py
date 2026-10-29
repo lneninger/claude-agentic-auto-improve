@@ -77,12 +77,14 @@ class AddonCase(unittest.TestCase):
     """Installs one add-on into an empty temporary project (the fixture's own failure is the RED reason)."""
 
     ADD_ON = ""
+    #: How the hooks get into the project. A disabled hook is installed through ``af.install_disabled``.
+    INSTALLER = staticmethod(af.install)
 
     def setUp(self) -> None:
         self.home = Path(tempfile.mkdtemp(prefix="addon-home-"))
         self.addCleanup(__import__("shutil").rmtree, self.home, True)
         self.project = af.new_project("addon-run-")
-        self.hooks = {p.name: p for p in af.install(self.ADD_ON, self.project)}
+        self.hooks = {p.name: p for p in self.INSTALLER(self.ADD_ON, self.project)}
 
     def run_hook(self, name: str, payload: dict, *, cwd: Path | None = None, extra_env: dict | None = None,
                  raw: bytes | None = None) -> Run:
@@ -111,9 +113,27 @@ class AddonCase(unittest.TestCase):
 
 
 class AngularTailwindAddonTests(AddonCase):
+    """The advisor is a DISABLED hook: no install writes it, so these rows install it through the fixture's
+    ``install_disabled`` and test the script that still ships for anyone who turns it back on."""
     ADD_ON = "angular-tailwind"
     HOOK = "angular-tailwind-advisor.py"
+    INSTALLER = staticmethod(af.install_disabled)
 
+    def test_the_manifest_installs_no_hook_and_declares_the_advisor_as_disabled(self):
+        self.assertEqual(af.hook_files(self.ADD_ON), [], msg="no hook is installed")
+        self.assertEqual(af.registrations(self.ADD_ON), [], msg="and no row is written")
+        self.assertEqual(af.disabled_hook_files(self.ADD_ON), [self.HOOK], msg="the advisor is the disabled hook")
+        self.assertEqual(sorted(self.hooks), [self.HOOK], msg="install_disabled copied exactly that file")
+        self.assertNotIn(af.KEY_KILL_SWITCHES, af.manifest(self.ADD_ON),
+                         msg="the add-on declares no kill switch (decision 3 of issue #84)")
+
+    def test_the_kept_script_no_longer_reads_the_arch_advisor_switch(self):
+        text = self.hooks[self.HOOK].read_text(encoding="utf-8")
+        self.assertNotIn("CLAUDE_ARCH_ADVISOR", text, msg="the switch and its docstring lines are gone")
+        run = self.run_hook(self.HOOK, {"prompt": "restyle the dashboard component styles"},
+                            extra_env={"CLAUDE_ARCH_ADVISOR": "off"})
+        self.assertIn("Tailwind", run.out, msg="control: the old switch value no longer silences it: "
+                                               + run.describe())
     def test_the_css_reminder_is_printed_for_a_ui_prompt_and_reads_the_projects_rules_first(self):
         self.write(".claude/hooks/architecture-guard.rules.json", json.dumps({
             "frontend_projects_root": "apps",
