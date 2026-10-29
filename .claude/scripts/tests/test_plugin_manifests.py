@@ -942,6 +942,9 @@ def addon_problems(name: str, data, root: pathlib.Path, default_hooks: set, disp
     if data.get(af.KEY_INSTALL_SKILL) != "auto-improve-%s-install" % name:
         problems.append("%s: %r is %r, not auto-improve-%s-install" % (name, af.KEY_INSTALL_SKILL,
                                                                         data.get(af.KEY_INSTALL_SKILL), name))
+    if data.get(af.KEY_UNINSTALL_SKILL) != "auto-improve-%s-uninstall" % name:
+        problems.append("%s: %r is %r, not auto-improve-%s-uninstall" % (name, af.KEY_UNINSTALL_SKILL,
+                                                                          data.get(af.KEY_UNINSTALL_SKILL), name))
     if af.KEY_PREREQUISITES not in data or not isinstance(data.get(af.KEY_PREREQUISITES), list):
         problems.append("%s: %r is not a list" % (name, af.KEY_PREREQUISITES))
     return problems
@@ -1040,6 +1043,15 @@ for _name in EXPECTED_ADDON_HOOKS:
           % _name,
           _skill.is_file() and _fm.get("name") == "auto-improve-%s-install" % _name
           and _fm.get("user_invocable") == "true", "frontmatter %r" % (_fm,))
+    _skill = ROOT / "skills" / ("auto-improve-%s-uninstall" % _name) / "SKILL.md"
+    _fm = read_frontmatter(_skill) if _skill.is_file() else {}
+    check("skill auto-improve-%s-uninstall exists, its frontmatter name equals its folder and it is user-invocable"
+          % _name,
+          _skill.is_file() and _fm.get("name") == "auto-improve-%s-uninstall" % _name
+          and _fm.get("user_invocable") == "true", "frontmatter %r" % (_fm,))
+    _text = _skill.read_text(encoding="utf-8") if _skill.is_file() else ""
+    check("skill auto-improve-%s-uninstall runs the addon-remove subcommand for %s" % (_name, _name),
+          "addon-remove --name %s" % _name in _text, "no addon-remove --name %s in the skill" % _name)
 
 # Controls: the problem finder must be able to fail. A throwaway plugin root holds one good add-on.
 with tempfile.TemporaryDirectory(prefix="addon-controls-") as _ctl_name:
@@ -1054,7 +1066,8 @@ with tempfile.TemporaryDirectory(prefix="addon-controls-") as _ctl_name:
         return {af.KEY_HOOKS: ["demo-hook.py"], af.KEY_HELPERS: [".claude/hooks/_project_paths.py"],
                 af.KEY_ROWS: [{af.ROW_EVENT: "PreToolUse", af.ROW_MATCHER: "Bash", af.ROW_HOOK: "demo-hook.py"}],
                 af.KEY_PREREQUISITES: [], af.KEY_KILL_SWITCHES: ["CLAUDE_DEMO"],
-                af.KEY_INSTALL_SKILL: "auto-improve-demo-install"}
+                af.KEY_INSTALL_SKILL: "auto-improve-demo-install",
+                af.KEY_UNINSTALL_SKILL: "auto-improve-demo-uninstall"}
 
     def _ctl_problems(data, dispatched_members=frozenset()):
         return addon_problems("demo", data, _ctl, default_hook_names(_ctl), set(dispatched_members))

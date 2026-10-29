@@ -27,6 +27,17 @@ Usage:
   py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . --apply \\
       --expect-sha256 <plan hash>
+  py -3 .claude/scripts/auto_improve_finish_install.py addon-remove --name <add-on> --project . [--json]
+  py -3 .claude/scripts/auto_improve_finish_install.py addon-remove --name <add-on> --project . --apply \\
+      --expect-sha256 <plan hash>
+
+The ``addon-remove`` subcommand takes an add-on out again, through the same preview and plan hash: it removes
+the add-on's rows from settings.json first (with a backup, as a text splice that keeps every other byte), then
+its document paths from the profile's ``review.documents`` slot (``none`` when none is left), then its hook and
+document files. A file is deleted only when it is identical to the plugin's copy after the fold (line endings,
+byte order mark) or matches a released hash; a file that differs is kept. Helpers and the stylesheet snippet are
+never deleted and kill switches are left alone. Rows are matched by hook file name under the current and every
+former name, in every form an older release wrote.
 
 The ``addon`` subcommand installs one opt-in add-on (a folder under ``.claude/addons/`` in the plugin)
 into the project: it copies the add-on's hook files, rule documents and the helper files its ``addon.json``
@@ -2179,9 +2190,10 @@ def _plan_profile_documents(project: Path, paths: List[str]) -> Tuple[Optional[R
                   "already-listed": already, "before": raw, "after": after, "diff": diff}
 
 
-def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[Path],
-                plugin_root: Optional[Path], provider: str = "claude") -> Tuple[Result, Dict[str, Any]]:
-    """The AddonPlan (or a refusal) plus the bytes the apply needs. Writes nothing."""
+def _resolve_addon(project: Path, name: str, claude_home: Optional[Path], plugin_root: Optional[Path],
+                   provider: str, verb: str) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """The checks the install and the removal share: provider, project, not the plugin's checkout, a known
+    add-on, a readable manifest. Returns (refusal, {}) or (None, {home, root, folder, manifest})."""
     if provider != "claude":
         return _no_hooks_provider(provider, project), {}
     bad = _check_project(project)
@@ -2189,15 +2201,16 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
         return bad, {}
     if _manifest_names_plugin(project):
         return refusal("plugin-source-checkout",
-                       "this project is the plugin's own checkout; an add-on is installed into a project "
-                       "that uses the plugin", project), {}
+                       "this project is the plugin's own checkout; an add-on is %s a project "
+                       "that uses the plugin" % ("installed into" if verb == "install" else "removed from"),
+                       project), {}
     if not ADDON_NAME_RE.match(name or ""):
         return refusal("addon-unknown", "%r is not an add-on name" % name, project), {}
     home = _claude_home(claude_home)
     root = _separate_plugin_root(project, plugin_root, home, lambda r: (r / ADDONS_REL / name).is_dir())
     if root is None:
         return refusal("addon-manifest-missing",
-                       "no copy of the plugin with an add-ons folder was found to install from", project), {}
+                       "no copy of the plugin with an add-ons folder was found to %s from" % verb, project), {}
     folder = root / ADDONS_REL / name
     if not folder.is_dir():
         known = sorted(a["name"] for a in _addon_listing(root))
@@ -2206,6 +2219,16 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
     problem, manifest = _read_addon_manifest(folder)
     if problem:
         return problem, {}
+    return None, {"home": home, "root": root, "folder": folder, "manifest": manifest}
+
+
+def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[Path],
+                plugin_root: Optional[Path], provider: str = "claude") -> Tuple[Result, Dict[str, Any]]:
+    """The AddonPlan (or a refusal) plus the bytes the apply needs. Writes nothing."""
+    problem, found = _resolve_addon(project, name, claude_home, plugin_root, provider, "install")
+    if problem:
+        return problem, {}
+    home, root, folder, manifest = found["home"], found["root"], found["folder"], found["manifest"]
     approval_notes: List[str] = []
     for need in manifest["prerequisites"]:
         state = _mcp_server_state(need["name"], project, claude_home)
@@ -2384,6 +2407,494 @@ def apply_addon(
 
 
 # =======================================================================================
+# Add-on removal (``addon-remove``): the Preview-hash apply extension
+# =======================================================================================
+#
+# The removal takes an add-on out of a project in the order that keeps every prompt working: settings.json
+# rows first (with a backup), then the profile entries, then the files (I-7). A hook row that points at a
+# missing script exits 2 and would block every prompt, so no file goes while a row still names it. A file is
+# deleted only when it is identical to the plugin's copy after the fold, or its folded hash is a released
+# hash (I-8). Helpers and the stylesheet snippet are never deleted. Kill switches are not touched.
+
+REMOVAL_SESSION_NOTE = (
+    "Claude Code reads the hook rows once, when a session starts. Start a new session so the removed "
+    "add-on's hooks stop running.")
+HELPER_KEPT_REASON = "a helper other hooks may use; the removal never deletes helpers"
+SNIPPET_KEPT_REASON = ("the stylesheet snippet lives in the project's own stylesheet; the removal never "
+                       "removes it, delete the marked block by hand if you want it gone")
+KEPT_REASONS = {
+    "kept-differs": "it differs from the plugin's copy and from every released copy, so it may hold your edits",
+    "kept-referenced": "a settings.local.json or user settings row still names it; remove that row first",
+}
+
+
+def _owned_hook_names(manifest: Dict[str, Any]) -> Set[str]:
+    """Lowercase hook file names the add-on owns: its hooks, its disabled hooks and their former names."""
+    names = {h.lower() for h in manifest["hooks"]}
+    for entry in manifest.get("disabled", []):
+        names.add(entry["hook"].lower())
+        names.update(f.lower() for f in entry.get("former_names", []))
+    return names
+
+
+def _owned_row(hook: Any, names: Set[str]) -> Optional[Tuple[str, Tuple[str, ...]]]:
+    """(file, arguments after it) when ``hook`` is a row that names one of ``names``, in any form."""
+    parsed = _hook_key(hook) if isinstance(hook, dict) else None
+    return (parsed[0], parsed[1]) if parsed and parsed[0].lower() in names else None
+
+
+def _rows_to_remove(settings: Any, names: Set[str]) -> List[Dict[str, Any]]:
+    found: List[Dict[str, Any]] = []
+    for event, matcher, hook in _iter_hooks(settings):
+        owned = _owned_row(hook, names)
+        if owned:
+            found.append({"event": event, "matcher": matcher, "file": owned[0],
+                          "registration-key": "|".join((event, owned[0]) + _compare_extras(owned[1])),
+                          "command": " ".join(_hook_tokens(hook))})
+    return found
+
+
+def _settings_without(settings: Any, names: Set[str]) -> Any:
+    """The settings object with every row naming one of ``names`` taken out, in memory. A group, an event
+    or the ``hooks`` object that this leaves empty goes too; a container that was empty before stays."""
+    out = copy.deepcopy(settings)
+    hooks = out.get("hooks") if isinstance(out, dict) else None
+    if not isinstance(hooks, dict):
+        return out
+    removed_any = False
+    for event in list(hooks):
+        groups = hooks[event]
+        kept_groups = []
+        for group in groups:
+            members = group.get("hooks", [])
+            keep = [h for h in members if not _owned_row(h, names)]
+            if len(keep) != len(members):
+                removed_any = True
+                group["hooks"] = keep
+                if not keep:
+                    continue
+            kept_groups.append(group)
+        if len(kept_groups) != len(groups):
+            hooks[event] = kept_groups
+            if not kept_groups:
+                del hooks[event]
+    if removed_any and not hooks:
+        del out["hooks"]
+    return out
+
+
+def _begins_line(text: str, first: int) -> Tuple[int, bool]:
+    """(start of the blank run before ``first``, whether that run starts a line)."""
+    j = first
+    while j > 0 and text[j - 1] in " \t":
+        j -= 1
+    return j, (j == 0 or text[j - 1] == "\n")
+
+
+def _member_first(box: _Box, member: Tuple[int, int, int, int]) -> int:
+    return member[0] if box.opener == "{" else member[2]
+
+
+def _member_cut(text: str, box: _Box, n: int) -> Tuple[int, int]:
+    """The span to delete to take member ``n`` out of ``box``. It mirrors what ``_splice_in`` inserts, so a
+    row the install added is taken out with exactly the bytes it added."""
+    members = box.members
+    first = _member_first(box, members[n])
+    value_end = members[n][3]
+    line_begin, at_line_start = _begins_line(text, first)
+    if len(members) == 1:
+        if at_line_start:
+            k = value_end
+            while k < len(text) and text[k] in " \t":
+                k += 1
+            if text.startswith("\r\n", k):
+                return line_begin, k + 2
+            if text.startswith("\n", k):
+                return line_begin, k + 1
+        return first, value_end
+    if n == len(members) - 1:
+        return members[n - 1][3], value_end
+    next_first = _member_first(box, members[n + 1])
+    if at_line_start:
+        next_begin, next_at_line_start = _begins_line(text, next_first)
+        if next_at_line_start:
+            return line_begin, next_begin
+    return first, next_first
+
+
+def _remove_first_row(text: str, settings: Any, names: Set[str]) -> Optional[str]:
+    """``text`` without its first row that names one of ``names``, or None when there is none. Only that row's
+    bytes go, plus a group, an event or the hooks key when the row was its only member."""
+    where: Optional[Tuple[str, int, int]] = None
+    for event, groups in (settings.get("hooks") or {}).items():
+        for gi, group in enumerate(groups):
+            for hi, hook in enumerate(group.get("hooks", [])):
+                if where is None and _owned_row(hook, names):
+                    where = (event, gi, hi)
+    if where is None:
+        return None
+    event, gi, hi = where
+
+    def member_of(box: _Box, key: str) -> int:
+        at = _member_named(text, box, key)
+        if at is None:
+            raise _SpliceRefused(box.name, 'it has no "%s" member' % key)
+        return at
+
+    root = _open_box(text, _scan_space(text, 0), "the top-level object")
+    i_hooks = member_of(root, "hooks")
+    hooks_box = _open_box(text, root.members[i_hooks][2], 'the "hooks" object')
+    i_event = member_of(hooks_box, event)
+    list_box = _open_box(text, hooks_box.members[i_event][2], 'the "%s" list' % event)
+    group_box = _open_box(text, list_box.members[gi][2], 'a group of the "%s" list' % event)
+    inner = _open_box(text, group_box.members[member_of(group_box, "hooks")][2],
+                      'the "hooks" list of a group of "%s"' % event)
+    levels = [(inner, hi), (list_box, gi), (hooks_box, i_event), (root, i_hooks)]
+    k = 0
+    while k < len(levels) - 1 and len(levels[k][0].members) == 1:
+        k += 1
+    box, n = levels[k]
+    start, end = _member_cut(text, box, n)
+    return text[:start] + text[end:]
+
+
+def _splice_rows_out(text: str, settings: Any, names: Set[str]) -> str:
+    """The text with every row that names one of ``names`` taken out, or a _SpliceRefused. The result must
+    parse strictly and equal the object the in-memory removal gives."""
+    expected = _settings_without(settings, names)
+    current = text
+    for _ in range(len(_rows_to_remove(settings, names)) + 1):
+        parsed = json.loads(current, object_pairs_hook=_strict_pairs)
+        following = _remove_first_row(current, parsed, names)
+        if following is None:
+            break
+        current = following
+    try:
+        result = json.loads(current, object_pairs_hook=_strict_pairs)
+    except ValueError as exc:
+        raise _SpliceRefused("the new text", "the self-check could not parse it: %s" % exc)
+    if result != expected:
+        raise _SpliceRefused("the new text", "the self-check found it differs from the expected object")
+    return current
+
+
+def _plan_profile_removal(project: Path, paths: List[str], needed: bool
+                          ) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """Take the add-on's document paths out of the profile's ``review.documents`` slot (I-6).
+
+    Every other entry keeps its own text; the slot reads ``none`` when nothing is left. ``needed`` is True when
+    a document file of the add-on is still in the project: the profile must then be readable and hold the
+    slot, or the removal is refused (``profile-slot-missing``, nothing written). When no document file is
+    present and the profile or the slot is missing there is nothing to unregister and no refusal. Writes nothing.
+    """
+    target = project / PROFILE_REL
+    empty: Dict[str, Any] = {"target": target, "old-bytes": None, "new-bytes": None, "removes": [],
+                             "before": None, "after": None, "diff": ""}
+    if not paths:
+        return None, empty
+    hint = "run /auto-improve-finish-install to write the profile first, then run this removal again"
+    if not target.is_file():
+        if needed:
+            return refusal("profile-slot-missing", "the project has no %s, so the %s entries of the add-on's "
+                           "documents cannot be unregistered and nothing was written; %s"
+                           % (PROFILE_REL, PROFILE_DOCUMENTS_SLOT, hint), target), {}
+        return None, empty
+    try:
+        old_bytes = target.read_bytes()
+        text = old_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        if needed:
+            return refusal("project-unreadable", "the profile cannot be read as UTF-8: %s" % exc, target), {}
+        return None, empty
+    lines = text.split("\n")
+    found = [(i, raw) for i, slot, raw in _slot_rows(lines) if slot == PROFILE_DOCUMENTS_SLOT]
+    if not found:
+        if needed:
+            return refusal("profile-slot-missing", "%s has no %s row, so the add-on's documents cannot be "
+                           "unregistered and nothing was written; %s" % (PROFILE_REL, PROFILE_DOCUMENTS_SLOT, hint),
+                           target), {}
+        return None, empty
+    index, raw = found[0]
+    empty.update({"old-bytes": old_bytes, "new-bytes": old_bytes, "before": raw, "after": raw})
+    if _is_placeholder(raw) or raw.strip("` ").lower() == "none":
+        return None, empty
+    wanted = set(paths)
+    pieces = raw.split(",")
+    kept = [p for p in pieces if _profile_path_key(p) not in wanted]
+    removes = [p for p in paths if p in {_profile_path_key(x) for x in pieces}]
+    if len(kept) == len(pieces):
+        return None, empty
+    left = [p for p in kept if p.strip().strip("`").strip() and p.strip().strip("`").strip().lower() != "none"]
+    after = ",".join(kept).strip() if left else "none"
+    line = lines[index]
+    match = _ROW.match(line.rstrip("\r"))
+    if match is None:  # cannot happen: _slot_rows matched this very line
+        return refusal("unexpected-settings-shape", "the %s row could not be re-read" % PROFILE_DOCUMENTS_SLOT,
+                       target), {}
+    start, end = match.span(2)
+    lines[index] = line[:start] + " " + after + " " + line[end:]
+    new_bytes = "\n".join(lines).encode("utf-8")
+    diff = "".join(difflib.unified_diff(text.splitlines(keepends=True), new_bytes.decode("utf-8").splitlines(
+        keepends=True), fromfile=str(target), tofile=str(target)))
+    return None, {"target": target, "old-bytes": old_bytes, "new-bytes": new_bytes, "removes": removes,
+                  "before": raw, "after": after, "diff": diff}
+
+
+def _folded_sha256(path: Path) -> Optional[str]:
+    try:
+        return _sha256(_fold_text_bytes(path.read_bytes())) if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _classify_file(dest: Path, allowed: Set[str]) -> Tuple[str, str]:
+    """(action, digest of the project's bytes) for one file the removal may delete (I-8)."""
+    if not os.path.lexists(str(dest)):
+        return "absent", "absent"
+    if os.path.islink(str(dest)) or not dest.is_file():
+        return "kept-differs", "not-a-regular-file"
+    try:
+        data = dest.read_bytes()
+    except OSError:
+        return "kept-differs", "unreadable"
+    return ("delete" if _sha256(_fold_text_bytes(data)) in allowed else "kept-differs"), _sha256(data)
+
+
+def _removal_file_ops(project: Path, folder: Path, manifest: Dict[str, Any], referenced: Set[str]
+                      ) -> List[Dict[str, Any]]:
+    """What the removal does to each hook, disabled-hook and document file: ``delete``, ``kept-differs``,
+    ``kept-referenced`` or ``absent``. A disabled hook is looked for under its current and every former name,
+    ignoring case, and is deleted when it matches the plugin's copy or any released hash."""
+    ops: List[Dict[str, Any]] = []
+
+    def add(kind: str, dest: Path, rel: str, allowed: Set[str]) -> None:
+        action, digest = _classify_file(dest, allowed)
+        if action == "delete" and kind != "document" and dest.name.lower() in referenced:
+            action = "kept-referenced"
+        ops.append({"path": rel, "kind": kind, "action": action, "dest": dest, "sha256": digest})
+
+    for hook in manifest["hooks"]:
+        copy_hash = _folded_sha256(folder / "hooks" / hook)
+        add("hook", project / ".claude" / "hooks" / hook, ".claude/hooks/" + hook,
+            {copy_hash} if copy_hash else set())
+    hooks_dir = project / ".claude" / "hooks"
+    for entry in manifest.get("disabled", []):
+        copy_hash = _folded_sha256(folder / "hooks" / entry["hook"])
+        allowed = set(entry["released_sha256"]) | ({copy_hash} if copy_hash else set())
+        wanted = {n.lower() for n in [entry["hook"]] + list(entry.get("former_names", []))}
+        try:
+            present = sorted(p for p in hooks_dir.iterdir() if p.name.lower() in wanted)
+        except OSError:
+            present = []
+        for candidate in present:
+            add("disabled-hook", candidate, ".claude/hooks/" + candidate.name, allowed)
+    for document in manifest.get("documents", []):
+        copy_hash = _folded_sha256(folder / "documents" / document)
+        add("document", project / Path(_document_path(folder.name, document)), _document_path(folder.name, document),
+            {copy_hash} if copy_hash else set())
+    return ops
+
+
+def _referenced_hook_names(project: Path, home: Path, names: Set[str]) -> Tuple[Optional[Result], Set[str]]:
+    """Owned hook names that a settings.local.json or user-settings row still points at inside this project."""
+    existing, _disabled, problem = _existing_registrations(project, home)
+    if problem:
+        return problem, set()
+    return None, {str(row["file"]).lower() for row in existing
+                  if row["layer"] in ("local", "user") and str(row["file"]).lower() in names
+                  and _is_project_folder(row["folder"], project)}
+
+
+def _plan_addon_removal(project: Path, name: str, claude_home: Optional[Path], plugin_root: Optional[Path],
+                        provider: str = "claude") -> Tuple[Result, Dict[str, Any]]:
+    """The RemovalPlan (or a refusal) plus the bytes the apply needs. Writes nothing."""
+    problem, found = _resolve_addon(project, name, claude_home, plugin_root, provider, "remove")
+    if problem:
+        return problem, {}
+    home, root, folder, manifest = found["home"], found["root"], found["folder"], found["manifest"]
+    names = _owned_hook_names(manifest)
+    target = project / ".claude" / "settings.json"
+    try:
+        old_bytes = target.read_bytes() if target.is_file() else None
+    except OSError as exc:
+        return refusal("project-unreadable", "settings.json cannot be read: %s" % exc, target), {}
+    settings: Any = {}
+    if old_bytes is not None:
+        problem, settings = _parse_settings(old_bytes, target)
+        if problem:
+            return problem, {}
+    problem, referenced = _referenced_hook_names(project, home, names)
+    if problem:
+        return problem, {}
+    rows = _rows_to_remove(settings, names)
+    new_bytes = old_bytes
+    diff = ""
+    if rows and old_bytes is not None:
+        text = old_bytes.decode("utf-8-sig")
+        try:
+            new_text = _splice_rows_out(text, settings, names)
+        except _SpliceRefused as exc:
+            return refusal("unexpected-settings-shape",
+                           "settings.json: the add-on's rows could not be taken out of %s (%s), so nothing was "
+                           "written. Remove the rows by hand" % (exc.container, exc.why), target), {}
+        except (ValueError, IndexError, AttributeError, TypeError, RecursionError) as exc:
+            return refusal("unexpected-settings-shape",
+                           "settings.json: the text around the rows could not be read safely (%s), so nothing "
+                           "was written. Remove the rows by hand" % exc, target), {}
+        bom = b"\xef\xbb\xbf" if old_bytes.startswith(b"\xef\xbb\xbf") else b""
+        new_bytes = bom + new_text.encode("utf-8")
+        diff = "".join(difflib.unified_diff(text.splitlines(keepends=True), new_text.splitlines(keepends=True),
+                                            fromfile=str(target), tofile=str(target)))
+    ops = _removal_file_ops(project, folder, manifest, referenced)
+    document_paths = [_document_path(name, d) for d in manifest.get("documents", [])]
+    needed = any(o["kind"] == "document" and o["action"] != "absent" for o in ops)
+    problem, profile = _plan_profile_removal(project, document_paths, needed)
+    if problem:
+        return problem, {}
+    kept: List[Dict[str, str]] = [{"path": o["path"], "reason": KEPT_REASONS[o["action"]]}
+                                  for o in ops if o["action"] in KEPT_REASONS]
+    kept += [{"path": h, "reason": HELPER_KEPT_REASON} for h in manifest["helpers"]]
+    snippet = manifest.get("stylesheet_snippet")
+    if isinstance(snippet, dict):
+        kept.append({"path": snippet["file"], "reason": SNIPPET_KEPT_REASON})
+    ops_digest = "\n".join("%s|%s|%s" % (o["action"], o["path"], o["sha256"]) for o in ops).encode("utf-8")
+    absent = b"absent"
+    plan: Result = {
+        "status": "plan", "action": "remove", "add-on": name, "uninstall-skill": manifest.get("uninstall_skill"),
+        "target": str(target), "plugin-root": str(root),
+        "rows": rows,
+        "files": [{"path": o["path"], "kind": o["kind"], "action": o["action"]} for o in ops],
+        "profile": ({"target": str(profile["target"]), "slot": PROFILE_DOCUMENTS_SLOT, "removes": profile["removes"],
+                     "before": profile["before"], "after": profile["after"], "unified-diff": profile["diff"]}
+                    if document_paths else None),
+        "kept": kept,
+        "kill-switches": [k for k in manifest.get("kill_switches", []) if isinstance(k, str)],
+        "source-sha256": _sha256(old_bytes) if old_bytes is not None else "absent",
+        "plan-sha256": _plan_digest(old_bytes if old_bytes is not None else absent,
+                                    new_bytes if new_bytes is not None else absent, ops_digest,
+                                    profile["old-bytes"] if profile["old-bytes"] is not None else absent,
+                                    profile["new-bytes"] if profile["new-bytes"] is not None else absent),
+        "unified-diff": diff, "new-session-note": REMOVAL_SESSION_NOTE if rows else None,
+    }
+    return plan, {"old-bytes": old_bytes, "new-bytes": new_bytes, "rows": rows, "ops": ops, "profile": profile}
+
+
+def plan_addon_removal(
+    project: Path,
+    name: str,
+    claude_home: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+    provider: str = "claude",
+) -> Dict[str, Any]:
+    """Preview removing one add-on (RemovalPlan) or return a Refusal. Writes nothing."""
+    plan, _payload = _plan_addon_removal(Path(project), name, claude_home, plugin_root, provider)
+    return plan
+
+
+def _remove_file(path: Path) -> Optional[str]:
+    """Delete one file; the error text, or None. The only place the removal deletes a file."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return str(exc)
+    return None
+
+
+def apply_addon_removal(
+    project: Path,
+    name: str,
+    expect_sha256: str,
+    claude_home: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+    provider: str = "claude",
+) -> Dict[str, Any]:
+    """Remove one add-on: its rows first (with a backup), then its profile entries, then its files (I-7).
+
+    The previewed plan hash must still match; it covers settings.json, the profile and the project's bytes of
+    every file to delete. Every check runs before the first write. A file that differs is kept (I-8), helpers
+    and the snippet are never touched. With nothing to remove the result is ``nothing-to-do``.
+    """
+    project = Path(project)
+    plan, payload = _plan_addon_removal(project, name, claude_home, plugin_root, provider)
+    if _is_refusal(plan):
+        return plan
+    target = Path(plan["target"])
+    if expect_sha256 != plan["plan-sha256"]:
+        return refusal("changed-since-preview",
+                       "what would be removed changed since it was previewed (settings.json, the profile or "
+                       "the add-on's files in the project differ); run the preview again", target)
+    rows, profile = payload["rows"], payload["profile"]
+    deletions = [o for o in payload["ops"] if o["action"] == "delete"]
+    profile_changes = bool(profile["removes"])
+    if not rows and not profile_changes and not deletions:
+        return {"status": "nothing-to-do", "target": str(target), "add-on": name, "kept": plan["kept"]}
+    folders = [".claude", ".claude/hooks"] + [posixpath.dirname(o["path"]) for o in deletions]
+    linked = _linked_folder_refusal(project, list(dict.fromkeys(folders)), target)
+    if linked:
+        return linked
+    if rows and os.path.islink(str(target)):
+        return refusal("write-failed", "%s is a symbolic link; the apply would replace the link or write "
+                       "through it, so nothing was written. Edit the file it points to by hand" % target.name,
+                       target)
+    result: Dict[str, Any] = {"status": "applied", "target": str(target), "add-on": name, "removed-rows": [],
+                              "unregistered": [], "deleted": [], "kept": plan["kept"], "backup": None,
+                              "new-session-note": REMOVAL_SESSION_NOTE if rows else None}
+    if rows:
+        old_bytes = payload["old-bytes"]
+        try:
+            current = target.read_bytes() if target.is_file() else None
+        except OSError as exc:
+            return refusal("project-unreadable", "settings.json cannot be read: %s" % exc, target)
+        if current != old_bytes:
+            return refusal("changed-since-preview", "settings.json changed while the apply was running", target)
+        backup: Optional[Path] = None
+        try:
+            backup = _backup_write(target, old_bytes)
+        except OSError as exc:
+            return refusal("write-failed", "the backup could not be written: %s (nothing was removed)" % exc,
+                           target)
+        error = _atomic_write(target, payload["new-bytes"])
+        if error:
+            try:
+                backup.unlink()  # the original is untouched, so the backup would only be clutter
+            except OSError:
+                pass
+            return refusal("write-failed", "settings.json could not be replaced: %s (nothing was removed)"
+                           % error, target)
+        result.update({"backup": str(backup), "rollback": "copy %s over %s" % (backup, target),
+                       "gitignore-hint": ".claude/settings.json.bak-*",
+                       "removed-rows": [r["registration-key"] for r in rows]})
+    if profile_changes:
+        try:
+            current_profile = Path(profile["target"]).read_bytes()
+        except OSError:
+            current_profile = None
+        if current_profile != profile["old-bytes"]:
+            return refusal("changed-since-preview", "the project profile changed while the apply was running "
+                           "(rows removed: %d)" % len(rows), profile["target"])
+        error = _atomic_write(Path(profile["target"]), profile["new-bytes"])
+        if error:
+            return refusal("write-failed", "the project profile could not be written: %s (rows removed: %d)"
+                           % (error, len(rows)), profile["target"])
+        result["unregistered"] = list(profile["removes"])
+    for op in deletions:
+        error = _remove_file(op["dest"])
+        if error:
+            return refusal("write-failed", "%s could not be deleted: %s (deleted so far: %s)"
+                           % (op["path"], error, ", ".join(result["deleted"]) or "none"), op["dest"])
+        result["deleted"].append(op["path"])
+    documents_folder = project / Path(ADDON_DOCUMENTS_REL) / name
+    if any(o["kind"] == "document" for o in deletions):
+        try:
+            documents_folder.rmdir()  # only when empty: never a file the project added
+        except OSError:
+            pass
+    return result
+
+
+# =======================================================================================
 # Command line
 # =======================================================================================
 
@@ -2418,6 +2929,10 @@ def build_parser() -> argparse.ArgumentParser:
     addon.add_argument("--name", required=True, help="the add-on to install (a folder under .claude/addons/)")
     addon.add_argument("--platform", default=None, help="override sys.platform (tests)")
     addon.add_argument("--provider", choices=PROVIDERS, default="claude")
+
+    remove = sub.add_parser("addon-remove", parents=[common], help="remove one opt-in add-on")
+    remove.add_argument("--name", required=True, help="the add-on to remove (a folder under .claude/addons/)")
+    remove.add_argument("--provider", choices=PROVIDERS, default="claude")
     return parser
 
 
@@ -2433,6 +2948,11 @@ def _render_text(result: Result) -> str:
         out += ["  %s: %s" % (c["name"], "ok" if c["ok"] else "FAILED") for c in result.get("checks", [])]
     for item in result.get("files", []):
         out.append("  file %-60s %s" % (item["path"], item["action"]))
+    if result.get("action") == "remove":
+        out += ["  row  %-18s %s" % (r["event"], r["command"]) for r in result.get("rows", [])]
+        out += ["  kept %-60s %s" % (k["path"], k["reason"]) for k in result.get("kept", [])]
+    if "deleted" in result:
+        out.append("deleted: %s" % (", ".join(result["deleted"]) or "none"))
     if "copied" in result:
         out.append("copied: %s" % (", ".join(result["copied"]) or "none"))
     if "to-add" in result:
@@ -2468,6 +2988,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                  provider=args.provider)
         else:
             result = plan_addon(project, args.name, args.platform, home, provider=args.provider)
+    elif args.command == "addon-remove":
+        if args.apply:
+            result = apply_addon_removal(project, args.name, args.expect_sha256 or "", home,
+                                         provider=args.provider)
+        else:
+            result = plan_addon_removal(project, args.name, home, provider=args.provider)
     elif args.apply:
         result = apply_hooks(project, args.expect_sha256 or "", args.skip, args.platform, args.provider, home)
     else:

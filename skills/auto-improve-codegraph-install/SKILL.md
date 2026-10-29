@@ -172,11 +172,9 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 
 ## How to remove it
 
-The script never removes anything, so removal is by hand:
+This install never removes anything. The removal is its own skill, `/auto-improve-codegraph-uninstall`. It previews, asks once, then removes the three `settings.json` rows (with a backup) and only then the three hook files. It keeps a hook file you edited, leaves `_project_paths.py` and `_error_log.py` because other hooks use them, and leaves the `CLAUDE_SKIP_CG` kill switch as it is. `.claude/.codegraph-used-this-turn`, if it exists, is a leftover of a turn that the user may delete.
 
-1. Open `.claude/settings.json` and delete the three entries whose `args` name `codegraph-first-guard.py`, `codegraph-turn-tracker.py` and `codegraph-turn-reset.py`.
-2. Delete those three files from `.claude/hooks/`, and `.claude/.codegraph-used-this-turn` if it exists.
-3. Leave `_project_paths.py` and `_error_log.py`: other hooks use them.
+Do not delete the hook files or the rows by hand: a row that points at a missing script blocks every prompt.
 
 ## Closing
 
