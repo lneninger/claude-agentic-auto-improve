@@ -15,9 +15,9 @@ north_stars: inherited from .claude/work-items/2026-10-28-84-angular-tailwind-ru
 parent_issue: 84
 base: feature/84-angular-tailwind-rule-documents
 contract: .claude/concepts/2026-10-28-angular-tailwind-rule-documents.md
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/104
+issue_link: deferred
+status: shipped
 created: 2026-10-28
 ---
 
