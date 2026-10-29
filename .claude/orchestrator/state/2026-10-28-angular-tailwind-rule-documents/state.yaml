@@ -2,9 +2,9 @@ contract: 2026-10-28-angular-tailwind-rule-documents
 started_at: '2026-10-29T00:15:15.704216+00:00'
 sub_tasks:
   t1-rule-documents:
-    status: awaiting-merge
+    status: completed
     branch: task/2026-10-28-angular-tailwind-rule-documents/t1-rule-documents
-    pull_request: null
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/97
     issue: 87
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-87-t1-rule-documents.md
