@@ -27,6 +27,8 @@ Usage:
   py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . --apply \\
       --expect-sha256 <plan hash>
+  py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . \\
+      --stylesheet <relative path> [--stylesheet ...] [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py addon-remove --name <add-on> --project . [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py addon-remove --name <add-on> --project . --apply \\
       --expect-sha256 <plan hash>
@@ -46,6 +48,13 @@ manifest's registration rows into the project's settings.json in exec form, thro
 plan hash, backup and atomic writer as ``hooks``. It never removes a row or a file and never overwrites a
 file that differs. A hook the manifest lists under ``disabled`` is never copied and never registered; a
 project that still carries one (under its current or a former name) is refused as ``disabled-hook-present``.
+
+An add-on whose manifest names a ``stylesheet_snippet`` also takes ``--stylesheet <relative path>`` (repeatable):
+the snippet is appended at the end of that global stylesheet, between its begin and end markers, when none of the
+snippet's classes is defined there. Without the option the preview only lists the candidate stylesheets
+(``<each frontend.roots entry>/src/styles.scss`` or ``.css`` that exists) and nothing is written. All the classes
+defined already is ``present`` and the file is left alone; only some of them is refused as
+``stylesheet-partial-snippet``. The plan hash covers the stylesheet bytes before and after.
 """
 
 from __future__ import annotations
@@ -114,6 +123,8 @@ REFUSAL_CODES: Tuple[str, ...] = (
     "addon-file-differs",
     "profile-slot-missing",
     "disabled-hook-present",
+    "stylesheet-partial-snippet",
+    "stylesheet-missing",
 )
 
 _ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing",
@@ -1896,6 +1907,12 @@ def _read_addon_manifest(folder: Path) -> Tuple[Optional[Result], Dict[str, Any]
                                     and "\\" not in snippet["file"] and (folder / snippet["file"]).is_file()):
         return _addon_manifest_problem(path, "stylesheet_snippet must name a file under snippets/ in the "
                                              "add-on folder"), {}
+    if snippet is not None and not (
+            isinstance(snippet.get("selectors"), list) and snippet["selectors"]
+            and all(isinstance(s, str) and re.match(r"^\.[\w-]+$", s) for s in snippet["selectors"])
+            and all(isinstance(snippet.get(k), str) and snippet[k].strip() for k in ("begin", "end"))):
+        return _addon_manifest_problem(path, "stylesheet_snippet needs selectors (class names such as "
+                                             ".scroll-edge) and the begin and end marker comments"), {}
     for document in documents:
         if not (folder / "documents" / document).is_file():
             return _addon_manifest_problem(path, "the document %s is not under documents/ in the add-on folder"
@@ -2190,6 +2207,111 @@ def _plan_profile_documents(project: Path, paths: List[str]) -> Tuple[Optional[R
                   "already-listed": already, "before": raw, "after": after, "diff": diff}
 
 
+def _stylesheet_candidates(project: Path) -> List[str]:
+    """The global stylesheets worth offering: ``<root>/src/styles.scss`` or ``.css`` for each ``frontend.roots``
+    entry of the profile, those that exist (sorted, forward slashes). Reads only; a profile that cannot be read
+    offers nothing."""
+    try:
+        text = (project / PROFILE_REL).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    found: Set[str] = set()
+    for root in load_slot(text, "frontend.roots"):
+        base = posixpath.normpath(root.replace("\\", "/"))
+        if base.startswith("/") or ".." in base.split("/") or re.match(r"^[A-Za-z]:", base):
+            continue
+        for extension in (".scss", ".css"):
+            rel = posixpath.normpath(posixpath.join(base, "src", "styles" + extension))
+            if (project / rel).is_file():
+                found.add(rel)
+    return sorted(found)
+
+
+def _defined_classes(text: str, selectors: Sequence[str]) -> List[str]:
+    """The selectors that head a rule in ``text``. A comment, a use (``@extend``, a template) and a longer
+    class name that merely starts the same (``.scroll-edge-content`` for ``.scroll-edge``) define nothing."""
+    bare = re.sub(r"(?m)^\s*//.*$", "", re.sub(r"/\*.*?\*/", "", text, flags=re.S))
+    return [s for s in selectors if re.search(re.escape(s) + r"(?![\w-])[^{};]*\{", bare)]
+
+
+def _stylesheet_rel(project: Path, raw: Any) -> Optional[str]:
+    """The project-relative forward-slash form of an operator-named stylesheet, or None when it is not a file
+    inside the project."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    rel = posixpath.normpath(raw.strip().replace("\\", "/"))
+    if rel.startswith("/") or re.match(r"^[A-Za-z]:", rel) or ".." in rel.split("/"):
+        return None
+    dest = project / rel
+    return rel if dest.is_file() and _is_within(dest, project) else None
+
+
+def _plan_stylesheet(project: Path, folder: Path, manifest: Dict[str, Any], rels: Sequence[str]
+                     ) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """Plan appending the add-on's stylesheet snippet to each stylesheet in ``rels`` (the contract's Stylesheet
+    snippet; Q12).
+
+    Returns (refusal, {}) or (None, plan). A manifest with no snippet gives ``plan["stylesheet"] = None``. With no
+    ``rels`` the plan lists the candidates and chooses none. Per stylesheet: every class defined is ``present``;
+    none defined is ``append`` (the snippet goes at the end, between its markers); some defined, or the markers
+    without all the classes, is ``stylesheet-partial-snippet``, and a file that is not in the project is
+    ``stylesheet-missing``. Nothing is written; ``writes`` carries the bytes before and after for the apply.
+    """
+    snippet = manifest.get("stylesheet_snippet")
+    if not isinstance(snippet, dict):
+        return None, {"stylesheet": None, "writes": [], "digest": ()}
+    source = (folder / snippet["file"]).read_bytes()
+    selectors = list(snippet["selectors"])
+    targets: List[Dict[str, Any]] = []
+    writes: List[Dict[str, Any]] = []
+    digest: List[bytes] = []
+    diff = ""
+    for raw in dict.fromkeys(rels):
+        rel = _stylesheet_rel(project, raw)
+        if rel is None:
+            return refusal("stylesheet-missing", "%r is not a file inside the project, so nothing was written. "
+                           "Name the global stylesheet relative to the project root%s"
+                           % (raw, " (the preview lists the candidates)" if _stylesheet_candidates(project) else ""),
+                           project / str(raw)), {}
+        dest = project / rel
+        try:
+            old_bytes = dest.read_bytes()
+            old_text = old_bytes.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return refusal("project-unreadable", "%s cannot be read as UTF-8: %s" % (rel, exc), dest), {}
+        defined = _defined_classes(old_text, selectors)
+        missing = [s for s in selectors if s not in defined]
+        marked = snippet["begin"] in old_text or snippet["end"] in old_text
+        new_bytes = old_bytes
+        if defined and not missing:
+            action = "present"
+        elif defined or marked:
+            return refusal("stylesheet-partial-snippet",
+                           "%s %s, so the snippet was not appended and nothing was written. Add the missing "
+                           "class(es) by hand, or remove the half-installed block and run this again"
+                           % (rel, ("defines %s but not %s" % (", ".join(defined), ", ".join(missing))) if defined
+                              else "holds the snippet's markers but defines none of %s" % ", ".join(selectors)),
+                           dest), {}
+        else:
+            if os.path.islink(str(dest)):
+                return refusal("write-failed", "%s is a symbolic link; the apply would replace the link, so "
+                               "nothing was written. Name the file it points to" % rel, dest), {}
+            eol = "\r\n" if "\r\n" in old_text else "\n"
+            lead = "" if not old_text else ("" if old_text.endswith("\n") else eol) + eol
+            added = _fold_text_bytes(source).decode("utf-8").replace("\n", eol)
+            new_bytes = (old_text + lead + added).encode("utf-8")
+            action = "append"
+            diff += "".join(difflib.unified_diff(
+                old_text.splitlines(keepends=True), new_bytes.decode("utf-8").splitlines(keepends=True),
+                fromfile=str(dest), tofile=str(dest)))
+            writes.append({"path": rel, "dest": dest, "old-bytes": old_bytes, "new-bytes": new_bytes})
+        targets.append({"path": rel, "action": action, "defined": defined, "missing": missing})
+        digest += [rel.encode("utf-8"), old_bytes, new_bytes]
+    plan = {"snippet": snippet["file"], "candidates": _stylesheet_candidates(project), "targets": targets,
+            "unified-diff": diff}
+    return None, {"stylesheet": plan, "writes": writes, "digest": tuple(digest)}
+
+
 def _resolve_addon(project: Path, name: str, claude_home: Optional[Path], plugin_root: Optional[Path],
                    provider: str, verb: str) -> Tuple[Optional[Result], Dict[str, Any]]:
     """The checks the install and the removal share: provider, project, not the plugin's checkout, a known
@@ -2223,7 +2345,8 @@ def _resolve_addon(project: Path, name: str, claude_home: Optional[Path], plugin
 
 
 def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[Path],
-                plugin_root: Optional[Path], provider: str = "claude") -> Tuple[Result, Dict[str, Any]]:
+                plugin_root: Optional[Path], provider: str = "claude",
+                stylesheets: Sequence[str] = ()) -> Tuple[Result, Dict[str, Any]]:
     """The AddonPlan (or a refusal) plus the bytes the apply needs. Writes nothing."""
     problem, found = _resolve_addon(project, name, claude_home, plugin_root, provider, "install")
     if problem:
@@ -2250,6 +2373,9 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
     problem, profile = _plan_profile_documents(project, document_paths)
     if problem:
         return problem, {}
+    problem, sheets = _plan_stylesheet(project, folder, manifest, stylesheets)
+    if problem:
+        return problem, {}
     regs = [_Registration(r["event"], r.get("matcher") or None, r["hook"], tuple(r.get("args", [])),
                           "py", r["hook"], "command",
                           tuple((k, r[k]) for k in ADDON_ROW_KEYS if k in r))
@@ -2259,7 +2385,7 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
         return problem, {}
     ops_digest = "\n".join("%s|%s|%s" % (o["action"], o["path"], o["sha256"]) for o in ops).encode("utf-8")
     old_bytes, new_bytes, to_add = edit["old-bytes"], edit["new-bytes"], edit["to-add"]
-    # I-9: the digest covers the settings and profile bytes (before and after) and every file to copy.
+    # I-9: the digest covers the settings, profile and stylesheet bytes (before and after) and every file to copy.
     profile_digest = (profile["old-bytes"] if profile["old-bytes"] is not None else b"absent",
                       profile["new-bytes"] if profile["new-bytes"] is not None else b"absent")
     plan: Result = {
@@ -2268,7 +2394,8 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
         "files": [{"path": o["path"], "kind": o["kind"], "action": o["action"]} for o in ops],
         "source-sha256": _sha256(old_bytes) if old_bytes is not None else "absent",
         "plan-sha256": _plan_digest(old_bytes if old_bytes is not None else b"absent", new_bytes, ops_digest,
-                                    *profile_digest),
+                                    *profile_digest, *sheets["digest"]),
+        "stylesheet": sheets["stylesheet"],
         "profile": ({"target": str(profile["target"]), "slot": PROFILE_DOCUMENTS_SLOT, "adds": profile["adds"],
                      "already-listed": profile["already-listed"], "before": profile["before"],
                      "after": profile["after"], "unified-diff": profile["diff"]}
@@ -2284,7 +2411,7 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
         "new-session-note": NEW_SESSION_NOTE,
     }
     return plan, {"old-bytes": old_bytes, "new-bytes": new_bytes, "to-add": to_add, "ops": ops,
-                  "profile": profile}
+                  "profile": profile, "stylesheet-writes": sheets["writes"]}
 
 
 def plan_addon(
@@ -2294,10 +2421,14 @@ def plan_addon(
     claude_home: Optional[Path] = None,
     plugin_root: Optional[Path] = None,
     provider: str = "claude",
+    stylesheets: Sequence[str] = (),
 ) -> Dict[str, Any]:
-    """Preview installing one add-on (AddonPlan) or return a Refusal. Writes nothing."""
+    """Preview installing one add-on (AddonPlan) or return a Refusal. Writes nothing.
+
+    ``stylesheets`` names the global stylesheets (relative to the project) that get the add-on's snippet; with
+    none, the plan only lists the candidates."""
     plan, _payload = _plan_addon(Path(project), name, platform or sys.platform, claude_home, plugin_root,
-                                 provider)
+                                 provider, stylesheets)
     return plan
 
 
@@ -2309,18 +2440,19 @@ def apply_addon(
     claude_home: Optional[Path] = None,
     plugin_root: Optional[Path] = None,
     provider: str = "claude",
+    stylesheets: Sequence[str] = (),
 ) -> Dict[str, Any]:
-    """Install one add-on: copy its missing files, register its documents, then merge its rows.
+    """Install one add-on: copy its missing files, register its documents, append its snippet, merge its rows.
 
     The previewed plan hash must still match. Every check runs before the first write. The hook files and
     documents are copied first, then the document paths are appended to the profile's review.documents slot
-    (only when some are not listed yet), then the rows are written, so neither a row nor a profile entry
-    points at a file that is not there. A backup of settings.json is taken and the file is replaced
-    atomically. Nothing is ever removed or overwritten.
+    (only when some are not listed yet), then the snippet is appended to each named stylesheet that lacks it,
+    then the rows are written, so neither a row nor a profile entry points at a file that is not there. A backup
+    of settings.json is taken and the file is replaced atomically. Nothing is ever removed or overwritten.
     """
     project = Path(project)
     platform = platform or sys.platform
-    plan, payload = _plan_addon(project, name, platform, claude_home, plugin_root, provider)
+    plan, payload = _plan_addon(project, name, platform, claude_home, plugin_root, provider, stylesheets)
     if _is_refusal(plan):
         return plan
     target = Path(plan["target"])
@@ -2331,9 +2463,11 @@ def apply_addon(
     copies = [o for o in payload["ops"] if o["action"] == "copy"]
     profile = payload["profile"]
     profile_changes = bool(profile["adds"])
-    if not copies and not payload["to-add"] and not profile_changes:
+    sheet_writes = payload["stylesheet-writes"]
+    if not copies and not payload["to-add"] and not profile_changes and not sheet_writes:
         return {"status": "nothing-to-do", "target": str(target), "add-on": name}
     destinations = [posixpath.dirname(op["path"]) for op in copies]
+    destinations += [posixpath.dirname(write["path"]) for write in sheet_writes]
     linked = _linked_folder_refusal(project, list(dict.fromkeys(list(WRITE_FOLDERS) + destinations)), target)
     if linked:
         return linked
@@ -2381,6 +2515,22 @@ def apply_addon(
             return refusal("write-failed", "the project profile could not be written: %s (files copied: %s)"
                            % (error, ", ".join(copied) or "none"), profile["target"])
         result["registered"] = list(profile["adds"])
+    written: List[str] = []
+    for write in sheet_writes:
+        # The stylesheet was read with the plan above; a change since then is refused, as for settings.json.
+        try:
+            current_sheet = write["dest"].read_bytes()
+        except OSError:
+            current_sheet = None
+        if current_sheet != write["old-bytes"]:
+            return refusal("changed-since-preview", "%s changed while the apply was running (files copied: %s)"
+                           % (write["path"], ", ".join(copied) or "none"), write["dest"])
+        error = _atomic_write(write["dest"], write["new-bytes"])
+        if error:
+            return refusal("write-failed", "%s could not be written: %s (files copied: %s)"
+                           % (write["path"], error, ", ".join(copied) or "none"), write["dest"])
+        written.append(write["path"])
+    result["stylesheets"] = written
     if not payload["to-add"]:
         return result
     old_bytes = payload["old-bytes"]
@@ -2929,6 +3079,8 @@ def build_parser() -> argparse.ArgumentParser:
     addon.add_argument("--name", required=True, help="the add-on to install (a folder under .claude/addons/)")
     addon.add_argument("--platform", default=None, help="override sys.platform (tests)")
     addon.add_argument("--provider", choices=PROVIDERS, default="claude")
+    addon.add_argument("--stylesheet", action="append", default=[], metavar="PATH",
+                       help="global stylesheet (relative to the project) that gets the add-on's snippet (repeatable)")
 
     remove = sub.add_parser("addon-remove", parents=[common], help="remove one opt-in add-on")
     remove.add_argument("--name", required=True, help="the add-on to remove (a folder under .claude/addons/)")
@@ -2953,6 +3105,13 @@ def _render_text(result: Result) -> str:
         out += ["  kept %-60s %s" % (k["path"], k["reason"]) for k in result.get("kept", [])]
     if "deleted" in result:
         out.append("deleted: %s" % (", ".join(result["deleted"]) or "none"))
+    sheet = result.get("stylesheet")
+    if sheet:
+        out += ["  stylesheet %-56s %s" % (t["path"], t["action"]) for t in sheet["targets"]]
+        if not sheet["targets"] and sheet["candidates"]:
+            out.append("stylesheet candidates (pass one with --stylesheet): %s" % ", ".join(sheet["candidates"]))
+        if sheet["unified-diff"]:
+            out.append(sheet["unified-diff"])
     if "copied" in result:
         out.append("copied: %s" % (", ".join(result["copied"]) or "none"))
     if "to-add" in result:
@@ -2985,9 +3144,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif args.command == "addon":
         if args.apply:
             result = apply_addon(project, args.name, args.expect_sha256 or "", args.platform, home,
-                                 provider=args.provider)
+                                 provider=args.provider, stylesheets=args.stylesheet)
         else:
-            result = plan_addon(project, args.name, args.platform, home, provider=args.provider)
+            result = plan_addon(project, args.name, args.platform, home, provider=args.provider,
+                                stylesheets=args.stylesheet)
     elif args.command == "addon-remove":
         if args.apply:
             result = apply_addon_removal(project, args.name, args.expect_sha256 or "", home,
