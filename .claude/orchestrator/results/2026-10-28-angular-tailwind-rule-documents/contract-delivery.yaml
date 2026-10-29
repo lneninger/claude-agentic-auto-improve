@@ -1,0 +1,22 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/109
+number: 109
+head_ref: feature/84-angular-tailwind-rule-documents
+base_ref: master
+base_is_default: true
+commit: 46b313d701215a26426455715308c78d398607e9
+merged_at: '2026-10-29T21:28:27Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-10-29T23:08:49.382744+00:00'
+blocks_recorded: []
+blocks_already_recorded:
+- t1-rule-documents
+- t2-coverage-test
+- t3-manifest-and-install
+- t4-add-on-removal
+- t5-stylesheet-snippet-install
+- t6-guard-messages
+- t7-agent-rule-delivery
+- t8-release-notes-and-upgrade-path
+- t9-review
