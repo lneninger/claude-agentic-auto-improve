@@ -98,7 +98,13 @@ The `@theme` bridge in each `styles.scss` then maps all `--mat-sys-*` tokens to 
 
 ### Inline Style Elimination (HARD RULE)
 
-**Never write inline `style="..."` for colors, backgrounds, or borders** when a `@theme`-bridged Tailwind utility exists. The "Inline Style to Tailwind Conversion" table in the design-pattern document named by `review.documents` is the authoritative reference.
+**A component template has no static `style="..."`.** A static `style` never carries a colour, background or border value. A fixed theme colour is a `@theme`-bridged utility class, never a binding. The closed list of exceptions:
+
+- (a) Bindings `[style.prop]`, `[style]` and `[attr.style]` whose value is computed at run time. Any property is allowed here, including a chart colour read from a theme token by a signal.
+- (b) A static `style` on an SVG element (`svg`, `g`, `text`, `tspan`, `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path`, `use`, `image`, `foreignObject`) or on `canvas`, when every property is a positioning property (`position`, `left`, `top`, `right`, `bottom`, `transform`, `transform-origin`, `translate`). The opening tag name must sit on the same line as `style=`, because the guard reads one line at a time. A tag split across lines is not excepted.
+- (c) A tooltip `max-width`, written as a global class. That is a recipe, not an exception.
+
+The "Inline Style to Tailwind Conversion" table in the design-pattern document named by `review.documents` is the authoritative reference.
 
 Quick examples:
 
@@ -156,7 +162,7 @@ Before delivering any UI work:
 - Never use `text-gray-*` for muted text — use `text-on-surface-variant` (adapts to theme)
 - Never use `bg-gray-*` for subtle backgrounds — use `bg-surface-variant` or `bg-surface-container`
 - Never use `bg-[--mat-app-background-color]` arbitrary property syntax — use the `@theme`-bridged utilities
-- Never use `!important` in styles unless overriding a third-party library
+- Never write `!important` in a stylesheet except to override a third-party library. In a template, the Tailwind `!` prefix is allowed only on an element a third-party library renders (Material), to beat its host styles, and never on the project's own elements
 - Never rely on color alone to convey state — always pair with icon, text, or shape
 - Never add decorative animations that run continuously — flash effects only on data change
 - Never assume dark theme — check which app you're working in first
