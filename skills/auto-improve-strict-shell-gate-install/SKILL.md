@@ -157,11 +157,9 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 
 ## How to remove it
 
-The script never removes anything, so removal is by hand:
+This install never removes anything. The removal is its own skill, `/auto-improve-strict-shell-gate-uninstall`. It previews, asks once, then removes the `PreToolUse` row (matcher `Bash`) from `settings.json` (with a backup) and only then deletes `.claude/hooks/bash-gate.py`. It keeps the file if you edited it, leaves `_project_paths.py`, `_shell_write_targets.py` and `.claude/scripts/_contract_index.py` because the default main-checkout guard and the concept gate use them, and leaves the `CLAUDE_BASH_GATE` and `CLAUDE_CONCEPT_GATE` kill switches as they are.
 
-1. Open `.claude/settings.json` and delete the `PreToolUse` entry (matcher `Bash`) whose `args` name `bash-gate.py`.
-2. Delete `.claude/hooks/bash-gate.py`.
-3. Leave `_project_paths.py`, `_shell_write_targets.py` and `.claude/scripts/_contract_index.py`. The default main-checkout guard and the concept gate use them.
+Do not delete the hook file or the row by hand: a row that points at a missing script blocks every shell command.
 
 ## Closing
 

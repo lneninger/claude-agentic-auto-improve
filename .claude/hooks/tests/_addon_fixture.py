@@ -80,6 +80,37 @@ DISABLED_HOOK, DISABLED_FORMER, DISABLED_ROW, DISABLED_NOTE, DISABLED_HASHES = (
 ROW_EVENT, ROW_MATCHER, ROW_HOOK, ROW_ARGS, ROW_ASYNC, ROW_STATUS = (
     "event", "matcher", "hook", "args", "async", "statusMessage")
 
+#: THE ROW FORMS OLDER INSTALLS CARRY for the retired angular-tailwind advisor, as read from git history
+#: (``git log -S`` over ``.claude/hooks/hooks.json``, the add-on folder and the finish-install script). Each
+#: form is the hook dict of one ``UserPromptSubmit`` row (no matcher) that names the advisor file ``<file>``:
+#:   ``plugin-string``   the plugin's own hooks.json up to 0.6.x (commit 9beb09f: ``py -3 "${CLAUDE_PLUGIN_ROOT}/
+#:                       .claude/hooks/architecture-advisor.py"``), which a project copied by hand into its
+#:                       settings.json. 0.7.0 (304ca12) took the row out of hooks.json, so a plugin install no
+#:                       longer registers it;
+#:   ``project-string``  the same string with the project path variable, the form a hand copy of a vendored
+#:                       hook takes;
+#:   ``exec-py``         the exec form the finish-install writer has written since 05a1784, and the add-on
+#:                       install of 0.9.9 to 0.9.21 (5876b17): ``"command": "py", "args": ["-3", <path>]``;
+#:   ``exec-python3``    the same on macOS and Linux (``"command": "python3"``).
+#: A test that cleans an old install builds one project per form and per file name (current or former).
+OLD_ROW_FORMS = ("plugin-string", "project-string", "exec-py", "exec-python3")
+OLD_ROW_EVENT = "UserPromptSubmit"
+
+
+def old_row(form: str, file: str) -> dict:
+    """The hook dict of one old-install row of ``form`` that names the hook file ``file``."""
+    project_path = "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + file
+    if form == "plugin-string":
+        return {"type": "command", "command": 'py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/%s"' % file}
+    if form == "project-string":
+        return {"type": "command", "command": 'py -3 "%s"' % project_path}
+    if form == "exec-py":
+        return {"type": "command", "command": "py", "args": ["-3", project_path]}
+    if form == "exec-python3":
+        return {"type": "command", "command": "python3", "args": [project_path]}
+    raise AddonFixtureError("no old row form %r (known: %s)" % (form, ", ".join(OLD_ROW_FORMS)))
+
+
 _TEMP_FOLDERS: list[Path] = []
 
 

@@ -3362,6 +3362,16 @@ ANGULAR_DOC_DIR = ".claude/references/angular-tailwind"
 DISABLED_ADVISOR = "angular-tailwind-advisor.py"
 DISABLED_FORMER = "architecture-advisor.py"
 DOC_SLOT = "review.documents"
+#: What the fake plugin ships as the disabled advisor today, and two copies an older release shipped. The
+#: manifest's released_sha256 lists the folded hash of every released copy (the current one included).
+ADVISOR_CURRENT = "# the disabled hook\n"
+ADVISOR_RELEASE_ONE = "# the disabled hook, an older release\nimport sys\nsys.exit(0)\n"
+ADVISOR_RELEASE_TWO = "# the disabled hook, an even older release (kept an extra option)\n"
+
+
+def _released(*texts):
+    return [hashlib.sha256(t.encode("utf-8")).hexdigest() for t in texts]
+
 
 ADDON_SPECS = {
     # The angular-tailwind add-on installs documents and registers them in the profile. It installs no hook,
@@ -3376,7 +3386,8 @@ ADDON_SPECS = {
         "disabled": [{
             af.DISABLED_HOOK: DISABLED_ADVISOR, af.DISABLED_FORMER: [DISABLED_FORMER],
             af.DISABLED_ROW: {af.ROW_EVENT: "UserPromptSubmit", af.ROW_ARGS: []},
-            af.DISABLED_NOTE: "DISABLED.md", af.DISABLED_HASHES: ["a" * 64, "b" * 64]}],
+            af.DISABLED_NOTE: "DISABLED.md",
+            af.DISABLED_HASHES: _released(ADVISOR_RELEASE_ONE, ADVISOR_RELEASE_TWO, ADVISOR_CURRENT)}],
     },
     "codegraph": {
         "hooks": ["codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py"],
@@ -3421,7 +3432,8 @@ def build_fake_addons(root):
             rows.append(row)
         manifest = {af.KEY_HOOKS: list(spec["hooks"]), af.KEY_HELPERS: list(spec["helpers"]), af.KEY_ROWS: rows,
                     af.KEY_PREREQUISITES: list(spec["prerequisites"]),
-                    af.KEY_INSTALL_SKILL: "auto-improve-%s-install" % name}
+                    af.KEY_INSTALL_SKILL: "auto-improve-%s-install" % name,
+                    af.KEY_UNINSTALL_SKILL: "auto-improve-%s-uninstall" % name}
         if spec["kill"] is not None:
             manifest[af.KEY_KILL_SWITCHES] = list(spec["kill"])
         if spec.get("documents"):
@@ -3432,12 +3444,15 @@ def build_fake_addons(root):
         if spec.get("disabled"):
             manifest[af.KEY_DISABLED] = copy.deepcopy(spec["disabled"])
             for entry in spec["disabled"]:
-                (folder / "hooks" / entry[af.DISABLED_HOOK]).write_text("# the disabled hook\n", encoding="utf-8")
+                (folder / "hooks" / entry[af.DISABLED_HOOK]).write_text(ADVISOR_CURRENT, encoding="utf-8")
                 (folder / entry[af.DISABLED_NOTE]).write_text("# disabled\n", encoding="utf-8")
         (folder / "addon.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
-class TestAddonInstall(Base):
+class AddonHarness(Base):
+    """The fake plugin with its three add-ons, a project with a profile, and the install helpers the install
+    suite and the removal suite share."""
+
     def setUp(self):
         super().setUp()
         build_fake_addons(self.plugin)
@@ -3543,6 +3558,8 @@ class TestAddonInstall(Base):
                           msg="the row points into the PROJECT's hooks folder, never the plugin's")
             self.assertNotIn("CLAUDE_PLUGIN_ROOT", json.dumps(entry), msg="and never at ${CLAUDE_PLUGIN_ROOT}")
 
+
+class TestAddonInstall(AddonHarness):
     # --- preview and apply ----------------------------------------------------------------
     def test_a_preview_writes_nothing_and_carries_a_plan_hash_for_each_add_on(self):
         self.configure_mcp("project")
@@ -4620,6 +4637,434 @@ class TestLinkedFolders(WriterHarness):
                                  msg="a linked PARENT folder does not stop the install: %r" % (applied or out,))
                 self.assertTrue((real_parent / "proj" / ".claude" / "settings.json").is_file(),
                                 msg="the settings file landed in the real project folder")
+
+
+# ======================================================================================
+# Sub-task 4: add-on removal (``addon-remove``), the Preview-hash apply extension. I-6 (profile), I-7 (rows
+# before files), I-8 (a file is deleted only when it is identical after the fold or a released copy).
+#
+# One fixture per old row form (OLD_ROW_FORMS in _addon_fixture.py, read from git history) and per file name
+# the retired advisor has carried (angular-tailwind-advisor.py now, architecture-advisor.py before).
+# ======================================================================================
+OTHER_ROW = {"type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/mine.py"]}
+
+
+class TestAddonRemoval(AddonHarness):
+    def remove_argv(self, name, apply=False, sha=None, project=None):
+        argv = ["addon-remove", "--name", name, "--project", str(project or self.project), "--json",
+                "--claude-home", str(self.home)]
+        if apply:
+            argv += ["--apply", "--expect-sha256", sha or ""]
+        return argv
+
+    def preview_remove(self, name):
+        rc, out, parsed = self.cli(self.remove_argv(name))
+        self.assertIsNotNone(parsed, msg="--json prints the plan; got %r" % out)
+        self.assertEqual((rc, parsed.get("status")), (0, "plan"), msg="a removal plan is exit 0: %r" % (parsed,))
+        self.assertRegex(str(parsed.get("plan-sha256")), HEX64, msg="the preview carries the plan hash")
+        return parsed
+
+    def remove(self, name, expect_status="applied"):
+        plan = self.preview_remove(name)
+        rc, out, parsed = self.cli(self.remove_argv(name, apply=True, sha=plan["plan-sha256"]))
+        self.assertEqual(rc, 0, msg="the apply exits 0: %r" % (parsed or out,))
+        self.assertEqual((parsed or {}).get("status"), expect_status, msg=repr(parsed))
+        return plan, parsed
+
+    def hook_path(self, name):
+        return self.project / ".claude" / "hooks" / name
+
+    def put_hook(self, name, text):
+        path = self.hook_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="")
+        return path
+
+    def old_install(self, form, hook_file, text=ADVISOR_CURRENT, with_other=True, event=None):
+        """A project that an older release set up: one advisor row of ``form`` in settings.json and the file."""
+        hooks = ([copy.deepcopy(OTHER_ROW)] if with_other else []) + [af.old_row(form, hook_file)]
+        write_json(self.settings_path(), {"model": "opus", "hooks": {event or af.OLD_ROW_EVENT: [{"hooks": hooks}]}})
+        return self.put_hook(hook_file, text)
+
+    def install_row_only(self, hook_file, event="PreToolUse", matcher="Bash"):
+        row = {"matcher": matcher, "hooks": [{"type": "command", "command": "py", "args": [
+            "-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + hook_file]}]}
+        write_json(self.settings_path(), {"hooks": {event: [row]}})
+
+    def settings_rows(self):
+        return sorted(r[2] for r in flat_registrations(self.read_settings()))
+
+    def files_of(self, plan):
+        return {f["path"]: f["action"] for f in plan["files"]}
+
+    def clear_backups(self):
+        for leftover in self.project.glob(".claude/settings.json.bak-*"):
+            leftover.unlink()
+
+    # --- old installs: every row form, both names ------------------------------------------
+    def test_every_old_row_form_under_both_names_is_removed_and_the_file_deleted(self):
+        for form in af.OLD_ROW_FORMS:
+            for hook_file in (DISABLED_ADVISOR, DISABLED_FORMER):
+                with self.subTest(form=form, file=hook_file):
+                    path = self.old_install(form, hook_file)
+                    plan, result = self.remove("angular-tailwind")
+                    self.assertEqual(self.files_of(plan).get(".claude/hooks/" + hook_file), "delete")
+                    self.assertEqual(self.settings_rows(), ["mine.py"], msg="only the advisor row goes")
+                    self.assertEqual(self.read_settings().get("model"), "opus", msg="other settings survive")
+                    self.assertFalse(path.exists(), msg="the hook file is deleted after the row")
+                    self.assertTrue(result.get("backup"), msg="the row removal takes a backup of settings.json")
+                    self.clear_backups()
+
+    def test_the_old_advisor_copies_of_every_release_are_deleted_and_an_unknown_one_is_kept(self):
+        for label, text, action in (("current", ADVISOR_CURRENT, "delete"),
+                                    ("release one", ADVISOR_RELEASE_ONE, "delete"),
+                                    ("release two", ADVISOR_RELEASE_TWO, "delete"),
+                                    ("release one with CRLF", ADVISOR_RELEASE_ONE.replace("\n", "\r\n"), "delete"),
+                                    ("edited by the team", "# my own change\n", "kept-differs")):
+            with self.subTest(copy=label):
+                path = self.old_install("exec-py", DISABLED_FORMER, text=text)
+                plan = self.preview_remove("angular-tailwind")
+                self.assertEqual(self.files_of(plan).get(".claude/hooks/" + DISABLED_FORMER), action)
+                self.remove("angular-tailwind")
+                self.assertEqual(path.exists(), action == "kept-differs", msg="a differing file is kept")
+                self.assertEqual(self.settings_rows(), ["mine.py"], msg="the row goes either way")
+                self.clear_backups()
+                if path.exists():
+                    path.unlink()
+
+    def test_an_old_install_with_only_the_advisor_is_cleaned_without_a_profile(self):
+        (self.project / ".claude/project-profile.md").unlink()
+        path = self.old_install("project-string", DISABLED_ADVISOR, with_other=False)
+        self.remove("angular-tailwind")
+        self.assertFalse(path.exists())
+        self.assertEqual(self.read_settings(), {"model": "opus"}, msg="the emptied group, event and hooks go")
+
+    def test_both_advisor_names_present_together_are_both_cleaned(self):
+        write_json(self.settings_path(), {"hooks": {"UserPromptSubmit": [{"hooks": [
+            af.old_row("exec-py", DISABLED_ADVISOR), af.old_row("project-string", DISABLED_FORMER)]}]}})
+        paths = [self.put_hook(DISABLED_ADVISOR, ADVISOR_CURRENT), self.put_hook(DISABLED_FORMER, ADVISOR_RELEASE_ONE)]
+        self.remove("angular-tailwind")
+        self.assertEqual([p.exists() for p in paths], [False, False])
+        self.assertEqual(self.read_settings(), {})
+
+    def test_a_row_on_another_event_is_still_matched_by_file_name(self):
+        self.old_install("exec-python3", DISABLED_ADVISOR, event="Stop")
+        self.remove("angular-tailwind")
+        self.assertEqual(self.settings_rows(), ["mine.py"])
+
+    # --- the add-on's own rows ------------------------------------------------------------------
+    def test_a_round_trip_restores_the_original_settings_bytes(self):
+        self.configure_mcp("project")
+        shapes = {
+            "two-space lf": dict(),
+            "four-space crlf with a byte order mark": dict(indent=4, newline="\r\n", bom=True),
+            "one-space": dict(indent=1),
+        }
+        existing = {"model": "opus", "hooks": {"Stop": [{"hooks": [copy.deepcopy(OTHER_ROW)]}],
+                                                 "PreToolUse": [{"matcher": "Read",
+                                                                 "hooks": [copy.deepcopy(OTHER_ROW)]}]}}
+        for label, fmt in shapes.items():
+            for name in ("codegraph", "strict-shell-gate"):
+                with self.subTest(shape=label, add_on=name):
+                    write_json(self.settings_path(), existing, **fmt)
+                    original = self.settings_path().read_bytes()
+                    self.install_addon(name)
+                    self.assertNotEqual(self.settings_path().read_bytes(), original)
+                    self.remove(name)
+                    self.assertEqual(self.settings_path().read_bytes(), original,
+                                     msg="installing then removing restores the original settings bytes")
+                    self.clear_backups()
+                    for hook in ADDON_SPECS[name]["hooks"]:
+                        self.assertFalse(self.hook_path(hook).exists())
+
+    def test_a_settings_file_the_install_created_ends_up_without_hooks(self):
+        self.install_addon("strict-shell-gate")
+        self.remove("strict-shell-gate")
+        self.assertEqual(self.read_settings(), {}, msg="the rows, their groups, events and the hooks key are gone")
+
+    def test_a_group_that_holds_another_hook_stays(self):
+        self.configure_mcp("project")
+        write_json(self.settings_path(), {"hooks": {"UserPromptSubmit": [{"hooks": [copy.deepcopy(OTHER_ROW)]}]}})
+        self.install_addon("codegraph")
+        self.remove("codegraph")
+        self.assertEqual(self.settings_rows(), ["mine.py"])
+
+    def test_all_three_rows_of_codegraph_are_removed_with_one_backup(self):
+        self.configure_mcp("project")
+        self.install_addon("codegraph")
+        plan, result = self.remove("codegraph")
+        self.assertEqual(len(plan["rows"]), 3, msg="one planned row removal per installed row: %r" % plan["rows"])
+        self.assertEqual(len(list(self.project.glob(".claude/settings.json.bak-*"))), 1)
+        self.assertEqual(sorted(result["deleted"]),
+                         sorted(".claude/hooks/" + h for h in ADDON_SPECS["codegraph"]["hooks"]))
+
+    # --- twice-run -------------------------------------------------------------------------------
+    def test_a_second_run_has_nothing_to_do_and_leaves_a_byte_identical_tree(self):
+        self.configure_mcp("project")
+        for name in ADDON_SPECS:
+            with self.subTest(add_on=name):
+                self.install_addon(name)
+                self.remove(name)
+                before = snapshot(self.tmp)
+                rc, out, plan = self.cli(self.remove_argv(name))
+                self.assertEqual(rc, 0, msg=out)
+                self.assertTreeSame(before, "a second preview writes nothing")
+                rc, out, parsed = self.cli(self.remove_argv(name, apply=True, sha=plan["plan-sha256"]))
+                self.assertEqual((rc, parsed.get("status")), (0, "nothing-to-do"), msg=repr(parsed))
+                self.assertTreeSame(before, "the second apply writes nothing: no file, no row, no backup")
+
+    def test_a_second_run_after_a_kept_file_still_has_nothing_to_do(self):
+        self.put_hook("bash-gate.py", "# edited\n")
+        self.install_row_only("bash-gate.py")
+        self.remove("strict-shell-gate")
+        before = snapshot(self.tmp)
+        rc, out, plan = self.cli(self.remove_argv("strict-shell-gate"))
+        rc, out, parsed = self.cli(self.remove_argv("strict-shell-gate", apply=True, sha=plan["plan-sha256"]))
+        self.assertEqual((rc, parsed.get("status")), (0, "nothing-to-do"), msg=repr(parsed))
+        self.assertTreeSame(before, "nothing changes")
+
+    # --- differing and referenced files --------------------------------------------------------
+    def test_a_differing_hook_file_is_kept_and_reported_but_its_row_is_removed(self):
+        self.install_addon("strict-shell-gate")
+        path = self.hook_path("bash-gate.py")
+        path.write_text("# the team edited this\n", encoding="utf-8")
+        plan, result = self.remove("strict-shell-gate")
+        self.assertEqual(self.files_of(plan)[".claude/hooks/bash-gate.py"], "kept-differs")
+        self.assertEqual(path.read_text(encoding="utf-8"), "# the team edited this\n")
+        self.assertEqual(self.settings_rows(), [], msg="the row is gone")
+        self.assertIn(".claude/hooks/bash-gate.py", [k["path"] for k in result["kept"]])
+
+    def test_a_differing_document_is_kept_and_the_identical_ones_are_deleted(self):
+        self.install_addon("angular-tailwind")
+        edited = self.project / ANGULAR_DOC_DIR / ANGULAR_DOCS[0]
+        edited.write_text("# our own rules\n", encoding="utf-8")
+        plan, _result = self.remove("angular-tailwind")
+        self.assertEqual(self.files_of(plan)["%s/%s" % (ANGULAR_DOC_DIR, ANGULAR_DOCS[0])], "kept-differs")
+        self.assertTrue(edited.is_file(), msg="the edited document stays")
+        for document in ANGULAR_DOCS[1:]:
+            self.assertFalse((self.project / ANGULAR_DOC_DIR / document).exists())
+
+    def test_a_document_with_crlf_line_endings_counts_as_identical(self):
+        self.install_addon("angular-tailwind")
+        doc = self.project / ANGULAR_DOC_DIR / ANGULAR_DOCS[1]
+        doc.write_bytes(doc.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        self.remove("angular-tailwind")
+        self.assertFalse(doc.exists())
+
+    def test_a_file_a_local_settings_row_still_names_is_kept(self):
+        self.install_addon("strict-shell-gate")
+        write_json(self.project / ".claude/settings.local.json", {"hooks": {"PreToolUse": [{"hooks": [
+            {"type": "command", "command": "py",
+             "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/bash-gate.py"]}]}]}})
+        plan, _result = self.remove("strict-shell-gate")
+        self.assertEqual(self.files_of(plan)[".claude/hooks/bash-gate.py"], "kept-referenced")
+        self.assertTrue(self.hook_path("bash-gate.py").is_file())
+
+    def test_helpers_are_never_deleted_and_the_kill_switches_are_left_alone(self):
+        self.configure_mcp("project")
+        for name in ("codegraph", "strict-shell-gate", "angular-tailwind"):
+            with self.subTest(add_on=name):
+                self.install_addon(name)
+                plan, result = self.remove(name)
+                kept = {k["path"]: k["reason"] for k in result["kept"]}
+                for helper in ADDON_SPECS[name]["helpers"]:
+                    self.assertTrue((self.project / helper).is_file(), msg="%s is shared and stays" % helper)
+                    self.assertIn(helper, kept)
+                    self.assertTrue(kept[helper].strip())
+                self.assertEqual(plan["kill-switches"], list(ADDON_SPECS[name]["kill"] or []),
+                                 msg="the kill switches are named, never changed")
+
+    def test_a_missing_file_is_absent_and_a_row_with_no_file_is_still_removed(self):
+        self.install_addon("strict-shell-gate")
+        self.hook_path("bash-gate.py").unlink()
+        plan, _result = self.remove("strict-shell-gate")
+        self.assertEqual(self.files_of(plan)[".claude/hooks/bash-gate.py"], "absent")
+        self.assertEqual(self.settings_rows(), [])
+
+    def test_a_file_with_no_row_is_deleted_without_touching_settings(self):
+        self.install_addon("strict-shell-gate")
+        write_json(self.settings_path(), {"model": "opus"})
+        before = self.settings_path().read_bytes()
+        self.clear_backups()
+        self.remove("strict-shell-gate")
+        self.assertEqual(self.settings_path().read_bytes(), before)
+        self.assertEqual(list(self.project.glob(".claude/settings.json.bak-*")), [], msg="no row, no backup")
+        self.assertFalse(self.hook_path("bash-gate.py").exists())
+
+    # --- ordering (I-7) ---------------------------------------------------------------------
+    def test_the_rows_are_written_before_the_first_file_is_deleted(self):
+        self.configure_mcp("project")
+        for name in ("codegraph", "angular-tailwind"):
+            with self.subTest(add_on=name):
+                self.install_addon(name)
+                if name == "angular-tailwind":
+                    self.old_install("exec-py", DISABLED_ADVISOR)
+                states = []
+                real = fi._remove_file
+
+                def spy(path, _real=real):
+                    states.append((self.settings_path().read_bytes(),
+                                   (self.project / ".claude/project-profile.md").read_bytes()))
+                    return _real(path)
+
+                plan = self.preview_remove(name)
+                settings_before = self.settings_path().read_bytes()
+                profile_before = (self.project / ".claude/project-profile.md").read_bytes()
+                with mock.patch.object(fi, "_remove_file", side_effect=spy):
+                    rc, out, parsed = self.cli(self.remove_argv(name, apply=True, sha=plan["plan-sha256"]))
+                self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg=repr(parsed))
+                self.assertTrue(states, msg="files were deleted through _remove_file")
+                for settings_bytes, profile_bytes in states:
+                    self.assertNotEqual(settings_bytes, settings_before, msg="settings.json is already rewritten")
+                    if name == "angular-tailwind":
+                        self.assertNotEqual(profile_bytes, profile_before, msg="and so is the profile")
+
+    def test_a_failed_row_write_deletes_no_file(self):
+        self.install_addon("strict-shell-gate")
+        plan = self.preview_remove("strict-shell-gate")
+        with mock.patch.object(fi, "_atomic_write", return_value="disk full"), \
+                mock.patch.object(fi, "_remove_file") as removed:
+            rc, out, parsed = self.cli(self.remove_argv("strict-shell-gate", apply=True, sha=plan["plan-sha256"]))
+        self.assertRefused(parsed, "write-failed", "the settings write failed")
+        removed.assert_not_called()
+        self.assertTrue(self.hook_path("bash-gate.py").is_file())
+
+    # --- the profile (I-6) -----------------------------------------------------------------
+    def test_the_documents_leave_the_profile_and_an_empty_slot_reads_none(self):
+        self.install_addon("angular-tailwind")
+        self.remove("angular-tailwind")
+        self.assertEqual(self.doc_slot(), "none")
+
+    def test_other_entries_in_the_slot_survive(self):
+        profile = self.project / ".claude/project-profile.md"
+        text = profile.read_text(encoding="utf-8")
+        raw = [r for _i, s, r in fi._slot_rows(text.split("\n")) if s == DOC_SLOT][0]
+        profile.write_text(text.replace("| `review.documents` | %s |" % raw,
+                                        "| `review.documents` | `CLAUDE.md`,README.md |"),
+                           encoding="utf-8", newline="")
+        self.install_addon("angular-tailwind")
+        self.assertEqual(len(self.listed(self.doc_slot())), 6)
+        self.remove("angular-tailwind")
+        self.assertEqual(self.doc_slot(), "`CLAUDE.md`,README.md", msg="the authored entries are byte-for-byte kept")
+
+    def test_a_profile_change_is_one_line_only(self):
+        self.install_addon("angular-tailwind")
+        before = (self.project / ".claude/project-profile.md").read_text(encoding="utf-8").split("\n")
+        self.remove("angular-tailwind")
+        after = (self.project / ".claude/project-profile.md").read_text(encoding="utf-8").split("\n")
+        self.assertEqual(len(before), len(after))
+        self.assertEqual(len([1 for a, b in zip(before, after) if a != b]), 1)
+
+    def test_a_missing_profile_with_the_documents_present_is_refused_and_nothing_is_written(self):
+        self.install_addon("angular-tailwind")
+        (self.project / ".claude/project-profile.md").unlink()
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.remove_argv("angular-tailwind"))
+        self.assertRefused(parsed, "profile-slot-missing", "documents to unregister but no profile")
+        self.assertEqual(rc, 2)
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_profile_without_the_slot_row_is_refused_and_nothing_is_written(self):
+        self.install_addon("angular-tailwind")
+        profile = self.project / ".claude/project-profile.md"
+        profile.write_text("\n".join(line for line in profile.read_text(encoding="utf-8").split("\n")
+                                     if "`review.documents`" not in line), encoding="utf-8", newline="")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.remove_argv("angular-tailwind"))
+        self.assertRefused(parsed, "profile-slot-missing", "the profile has no review.documents row")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_missing_profile_does_not_matter_when_no_document_is_present(self):
+        (self.project / ".claude/project-profile.md").unlink()
+        rc, out, parsed = self.cli(self.remove_argv("angular-tailwind"))
+        self.assertEqual((rc, parsed.get("status")), (0, "plan"), msg=repr(parsed))
+        rc, out, parsed = self.cli(self.remove_argv("angular-tailwind", apply=True, sha=parsed["plan-sha256"]))
+        self.assertEqual((rc, parsed.get("status")), (0, "nothing-to-do"), msg=repr(parsed))
+
+    # --- preview, hash and refusals -------------------------------------------------------------
+    def test_a_preview_writes_nothing_and_lists_rows_files_and_the_kept_items(self):
+        self.configure_mcp("project")
+        for name in ADDON_SPECS:
+            self.install_addon(name)
+        before = snapshot(self.tmp)
+        for name in ADDON_SPECS:
+            with self.subTest(add_on=name):
+                plan = self.preview_remove(name)
+                self.assertEqual(plan["add-on"], name)
+                self.assertEqual(plan["uninstall-skill"], "auto-improve-%s-uninstall" % name)
+                for key in ("rows", "files", "kept", "profile", "kill-switches"):
+                    self.assertIn(key, plan)
+        self.assertTreeSame(before, "a preview writes nothing")
+
+    def test_a_wrong_hash_is_refused_and_nothing_is_written(self):
+        self.install_addon("strict-shell-gate")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.remove_argv("strict-shell-gate", apply=True, sha="0" * 64))
+        self.assertRefused(parsed, "changed-since-preview", "the hash is not the previewed plan's")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_hook_file_edited_since_the_preview_changes_the_hash(self):
+        self.install_addon("strict-shell-gate")
+        plan = self.preview_remove("strict-shell-gate")
+        self.hook_path("bash-gate.py").write_text("# edited after the preview\n", encoding="utf-8")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.remove_argv("strict-shell-gate", apply=True, sha=plan["plan-sha256"]))
+        self.assertRefused(parsed, "changed-since-preview", "the file that was to be deleted now differs")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_settings_file_edited_since_the_preview_changes_the_hash(self):
+        self.install_addon("strict-shell-gate")
+        plan = self.preview_remove("strict-shell-gate")
+        data = self.read_settings()
+        data["model"] = "haiku"
+        write_json(self.settings_path(), data)
+        rc, out, parsed = self.cli(self.remove_argv("strict-shell-gate", apply=True, sha=plan["plan-sha256"]))
+        self.assertRefused(parsed, "changed-since-preview", "settings.json changed")
+
+    def test_an_unknown_add_on_is_refused(self):
+        rc, out, parsed = self.cli(self.remove_argv("no-such-add-on"))
+        self.assertRefused(parsed, "addon-unknown", "there is no such add-on")
+        self.assertEqual(rc, 2)
+
+    def test_the_plugin_checkout_is_refused(self):
+        checkout = self.tmp / "checkout"
+        (checkout / ".claude-plugin").mkdir(parents=True)
+        (checkout / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": fi.PLUGIN_NAME, "version": "1.0.0"}), encoding="utf-8")
+        rc, out, parsed = self.cli(self.remove_argv("codegraph", project=checkout))
+        self.assertRefused(parsed, "plugin-source-checkout", "the plugin's own checkout")
+
+    def test_a_malformed_settings_file_is_refused_and_untouched(self):
+        self.settings_path().parent.mkdir(parents=True, exist_ok=True)
+        self.settings_path().write_text("{ not json", encoding="utf-8")
+        self.put_hook("bash-gate.py", "# fake add-on hook bash-gate.py\nimport sys\nsys.exit(0)\n")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.remove_argv("strict-shell-gate"))
+        self.assertRefused(parsed, "malformed-settings", "settings.json is not JSON")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_an_empty_tree_has_nothing_to_do(self):
+        for name in ADDON_SPECS:
+            with self.subTest(add_on=name):
+                before = snapshot(self.tmp)
+                self.remove(name, expect_status="nothing-to-do")
+                self.assertTreeSame(before, "nothing is written")
+
+    def test_the_emptied_documents_folder_is_removed(self):
+        self.install_addon("angular-tailwind")
+        self.remove("angular-tailwind")
+        self.assertFalse((self.project / ANGULAR_DOC_DIR).exists())
+
+    def test_the_text_rendering_names_the_rows_and_files(self):
+        self.install_addon("strict-shell-gate")
+        out, err = io.StringIO(), io.StringIO()
+        argv = self.remove_argv("strict-shell-gate")
+        argv.remove("--json")
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = fi.main(argv)
+        self.assertEqual(rc, 0)
+        self.assertIn("bash-gate.py", out.getvalue())
+        self.assertIn("delete", out.getvalue())
 
 
 if __name__ == "__main__":

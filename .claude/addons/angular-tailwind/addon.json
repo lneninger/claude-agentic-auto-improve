@@ -42,5 +42,6 @@
       ]
     }
   ],
-  "install_skill": "auto-improve-angular-tailwind-install"
+  "install_skill": "auto-improve-angular-tailwind-install",
+  "uninstall_skill": "auto-improve-angular-tailwind-uninstall"
 }

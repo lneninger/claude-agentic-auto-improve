@@ -37,5 +37,6 @@
   "kill_switches": [
     "CLAUDE_SKIP_CG"
   ],
-  "install_skill": "auto-improve-codegraph-install"
+  "install_skill": "auto-improve-codegraph-install",
+  "uninstall_skill": "auto-improve-codegraph-uninstall"
 }
