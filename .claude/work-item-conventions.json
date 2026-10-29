@@ -84,9 +84,31 @@
     ]
   },
   "contractLanding": {
-    "$comment": "TEMPLATE, deliberately empty. land_contract.py reads this block and halts with 'landing-not-configured' while it has no verification steps, so a fresh project never merges anything until it declares its own gate. Populate per project: verification.steps, resultPaths outside the tree, protectedBranches. Do not copy another project's baseline.",
+    "$comment": "This project's landing gate. land_contract.py runs each step in its own landing checkout of the parent branch, after merging the default branch into it, and merges nothing unless every step exits 0. Every step reads its result from the exit code alone, so no result file is written into the tree. The hook-tests step runs each hook test file directly, because two of them are script-style and fail unittest discovery at import. test_gate_cost.py is left out on purpose: it is a timing measurement that needs a production-sized contracts folder named by an environment variable, not a correctness check.",
     "verification": {
-      "steps": []
+      "steps": [
+        {
+          "id": "version-bump",
+          "command": ["py", "-3", ".claude/scripts/check_version_bump.py"],
+          "results": { "format": "exit-code" },
+          "timeout_minutes": 5
+        },
+        {
+          "id": "loop-script-tests",
+          "command": ["py", "-3", ".claude/scripts/tests/test_pr_merged.py"],
+          "results": { "format": "exit-code" },
+          "timeout_minutes": 15
+        },
+        {
+          "id": "hook-tests",
+          "command": [
+            "py", "-3", "-c",
+            "import glob,subprocess,sys; fs=sorted(f for f in glob.glob('.claude/hooks/tests/test_*.py') if not f.endswith('test_gate_cost.py')); rcs=[subprocess.call([sys.executable,f]) for f in fs]; sys.exit(1 if (not fs or any(rcs)) else 0)"
+          ],
+          "results": { "format": "exit-code" },
+          "timeout_minutes": 15
+        }
+      ]
     }
   }
 }
