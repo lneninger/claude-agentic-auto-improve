@@ -233,7 +233,42 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract's Open Questions or Critique section records an answer or acceptance, and the Data Shapes, Invariants or New Mechanisms text still reads as it did before that answer (here: no `root-undeterminable` halt row, and no host built-in clause for `dataviz`)
 - **Tags:** design-first, contract-amendment, critic-warn, open-questions, data-shapes
 
+### 2026-10-28 — State the real trigger of a hook, not the printing condition
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-28-angular-tailwind-rule-documents.md
+- **Lesson:** Read the hook registration (event and matcher) before writing a cost statement. A hook with no matcher starts a program on every prompt even when it prints only on keywords.
+- **Apply when:** a contract states how often or how much a hook costs
+- **Tags:** hooks, cost, matcher, userpromptsubmit
+
+### 2026-10-28 — A new term's definition must be true against every existing member
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-28-angular-tailwind-rule-documents.md
+- **Lesson:** Before defining a term such as Add-on by a universal negative, check each existing member. Two add-ons still keep human-only environment switches, so the claim was false the day it was written.
+- **Apply when:** a contract proposes a VOCABULARY.md term that generalises over existing add-ons, hooks or mechanisms
+- **Tags:** vocabulary, add-on, kill-switch, universal-claim
+
+### 2026-10-28 — A rule that writes a slot the vocabulary calls frozen needs a vocabulary amendment
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-28-angular-tailwind-rule-documents.md
+- **Lesson:** If an invariant writes a profile slot that a VOCABULARY.md term says is never changed, propose the amendment to that term in the same contract and name a second-run skip rule with a test.
+- **Apply when:** a contract has an install or tool writing authored or none-valued project profile slots
+- **Tags:** profile-slot, placeholder-slot, idempotence, vocabulary
+
+### 2026-10-28 — Guard messages must use names the guard emits and degrade when a cited document is absent
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-28-angular-tailwind-rule-documents.md
+- **Lesson:** Map rule names from the guard's own emitted rule names, and cite an installed document path only when the file exists; otherwise name the install skill.
+- **Apply when:** a contract changes a hook's block or warn text to cite external documents
+- **Tags:** guard, messages, rule-ids, absent-document
+
+### 2026-10-28 — Do not promote a mechanism the registry already describes as an extension seam
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-28-angular-tailwind-rule-documents.md
+- **Lesson:** Read the Extend-by line of the nearest MECHANISMS.md entry before declaring a New Mechanism; removal of what an apply wrote extends the apply entry.
+- **Apply when:** a contract lists a New Mechanism that mirrors an existing entry's inverse operation
+- **Tags:** mechanisms, reuse, extend-by, removal
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
-
+

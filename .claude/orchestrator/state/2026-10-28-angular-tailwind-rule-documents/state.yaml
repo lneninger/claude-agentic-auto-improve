@@ -1,0 +1,66 @@
+contract: 2026-10-28-angular-tailwind-rule-documents
+started_at: '2026-10-29T00:15:15.704216+00:00'
+sub_tasks:
+  t1-rule-documents:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t1-rule-documents
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/97
+    issue: 87
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-87-t1-rule-documents.md
+  t2-coverage-test:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t2-coverage-test
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/99
+    issue: 88
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-88-t2-coverage-test.md
+  t3-manifest-and-install:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t3-manifest-and-install
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/101
+    issue: 89
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-89-t3-manifest-and-install.md
+  t4-add-on-removal:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t4-add-on-removal
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/102
+    issue: 90
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-90-t4-add-on-removal.md
+  t5-stylesheet-snippet-install:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t5-stylesheet-snippet-install
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/103
+    issue: 91
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-91-t5-stylesheet-snippet-install.md
+  t6-guard-messages:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t6-guard-messages
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/104
+    issue: 92
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-92-t6-guard-messages.md
+  t7-agent-rule-delivery:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t7-agent-rule-delivery
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/105
+    issue: 93
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-93-t7-agent-rule-delivery.md
+  t8-release-notes-and-upgrade-path:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t8-release-notes-and-upgrade-path
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/106
+    issue: 94
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-94-t8-release-notes-and-upgrade-path.md
+  t9-review:
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t9-review
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/107
+    issue: 95
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-95-t9-review.md

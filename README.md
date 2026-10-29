@@ -238,6 +238,64 @@ accepts a rule scoped under the component's element selector. The `angular-tailw
 reminder says the same. The CodeGraph decision table gains a section for projects that installed
 the `codegraph` add-on, and the contract template gains a token budget line and rule.
 
+**Changed in 0.10.0 (the `angular-tailwind` rule documents, issue #84):** the `angular-tailwind`
+add-on no longer starts a program on every prompt. The manifests read 0.10.0; the work was planned
+as 0.9.22, and the version moved on while its sub-tasks were merged.
+
+- **Four rule documents.** `ANGULAR_CODE_RULES.md`, `ANGULAR_MATERIAL_RULES.md`,
+  `TAILWINDCSS_RULES.md` and `UI-UX-PATTERNS.md`. The install copies them to
+  `.claude/references/angular-tailwind/` and lists them in the `review.documents` row of the
+  project profile. It appends only paths not already listed, and writes nothing when all four
+  are there. The add-on also ships a stylesheet snippet (`.scroll-edge`, `.scroll-edge-content`,
+  `.scroll-edge-header`); the install appends it to a global stylesheet you name with
+  `--stylesheet`, and no uninstall takes it out again.
+- **A new skill, `angular-ui-rules`.** It carries the short rule list, keyed by Rule ID, and
+  points at the documents. It always ships, and `angular-senior-dev` and `ui-ux-designer` preload
+  it. When the documents are not installed, it says so and works from its short list.
+- **The guard names the rule.** `architecture-guard.py` prints a Rule ID on every block and warn
+  line (`A-nnn` Angular code, `M-nnn` Material, `T-nnn` Tailwind and styling, `P-nnn` patterns),
+  then one footer line. The footer names the installed document when the file exists in the
+  project, and otherwise says the rule text is not installed and which skill installs it.
+- **Uninstall skills.** `/auto-improve-angular-tailwind-uninstall`, `/auto-improve-codegraph-uninstall`
+  and `/auto-improve-strict-shell-gate-uninstall`, each paired with its install skill. They run
+  `auto_improve_finish_install.py addon-remove`, which previews, asks once, writes `settings.json`
+  first (with a backup), then the profile, then deletes files. A second run changes nothing. It
+  keeps any file you edited, every helper file and the stylesheet snippet.
+- **The advisor is disabled.** `angular-tailwind-advisor.py` still ships in the add-on folder,
+  but no install copies it or writes its row. `.claude/addons/angular-tailwind/DISABLED.md` says
+  what it did, what it cost, why it is off and how to turn it back on.
+
+The kill switches of `codegraph` (`CLAUDE_SKIP_CG`) and `strict-shell-gate` (`CLAUDE_BASH_GATE`
+and `CLAUDE_CONCEPT_GATE`) are unchanged. `angular-tailwind` declares none, and the retired
+`CLAUDE_ARCH_ADVISOR` is no longer read.
+
+**Upgrading a project that has the old advisor.** Which rows the project carries depends on
+when it installed. Every one is a `UserPromptSubmit` row with no matcher:
+
+| Install age | Row in `settings.json` | File it names |
+|---|---|---|
+| add-on install, 0.9.9 to 0.9.21 | one row in exec form (`"command": "py"` with `"args": ["-3", ...]`, or `python3`) on `${CLAUDE_PROJECT_DIR}/.claude/hooks/...` | `angular-tailwind-advisor.py` |
+| older installs, and hand copies of the plugin's own row (the plugin registered it itself up to 0.6.x; 0.7.0 took that out) | one row, either the string form `py -3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/..."` or `py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/..."`, or the exec form | `architecture-advisor.py` |
+
+The steps, in this order:
+
+1. Run `/auto-improve-angular-tailwind-uninstall`. It finds the row in every form above, under
+   either file name, removes the row first and the file after. Do not delete the file yourself
+   first: a row that points at a missing script exits with code 2 and blocks every prompt.
+2. Run `/auto-improve-angular-tailwind-install` to put the documents, the profile entries and the
+   stylesheet snippet in. Until step 1 has run, the install refuses with `disabled-hook-present`.
+3. Start a new session. Claude Code reads hook rows once, when a session starts.
+
+A project that never installed the add-on needs nothing: it gets no document and no row.
+
+**What the change costs.** Before: the advisor was registered on `UserPromptSubmit` with no
+matcher, so Claude Code started a Python program on every prompt, whether or not the prompt was
+about UI. The median of seven runs was 123 ms against 50 ms for a bare Python start. It was
+measured once, on one Windows workstation, for issue #84, and was not measured again. After:
+the add-on registers no row on any event that runs per prompt, so no program starts for Angular
+rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
+test (zero `UserPromptSubmit` rows written), not by a timing run.
+
 ### Retired hooks, and how to restore one
 
 Version 0.7.0 retired six hooks. Version 0.9.8 brought `plan-question-advisor.py` back as a
@@ -247,30 +305,40 @@ default install runs none of them:
 
 | Add-on | Its hook files | What it does | Why it is not a default |
 |---|---|---|---|
-| `angular-tailwind` | `angular-tailwind-advisor.py` (formerly `architecture-advisor.py`) | at each UI prompt, reminds the agent of the Angular and Tailwind CSS rules | it only suits Angular plus Tailwind projects; `architecture-guard.py` still enforces at the write |
+| `angular-tailwind` | no hook file is installed; four rule documents and a stylesheet snippet instead. The old `angular-tailwind-advisor.py` (formerly `architecture-advisor.py`) still ships but is disabled since 0.10.0 | copies the Angular, Material, Tailwind and UI-pattern rule documents into `.claude/references/angular-tailwind/` and lists them in `review.documents`; the guard's lines cite them by Rule ID | it only suits Angular plus Tailwind projects; `architecture-guard.py` still enforces at the write |
 | `codegraph` | `codegraph-first-guard.py`, `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | blocks `Read` / `Grep` / `Glob` on source until a CodeGraph tool has run in the turn | it blocks every source read when the CodeGraph server is missing |
 | `strict-shell-gate` | `bash-gate.py` | reads each shell command before it runs and blocks a write into a source file no approved contract covers | a program start on every shell command, and it misreads some commands (it read `--stat` as the file written in `sed -i` followed by `git diff --stat`) and cannot see what a program such as `python` or `node` writes; the Changed-file check, which stays on, catches those after the fact |
 
 **To install one in a project**, run its skill. Each one previews the files and the
 `settings.json` change, asks once, and writes only after a yes:
 
-| Add-on | Skill |
-|---|---|
-| `angular-tailwind` | `/auto-improve-angular-tailwind-install` |
-| `codegraph` | `/auto-improve-codegraph-install` (stops with a plain message when the CodeGraph MCP server is not configured, has no command or url, or is listed as disabled) |
-| `strict-shell-gate` | `/auto-improve-strict-shell-gate-install` |
+| Add-on | Install skill | Uninstall skill |
+|---|---|---|
+| `angular-tailwind` | `/auto-improve-angular-tailwind-install` | `/auto-improve-angular-tailwind-uninstall` |
+| `codegraph` | `/auto-improve-codegraph-install` (stops with a plain message when the CodeGraph MCP server is not configured, has no command or url, or is listed as disabled) | `/auto-improve-codegraph-uninstall` |
+| `strict-shell-gate` | `/auto-improve-strict-shell-gate-install` | `/auto-improve-strict-shell-gate-uninstall` |
 
-Each skill runs `auto_improve_finish_install.py addon --name <add-on>`. The script copies the
+Each install skill runs `auto_improve_finish_install.py addon --name <add-on>`. The script copies the
 add-on's hook files and the helper files its `addon.json` names (a helper only when the project
 lacks it), then writes the rows in exec form on `${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>`, through
 the same preview, plan hash, backup and symbolic-link refusal as the hooks step. The rows are
 inserted into the existing `settings.json` as text, so every other byte of the file (escapes,
 one-line lists, line endings, byte order mark) stays as it was, and a folder it would write into
-that is a link to somewhere else (a junction on Windows) is refused. It never removes
-a row or a file and never overwrites a file that differs; start a new session afterwards, because
-hooks are read when a session starts. To remove an add-on, delete its rows from
-`.claude/settings.json` and its hook files from `.claude/hooks/` by hand. `plugin_doctor.py
---drift` compares an installed add-on's files with the plugin's.
+that is a link to somewhere else (a junction on Windows) is refused. An add-on that ships rule
+documents (`angular-tailwind`) also copies them and appends their paths to `review.documents`,
+which needs a project profile with that row (otherwise it stops with `profile-slot-missing`). The
+install never removes a row or a file and never overwrites a file that differs; start a new
+session afterwards, because hooks are read when a session starts. `plugin_doctor.py --drift`
+compares an installed add-on's files with the plugin's.
+
+**To remove an add-on**, run its uninstall skill. It runs `auto_improve_finish_install.py
+addon-remove --name <add-on>`: it previews the rows, files and profile entries, asks once, and
+writes `settings.json` first (with a backup), the profile next and deletes files last. Do not
+delete a hook file by hand before its row is gone: a row that points at a missing script exits
+with code 2 and blocks every prompt. It deletes a file only when it is identical to the plugin's
+copy (line endings and a leading byte order mark ignored) or matches a copy an earlier release
+shipped; an edited file is kept and reported. Helper files and the stylesheet snippet are never
+deleted. A second run finds nothing to do. Removing an add-on does not touch its kill switches.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
 `post-edit-dispatcher.py` rather than as four registrations.
@@ -430,7 +498,7 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          28 generic skills          (plugin root -- all three providers)
+skills/          32 generic skills          (plugin root -- all three providers)
 agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    6 shipped working agreements, delivered at session start
@@ -479,8 +547,10 @@ flow, task, design-first, tdd-first, advance, pr-merged, verify-before-done,
 git-commit, ship, debug, north-star, north-star-review, list-contracts,
 contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
 validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install,
-auto-improve-angular-tailwind-install, auto-improve-codegraph-install,
-auto-improve-strict-shell-gate-install, unit-testing, application-design, website-design.
+auto-improve-angular-tailwind-install, auto-improve-angular-tailwind-uninstall,
+auto-improve-codegraph-install, auto-improve-codegraph-uninstall,
+auto-improve-strict-shell-gate-install, auto-improve-strict-shell-gate-uninstall,
+angular-ui-rules, unit-testing, application-design, website-design.
 
 A skill or agent that mentions a skill owned by another plugin follows the rule in
 [CONTRIBUTING.md](CONTRIBUTING.md) → "Referencing another plugin's skill".
@@ -488,8 +558,9 @@ A skill or agent that mentions a skill owned by another plugin follows the rule 
 `auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
 skill, run once per project after the plugin is installed. Its name carries the plugin's name
 because you may have several plugins installed. The three `auto-improve-*-install` skills
-after it are not stages either: each installs one opt-in add-on (see "Retired hooks, and how
-to restore one").
+after it are not stages either: each installs one opt-in add-on, and its paired
+`auto-improve-*-uninstall` skill removes it (see "Retired hooks, and how to restore one").
+`angular-ui-rules` is a rule skill, not a stage: the Angular agents preload it.
 
 The rest form one chain, and each stage hands the next a written artefact rather than a memory
 of the conversation:
@@ -601,7 +672,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 242 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 304 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
