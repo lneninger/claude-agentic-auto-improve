@@ -290,6 +290,81 @@ class Violation(NamedTuple):
     line_no: int
     line_text: str
     suggestion: str
+    rule_id: str = ""
+    document: str | None = None
+
+
+# Guard rule map (contract 2026-10-28-angular-tailwind-rule-documents, t6).
+# Keys are matched exactly first, then by prefix. Each value is (Rule ID, document).
+# `external:` rules carry their own id and no document (handled in resolve_rule_id).
+RULE_MAP_EXACT: dict[str, tuple[str, str]] = {
+    "inline-style": ("T-001", "TAILWINDCSS_RULES.md"),
+    "hex-color": ("T-004", "TAILWINDCSS_RULES.md"),
+    "scroll-edge": ("T-012", "TAILWINDCSS_RULES.md"),
+    "inline-component-template": ("A-003", "ANGULAR_CODE_RULES.md"),
+    "inline-component-styles": ("A-003", "ANGULAR_CODE_RULES.md"),
+    "scss-warn:raw-property": ("T-010", "TAILWINDCSS_RULES.md"),
+    "scss-warn:dead-host": ("T-011", "TAILWINDCSS_RULES.md"),
+}
+RULE_MAP_PREFIX: dict[str, tuple[str, str]] = {
+    "gray-utility:": ("T-003", "TAILWINDCSS_RULES.md"),
+    "app-banned-class:": ("T-022", "TAILWINDCSS_RULES.md"),
+    "height-chain-warn:": ("T-014", "TAILWINDCSS_RULES.md"),
+}
+ADDON_DOCS_RELATIVE = (".claude", "references", "angular-tailwind")
+DOCS_NOT_INSTALLED_LINE = (
+    "Rule text not installed in this project: the angular-tailwind add-on installs it "
+    "(/auto-improve-angular-tailwind-install)."
+)
+
+
+def resolve_rule_id(rule: str) -> tuple[str, str | None]:
+    """Return (rule_id, document) for a guard rule name; ("", None) when unmapped."""
+    if rule.startswith("external:"):
+        return (rule[len("external:"):], None)
+    if rule in RULE_MAP_EXACT:
+        return RULE_MAP_EXACT[rule]
+    for prefix, entry in RULE_MAP_PREFIX.items():
+        if rule.startswith(prefix):
+            return entry
+    return ("", None)
+
+
+def installed_document_path(document: str) -> Path | None:
+    """The project's copy of an add-on document, or None when absent or the root is unknown."""
+    try:
+        root = _pp.project_dir() if _pp else None
+    except Exception:  # noqa: BLE001
+        root = None
+    if root is None:
+        return None
+    candidate = root.joinpath(*ADDON_DOCS_RELATIVE, document)
+    return candidate if candidate.is_file() else None
+
+
+def format_rule_label(v: Violation) -> str:
+    rule_id, _ = resolve_rule_id(v.rule)
+    return f"[{v.rule}] {rule_id}" if rule_id else f"[{v.rule}]"
+
+
+def document_footer(violations: list[Violation]) -> list[str]:
+    """One 'Rule text:' line per installed document; one 'not installed' line if any is absent."""
+    docs: list[str] = []
+    for v in violations:
+        _, doc = resolve_rule_id(v.rule)
+        if doc and doc not in docs:
+            docs.append(doc)
+    out: list[str] = []
+    missing = False
+    for doc in docs:
+        found = installed_document_path(doc)
+        if found is None:
+            missing = True
+        else:
+            out.append(f"Rule text: {found}")
+    if missing:
+        out.append(DOCS_NOT_INSTALLED_LINE)
+    return out
 
 
 def log(msg: str) -> None:
@@ -340,6 +415,34 @@ def file_rule_exempted(path: Path, rule: str, exemptions: dict) -> bool:
 # Exclude: [attr.style]="..."  (preceded by `.`)
 RX_INLINE_STYLE = re.compile(r"(?<![\[\.\w])style\s*=\s*\"[^\"]*\"")
 
+# C1(b): a static style on these elements is allowed when every property positions.
+SVG_STYLE_ELEMENTS = frozenset({
+    "svg", "g", "text", "tspan", "rect", "circle", "ellipse", "line", "polyline",
+    "polygon", "path", "use", "image", "foreignobject", "canvas",
+})
+POSITIONING_PROPERTIES = frozenset({
+    "position", "left", "top", "right", "bottom", "transform", "transform-origin", "translate",
+})
+RX_OPEN_TAG_BEFORE = re.compile(r"<([A-Za-z][\w:-]*)[^<>]*$")
+RX_STYLE_VALUE = re.compile(r"\"([^\"]*)\"")
+
+
+def style_is_positioning_exception(line: str, match: re.Match) -> bool:
+    """True when the static style at ``match`` is C1(b): SVG/canvas tag on the same line, positioning only."""
+    tag = RX_OPEN_TAG_BEFORE.search(line[: match.start()])
+    if tag is None or tag.group(1).lower() not in SVG_STYLE_ELEMENTS:
+        return False
+    value = RX_STYLE_VALUE.search(match.group(0))
+    names = []
+    for decl in (value.group(1) if value else "").split(";"):
+        if not decl.strip():
+            continue
+        if ":" not in decl:
+            return False
+        names.append(decl.split(":", 1)[0].strip().lower())
+    return bool(names) and all(n in POSITIONING_PROPERTIES for n in names)
+
+
 # Tailwind gray utilities that should be Material tokens.
 RX_TEXT_GRAY = re.compile(r"\btext-gray-\d+\b")
 RX_BG_GRAY = re.compile(r"\bbg-gray-\d+\b")
@@ -356,6 +459,16 @@ RX_INLINE_STYLES = re.compile(r"@Component\s*\(\s*\{[^}]*\bstyles\s*:", re.DOTAL
 # Raw overflow-y-auto / sticky top-0 / position: relative patterns in templates.
 RX_INLINE_OVERFLOW = re.compile(r"\boverflow-y-auto\b")
 RX_INLINE_STICKY = re.compile(r"\bsticky\s+top-0\b")
+RX_CLASS_ATTR = re.compile(r"""(?<![\w.\-])class\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+RX_STICKY_TOKEN = re.compile(r"(?:^|\s)(?:[\w-]+:)*sticky(?=\s|$)")
+
+
+def class_attribute_has_sticky(line: str) -> bool:
+    """True when a class="..." attribute holds a `sticky` token (variants allowed); prose does not count."""
+    for m in RX_CLASS_ATTR.finditer(line):
+        if RX_STICKY_TOKEN.search(m.group(1) if m.group(1) is not None else m.group(2)):
+            return True
+    return False
 
 # Height-chain invariant for scroll-edge templates.
 # scroll-edge + flex-1 min-h-0 inside a file whose first <div class="..."> lacks
@@ -451,6 +564,8 @@ def scan_template_html(content: str, path: Path, exemptions: dict) -> list[Viola
         # Rule: static inline style=
         if not file_rule_exempted(path, "inline-style", exemptions):
             for m in RX_INLINE_STYLE.finditer(line):
+                if style_is_positioning_exception(line, m):
+                    continue
                 violations.append(Violation(
                     rule="inline-style",
                     line_no=i,
@@ -459,8 +574,9 @@ def scan_template_html(content: str, path: Path, exemptions: dict) -> list[Viola
                         "Replace static style=\"...\" with Tailwind utilities from "
                         "the design-pattern document under Reference below "
                         "(e.g. text-primary, bg-surface-container, "
-                        "border-outline-variant, w-[200px], p-4, gap-2). "
-                        "Dynamic [style.prop]=\"expr\" bindings are allowed."
+                        "border-outline-variant, w-48, p-4, gap-2). "
+                        "Dynamic [style.prop]=\"expr\" bindings are allowed, and so is a "
+                        "positioning-only style on an SVG element or canvas."
                     ),
                 ))
 
@@ -495,14 +611,15 @@ def scan_template_html(content: str, path: Path, exemptions: dict) -> list[Viola
 
         # Rule: inline overflow / sticky.
         if not file_rule_exempted(path, "scroll-edge", exemptions):
-            if RX_INLINE_OVERFLOW.search(line) or RX_INLINE_STICKY.search(line):
+            if (RX_INLINE_OVERFLOW.search(line) or RX_INLINE_STICKY.search(line)
+                    or class_attribute_has_sticky(line)):
                 violations.append(Violation(
                     rule="scroll-edge",
                     line_no=i,
                     line_text=line.strip(),
                     suggestion=(
                         "Use the global scroll-edge / scroll-edge-content / scroll-edge-header "
-                        "classes instead of inline overflow-y-auto or sticky top-0. "
+                        "classes instead of inline overflow-y-auto or sticky positioning. "
                         "Set height via h-* utility on the scroll-edge element."
                     ),
                 ))
@@ -531,7 +648,7 @@ def scan_component_ts(content: str, path: Path, exemptions: dict) -> list[Violat
                         rule="inline-component-template",
                         line_no=i,
                         line_text=line.strip(),
-                        suggestion="Use templateUrl: './xxx.component.html' — never inline template:.",
+                        suggestion="Use templateUrl: './xxx.component.html' -- never inline template:.",
                     ))
                     break
 
@@ -544,7 +661,7 @@ def scan_component_ts(content: str, path: Path, exemptions: dict) -> list[Violat
                         rule="inline-component-styles",
                         line_no=i,
                         line_text=line.strip(),
-                        suggestion="Use styleUrl: './xxx.component.scss' — never inline styles:.",
+                        suggestion="Use styleUrl: './xxx.component.scss' -- never inline styles:.",
                     ))
                     break
 
@@ -883,7 +1000,7 @@ def format_block_message(file_path: str, blocking: list[Violation]) -> str:
         "",
     ]
     for v in blocking[:15]:  # cap at 15 to keep output readable
-        lines.append(f"  [{v.rule}] line {v.line_no}")
+        lines.append(f"  {format_rule_label(v)} line {v.line_no}")
         excerpt = v.line_text if len(v.line_text) <= 120 else v.line_text[:117] + "..."
         lines.append(f"    | {excerpt}")
         lines.append(f"    -> {v.suggestion}")
@@ -894,6 +1011,10 @@ def format_block_message(file_path: str, blocking: list[Violation]) -> str:
     # The documents a reader is pointed at are a project fact, so they come from
     # architecture-guard.rules.json (`reference_documents`). An empty list simply
     # omits the section; no verdict depends on it.
+    footer = document_footer(blocking)
+    if footer:
+        lines.extend(footer)
+        lines.append("")
     reference_docs = load_project_settings()["reference_documents"]
     if reference_docs:
         lines.append("Reference:")
@@ -945,12 +1066,13 @@ def emit_scss_warnings(file_path: str, warnings: list[Violation]) -> None:
         bar,
     ]
     for rule, items in groups.items():
-        out.append(f"  [{rule}]")
+        out.append(f"  {format_rule_label(items[0])}")
         for v in items[:10]:
             out.append(f"  line {v.line_no}: {v.line_text[:100]}")
         if len(items) > 10:
             out.append(f"  ... and {len(items) - 10} more")
         out.append(f"  -> {items[0].suggestion}")
+    out.extend(f"  {line}" for line in document_footer(warnings))
     out.append(bar)
     out.append("")
     print("\n".join(out), file=sys.stderr)
