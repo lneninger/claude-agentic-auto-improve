@@ -9,23 +9,23 @@ sub_tasks:
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-87-t1-rule-documents.md
   t2-coverage-test:
-    status: pending
-    branch: null
-    pull_request: null
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t2-coverage-test
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/99
     issue: 88
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-88-t2-coverage-test.md
   t3-manifest-and-install:
-    status: pending
-    branch: null
-    pull_request: null
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t3-manifest-and-install
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/101
     issue: 89
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-89-t3-manifest-and-install.md
   t4-add-on-removal:
-    status: pending
-    branch: null
-    pull_request: null
+    status: completed
+    branch: task/2026-10-28-angular-tailwind-rule-documents/t4-add-on-removal
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/102
     issue: 90
     base: feature/84-angular-tailwind-rule-documents
     brief: .claude/work-items/2026-10-28-90-t4-add-on-removal.md
