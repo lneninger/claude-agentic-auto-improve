@@ -1,0 +1,66 @@
+contract: 2026-10-28-angular-tailwind-rule-documents
+started_at: '2026-10-29T00:15:15.704216+00:00'
+sub_tasks:
+  t1-rule-documents:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 87
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-87-t1-rule-documents.md
+  t2-coverage-test:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 88
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-88-t2-coverage-test.md
+  t3-manifest-and-install:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 89
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-89-t3-manifest-and-install.md
+  t4-add-on-removal:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 90
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-90-t4-add-on-removal.md
+  t5-stylesheet-snippet-install:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 91
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-91-t5-stylesheet-snippet-install.md
+  t6-guard-messages:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 92
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-92-t6-guard-messages.md
+  t7-agent-rule-delivery:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 93
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-93-t7-agent-rule-delivery.md
+  t8-release-notes-and-upgrade-path:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 94
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-94-t8-release-notes-and-upgrade-path.md
+  t9-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 95
+    base: feature/84-angular-tailwind-rule-documents
+    brief: .claude/work-items/2026-10-28-95-t9-review.md

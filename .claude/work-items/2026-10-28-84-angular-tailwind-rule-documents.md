@@ -15,7 +15,7 @@ north_stars: none
 contract: .claude/concepts/2026-10-28-angular-tailwind-rule-documents.md
 pr: none
 issue_link: unknown
-status: designing
+status: implementing
 created: 2026-10-28
 ---
 
