@@ -13,9 +13,9 @@ branch: feature/84-angular-tailwind-rule-documents
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261028-feature-84-replace-angular-tailwind-prompt-hook
 north_stars: none
 contract: .claude/concepts/2026-10-28-angular-tailwind-rule-documents.md
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/109
+issue_link: closes
+status: shipped
 created: 2026-10-28
 ---
 
