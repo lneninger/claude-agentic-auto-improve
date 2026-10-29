@@ -101,6 +101,7 @@ Implementation seams the tests rely on (all stated by the contract or the reposi
 """
 
 import contextlib
+import copy
 import datetime
 import difflib
 import hashlib
@@ -3355,13 +3356,27 @@ class TestRoundThreeStrictReadsOnThePluginPath(Base):
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hooks" / "tests"))
 import _addon_fixture as af  # noqa: E402
 
+ANGULAR_DOCS = ["ANGULAR_CODE_RULES.md", "ANGULAR_MATERIAL_RULES.md", "TAILWINDCSS_RULES.md",
+                "UI-UX-PATTERNS.md"]
+ANGULAR_DOC_DIR = ".claude/references/angular-tailwind"
+DISABLED_ADVISOR = "angular-tailwind-advisor.py"
+DISABLED_FORMER = "architecture-advisor.py"
+DOC_SLOT = "review.documents"
+
 ADDON_SPECS = {
+    # The angular-tailwind add-on installs documents and registers them in the profile. It installs no hook,
+    # writes no row, declares no kill switch (kill is None: the key is absent) and keeps the advisor disabled.
     "angular-tailwind": {
-        "hooks": ["angular-tailwind-advisor.py"],
+        "hooks": [],
         "helpers": [".claude/hooks/_project_paths.py"],
-        "rows": [("UserPromptSubmit", None, "angular-tailwind-advisor.py", [])],
+        "rows": [],
         "prerequisites": [],
-        "kill": ["CLAUDE_ARCH_ADVISOR"],
+        "kill": None,
+        "documents": ANGULAR_DOCS,
+        "disabled": [{
+            af.DISABLED_HOOK: DISABLED_ADVISOR, af.DISABLED_FORMER: [DISABLED_FORMER],
+            af.DISABLED_ROW: {af.ROW_EVENT: "UserPromptSubmit", af.ROW_ARGS: []},
+            af.DISABLED_NOTE: "DISABLED.md", af.DISABLED_HASHES: ["a" * 64, "b" * 64]}],
     },
     "codegraph": {
         "hooks": ["codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py"],
@@ -3405,8 +3420,20 @@ def build_fake_addons(root):
                 row[af.ROW_MATCHER] = matcher
             rows.append(row)
         manifest = {af.KEY_HOOKS: list(spec["hooks"]), af.KEY_HELPERS: list(spec["helpers"]), af.KEY_ROWS: rows,
-                    af.KEY_PREREQUISITES: list(spec["prerequisites"]), af.KEY_KILL_SWITCHES: list(spec["kill"]),
+                    af.KEY_PREREQUISITES: list(spec["prerequisites"]),
                     af.KEY_INSTALL_SKILL: "auto-improve-%s-install" % name}
+        if spec["kill"] is not None:
+            manifest[af.KEY_KILL_SWITCHES] = list(spec["kill"])
+        if spec.get("documents"):
+            manifest[af.KEY_DOCUMENTS] = list(spec["documents"])
+            (folder / "documents").mkdir(parents=True, exist_ok=True)
+            for document in spec["documents"]:
+                (folder / "documents" / document).write_text("# %s\n\nThe rules.\n" % document, encoding="utf-8")
+        if spec.get("disabled"):
+            manifest[af.KEY_DISABLED] = copy.deepcopy(spec["disabled"])
+            for entry in spec["disabled"]:
+                (folder / "hooks" / entry[af.DISABLED_HOOK]).write_text("# the disabled hook\n", encoding="utf-8")
+                (folder / entry[af.DISABLED_NOTE]).write_text("# disabled\n", encoding="utf-8")
         (folder / "addon.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
@@ -3416,8 +3443,23 @@ class TestAddonInstall(Base):
         build_fake_addons(self.plugin)
         self.install_plugin()
         self.user_home = self.tmp / "fakeuser"
+        # The angular-tailwind add-on registers its documents in the profile's review.documents slot, so every
+        # project here has a profile with that slot still a placeholder.
+        self.put_profile()
 
     # --- helpers --------------------------------------------------------------------
+    def doc_paths(self):
+        return ["%s/%s" % (ANGULAR_DOC_DIR, d) for d in ANGULAR_DOCS]
+
+    def doc_slot(self, project=None):
+        """The raw value of the profile's review.documents row, or None when there is no such row."""
+        text = (Path(project or self.project) / ".claude/project-profile.md").read_text(encoding="utf-8")
+        found = [raw for _i, slot, raw in fi._slot_rows(text.split("\n")) if slot == DOC_SLOT]
+        return found[0] if found else None
+
+    def listed(self, raw):
+        return [p.strip().strip("`") for p in raw.split(",")]
+
     def addon_argv(self, name, apply=False, sha=None, project=None):
         argv = ["addon", "--name", name, "--project", str(project or self.project), "--json",
                 "--claude-home", str(self.home)]
@@ -3472,9 +3514,24 @@ class TestAddonInstall(Base):
                              msg="%s must be a byte-for-byte copy of the plugin's add-on file" % hook)
         for helper in spec["helpers"]:
             self.assertTrue((self.project / helper).is_file(), msg="helper %s must be present" % helper)
+        for document in spec.get("documents", []):
+            copied = self.project / ANGULAR_DOC_DIR / document
+            self.assertEqual(copied.read_bytes(),
+                             (self.plugin / ".claude" / "addons" / name / "documents" / document).read_bytes(),
+                             msg="%s must be a byte-for-byte copy under .claude/references/angular-tailwind/" % document)
+        for entry in spec.get("disabled", []):
+            for hook_name in [entry[af.DISABLED_HOOK]] + entry[af.DISABLED_FORMER]:
+                self.assertFalse((self.project / ".claude" / "hooks" / hook_name).exists(),
+                                 msg="a disabled hook is never copied: %s" % hook_name)
         if not parsed_settings:
             return
+        if not spec["rows"]:
+            self.assertFalse(self.settings_path().exists(), msg="an add-on with no row writes no settings file")
+            return
         regs = flat_registrations(self.read_settings())
+        for entry in spec.get("disabled", []):
+            self.assertEqual([r for r in regs if r[2] in [entry[af.DISABLED_HOOK]] + entry[af.DISABLED_FORMER]],
+                             [], msg="and a disabled hook's row is never written")
         for event, matcher, hook, args in spec["rows"]:
             found = [r for r in regs if r[2] == hook and r[0] == event]
             self.assertEqual(len(found), 1, msg="exactly one %s row for %s; settings hold %r" % (event, hook, regs))
@@ -3615,6 +3672,229 @@ class TestAddonInstall(Base):
         for name in ("angular-tailwind", "strict-shell-gate"):
             with self.subTest(add_on=name):
                 self.preview(name)
+
+    # --- documents, profile registration and the disabled hook (issue #84) ---------------------------------
+    def test_the_install_copies_the_documents_registers_them_and_writes_no_row(self):
+        plan = self.preview("angular-tailwind")
+        self.assertEqual(plan["to-add"], [], msg="no row is planned: the add-on installs no hook")
+        self.assertEqual(plan["kill-switches"], [], msg="and it declares no kill switch")
+        self.assertEqual([(f["path"], f["kind"], f["action"]) for f in plan["files"] if f["kind"] == "document"],
+                         [("%s/%s" % (ANGULAR_DOC_DIR, d), "document", "copy") for d in ANGULAR_DOCS],
+                         msg="the four documents are listed for copy")
+        self.assertEqual(plan["profile"]["adds"], self.doc_paths(), msg="and the preview names the profile paths")
+        before = snapshot(self.tmp)
+        self.assertEqual(self.preview("angular-tailwind")["plan-sha256"], plan["plan-sha256"],
+                         msg="the preview is repeatable")
+        self.assertTreeSame(before, "a preview writes nothing")
+        rc, out, parsed = self.apply("angular-tailwind", plan["plan-sha256"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="%r" % (parsed or out,))
+        self.assert_installed("angular-tailwind")
+        self.assertEqual(self.listed(self.doc_slot()), self.doc_paths(), msg="the slot lists the four documents")
+        self.assertFalse(self.settings_path().exists(), msg="no settings.json, so no UserPromptSubmit row")
+        self.assertEqual([p for p in (self.project / ".claude").rglob("*") if ".bak-" in p.name], [],
+                         msg="and no backup, because settings.json was not written")
+
+    def test_a_project_that_never_ran_the_install_has_no_document_no_row_and_an_unchanged_profile(self):
+        # I-10. Install the other add-ons, run refused and previewed angular-tailwind commands, and look.
+        profile_before = (self.project / ".claude/project-profile.md").read_bytes()
+        self.install_addon("strict-shell-gate")
+        self.preview("angular-tailwind")
+        self.assertFalse((self.project / ANGULAR_DOC_DIR).exists(), msg="no add-on document")
+        self.assertEqual((self.project / ".claude/project-profile.md").read_bytes(), profile_before,
+                         msg="the profile is byte-identical")
+        rows = flat_registrations(self.read_settings())
+        self.assertEqual([r for r in rows if r[0] == "UserPromptSubmit"], [], msg="and there is no add-on row")
+        self.assertEqual([r for r in rows if r[2] in (DISABLED_ADVISOR, DISABLED_FORMER)], [],
+                         msg="least of all the advisor's")
+
+    def test_install_twice_the_second_preview_adds_nothing_and_the_apply_does_nothing(self):
+        self.install_addon("angular-tailwind")
+        before = snapshot(self.tmp)
+        second = self.preview("angular-tailwind")
+        self.assertEqual(second["to-add"], [], msg="no row to add")
+        self.assertEqual([f["action"] for f in second["files"] if f["kind"] == "document"],
+                         ["present"] * len(ANGULAR_DOCS), msg="every document is already there")
+        self.assertEqual(second["profile"]["adds"], [], msg="and nothing is left to register")
+        self.assertEqual(sorted(second["profile"]["already-listed"]), sorted(self.doc_paths()))
+        rc, out, parsed = self.apply("angular-tailwind", second["plan-sha256"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg="%r" % (parsed or out,))
+        self.assertTreeSame(before, "the tree is byte-identical: no file, no profile line, no backup")
+
+    def write_slot(self, raw, drop=False):
+        self.put_profile(template_text(overrides={DOC_SLOT: raw}, drop=(DOC_SLOT,) if drop else ()))
+
+    def test_the_profile_slot_cases(self):
+        wanted = ", ".join("`%s`" % p for p in self.doc_paths())
+        cases = [
+            ("placeholder", None, wanted),
+            ("none", "none", wanted),
+            ("authored list", "`CLAUDE.md`, `TESTING.md`", "`CLAUDE.md`, `TESTING.md`, " + wanted),
+            ("already-listed path, other spelling", "`CLAUDE.md`, `.claude\\references\\angular-tailwind\\%s`"
+             % ANGULAR_DOCS[1],
+             "`CLAUDE.md`, `.claude\\references\\angular-tailwind\\%s`, " % ANGULAR_DOCS[1] + ", ".join(
+                 "`%s`" % p for p in self.doc_paths() if not p.endswith(ANGULAR_DOCS[1]))),
+        ]
+        for label, raw, expected in cases:
+            with self.subTest(slot=label):
+                self.write_slot(raw) if raw is not None else self.put_profile()
+                self.install_addon("angular-tailwind")
+                self.assertEqual(self.doc_slot(), expected, msg="the slot after the install")
+                self.assertEqual(len(set(p.replace("\\", "/") for p in self.listed(self.doc_slot()))),
+                                 len(self.listed(self.doc_slot())), msg="no path is listed twice")
+                for leftover in (self.project / ANGULAR_DOC_DIR, self.project / ".claude" / "hooks"):
+                    shutil.rmtree(str(leftover), ignore_errors=True)
+
+    def test_every_path_already_listed_means_the_profile_is_not_written(self):
+        listed = ", ".join("`%s`" % p for p in self.doc_paths())
+        self.write_slot(listed)
+        profile = self.project / ".claude/project-profile.md"
+        os.utime(str(profile), ns=(1_000_000_000_000_000_000, 1_000_000_000_000_000_000))
+        bytes_before, stamp = profile.read_bytes(), profile.stat().st_mtime_ns
+        plan = self.preview("angular-tailwind")
+        self.assertEqual(plan["profile"]["adds"], [], msg="nothing to add")
+        rc, out, parsed = self.apply("angular-tailwind", plan["plan-sha256"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="the documents are still copied")
+        self.assertEqual((profile.read_bytes(), profile.stat().st_mtime_ns), (bytes_before, stamp),
+                         msg="the profile was not rewritten")
+
+    def test_an_authored_row_keeps_every_other_byte_of_the_profile(self):
+        self.write_slot("`CLAUDE.md`")
+        before = (self.project / ".claude/project-profile.md").read_text(encoding="utf-8")
+        self.install_addon("angular-tailwind")
+        after = (self.project / ".claude/project-profile.md").read_text(encoding="utf-8")
+        old_lines, new_lines = before.split("\n"), after.split("\n")
+        self.assertEqual(len(old_lines), len(new_lines), msg="no line was added or removed")
+        changed = [(a, b) for a, b in zip(old_lines, new_lines) if a != b]
+        self.assertEqual(len(changed), 1, msg="exactly one line changed: the review.documents row")
+        self.assertTrue(changed[0][0].startswith("| `review.documents` |"), msg=changed[0][0])
+
+    def test_a_profile_with_no_review_documents_row_is_refused_and_nothing_is_written(self):
+        self.write_slot(None, drop=True)
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("angular-tailwind"))
+        self.assertRefused(parsed, "profile-slot-missing", "the profile has no review.documents row")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertIn("review.documents", parsed["message"], msg="the message names the slot")
+        self.assertTreeSame(before, "no document was copied and the profile is unchanged")
+
+    def test_no_profile_at_all_is_refused_and_nothing_is_written(self):
+        (self.project / ".claude/project-profile.md").unlink()
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("angular-tailwind"))
+        self.assertRefused(parsed, "profile-slot-missing", "the project has no profile")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertTreeSame(before, "nothing is written")
+        self.assertFalse((self.project / ".claude/project-profile.md").exists(), msg="and no profile is created")
+
+    def test_the_slot_check_applies_only_to_add_ons_that_ship_documents(self):
+        (self.project / ".claude/project-profile.md").unlink()
+        self.preview("strict-shell-gate")
+
+    def test_the_plan_hash_covers_the_profile_bytes(self):
+        plan = self.preview("angular-tailwind")
+        profile = self.project / ".claude/project-profile.md"
+        profile.write_bytes(profile.read_bytes() + b"\nA line added after the preview.\n")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply("angular-tailwind", plan["plan-sha256"])
+        self.assertRefused(parsed, "changed-since-preview", "the profile changed after the preview")
+        self.assertEqual(rc, 2, msg="exit 2")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_differing_document_is_refused_and_never_overwritten(self):
+        mine = self.project / ANGULAR_DOC_DIR / ANGULAR_DOCS[0]
+        mine.parent.mkdir(parents=True)
+        mine.write_text("# the project edited this\n", encoding="utf-8")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("angular-tailwind"))
+        self.assertRefused(parsed, "addon-file-differs", "a document the project edited")
+        self.assertIn(ANGULAR_DOCS[0], parsed["message"], msg="the message names the document")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_disabled_hook_file_or_row_in_the_project_is_refused_under_either_name(self):
+        row = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "py", "args": [
+            "-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/%s"]}]}]}}
+        string_row = {"hooks": {"UserPromptSubmit": [{"hooks": [{
+            "type": "command", "command": 'py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/%s"'}]}]}}
+        cases = []
+        for name in (DISABLED_ADVISOR, DISABLED_FORMER):
+            cases.append(("file " + name, {"file": name}))
+            cases.append(("exec row " + name, {"settings": json.loads(json.dumps(row).replace("%s", name))}))
+            cases.append(("string row " + name, {"settings": json.loads(json.dumps(string_row).replace("%s", name))}))
+            cases.append(("local row " + name, {"local": json.loads(json.dumps(row).replace("%s", name))}))
+        for label, spec in cases:
+            with self.subTest(case=label):
+                shutil.rmtree(str(self.project / ".claude"), ignore_errors=True)
+                self.put_profile()
+                if "file" in spec:
+                    hook = self.project / ".claude" / "hooks" / spec["file"]
+                    hook.parent.mkdir(parents=True, exist_ok=True)
+                    hook.write_text("# whatever the project has\n", encoding="utf-8")
+                if "settings" in spec:
+                    write_json(self.settings_path(), spec["settings"])
+                if "local" in spec:
+                    write_json(self.project / ".claude" / "settings.local.json", spec["local"])
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.cli(self.addon_argv("angular-tailwind"))
+                self.assertRefused(parsed, "disabled-hook-present", "the project carries the retired advisor")
+                self.assertEqual(rc, 2, msg="exit 2")
+                self.assertIn("auto-improve-angular-tailwind-uninstall", parsed["message"],
+                              msg="the message names the uninstall skill")
+                self.assertTreeSame(before, "nothing is written")
+
+    def test_an_unrelated_row_and_file_do_not_count_as_a_disabled_hook(self):
+        write_json(self.settings_path(), {"hooks": {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/mine.py"]}]}]}})
+        (self.project / ".claude" / "hooks").mkdir()
+        (self.project / ".claude" / "hooks" / "angular-tailwind-advisor.py.bak").write_text("x", encoding="utf-8")
+        self.install_addon("angular-tailwind")
+
+    def test_the_manifest_checks_refuse_an_unusable_add_on(self):
+        path = self.plugin / ".claude" / "addons" / "angular-tailwind" / "addon.json"
+        good = json.loads(path.read_text(encoding="utf-8"))
+
+        def with_(**changes):
+            data = copy.deepcopy(good)
+            for key, value in changes.items():
+                if value is None:
+                    data.pop(key, None)
+                else:
+                    data[key] = value
+            return data
+        two_lists = copy.deepcopy(good[af.KEY_DISABLED])
+        two_lists[0][af.DISABLED_FORMER] = [DISABLED_ADVISOR]
+        bad_hash = copy.deepcopy(good[af.KEY_DISABLED])
+        bad_hash[0][af.DISABLED_HASHES] = ["not-a-hash"]
+        no_note = copy.deepcopy(good[af.KEY_DISABLED])
+        no_note[0][af.DISABLED_NOTE] = "MISSING.md"
+        cases = {
+            "I-1 hooks and documents both empty": with_(documents=None),
+            "I-1 documents empty": with_(documents=[]),
+            "I-2 a row names no listed hook": with_(registrations=[{"event": "PreToolUse", "hook": "x.py"}]),
+            "I-2 a hook with no row": with_(hooks=[DISABLED_ADVISOR + ".other.py"]),
+            "I-3 a file in hooks and disabled": with_(hooks=[DISABLED_ADVISOR], registrations=[
+                {"event": "UserPromptSubmit", "hook": DISABLED_ADVISOR, "args": []}]),
+            "I-3 a former name equal to the hook": with_(disabled=two_lists),
+            "a document that is not in the folder": with_(documents=ANGULAR_DOCS + ["GONE.md"]),
+            "a document name with a separator": with_(documents=["sub/ANGULAR_CODE_RULES.md"]),
+            "a document that is not markdown": with_(documents=["ANGULAR_CODE_RULES.txt"]),
+            "a kill switch that is not CLAUDE_*": with_(kill_switches=["ARCH"]),
+            "a released hash that is not a SHA-256": with_(disabled=bad_hash),
+            "a note that is not in the folder": with_(disabled=no_note),
+        }
+        for label, data in cases.items():
+            with self.subTest(case=label):
+                path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.cli(self.addon_argv("angular-tailwind"))
+                self.assertIsNotNone(parsed, msg=out)
+                self.assertIn(parsed.get("code"), ("addon-manifest-missing", "hook-file-missing"), msg=repr(parsed))
+                self.assertIn(rc, (2, 3), msg="a refusal exits non-zero")
+                self.assertTreeSame(before, "nothing is written")
+        with self.subTest(case="kill_switches is optional"):
+            path.write_text(json.dumps(with_(kill_switches=["CLAUDE_DEMO"]), indent=2), encoding="utf-8")
+            self.assertEqual(self.preview("angular-tailwind")["kill-switches"], ["CLAUDE_DEMO"])
+            path.write_text(json.dumps(good, indent=2), encoding="utf-8")
+            self.assertEqual(self.preview("angular-tailwind")["kill-switches"], [])
 
     def test_a_differing_hook_file_is_refused_and_never_overwritten(self):
         hook = self.project / ".claude" / "hooks" / "bash-gate.py"
@@ -3758,22 +4038,31 @@ def _event_block(name, groups):
     return "\n".join(['    "%s": [' % name, ",\n".join(rendered), "    ]"])
 
 
-def escaped_settings_text(placement):
-    """The escaped fixture as LF text, shaped for one placement case of the add-on's event (UserPromptSubmit)."""
+#: The event and matcher each writer kind adds a row on, and so the group the fixture already holds. The addon
+#: kind is driven through strict-shell-gate (PreToolUse on Bash); the hooks kind registers the plugin's own
+#: rows, one of which is on UserPromptSubmit with no matcher.
+WRITER_ROWS = {"addon": ("PreToolUse", "Bash"), "hooks": ("UserPromptSubmit", None)}
+
+
+def escaped_settings_text(placement, kind="hooks"):
+    """The escaped fixture as LF text, shaped for one placement case of the event ``kind`` adds a row on."""
+    event, matcher = WRITER_ROWS[kind]
     deny = ",\n".join('      "Bash(%s *)"' % _escaped_first_letter(w) for w in _HARMLESS_WORDS)
     text = ('{\n  "permissions": {\n    "deny": [\n%s\n    ],\n'
             '    "allow": ["Bash(ls)", "Bash(pwd)"]\n  }' % deny)
     stop = _event_block("Stop", [(None, [_OTHER_ONE_LINE_HOOK])])
     if placement in ("same-matcher", "lf-only"):
-        hooks = [_event_block("UserPromptSubmit", [(None, [_ONE_LINE_HOOK])]), stop]
+        hooks = [_event_block(event, [(matcher, [_ONE_LINE_HOOK])]), stop]
     elif placement == "new-group":
-        hooks = [_event_block("UserPromptSubmit", [("keep", [_ONE_LINE_HOOK])]), stop]
+        hooks = [_event_block(event, [("keep", [_ONE_LINE_HOOK])]), stop]
     elif placement == "new-event":
         hooks = [stop]
     elif placement == "empty-event-list":
-        hooks = ['    "UserPromptSubmit": []', stop]
+        hooks = ['    "%s": []' % event, stop]
     elif placement == "one-line-container":
-        hooks = ['    "UserPromptSubmit": [{"hooks": [%s]}]' % _ONE_LINE_HOOK, stop]
+        group = ('{"matcher": "%s", "hooks": [%s]}' % (matcher, _ONE_LINE_HOOK)) if matcher else (
+            '{"hooks": [%s]}' % _ONE_LINE_HOOK)
+        hooks = ['    "%s": [%s]' % (event, group), stop]
     elif placement == "no-hooks":
         return text + "\n}\n"
     else:
@@ -3781,8 +4070,8 @@ def escaped_settings_text(placement):
     return text + ',\n  "hooks": {\n' + ",\n".join(hooks) + "\n  }\n}\n"
 
 
-def escaped_settings_bytes(placement):
-    text = escaped_settings_text(placement)
+def escaped_settings_bytes(placement, kind="hooks"):
+    text = escaped_settings_text(placement, kind)
     if placement == "lf-only":
         return text.encode("utf-8")
     return b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8")
@@ -3922,7 +4211,9 @@ def make_directory_link(link, target):
 
 class WriterHarness(Base):
     """Fresh flat projects under the temporary folder, and the two subcommands driven through the command line."""
-    ADDON = "angular-tailwind"
+    # Moved off angular-tailwind, which now installs documents and writes no row (issue #84): a writer test
+    # needs an add-on that adds a row to settings.json.
+    ADDON = "strict-shell-gate"
 
     def setUp(self):
         super().setUp()
@@ -3992,9 +4283,9 @@ class WriterHarness(Base):
 class TestSettingsWriterKeepsEveryByte(WriterHarness):
     def test_the_escaped_fixture_really_holds_the_escapes_and_the_one_line_arrays(self):
         # Positive control: passes today. Without it a fixture that lost its escapes would pass every row below.
-        for placement in PLACEMENTS:
-            with self.subTest(placement=placement):
-                raw = escaped_settings_bytes(placement)
+        for placement, kind in [(p, k) for p in PLACEMENTS for k in WRITER_ROWS]:
+            with self.subTest(placement=placement, kind=kind):
+                raw = escaped_settings_bytes(placement, kind)
                 self.assertGreaterEqual(raw.count(b"\\u"), 20, msg="at least twenty unicode escapes")
                 if placement != "no-hooks":
                     self.assertGreater(len(re.findall(rb'"args": \[[^\]\r\n]*\]', raw)), 0,
@@ -4008,13 +4299,13 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                 parsed = parsed_settings(raw)
                 self.assertIn("permissions", parsed, msg="and it parses as one object")
                 if placement not in ("no-hooks", "new-event"):
-                    self.assertIn("UserPromptSubmit", parsed["hooks"], msg="the add-on's event is already listed")
+                    self.assertIn(WRITER_ROWS[kind][0], parsed["hooks"], msg="the row's event is already listed")
 
     def test_the_new_file_is_the_old_file_plus_inserted_bytes_and_the_old_object_plus_the_row(self):
         for kind in ("addon", "hooks"):
             for placement in PLACEMENTS:
                 with self.subTest(kind=kind, placement=placement):
-                    raw = escaped_settings_bytes(placement)
+                    raw = escaped_settings_bytes(placement, kind)
                     self.prepare(kind, raw)
                     plan = self.preview_ok(kind)
                     rows = plan["to-add"]
@@ -4055,7 +4346,7 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
         for kind in ("addon", "hooks"):
             for placement in PLACEMENTS:
                 with self.subTest(kind=kind, placement=placement):
-                    self.prepare(kind, escaped_settings_bytes(placement))
+                    self.prepare(kind, escaped_settings_bytes(placement, kind))
                     plan = self.preview_ok(kind)
                     diff = plan.get("unified-diff", "")
                     added = [l for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++")]
@@ -4118,16 +4409,18 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
     def test_a_key_on_the_insertion_path_written_with_an_escape_is_refused_and_nothing_changes(self):
         mine = ('{"type": "command", "command": "py", "args": '
                 '["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/mine.py"]}')
-        cases = {
-            "hooks key": ('\n  "hooks": {', '\n  "\\u0068ooks": {'),
-            "event name": ('"UserPromptSubmit": [', '"\\u0055serPromptSubmit": ['),
-            "group hooks key": ('        "hooks": [\n          ' + mine, '        "\\u0068ooks": [\n          ' + mine),
-        }
         for kind in ("addon", "hooks"):
+            event = WRITER_ROWS[kind][0]
+            cases = {
+                "hooks key": ('\n  "hooks": {', '\n  "\\u0068ooks": {'),
+                "event name": ('"%s": [' % event, '"%s": [' % _escaped_first_letter(event)),
+                "group hooks key": ('        "hooks": [\n          ' + mine,
+                                    '        "\\u0068ooks": [\n          ' + mine),
+            }
             for label, (plain, escaped) in cases.items():
                 with self.subTest(kind=kind, key=label):
-                    self.assertIn(plain, escaped_settings_text("same-matcher"), msg="fixture: the key is there")
-                    text = escaped_settings_text("same-matcher").replace(plain, escaped, 1)
+                    self.assertIn(plain, escaped_settings_text("same-matcher", kind), msg="fixture: the key is there")
+                    text = escaped_settings_text("same-matcher", kind).replace(plain, escaped, 1)
                     raw = b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8")
                     self.prepare(kind, raw)
                     before = snapshot(self.tmp)
@@ -4149,7 +4442,7 @@ class TestSettingsPlanHashControls(WriterHarness):
     def test_the_previewed_hash_applies_and_the_written_bytes_equal_the_previews_new_bytes(self):
         for kind in ("addon", "hooks"):
             with self.subTest(kind=kind):
-                self.prepare(kind, escaped_settings_bytes("same-matcher"))
+                self.prepare(kind, escaped_settings_bytes("same-matcher", kind))
                 plan = self.preview_ok(kind)
                 previewed = self.new_bytes_of_preview(kind)
                 rc, out, applied = self.apply_cli(kind, plan["plan-sha256"])
@@ -4160,7 +4453,7 @@ class TestSettingsPlanHashControls(WriterHarness):
     def test_a_wrong_hash_is_refused_as_changed_since_preview_and_changes_nothing(self):
         for kind in ("addon", "hooks"):
             with self.subTest(kind=kind):
-                self.prepare(kind, escaped_settings_bytes("same-matcher"))
+                self.prepare(kind, escaped_settings_bytes("same-matcher", kind))
                 self.preview_ok(kind)
                 before = snapshot(self.tmp)
                 rc, out, parsed = self.apply_cli(kind, "0" * 64)
@@ -4171,7 +4464,7 @@ class TestSettingsPlanHashControls(WriterHarness):
     def test_a_file_changed_between_preview_and_apply_is_refused_and_changes_nothing(self):
         for kind in ("addon", "hooks"):
             with self.subTest(kind=kind):
-                raw = escaped_settings_bytes("same-matcher")
+                raw = escaped_settings_bytes("same-matcher", kind)
                 self.prepare(kind, raw)
                 plan = self.preview_ok(kind)
                 self.settings_path().write_bytes(raw + b"\r\n")
@@ -4299,7 +4592,7 @@ class TestLinkedFolders(WriterHarness):
                 self.assert_refused_and_nothing_landed(kind, target)
 
     def test_a_helper_destination_folder_that_is_a_link_is_refused_at_apply(self):
-        self.ADDON = "strict-shell-gate"  # its helpers include one under .claude/scripts
+        self.assertEqual(self.ADDON, "strict-shell-gate", msg="fixture: its helpers include one under .claude/scripts")
         self.prepare("addon", None)
         target = self.tmp / "elsewhere-scripts"
         scripts = self.project / ".claude" / "scripts"

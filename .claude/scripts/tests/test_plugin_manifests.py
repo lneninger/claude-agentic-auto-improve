@@ -788,13 +788,20 @@ import _addon_fixture as af  # noqa: E402
 
 ADDONS_DIR = ROOT / ".claude" / "addons"
 EXPECTED_ADDON_HOOKS = {
-    "angular-tailwind": ["angular-tailwind-advisor.py"],
+    "angular-tailwind": [],
     "codegraph": ["codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py"],
     "strict-shell-gate": ["bash-gate.py"],
 }
+#: The documents the angular-tailwind add-on ships, and the disabled hook it keeps (issue #84).
+ANGULAR_DOCUMENTS = ["ANGULAR_CODE_RULES.md", "ANGULAR_MATERIAL_RULES.md", "TAILWINDCSS_RULES.md",
+                     "UI-UX-PATTERNS.md"]
+ANGULAR_DISABLED_HOOK = "angular-tailwind-advisor.py"
+ANGULAR_FORMER_NAMES = ["architecture-advisor.py"]
+#: Events that run once per prompt or per turn. No angular-tailwind row may sit on one (I-4).
+PER_PROMPT_EVENTS = {"UserPromptSubmit", "UserPromptExpansion", "Stop", "SubagentStop"}
+SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 #: (event, matcher) of every registration row, per file. A matcher of None is an event that takes none.
 EXPECTED_ADDON_ROWS = {
-    "angular-tailwind-advisor.py": ("UserPromptSubmit", None),
     "codegraph-first-guard.py": ("PreToolUse", "Read|Grep|Glob"),
     "codegraph-turn-reset.py": ("UserPromptSubmit", None),
     "codegraph-turn-tracker.py": ("PostToolUse", "mcp__codegraph__.*"),
@@ -806,16 +813,75 @@ def default_hook_names(root: pathlib.Path) -> set:
     return {p.name for p in (root / ".claude" / "hooks").glob("*.py") if not p.name.startswith("_")}
 
 
+def _plain_name(value, suffix: str) -> bool:
+    return (isinstance(value, str) and value.endswith(suffix) and value not in ("", ".", "..")
+            and "/" not in value and "\\" not in value and not value.startswith("."))
+
+
+def disabled_problems(name: str, entries, root: pathlib.Path, default_hooks: set, dispatched: set) -> list:
+    """Every way the manifest's ``disabled`` list breaks the Disabled hook entry shape; [] means it holds."""
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        return ["%s: %r is not a list of entries" % (name, af.KEY_DISABLED)]
+    problems = []
+    folder = root / ".claude" / "addons" / name
+    for entry in entries:
+        if not isinstance(entry, dict):
+            problems.append("%s: a disabled entry is not an object" % name)
+            continue
+        hook = entry.get(af.DISABLED_HOOK)
+        if not _plain_name(hook, ".py"):
+            problems.append("%s: a disabled entry has no plain .py %r" % (name, af.DISABLED_HOOK))
+            continue
+        if not (folder / "hooks" / hook).is_file():
+            problems.append("%s: disabled hook %s does not exist under .claude/addons/%s/hooks/" % (name, hook, name))
+        if hook in default_hooks or hook in dispatched:
+            problems.append("%s: disabled hook %s is a default hook or a dispatcher member" % (name, hook))
+        former = entry.get(af.DISABLED_FORMER, [])
+        if not isinstance(former, list) or not all(_plain_name(f, ".py") for f in former):
+            problems.append("%s: %r of %s is not a list of plain .py names" % (name, af.DISABLED_FORMER, hook))
+        row = entry.get(af.DISABLED_ROW)
+        if not (isinstance(row, dict) and isinstance(row.get(af.ROW_EVENT), str) and row[af.ROW_EVENT]
+                and isinstance(row.get(af.ROW_ARGS, []), list)
+                and all(isinstance(a, str) for a in row.get(af.ROW_ARGS, []))
+                and isinstance(row.get(af.ROW_MATCHER, ""), str)):
+            problems.append("%s: the registration of disabled hook %s needs an event, optional matcher and "
+                            "args (the row older installs carry)" % (name, hook))
+        note = entry.get(af.DISABLED_NOTE)
+        if not _plain_name(note, ".md") or not (folder / note).is_file():
+            problems.append("%s: the note %r of disabled hook %s is not a .md file in the add-on folder"
+                            % (name, note, hook))
+        hashes = entry.get(af.DISABLED_HASHES)
+        if not (isinstance(hashes, list) and hashes and all(isinstance(h, str) and SHA256_HEX.match(h)
+                                                            for h in hashes)):
+            problems.append("%s: %r of disabled hook %s is not a non-empty list of lowercase hex SHA-256 values"
+                            % (name, af.DISABLED_HASHES, hook))
+    return problems
+
+
 def addon_problems(name: str, data, root: pathlib.Path, default_hooks: set, dispatched: set) -> list:
-    """Every way an add-on manifest breaks the contract's Add-on manifest invariants; [] means it holds."""
+    """Every way an add-on manifest breaks the contract's Add-on manifest invariants (I-1 to I-3); [] means
+    it holds. ``kill_switches`` is optional."""
     problems = []
     if not isinstance(data, dict):
         return ["%s: the manifest is not a JSON object" % name]
+    folder = root / ".claude" / "addons" / name
     hooks = data.get(af.KEY_HOOKS)
-    if not isinstance(hooks, list) or not hooks or not all(isinstance(h, str) for h in hooks):
-        return ["%s: %r is not a non-empty list of file names" % (name, af.KEY_HOOKS)]
+    if not isinstance(hooks, list) or not all(_plain_name(h, ".py") for h in hooks):
+        return ["%s: %r is not a list of plain .py file names" % (name, af.KEY_HOOKS)]
+    documents = data.get(af.KEY_DOCUMENTS, [])
+    if not isinstance(documents, list) or not all(_plain_name(d, ".md") for d in documents):
+        return ["%s: %r is not a list of plain .md file names" % (name, af.KEY_DOCUMENTS)]
+    if not hooks and not documents:
+        problems.append("%s: I-1: %r and %r are both empty; an add-on installs something" % (
+            name, af.KEY_HOOKS, af.KEY_DOCUMENTS))
+    for document in documents:
+        if not (folder / "documents" / document).is_file():
+            problems.append("%s: document %s does not exist under .claude/addons/%s/documents/"
+                            % (name, document, name))
     for hook in hooks:
-        if not (root / ".claude" / "addons" / name / "hooks" / hook).is_file():
+        if not (folder / "hooks" / hook).is_file():
             problems.append("%s: hook file %s does not exist under .claude/addons/%s/hooks/" % (name, hook, name))
         if hook in default_hooks:
             problems.append("%s: %s is a default hook of the plugin; a manifest names no default hook" % (name, hook))
@@ -830,9 +896,19 @@ def addon_problems(name: str, data, root: pathlib.Path, default_hooks: set, disp
                 problems.append("%s: helper %s does not exist in the plugin's default tree" % (name, helper))
             if pathlib.PurePosixPath(helper).name in hooks or "/addons/" in helper.replace("\\", "/"):
                 problems.append("%s: helper %s is not a default-tree file" % (name, helper))
+    problems += disabled_problems(name, data.get(af.KEY_DISABLED), root, default_hooks, dispatched)
+    # I-3: a file name appears in at most one of hooks, disabled[].hook and disabled[].former_names.
+    claimed = list(hooks)
+    for entry in data.get(af.KEY_DISABLED) or []:
+        if isinstance(entry, dict):
+            claimed.append(entry.get(af.DISABLED_HOOK))
+            claimed += [f for f in entry.get(af.DISABLED_FORMER) or [] if isinstance(f, str)]
+    for dup in sorted({c for c in claimed if isinstance(c, str) and claimed.count(c) > 1}):
+        problems.append("%s: I-3: %s appears more than once across hooks, disabled hooks and former names"
+                        % (name, dup))
     rows = data.get(af.KEY_ROWS)
-    if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
-        problems.append("%s: %r is not a non-empty list of rows" % (name, af.KEY_ROWS))
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        problems.append("%s: %r is not a list of rows" % (name, af.KEY_ROWS))
         return problems
     row_hooks = []
     for row in rows:
@@ -840,7 +916,7 @@ def addon_problems(name: str, data, root: pathlib.Path, default_hooks: set, disp
         hook = row.get(af.ROW_HOOK)
         row_hooks.append(hook)
         if hook not in hooks:
-            problems.append("%s: a row names %r, which is not one of the manifest's hook files" % (name, hook))
+            problems.append("%s: I-2: a row names %r, which is not one of the manifest's hook files" % (name, hook))
         if hook in default_hooks:
             problems.append("%s: a row names default hook %s" % (name, hook))
         if not isinstance(row.get(af.ROW_EVENT), str) or not row.get(af.ROW_EVENT):
@@ -858,16 +934,38 @@ def addon_problems(name: str, data, root: pathlib.Path, default_hooks: set, disp
             problems.append("%s: the row for %s has a non-boolean async" % (name, hook))
     for hook in hooks:
         if hook not in row_hooks:
-            problems.append("%s: hook file %s has no registration row" % (name, hook))
-    for key in (af.KEY_KILL_SWITCHES,):
-        switches = data.get(key)
+            problems.append("%s: I-2: hook file %s has no registration row" % (name, hook))
+    if af.KEY_KILL_SWITCHES in data:
+        switches = data[af.KEY_KILL_SWITCHES]
         if not isinstance(switches, list) or not all(isinstance(s, str) and s.startswith("CLAUDE_") for s in switches):
-            problems.append("%s: %r is not a list of CLAUDE_* variable names" % (name, key))
+            problems.append("%s: %r is not a list of CLAUDE_* variable names" % (name, af.KEY_KILL_SWITCHES))
     if data.get(af.KEY_INSTALL_SKILL) != "auto-improve-%s-install" % name:
         problems.append("%s: %r is %r, not auto-improve-%s-install" % (name, af.KEY_INSTALL_SKILL,
                                                                         data.get(af.KEY_INSTALL_SKILL), name))
     if af.KEY_PREREQUISITES not in data or not isinstance(data.get(af.KEY_PREREQUISITES), list):
         problems.append("%s: %r is not a list" % (name, af.KEY_PREREQUISITES))
+    return problems
+
+
+def angular_tailwind_problems(data) -> list:
+    """I-4 for angular-tailwind: no kill switch, no row on a per-prompt event, the documents and the disabled
+    advisor with its former name."""
+    problems = []
+    if af.KEY_KILL_SWITCHES in data:
+        problems.append("angular-tailwind declares kill_switches %r; it declares none" % (data[af.KEY_KILL_SWITCHES],))
+    if data.get(af.KEY_ROWS):
+        problems.append("angular-tailwind declares registration rows; it installs no hook")
+    for row in data.get(af.KEY_ROWS) or []:
+        if row.get(af.ROW_EVENT) in PER_PROMPT_EVENTS:
+            problems.append("angular-tailwind has a row on %s, which runs per prompt" % row.get(af.ROW_EVENT))
+    if data.get(af.KEY_DOCUMENTS) != ANGULAR_DOCUMENTS:
+        problems.append("angular-tailwind documents are %r, not %r" % (data.get(af.KEY_DOCUMENTS), ANGULAR_DOCUMENTS))
+    disabled = data.get(af.KEY_DISABLED) or []
+    if [e.get(af.DISABLED_HOOK) for e in disabled if isinstance(e, dict)] != [ANGULAR_DISABLED_HOOK]:
+        problems.append("angular-tailwind disables %r, not [%r]" % (disabled, ANGULAR_DISABLED_HOOK))
+    elif disabled[0].get(af.DISABLED_FORMER) != ANGULAR_FORMER_NAMES:
+        problems.append("the disabled advisor lists former names %r, not %r"
+                        % (disabled[0].get(af.DISABLED_FORMER), ANGULAR_FORMER_NAMES))
     return problems
 
 
@@ -896,6 +994,26 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
         check("%s: the rows register each hook on the contract's event and matcher" % _name,
               _rows == {h: EXPECTED_ADDON_ROWS[h] for h in _expected_hooks}, "rows %r" % (_rows,))
         _all_addon_hook_files |= set(_data.get(af.KEY_HOOKS) or [])
+        # Disabled hooks and their former names are add-on hook files too: hooks.json must never register them.
+        for _entry in _data.get(af.KEY_DISABLED) or []:
+            _all_addon_hook_files.add(_entry.get(af.DISABLED_HOOK))
+            _all_addon_hook_files |= set(_entry.get(af.DISABLED_FORMER) or [])
+    if _name == "angular-tailwind":
+        _angular_problems = angular_tailwind_problems(_data)
+        check("angular-tailwind: I-4, no kill switch, no row (so none on a per-prompt event), four documents, "
+              "the advisor disabled with its former name", not _angular_problems, "\n".join(_angular_problems))
+        _note = ADDONS_DIR / _name / "DISABLED.md"
+        _note_text = _note.read_text(encoding="utf-8") if _note.is_file() else ""
+        for _label, _needle in (("what it did", "UserPromptSubmit"),
+                                ("its cost on every prompt", "every prompt"),
+                                ("the measured median", "123 ms"), ("the bare start", "50 ms"),
+                                ("the context it added", "400 words"), ("the dead keyword", '"ui"'),
+                                ("how to turn it back on", "turn it back on")):
+            check("angular-tailwind DISABLED.md states %s" % _label, _needle in _note_text,
+                  "%r is not in %s" % (_needle, _note))
+        check("angular-tailwind: the kept advisor script has no CLAUDE_ARCH_ADVISOR switch",
+              "CLAUDE_ARCH_ADVISOR" not in (ADDONS_DIR / _name / "hooks" / ANGULAR_DISABLED_HOOK).read_text(
+                  encoding="utf-8"))
     if _name == "codegraph":
         check("codegraph: the manifest names the CodeGraph MCP server as a prerequisite",
               "mcp-server" in json.dumps(_data.get(af.KEY_PREREQUISITES)) and
@@ -908,8 +1026,9 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
               sorted(h.replace("\\", "/") for h in _data.get(af.KEY_HELPERS) or []) == sorted([
                   ".claude/hooks/_project_paths.py", ".claude/hooks/_shell_write_targets.py",
                   ".claude/scripts/_contract_index.py"]), "helpers %r" % (_data.get(af.KEY_HELPERS),))
-check("the add-on manifests together name exactly the five add-on hook files that hooks.json must never register",
-      _all_addon_hook_files == ADDON_HOOK_FILES, "named %s" % sorted(_all_addon_hook_files))
+check("the add-on manifests together name exactly the five add-on hook files and the advisor's former name "
+      "(installed, disabled or former) that hooks.json must never register",
+      _all_addon_hook_files == CUT_HOOKS, "named %s" % sorted(_all_addon_hook_files))
 check("no add-on hook file sits in the default hooks folder (a project gets it only through an install skill)",
       not (ADDON_HOOK_FILES & default_hook_names(ROOT)),
       "found in .claude/hooks/: %s" % sorted(ADDON_HOOK_FILES & default_hook_names(ROOT)))
@@ -966,6 +1085,73 @@ with tempfile.TemporaryDirectory(prefix="addon-controls-") as _ctl_name:
     _m[af.KEY_INSTALL_SKILL] = "something-else"
     check("control: a wrong install skill name is reported", bool(_ctl_problems(_m)))
     check("control: a manifest that is not an object is reported", bool(_ctl_problems(["not", "an", "object"])))
+
+    # The invariants of the extended manifest (I-1 to I-3, optional kill_switches). The control add-on gets a
+    # document and a disabled hook with a note, so each case below changes exactly one thing.
+    (_ctl / ".claude" / "addons" / "demo" / "documents").mkdir()
+    (_ctl / ".claude" / "addons" / "demo" / "documents" / "DEMO_RULES.md").write_text("# rules\n", encoding="utf-8")
+    (_ctl / ".claude" / "addons" / "demo" / "hooks" / "old-hook.py").write_text("", encoding="utf-8")
+    (_ctl / ".claude" / "addons" / "demo" / "DISABLED.md").write_text("# off\n", encoding="utf-8")
+
+    def _docs_only() -> dict:
+        data = _good()
+        data.update({af.KEY_HOOKS: [], af.KEY_ROWS: [], af.KEY_DOCUMENTS: ["DEMO_RULES.md"]})
+        data.pop(af.KEY_KILL_SWITCHES)
+        return data
+
+    def _disabled_entry() -> dict:
+        return {af.DISABLED_HOOK: "old-hook.py", af.DISABLED_FORMER: ["older-hook.py"],
+                af.DISABLED_ROW: {af.ROW_EVENT: "UserPromptSubmit", af.ROW_ARGS: []},
+                af.DISABLED_NOTE: "DISABLED.md", af.DISABLED_HASHES: ["0" * 64]}
+
+    check("control: a documents-only add-on with no hook, no row and no kill_switches key is well formed (I-1, "
+          "optional kill_switches)", _ctl_problems(_docs_only()) == [], str(_ctl_problems(_docs_only())))
+    _m = _docs_only()
+    _m[af.KEY_DOCUMENTS] = []
+    check("control I-1: hooks and documents both empty is reported", bool(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_ROWS] = [{af.ROW_EVENT: "PreToolUse", af.ROW_HOOK: "demo-hook.py"}]
+    check("control I-2: a row that names a hook the manifest does not list is reported", bool(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_DOCUMENTS] = ["MISSING.md"]
+    check("control: a document that does not exist is reported", bool(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_DOCUMENTS] = ["sub/DEMO_RULES.md"]
+    check("control: a document name with a separator is reported", bool(_ctl_problems(_m)))
+    _m = _good()
+    _m[af.KEY_KILL_SWITCHES] = ["NOT_CLAUDE"]
+    check("control: a kill switch that is not a CLAUDE_* name is reported", bool(_ctl_problems(_m)))
+    _m = _good()
+    _m.pop(af.KEY_KILL_SWITCHES)
+    check("control: a manifest with no kill_switches key is well formed", _ctl_problems(_m) == [],
+          str(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_DISABLED] = [_disabled_entry()]
+    check("control: a well-formed disabled hook entry has no problem", _ctl_problems(_m) == [],
+          str(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_DISABLED] = [dict(_disabled_entry(), **{af.DISABLED_HOOK: "gone.py"})]
+    check("control I-3: a disabled hook whose file does not exist is reported", bool(_ctl_problems(_m)))
+    _m = _good()
+    _m[af.KEY_DISABLED] = [dict(_disabled_entry(), **{af.DISABLED_HOOK: "demo-hook.py"})]
+    check("control I-3: a file in both hooks and disabled is reported", bool(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_DISABLED] = [dict(_disabled_entry(), **{af.DISABLED_FORMER: ["old-hook.py"]})]
+    check("control I-3: a former name equal to the disabled hook is reported", bool(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_DISABLED] = [dict(_disabled_entry(), **{af.DISABLED_HASHES: ["abc"]})]
+    check("control: a released hash that is not a SHA-256 is reported", bool(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_DISABLED] = [dict(_disabled_entry(), **{af.DISABLED_NOTE: "NOPE.md"})]
+    check("control: a disabled hook whose note file does not exist is reported", bool(_ctl_problems(_m)))
+    check("control I-4: angular-tailwind with a kill switch is reported",
+          bool(angular_tailwind_problems(dict(_docs_only(), **{af.KEY_KILL_SWITCHES: ["CLAUDE_ARCH_ADVISOR"]}))))
+    check("control I-4: angular-tailwind with a row on UserPromptSubmit is reported",
+          bool(angular_tailwind_problems({af.KEY_ROWS: [{af.ROW_EVENT: "UserPromptSubmit",
+                                                         af.ROW_HOOK: ANGULAR_DISABLED_HOOK}],
+                                          af.KEY_DOCUMENTS: ANGULAR_DOCUMENTS,
+                                          af.KEY_DISABLED: [{af.DISABLED_HOOK: ANGULAR_DISABLED_HOOK,
+                                                             af.DISABLED_FORMER: ANGULAR_FORMER_NAMES}]})))
 
 print("\nINV-O1  the version is bumped exactly when the tree differs from its merge base with origin/master")
 # Amended from sub-task 1's "every version declaration exceeds origin's version": a branch whose tree

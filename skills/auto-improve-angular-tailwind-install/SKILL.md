@@ -1,12 +1,14 @@
 ---
 name: auto-improve-angular-tailwind-install
-description: "Install the angular-tailwind add-on of the agentic-auto-improve plugin in this project: a hook that, at each prompt about UI work, reminds the agent of the Angular and Tailwind CSS rules before it writes any code. Previews the files and the settings.json change, asks for one confirmation, then writes. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-angular-tailwind-install, 'install the angular tailwind add-on', 'turn on the CSS reminder', or 'add the UI rules advisor'. Never overwrites a file that differs and never removes a row."
+description: "Install the angular-tailwind add-on of the agentic-auto-improve plugin in this project: four rule documents (Angular code, Angular Material, Tailwind styling, UI patterns) copied into .claude/references/angular-tailwind/ and listed in the project profile's review.documents slot. Installs no hook and writes no settings.json row. Previews the files and the profile change, asks for one confirmation, then writes. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-angular-tailwind-install, 'install the angular tailwind add-on', 'add the Angular and Tailwind rule documents', or 'turn on the UI rules'. Never overwrites a file that differs and never removes a row."
 user_invocable: true
 ---
 
 # /auto-improve-angular-tailwind-install — install the angular-tailwind add-on
 
-The `angular-tailwind` add-on is a hook that speaks at each prompt. When the prompt is about UI work, it adds a short reminder of the project's CSS rules to what the agent sees. It is for projects built with Angular and Tailwind. Nothing registers it by default.
+The `angular-tailwind` add-on gives a project the Angular and Tailwind rule documents. It copies four markdown files into `.claude/references/angular-tailwind/` and lists them in the project profile's `review.documents` slot, so the agents that read that slot find them. It is for projects built with Angular and Tailwind. Nothing registers it by default.
+
+It starts no program on any prompt. The old prompt hook of this add-on is **disabled**: its script still ships, but this install never copies it and never writes its row. The edit-time guard `architecture-guard.py` stays the enforcement.
 
 This skill proposes first. It writes only after one yes, and it reads and touches only
 `agentic-auto-improve`.
@@ -21,7 +23,9 @@ Do not work any of it out yourself, and never edit `settings.json` by hand to in
 add-on: a typing mistake there can switch every check off, or block every action.
 
 The script never removes a row or a file. It never overwrites a file that differs from the
-plugin's copy. It copies a helper file only when the project lacks it.
+plugin's copy. It copies a helper file only when the project lacks it. In the project profile it
+writes exactly one thing: it appends its own document paths to the `review.documents` slot. It
+changes no other slot and no other entry in that slot.
 
 ## Step 0: Find the script
 
@@ -67,7 +71,16 @@ Every command below is `$PY "$FI" addon --name angular-tailwind --project . ...`
 
 ## What this add-on does
 
-At each prompt, the hook `angular-tailwind-advisor.py` looks for UI words (component, template, style, layout, theme, and similar). When it finds one, it adds a reminder: no static `style="..."` attributes, near-empty component SCSS, no `text-gray-*` or hard-coded hex colours, no inline `template:` or `styles:`, and the `scroll-edge` classes for scrolling containers. It never blocks anything. It reads the project's `.claude/hooks/architecture-guard.rules.json` (the keys `frontend_projects_root` and `reference_documents`) to name the project's front-end folder and its reference documents. With no such file it still prints the reminder, without a reference list.
+Four rule documents, each one a short list of rules with a stable Rule ID (`A-nnn` Angular code, `M-nnn` Material, `T-nnn` Tailwind and styling, `P-nnn` patterns):
+
+- `ANGULAR_CODE_RULES.md`
+- `ANGULAR_MATERIAL_RULES.md`
+- `TAILWINDCSS_RULES.md`
+- `UI-UX-PATTERNS.md`
+
+The install copies them verbatim into `.claude/references/angular-tailwind/`. The project never edits them. Project facts in them are placeholders that point at profile slots or at the project's own documents. The install then lists the four paths in the profile's `review.documents` slot, so a reviewer or an implementer reads them with the rest of that list. The guard's block and warn lines name the Rule ID, and name the document when it is installed here.
+
+The install writes **no hook file and no `settings.json` row**, and the add-on declares **no kill switch**. Nothing starts on a prompt. The old prompt hook (`angular-tailwind-advisor.py`, once `architecture-advisor.py`) is a disabled hook of this add-on: see `DISABLED.md` in the add-on folder for what it did, what it cost and how to turn it back on.
 
 It needs one helper, `.claude/hooks/_project_paths.py`, which the install copies only if the project lacks it.
 
@@ -77,31 +90,32 @@ It needs one helper, `.claude/hooks/_project_paths.py`, which the install copies
 $PY "$FI" addon --name angular-tailwind --project . --json
 ```
 
-The answer carries `files` (each file with its action: `copy`, `present` or `keep-existing`),
-`to-add` (the settings rows it would write), `already-present`, `unified-diff` (the exact change
-to `.claude/settings.json`), `notes`, `kill-switches`, `target`, `plugin-root` and `plan-sha256`.
-**Keep `plan-sha256`.** The apply needs it as `--expect-sha256`. It covers the settings bytes, the
-text the write would produce and every file the install would copy, so anything that moves
-between the preview and the write is refused as `changed-since-preview`.
+The answer carries `files` (each file with its kind, `document` or `helper`, and its action: `copy`, `present` or `keep-existing`),
+`profile` (the `review.documents` slot: `adds` the paths it would append, `already-listed` the paths it skips, `before` and `after`
+the slot text, and a `unified-diff`), `to-add` (settings rows; empty for this add-on), `notes`, `kill-switches` (empty),
+`disabled-hooks`, `target`, `plugin-root` and `plan-sha256`.
+**Keep `plan-sha256`.** The apply needs it as `--expect-sha256`. It covers the settings bytes, the profile bytes before and
+after, and every file the install would copy, so anything that moves between the preview and the write is refused as
+`changed-since-preview`.
 
-The install registers one row: `UserPromptSubmit`, running `angular-tailwind-advisor.py` from `${CLAUDE_PROJECT_DIR}/.claude/hooks/`. The pre-write check that enforces the same rules is a different hook, `architecture-guard.py`, which the plugin already registers by default.
+How the slot is written: a slot that still holds its placeholder, or `none`, becomes the list of the four paths. A slot the team
+wrote keeps its text, and the missing paths are appended after it. A path that is already listed (with or without backticks,
+with either slash) is skipped. When all four are listed, the profile is not written at all.
 
 ## Step 2: Show the plan and ask once
 
 Show the user, in plain words:
 
-- the files it would copy into `.claude/hooks/` (and any helper into `.claude/hooks/` or
-  `.claude/scripts/`), with the action for each. A file marked `present` is already identical
-  and is not touched. A helper marked `keep-existing` is kept as it is.
-- the exact `unified-diff` for `.claude/settings.json`, and how many rows it adds.
-- the kill switches from `kill-switches`. They are set by the user and never by an agent.
+- the documents it would copy into `.claude/references/angular-tailwind/`, and any helper into `.claude/hooks/`, with the
+  action for each. A file marked `present` is already identical and is not touched. A helper marked `keep-existing` is kept as it is.
+- the `profile` change: the slot before, the slot after, and the `unified-diff`.
+- that no hook is installed and no row is written to `settings.json`.
 - any `notes`.
 
 State your recommendation first, in one or two sentences. Then ask **once**: install this
 add-on?
 
-Say plainly: **the new rows take effect only in a NEW session.** Claude Code reads the hook rows
-once, when a session starts, so this session keeps running without them.
+No new session is needed for the documents to be found: they are files, read when an agent reads `review.documents`.
 
 Declining writes nothing.
 
@@ -113,14 +127,10 @@ On a yes, apply with the `plan-sha256` from the preview:
 $PY "$FI" addon --name angular-tailwind --project . --apply --expect-sha256 <plan-sha256 from the preview>
 ```
 
-The script copies the hook files first and writes the rows last, so a row never points at a file
-that is not there. It takes a timestamped backup of `.claude/settings.json` before it replaces
-it. Print the `backup` path and the `rollback` line (one copy command that puts the old file
-back). Tell the user to add `.claude/settings.json.bak-*` to `.gitignore`.
+The script copies the documents first and updates the profile last, so the profile never lists a file that is not there.
+`settings.json` is not touched, so there is no backup to print. The answer lists `copied` and `registered` (the paths appended to the slot).
 
 If the answer says `nothing-to-do`, the add-on was already installed. Nothing was written.
-
-To turn the reminder off for one session, the user sets `CLAUDE_ARCH_ADVISOR=off`.
 
 ### Refusals
 
@@ -128,7 +138,16 @@ Exit `2` is a refusal you can correct. Exit `3` is an environment problem, such 
 folder with no `addon.json`. On either, read `code` and `message`, tell the user the reason in
 one plain sentence, and stop. A refusal always means nothing was changed. The ones you may see:
 
-- `addon-file-differs`: a hook file of this add-on already exists in the project and is not the
+- `profile-slot-missing`: the project has no `.claude/project-profile.md`, or the profile has no
+  `review.documents` row. Nothing was written, not even the documents. Tell the user to run
+  `/auto-improve-finish-install` first (it writes the profile), then run this skill again.
+- `disabled-hook-present`: the project still carries the retired advisor hook, as the file
+  `.claude/hooks/angular-tailwind-advisor.py` or `.claude/hooks/architecture-advisor.py`, or as a
+  row in `.claude/settings.json` or `.claude/settings.local.json` that names either file. Name what the
+  message names. Nothing was written. Tell the user to run `/auto-improve-angular-tailwind-uninstall`
+  first, which removes the row and then the file, then run this skill again. Do not delete the row
+  or the file yourself: a row left pointing at a missing script blocks every prompt.
+- `addon-file-differs`: one of the four documents already exists in the project and is not the
   plugin's copy. Name the file. The script will not overwrite it. The user compares it with the
   plugin's copy and renames or removes it by hand, then runs this skill again.
 - `changed-since-preview`: something moved after the preview. Go back to the preview, show the
@@ -141,33 +160,33 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 
 ## How to remove it
 
-The script never removes anything, so removal is by hand:
-
-1. Open `.claude/settings.json` and delete the `UserPromptSubmit` entry whose `args` name `angular-tailwind-advisor.py`.
-2. Delete `.claude/hooks/angular-tailwind-advisor.py`.
-3. Leave `.claude/hooks/_project_paths.py`: other hooks use it.
+This install never removes anything. The removal is its own skill, `/auto-improve-angular-tailwind-uninstall`.
+It also cleans a project that installed the old advisor hook under either of its file names, which is
+what `disabled-hook-present` asks for.
 
 ## Closing
 
-End with a short summary: what was copied, which rows were added, the backup path, and what was
-**not** written and why. Then repeat the new-session warning. Say that running this skill again
-changes nothing: identical files are left alone and a row that is already there is not written
-twice.
+End with a short summary: what was copied, which paths were registered in `review.documents`, and what was
+**not** written and why (no hook, no row, no `settings.json`). Say that running this skill again
+changes nothing: identical files are left alone and a path that is already listed is not listed twice.
 
 ## Anti-patterns
 
-- **Telling the user the reminder enforces anything.** It only advises. The architecture guard enforces.
-
-- **Writing `settings.json` without the preview's `plan-sha256`**, or with an old one. The hash
-  is what proves the user saw the change as it is now.
-- **Hand-editing `settings.json` instead of using the script.**
-- **Overwriting a hook file that differs.** The script refuses; do not copy over it yourself.
-- **Skipping the new-session warning.** The user will otherwise test in this session and
-  conclude the add-on does nothing.
+- **Telling the user the documents enforce anything.** They state the rules. The architecture guard enforces
+  what it checks, and for those rules its verdict is final.
+- **Offering a kill switch or an environment variable for this add-on.** It declares none, and it starts nothing.
+- **Writing a hook row or a `settings.json` entry for this add-on.** Its hook is disabled; the script writes no row.
+- **Writing the profile by hand to list the documents.** Use the script: it compares paths and skips the ones already listed.
+- **Writing without the preview's `plan-sha256`**, or with an old one. The hash is what proves the user saw the
+  change as it is now.
+- **Hand-editing `settings.json` or deleting the old advisor row or file yourself.** Run the uninstall skill:
+  it removes the row first, because a row that points at a missing script blocks every prompt.
+- **Overwriting a document that differs.** The script refuses; do not copy over it yourself.
 
 ## When NOT to use
 
 - To turn on the check that blocks a bad write. That is `architecture-guard.py`, already a default hook.
-- To change the CSS rules the reminder prints. They belong to the add-on's hook file.
+- To change the rules the documents state. They belong to the add-on's `documents/` folder in the plugin.
+- To get the prompt reminder back. See `DISABLED.md` in the add-on folder.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
 - On Cursor or Codex. Hooks are Claude-only in this release.

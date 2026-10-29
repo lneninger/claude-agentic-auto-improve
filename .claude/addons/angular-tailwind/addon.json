@@ -1,21 +1,46 @@
 {
   "name": "angular-tailwind",
-  "hooks": [
-    "angular-tailwind-advisor.py"
-  ],
+  "hooks": [],
   "helpers": [
     ".claude/hooks/_project_paths.py"
   ],
-  "registrations": [
-    {
-      "event": "UserPromptSubmit",
-      "hook": "angular-tailwind-advisor.py",
-      "args": []
-    }
-  ],
+  "registrations": [],
   "prerequisites": [],
-  "kill_switches": [
-    "CLAUDE_ARCH_ADVISOR"
+  "documents": [
+    "ANGULAR_CODE_RULES.md",
+    "ANGULAR_MATERIAL_RULES.md",
+    "TAILWINDCSS_RULES.md",
+    "UI-UX-PATTERNS.md"
+  ],
+  "stylesheet_snippet": {
+    "file": "snippets/scroll-edge.scss",
+    "selectors": [
+      ".scroll-edge",
+      ".scroll-edge-content",
+      ".scroll-edge-header"
+    ],
+    "begin": "/* agentic-auto-improve:scroll-edge begin */",
+    "end": "/* agentic-auto-improve:scroll-edge end */"
+  },
+  "disabled": [
+    {
+      "hook": "angular-tailwind-advisor.py",
+      "former_names": [
+        "architecture-advisor.py"
+      ],
+      "registration": {
+        "event": "UserPromptSubmit",
+        "args": []
+      },
+      "note": "DISABLED.md",
+      "released_sha256": [
+        "db78cb8cb75516554268c617c58f974a77502a27ba9f9d81ebee02bdc086ed27",
+        "e2462e9a07cf6a2e3646553e4999ccd32da5920e32d21f0ec0a735eadf9f4ad3",
+        "3accb86d4dd55b5ef10885b7ef33f5bafcfa4bbb9ff046eb0e4e9b165fd75a25",
+        "799fa18773cc27f28dab48456b2c4c60be95373e8e6f3d13c1858b35ce8c0b51",
+        "58b9db5a45e387e16fac44656de33c6c36cc3372cf66c26d1b397be13f279b4e"
+      ]
+    }
   ],
   "install_skill": "auto-improve-angular-tailwind-install"
 }
