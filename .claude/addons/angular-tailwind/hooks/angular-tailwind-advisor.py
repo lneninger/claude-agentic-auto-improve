@@ -21,9 +21,6 @@ Hook contract (Claude Code):
                         additionalContext: <string injected into the prompt> } }
     exit 0: succeed (additionalContext is injected if present)
     other:  non-fatal -- fails open
-
-Bypass:
-    CLAUDE_ARCH_ADVISOR=off -- disable for a session
 """
 
 from __future__ import annotations
@@ -203,9 +200,6 @@ def log(msg: str) -> None:
 
 
 def main() -> None:
-    if os.environ.get("CLAUDE_ARCH_ADVISOR", "").lower() in {"off", "0", "false", "no"}:
-        sys.exit(0)
-
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}

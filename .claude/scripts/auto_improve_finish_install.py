@@ -29,10 +29,12 @@ Usage:
       --expect-sha256 <plan hash>
 
 The ``addon`` subcommand installs one opt-in add-on (a folder under ``.claude/addons/`` in the plugin)
-into the project: it copies the add-on's hook files and the helper files its ``addon.json`` names, and
-writes the manifest's registration rows into the project's settings.json in exec form, through the same
-preview, plan hash, backup and atomic writer as ``hooks``. It never removes a row or a file and never
-overwrites a file that differs.
+into the project: it copies the add-on's hook files, rule documents and the helper files its ``addon.json``
+names, registers the documents in the project profile's ``review.documents`` slot, and writes the
+manifest's registration rows into the project's settings.json in exec form, through the same preview,
+plan hash, backup and atomic writer as ``hooks``. It never removes a row or a file and never overwrites a
+file that differs. A hook the manifest lists under ``disabled`` is never copied and never registered; a
+project that still carries one (under its current or a former name) is refused as ``disabled-hook-present``.
 """
 
 from __future__ import annotations
@@ -99,6 +101,8 @@ REFUSAL_CODES: Tuple[str, ...] = (
     "addon-manifest-missing",
     "codegraph-mcp-not-configured",
     "addon-file-differs",
+    "profile-slot-missing",
+    "disabled-hook-present",
 )
 
 _ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing",
@@ -155,6 +159,11 @@ ADDONS_REL = ".claude/addons"
 ADDON_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ADDON_HELPER_ROOTS = (".claude/hooks/", ".claude/scripts/")
 ADDON_ROW_KEYS = ("async", "statusMessage")
+#: Where an add-on's documents land in the project: ``<ADDON_DOCUMENTS_REL>/<add-on name>/<file>``.
+ADDON_DOCUMENTS_REL = ".claude/references"
+#: The only profile slot an add-on install writes (I-6): it appends its own document paths to it.
+PROFILE_DOCUMENTS_SLOT = "review.documents"
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 NEW_SESSION_NOTE = (
     "Claude Code reads the hook rows once, when a session starts. Start a new session for the "
     "installed add-on to take effect.")
@@ -1845,22 +1854,83 @@ def _read_addon_manifest(folder: Path) -> Tuple[Optional[Result], Dict[str, Any]
         return _addon_manifest_problem(path, "it is not a JSON object"), {}
     hooks, helpers = data.get("hooks"), data.get("helpers")
     rows, prerequisites = data.get("registrations"), data.get("prerequisites")
-    if not (isinstance(hooks, list) and hooks and all(_plain_name(h) and str(h).endswith(".py") for h in hooks)):
-        return _addon_manifest_problem(path, "hooks must be a non-empty list of hook file names"), {}
+    documents = data.get("documents", [])
+    if not (isinstance(hooks, list) and all(_plain_name(h) and str(h).endswith(".py") for h in hooks)):
+        return _addon_manifest_problem(path, "hooks must be a list of hook file names (it may be empty)"), {}
+    if not (isinstance(documents, list) and all(_plain_name(d) and str(d).endswith(".md") for d in documents)):
+        return _addon_manifest_problem(path, "documents must be a list of markdown file names"), {}
+    if not hooks and not documents:  # I-1
+        return _addon_manifest_problem(path, "hooks and documents are both empty; an add-on installs something"), {}
     if not (isinstance(helpers, list) and all(
             isinstance(h, str) and h.startswith(ADDON_HELPER_ROOTS) and ".." not in h.split("/")
             and "\\" not in h for h in helpers)):
         return _addon_manifest_problem(path, "helpers must be paths under .claude/hooks/ or .claude/scripts/"), {}
-    if not (isinstance(rows, list) and rows and all(
+    if not (isinstance(rows, list) and all(
             isinstance(r, dict) and r.get("hook") in hooks and isinstance(r.get("event"), str) and r["event"]
             and isinstance(r.get("args", []), list) and all(isinstance(a, str) for a in r.get("args", []))
             and isinstance(r.get("matcher", ""), str) for r in rows)):
         return _addon_manifest_problem(path, "registrations must be rows naming an event and one of the hooks"), {}
+    if not all(any(r["hook"] == h for r in rows) for h in hooks):  # I-2: every hook has a row
+        return _addon_manifest_problem(path, "every hook needs at least one registration row"), {}
     if not (isinstance(prerequisites, list) and all(
             isinstance(p, dict) and p.get("kind") == "mcp-server" and isinstance(p.get("name"), str) and p["name"]
             for p in prerequisites)):
         return _addon_manifest_problem(path, "prerequisites must be a list of mcp-server entries"), {}
+    if "kill_switches" in data and not (isinstance(data["kill_switches"], list) and all(
+            isinstance(k, str) and k.startswith("CLAUDE_") for k in data["kill_switches"])):
+        return _addon_manifest_problem(path, "kill_switches, when present, must be a list of CLAUDE_* names"), {}
+    snippet = data.get("stylesheet_snippet")
+    if snippet is not None and not (isinstance(snippet, dict) and isinstance(snippet.get("file"), str)
+                                    and snippet["file"].startswith("snippets/") and ".." not in snippet["file"]
+                                    and "\\" not in snippet["file"] and (folder / snippet["file"]).is_file()):
+        return _addon_manifest_problem(path, "stylesheet_snippet must name a file under snippets/ in the "
+                                             "add-on folder"), {}
+    for document in documents:
+        if not (folder / "documents" / document).is_file():
+            return _addon_manifest_problem(path, "the document %s is not under documents/ in the add-on folder"
+                                           % document), {}
+    problem = _disabled_entries_problem(path, folder, data.get("disabled", []), hooks)
+    if problem:
+        return problem, {}
     return None, data
+
+
+def _disabled_entries_problem(path: Path, folder: Path, disabled: Any, hooks: List[str]) -> Optional[Result]:
+    """The refusal for a malformed ``disabled`` list (Disabled hook entry shape, I-3), or None."""
+    if not isinstance(disabled, list):
+        return _addon_manifest_problem(path, "disabled must be a list of disabled hook entries")
+    claimed: List[str] = list(hooks)
+    for entry in disabled:
+        hook = entry.get("hook") if isinstance(entry, dict) else None
+        if not (_plain_name(hook) and str(hook).endswith(".py")):
+            return _addon_manifest_problem(path, "a disabled entry needs a hook that is a plain .py file name")
+        former = entry.get("former_names", [])
+        if not (isinstance(former, list) and all(_plain_name(f) and str(f).endswith(".py") for f in former)):
+            return _addon_manifest_problem(path, "former_names of %s must be a list of .py file names" % hook)
+        row = entry.get("registration")
+        if not (isinstance(row, dict) and isinstance(row.get("event"), str) and row["event"]
+                and isinstance(row.get("args", []), list) and all(isinstance(a, str) for a in row.get("args", []))
+                and isinstance(row.get("matcher", ""), str)):
+            return _addon_manifest_problem(path, "the registration of disabled hook %s needs an event, an optional "
+                                                 "matcher and args" % hook)
+        note = entry.get("note")
+        if not (_plain_name(note) and str(note).endswith(".md") and (folder / note).is_file()):
+            return _addon_manifest_problem(path, "the note of disabled hook %s must be a .md file in the add-on "
+                                                 "folder" % hook)
+        hashes = entry.get("released_sha256")
+        if not (isinstance(hashes, list) and hashes and all(isinstance(h, str) and _SHA256_HEX.match(h)
+                                                            for h in hashes)):
+            return _addon_manifest_problem(path, "released_sha256 of %s must be a non-empty list of lowercase hex "
+                                                 "SHA-256 values" % hook)
+        if not (folder / "hooks" / hook).is_file():
+            return _addon_manifest_problem(path, "the disabled hook %s is not under hooks/ in the add-on folder"
+                                           % hook)
+        claimed += [hook] + list(former)
+    duplicate = next((c for c in claimed if claimed.count(c) > 1), None)
+    if duplicate:  # I-3
+        return _addon_manifest_problem(path, "%s appears more than once across hooks, disabled hooks and former "
+                                             "names" % duplicate)
+    return None
 
 
 def _addon_listing(root: Path) -> List[Dict[str, Any]]:
@@ -1874,8 +1944,12 @@ def _addon_listing(root: Path) -> List[Dict[str, Any]]:
     for folder in folders:
         data = _load_json_lenient(folder / "addon.json")
         if isinstance(data, dict) and isinstance(data.get("install_skill"), str):
-            found.append({"name": folder.name, "install-skill": data["install_skill"],
-                          "hooks": [h for h in data.get("hooks", []) if isinstance(h, str)]})
+            item = {"name": folder.name, "install-skill": data["install_skill"],
+                    "hooks": [h for h in data.get("hooks", []) if isinstance(h, str)],
+                    "documents": [d for d in data.get("documents", []) if isinstance(d, str)]}
+            if isinstance(data.get("uninstall_skill"), str):
+                item["uninstall-skill"] = data["uninstall_skill"]
+            found.append(item)
     return found
 
 
@@ -1969,15 +2043,54 @@ def _fold_text_bytes(data: bytes) -> bytes:
     return data.replace(b"\r\n", b"\n")
 
 
+def _document_path(addon: str, document: str) -> str:
+    """The project-relative path an add-on document is copied to (forward slashes)."""
+    return "%s/%s/%s" % (ADDON_DOCUMENTS_REL, addon, document)
+
+
+def _disabled_hook_refusal(project: Path, home: Path, name: str, manifest: Dict[str, Any]) -> Optional[Result]:
+    """``disabled-hook-present`` when the project carries a disabled hook: its file in .claude/hooks/, or a row
+    in the project's settings.json or settings.local.json, under the hook's current or any former name (I-5).
+    Reads only; the message names the uninstall skill."""
+    entries = [e for e in manifest.get("disabled", []) if isinstance(e, dict)]
+    if not entries:
+        return None
+    names = {n.lower(): e["hook"] for e in entries for n in [e["hook"]] + list(e.get("former_names", []))}
+    found: List[str] = []
+    first: Optional[Path] = None
+    for lowered, hook in sorted(names.items()):
+        for candidate in sorted(p for p in (project / ".claude" / "hooks").glob("*") if p.name.lower() == lowered):
+            found.append("the file .claude/hooks/%s" % candidate.name)
+            first = first or candidate
+    existing, _disabled, problem = _existing_registrations(project, home)
+    if problem:
+        return problem
+    for row in existing:
+        if row["layer"] in ("project", "local") and str(row["file"]).lower() in names:
+            layer = "settings.json" if row["layer"] == "project" else "settings.local.json"
+            found.append("a %s row in .claude/%s" % (row["event"], layer))
+            first = first or (project / ".claude" / layer)
+    if not found:
+        return None
+    return refusal(
+        "disabled-hook-present",
+        "this project still carries the retired %s hook (%s), which the %s add-on no longer installs, so "
+        "nothing was written. Run /auto-improve-%s-uninstall first, then run this install again"
+        % (entries[0]["hook"], "; ".join(found), name, name), first or project)
+
+
 def _addon_file_ops(project: Path, root: Path, folder: Path, manifest: Dict[str, Any]
                     ) -> Tuple[Optional[Result], List[Dict[str, Any]]]:
     """What the install does to each file: copy it, find it already identical, or leave a helper alone.
 
-    A hook file that exists in the project and differs from the plugin's is refused (addon-file-differs):
-    nothing is overwritten. A helper that exists is kept as it is, whatever it holds.
+    A hook or document file that exists in the project and differs from the plugin's is refused
+    (addon-file-differs): nothing is overwritten. A helper that exists is kept as it is, whatever it holds.
+    A disabled hook is not in the list: no install copies it.
     """
     ops: List[Dict[str, Any]] = []
     entries = [("hook", ".claude/hooks/" + h, folder / "hooks" / h) for h in manifest["hooks"]]
+    entries += [("document", _document_path(folder.name, d), folder / "documents" / d)
+                for d in manifest.get("documents", [])]
     entries += [("helper", h, root / h) for h in manifest["helpers"]]
     for kind, rel, src in entries:
         if not src.is_file():
@@ -2006,6 +2119,64 @@ def _addon_file_ops(project: Path, root: Path, folder: Path, manifest: Dict[str,
         ops.append({"path": rel, "kind": kind, "action": action, "dest": dest, "data": wanted,
                     "sha256": _sha256(wanted)})
     return None, ops
+
+
+def _profile_path_key(entry: str) -> str:
+    """Comparison form of a profile entry (I-6): no backticks, forward slashes, no leading ``./``."""
+    text = entry.strip().strip("`").strip().replace("\\", "/")
+    return text[2:] if text.startswith("./") else text
+
+
+def _plan_profile_documents(project: Path, paths: List[str]) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """Register ``paths`` (an add-on's document paths) in the profile's ``review.documents`` slot (I-6).
+
+    Returns (refusal, {}) or (None, plan). ``profile-slot-missing`` (nothing written) when the project has no
+    profile or the profile has no such row. The plan carries the profile bytes before and after:
+    paths already listed are skipped (compared without backticks, with forward slashes); a slot that is a
+    placeholder or ``none`` becomes the list; an authored slot keeps its text and gets the missing paths
+    appended; when every path is listed the bytes are unchanged and nothing is written. Writes nothing.
+    """
+    target = project / PROFILE_REL
+    empty: Dict[str, Any] = {"target": target, "old-bytes": None, "new-bytes": None, "adds": [],
+                             "already-listed": [], "before": None, "after": None, "diff": ""}
+    if not paths:
+        return None, empty
+    hint = "run /auto-improve-finish-install to write the profile first, then run this install again"
+    if not target.is_file():
+        return refusal("profile-slot-missing", "the project has no %s, so the %s slot that lists the add-on's "
+                       "documents cannot be written and nothing was written; %s"
+                       % (PROFILE_REL, PROFILE_DOCUMENTS_SLOT, hint), target), {}
+    try:
+        old_bytes = target.read_bytes()
+        text = old_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return refusal("project-unreadable", "the profile cannot be read as UTF-8: %s" % exc, target), {}
+    lines = text.split("\n")
+    found = [(i, raw) for i, slot, raw in _slot_rows(lines) if slot == PROFILE_DOCUMENTS_SLOT]
+    if not found:
+        return refusal("profile-slot-missing", "%s has no %s row, so the add-on's documents cannot be listed "
+                       "and nothing was written; %s" % (PROFILE_REL, PROFILE_DOCUMENTS_SLOT, hint), target), {}
+    index, raw = found[0]
+    open_slot = _is_placeholder(raw) or raw.strip("` ").lower() == "none"
+    listed = set() if open_slot else {_profile_path_key(e) for e in _parse_set_value(raw)}
+    adds = [p for p in paths if p not in listed]
+    already = [p for p in paths if p in listed]
+    new_bytes = old_bytes
+    after = raw
+    if adds:
+        after = _format_value(adds) if open_slot else raw.rstrip() + ", " + _format_value(adds)
+        line = lines[index]
+        match = _ROW.match(line.rstrip("\r"))
+        if match is None:  # cannot happen: _slot_rows matched this very line
+            return refusal("unexpected-settings-shape", "the %s row could not be re-read" % PROFILE_DOCUMENTS_SLOT,
+                           target), {}
+        start, end = match.span(2)
+        lines[index] = line[:start] + " " + after + " " + line[end:]
+        new_bytes = "\n".join(lines).encode("utf-8")
+    diff = "".join(difflib.unified_diff(text.splitlines(keepends=True), new_bytes.decode("utf-8").splitlines(
+        keepends=True), fromfile=str(target), tofile=str(target))) if adds else ""
+    return None, {"target": target, "old-bytes": old_bytes, "new-bytes": new_bytes, "adds": adds,
+                  "already-listed": already, "before": raw, "after": after, "diff": diff}
 
 
 def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[Path],
@@ -2046,7 +2217,14 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
                 "again." % (state["why"], name), project / ".mcp.json"), {}
         if state["note"]:
             approval_notes.append(state["note"])
+    problem = _disabled_hook_refusal(project, home, name, manifest)
+    if problem:
+        return problem, {}
     problem, ops = _addon_file_ops(project, root, folder, manifest)
+    if problem:
+        return problem, {}
+    document_paths = [o["path"] for o in ops if o["kind"] == "document"]
+    problem, profile = _plan_profile_documents(project, document_paths)
     if problem:
         return problem, {}
     regs = [_Registration(r["event"], r.get("matcher") or None, r["hook"], tuple(r.get("args", [])),
@@ -2058,12 +2236,22 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
         return problem, {}
     ops_digest = "\n".join("%s|%s|%s" % (o["action"], o["path"], o["sha256"]) for o in ops).encode("utf-8")
     old_bytes, new_bytes, to_add = edit["old-bytes"], edit["new-bytes"], edit["to-add"]
+    # I-9: the digest covers the settings and profile bytes (before and after) and every file to copy.
+    profile_digest = (profile["old-bytes"] if profile["old-bytes"] is not None else b"absent",
+                      profile["new-bytes"] if profile["new-bytes"] is not None else b"absent")
     plan: Result = {
         "status": "plan", "add-on": name, "install-skill": manifest.get("install_skill"),
         "target": str(edit["target"]), "plugin-root": str(root),
         "files": [{"path": o["path"], "kind": o["kind"], "action": o["action"]} for o in ops],
         "source-sha256": _sha256(old_bytes) if old_bytes is not None else "absent",
-        "plan-sha256": _plan_digest(old_bytes if old_bytes is not None else b"absent", new_bytes, ops_digest),
+        "plan-sha256": _plan_digest(old_bytes if old_bytes is not None else b"absent", new_bytes, ops_digest,
+                                    *profile_digest),
+        "profile": ({"target": str(profile["target"]), "slot": PROFILE_DOCUMENTS_SLOT, "adds": profile["adds"],
+                     "already-listed": profile["already-listed"], "before": profile["before"],
+                     "after": profile["after"], "unified-diff": profile["diff"]}
+                    if document_paths else None),
+        "disabled-hooks": [{"hook": e["hook"], "former-names": list(e.get("former_names", [])),
+                            "note": e["note"]} for e in manifest.get("disabled", [])],
         "to-add": [{"event": r.event, "matcher": r.matcher, "command": _written_hook(r, platform)["command"],
                     "args": _written_hook(r, platform)["args"], "registration-key": r.key} for r in to_add],
         "already-present": edit["present"], "interpreter": "py -3" if platform == "win32" else "python3",
@@ -2072,7 +2260,8 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
         "kill-switches": [k for k in manifest.get("kill_switches", []) if isinstance(k, str)],
         "new-session-note": NEW_SESSION_NOTE,
     }
-    return plan, {"old-bytes": old_bytes, "new-bytes": new_bytes, "to-add": to_add, "ops": ops}
+    return plan, {"old-bytes": old_bytes, "new-bytes": new_bytes, "to-add": to_add, "ops": ops,
+                  "profile": profile}
 
 
 def plan_addon(
@@ -2098,11 +2287,13 @@ def apply_addon(
     plugin_root: Optional[Path] = None,
     provider: str = "claude",
 ) -> Dict[str, Any]:
-    """Install one add-on: copy its missing files, then merge its rows into the project's settings.json.
+    """Install one add-on: copy its missing files, register its documents, then merge its rows.
 
-    The previewed plan hash must still match. Every check runs before the first write. The hook files are
-    copied before the rows are written, so a row never points at a file that is not there. A backup of
-    settings.json is taken and the file is replaced atomically. Nothing is ever removed or overwritten.
+    The previewed plan hash must still match. Every check runs before the first write. The hook files and
+    documents are copied first, then the document paths are appended to the profile's review.documents slot
+    (only when some are not listed yet), then the rows are written, so neither a row nor a profile entry
+    points at a file that is not there. A backup of settings.json is taken and the file is replaced
+    atomically. Nothing is ever removed or overwritten.
     """
     project = Path(project)
     platform = platform or sys.platform
@@ -2115,7 +2306,9 @@ def apply_addon(
                        "what would be written changed since it was previewed (settings.json, the add-on's "
                        "files in the project or in the plugin differ); run the preview again", target)
     copies = [o for o in payload["ops"] if o["action"] == "copy"]
-    if not copies and not payload["to-add"]:
+    profile = payload["profile"]
+    profile_changes = bool(profile["adds"])
+    if not copies and not payload["to-add"] and not profile_changes:
         return {"status": "nothing-to-do", "target": str(target), "add-on": name}
     destinations = [posixpath.dirname(op["path"]) for op in copies]
     linked = _linked_folder_refusal(project, list(dict.fromkeys(list(WRITE_FOLDERS) + destinations)), target)
@@ -2149,7 +2342,22 @@ def apply_addon(
         copied.append(op["path"])
     result: Dict[str, Any] = {"status": "applied", "target": str(target), "add-on": name,
                               "copied": copied, "added": len(payload["to-add"]), "backup": None,
-                              "new-session-note": NEW_SESSION_NOTE}
+                              "registered": [], "new-session-note": NEW_SESSION_NOTE}
+    if profile_changes:
+        # The documents are on disk, so the profile never lists a file that is not there. The slot was
+        # re-read with the plan above; a change since then is refused, as for settings.json.
+        try:
+            current_profile = Path(profile["target"]).read_bytes()
+        except OSError:
+            current_profile = None
+        if current_profile != profile["old-bytes"]:
+            return refusal("changed-since-preview", "the project profile changed while the apply was running "
+                           "(files copied: %s)" % (", ".join(copied) or "none"), profile["target"])
+        error = _atomic_write(Path(profile["target"]), profile["new-bytes"])
+        if error:
+            return refusal("write-failed", "the project profile could not be written: %s (files copied: %s)"
+                           % (error, ", ".join(copied) or "none"), profile["target"])
+        result["registered"] = list(profile["adds"])
     if not payload["to-add"]:
         return result
     old_bytes = payload["old-bytes"]
