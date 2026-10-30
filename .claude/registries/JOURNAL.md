@@ -268,6 +268,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract lists a New Mechanism that mirrors an existing entry's inverse operation
 - **Tags:** mechanisms, reuse, extend-by, removal
 
+### 2026-10-29 — A refusal can have more than one cause, so a fix for one cause must say what it does not cover
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-29-upgrade-loop-and-registry-entries.md
+- **Lesson:** Before claiming a fix ends a refusal loop, list every input the refusal reads (rows in each layer and files on disk) and state which ones the fix clears and which it leaves.
+- **Apply when:** a contract fixes a refusal that tells the user to run a command, and the command changes only some of the things the refusal reads
+- **Tags:** refusal, remedy, install, loop, kept-file
+
+### 2026-10-29 — A behaviour change must schedule an edit for every passage that describes the old behaviour
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-29-upgrade-loop-and-registry-entries.md
+- **Lesson:** When a fix changes what a command edits, search the README and the skill text for every sentence that names the old scope, and put each one in a block's Files to touch.
+- **Apply when:** a contract changes which files or layers a script reads or writes, and a README or skill describes that scope
+- **Tags:** readme-note, docs, scope, stale-text
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
