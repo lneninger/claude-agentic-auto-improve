@@ -1106,6 +1106,7 @@ HALT_OUTCOMES = (
     "verification-not-ready", "push-rejected", "pr-mismatch", "pr-not-ready",
     "link-not-verified", "master-moved", "head-moved", "not-mergeable", "merge-refused",
     "merge-unconfirmed",
+    "version-raise-failed",  # issue 113: P7b, the Landing version raise (26 halts)
 )
 
 
@@ -1128,6 +1129,7 @@ GATE_FACTS = (
     ("p7_unresolvable_conflict", "unresolvable-conflict"),
     ("p7_environment_failure", "environment-failure"),
     ("p7_regeneration_failed", "regeneration-failed"),
+    ("p7b_version_raise_failed", "version-raise-failed"),
     ("p9_push_rejected", "push-rejected"),
     ("p10_pr_mismatch", "pr-mismatch"),
     ("p10_pr_not_ready", "pr-not-ready"),
@@ -1153,7 +1155,7 @@ class TestLandingOutcomeSet(LandCase):
         outcomes = self.mod().__dict__.get("LANDING_OUTCOMES")
         self.assertIsNotNone(outcomes, "land_contract.LANDING_OUTCOMES (the closed set) must exist")
         self.assertEqual(set(outcomes), set(SUCCESS_OUTCOMES) | set(HALT_OUTCOMES),
-                         "the closed set holds exactly 3 successes and 25 halts")
+                         "the closed set holds exactly 3 successes and 26 halts")
 
 
 class TestEvaluateGates(LandCase):
@@ -1219,6 +1221,56 @@ for _key, _o in GATE_FACTS:
             _make_halt_test(_key, _o))
 setattr(TestEvaluateGates, "test_halt_p8_verification_not_ready_when_only_its_verdict_is_set",
         _make_verdict_test("NOT-READY", "verification-not-ready"))
+
+
+class TestVersionRaiseHalt(LandCase):
+    """Issue 113: P7b (the Landing version raise) has one halt, ordered between P7 and the verification."""
+
+    def test_a_failed_raise_halts_before_the_verification_is_even_read(self):
+        facts = good_facts()
+        facts.update(p7b_version_raise_failed=True, p8_verification_verdict="NOT-READY")
+        self.assertEqual(self.fn("evaluate_gates")(facts), "version-raise-failed",
+                         "P7b runs before P8, so its halt wins over a verification verdict")
+
+    def test_a_failed_regeneration_still_comes_before_the_raise(self):
+        facts = good_facts()
+        facts.update(p7_regeneration_failed=True, p7b_version_raise_failed=True)
+        self.assertEqual(self.fn("evaluate_gates")(facts), "regeneration-failed", "P7 before P7b")
+
+    def test_an_unresolvable_conflict_still_comes_before_the_raise(self):
+        facts = good_facts()
+        facts.update(p7_unresolvable_conflict=True, p7b_version_raise_failed=True)
+        self.assertEqual(self.fn("evaluate_gates")(facts), "unresolvable-conflict", "P7 before P7b")
+
+    def test_the_new_halt_has_a_remedy_and_exits_like_every_other_halt(self):
+        lc = self.mod()
+        self.assertTrue(str(getattr(lc, "REMEDIES", {}).get("version-raise-failed") or "").strip(),
+                        "every halt names the one operator action that moves the landing on")
+        self.assertEqual(lc.exit_code_for("version-raise-failed"), lc.EXIT_HALT, "a halt exits 9")
+
+
+class TestVersionFieldsConflictClass(LandCase):
+    """R-3: a MANIFESTS path is its own class; check_version_bump.MANIFESTS is the only list of them."""
+
+    CONFIG = {"versionRaise": True, "unionPaths": [], "regenerators": []}
+
+    def test_every_manifest_path_classifies_as_version_fields(self):
+        import check_version_bump
+        classify = self.fn("classify_conflict")
+        for path in check_version_bump.MANIFESTS:
+            with self.subTest(path=path):
+                self.assertEqual(classify(path, self.CONFIG), "version-fields",
+                                 "%s is a version file: a conflict on it is judged region by region" % path)
+
+    def test_a_neighbouring_path_is_not_a_manifest(self):
+        classify = self.fn("classify_conflict")
+        for path in ("docs/plugin.json", "plugin.json.bak", "src/code.py"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path, self.CONFIG), "halt", "the policy stays closed for %s" % path)
+
+    def test_a_union_path_keeps_its_class(self):
+        classify = self.fn("classify_conflict")
+        self.assertEqual(classify(".claude/JOURNAL.md", UNION_CONFIG), "union", "positive control")
 
 
 class TestRollUpVerdict(LandCase):

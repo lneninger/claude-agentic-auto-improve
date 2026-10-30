@@ -1106,5 +1106,122 @@ class TestP15ForgetsTheRemovedCheckout(StageCase):
         self.assertEqual(norm(phase["worktree"]), norm(path), "and carried forward while it still exists")
 
 
+# ===========================================================================
+# Issue 113: P7b, the Landing version raise (R-1, R-2, R-5), and the landing readers' feeders.
+#
+# P7b runs after P7 (the default branch merged into the parent branch) and before the verification:
+# `check_version_bump.py --raise`, then `--exact`, committed on the parent branch. It reads its switch,
+# contractLanding.versionRaise, from the conventions file at origin/<default>. It runs whether or not P7
+# merged anything, and is idempotent. A raise that cannot be made halts `version-raise-failed`.
+#
+# The fixture puts the real check_version_bump.py and four manifest files into the repository, so the
+# assertions hold wherever the implementation finds the script. Real git, fake network edges (Stage).
+# ===========================================================================
+_VBUMP_SCRIPT = Path(__file__).resolve().parent.parent / "check_version_bump.py"
+_MANIFEST_NAMES = ("plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json",
+                   ".claude-plugin/marketplace.json")
+
+
+def manifests_at(version):
+    plugin = json.dumps({"name": "x", "version": version, "description": "d"}, indent=2) + "\n"
+    market = json.dumps({"name": "m", "version": version,
+                         "plugins": [{"name": "x", "version": version}]}, indent=2) + "\n"
+    return {"plugin.json": plugin, ".claude-plugin/plugin.json": plugin,
+            ".cursor-plugin/plugin.json": plugin, ".claude-plugin/marketplace.json": market}
+
+
+def versions_in_tree(root):
+    found = []
+    for name in _MANIFEST_NAMES:
+        data = json.loads((Path(root) / name).read_text(encoding="utf-8"))
+        if "version" in data:
+            found.append(data["version"])
+        found.extend(entry["version"] for entry in data.get("plugins", []))
+    return found
+
+
+class TestP7bVersionRaise(StageCase):
+
+    def landing(self, *, master="0.11.3", parent="0.10.0", versionRaise=True, parent_extra=None,
+                move_master=True, subdir="k"):
+        """The parent branch holds ``parent``; origin/master holds ``master``; one source change on the parent."""
+        folder = Path(self._tmp.name) / subdir
+        folder.mkdir()
+        base_files = dict(manifests_at(parent))
+        base_files[".claude/scripts/check_version_bump.py"] = _VBUMP_SCRIPT.read_text(encoding="utf-8")
+        cfg = landing_config(steps=[STEP_CLEAN])
+        if versionRaise is not None:
+            cfg["versionRaise"] = versionRaise
+        parent_files = dict(SRC_CHANGE)
+        parent_files.update(parent_extra or {})
+        kit = Kit(folder, config=cfg, base_files=base_files, parent_files=parent_files)
+        if move_master:
+            kit.commit_remote("master", manifests_at(master), "master moves")
+        st = Stage(self, kit)
+        return st, st.run()
+
+    def exact(self, st):
+        proc = _REAL_SUBPROCESS_RUN(
+            [sys.executable, "-B", str(_VBUMP_SCRIPT), "--exact", "--default-branch", "master"],
+            cwd=str(st.worktree), capture_output=True, text=True, env=_GIT_ENV)
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+    def test_the_landing_commits_one_minor_raise_against_the_default_branch_after_merging_it(self):
+        st, report = self.landing()
+        self.assertEqual(report["outcome"], "landed", "fixture sanity: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(versions_in_tree(st.worktree), ["0.12.0"] * 5,
+                         "R-1: the default branch is at 0.11.3, so the landing head carries 0.12.0 (minor + 1, patch 0)")
+        code, out = self.exact(st)
+        self.assertEqual(code, 0, "and --exact accepts the committed head. got: %s" % out)
+        self.assertEqual(git(st.worktree, "status", "--porcelain"), "", "the raise is committed, not left in the tree")
+
+    def test_p7b_runs_even_when_p7_had_nothing_to_merge(self):
+        # The parent branch was cut from a master that is already at 0.11.3: M is an ancestor of the head.
+        st, report = self.landing(master="0.11.3", parent="0.11.3", move_master=False)
+        self.assertEqual(report["outcome"], "landed", "fixture sanity: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(versions_in_tree(st.worktree), ["0.12.0"] * 5, "R-2: P7b does not depend on P7 merging")
+
+    def test_positive_control_p7b_is_idempotent_when_the_head_already_carries_the_raise(self):
+        st, report = self.landing(master="0.11.3", parent="0.11.3", move_master=False,
+                                  parent_extra=manifests_at("0.12.0"))
+        self.assertEqual(report["outcome"], "landed", "fixture sanity: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(versions_in_tree(st.worktree), ["0.12.0"] * 5, "R-2: never 0.13.0 on a second pass")
+
+    def test_a_raise_that_cannot_be_made_halts_version_raise_failed_and_pushes_nothing(self):
+        st, report = self.landing(master="0.11.3", parent="0.11.3", move_master=False,
+                                  parent_extra={"plugin.json": "{ this is not json"})
+        self.assertEqual(report["outcome"], "version-raise-failed",
+                         "an unreadable manifest cannot be raised: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(st.count("git_push"), 0, "nothing is pushed after a halt")
+        self.assertEqual(st.count("gh_pr_merge"), 0)
+
+    def test_positive_control_without_the_switch_the_manifests_are_not_touched(self):
+        for label, value in (("switch absent", None), ("switch off", False)):
+            with self.subTest(case=label):
+                st, report = self.landing(versionRaise=value, subdir="switch-" + label.replace(" ", "-"))
+                self.assertEqual(report["outcome"], "landed", "%s %s" % (report["outcome"], report["detail"]))
+                self.assertEqual(versions_in_tree(st.worktree), ["0.11.3"] * 5,
+                                 "contractLanding.versionRaise is off: the landing leaves the version alone")
+
+
+class TestFeedersPassUnfilteredBriefs(StageCase):
+    """L-3: the landing's P1 reads the parent brief through the one selector, whatever its contract: field holds."""
+
+    def test_a_parent_brief_whose_contract_field_is_none_does_not_stop_the_landing_at_parent_unresolved(self):
+        brief_rel = BRIEF_DIR + "2026-10-05-394-demo.md"
+        parent_brief = brief_md(394, branch=PARENT, parent_issue=None).replace(
+            "contract: .claude/concepts/%s.md" % SLUG, "contract: none")
+        self.assertIn("contract: none", parent_brief, "fixture sanity")
+        contract = ("# Demo contract\n\n**Status:** approved\n**Work Item Brief:** %s\n" % brief_rel
+                    + CONTRACT_TEXT.split("\n", 1)[1])
+        kit = Kit(Path(self._tmp.name), config=landing_config(steps=[STEP_CLEAN]),
+                  base_files={".claude/concepts/%s.md" % SLUG: contract},
+                  parent_files=dict(SRC_CHANGE, **{brief_rel: parent_brief}))
+        report = Stage(self, kit).run()
+        self.assertEqual(report["outcome"], "landed",
+                         "the contract's header names the parent brief; contract: none is unset, not another "
+                         "contract's. got %s: %s" % (report["outcome"], report["detail"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

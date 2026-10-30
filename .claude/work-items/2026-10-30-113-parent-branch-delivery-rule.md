@@ -15,7 +15,7 @@ north_stars: none
 contract: .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
 pr: none
 issue_link: unknown
-status: designing
+status: implementing
 created: 2026-10-30
 ---
 

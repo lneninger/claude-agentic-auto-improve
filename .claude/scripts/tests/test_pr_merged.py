@@ -12691,7 +12691,860 @@ class TestAtRefRecordReadersAndAdvanceAlias(unittest.TestCase):
                             "advance name still 'matches' a longer slug")
 
 
+# ==========================================================================
+# Parent Branch Delivery Rule (issue 113)
+#   .claude/concepts/2026-10-30-parent-branch-delivery-rule.md (approved), RED phase.
+#
+# Rules pinned here: L-1..L-5 (one matcher, one selector, the layout), the closed set of layout defect
+# reasons, R-6 (status decides who is judged), R-7 (delivery by evidence, guard G-7), R-8 (a sub-task
+# pull request merged into the default branch on the web), R-9 (no endless loop through
+# --accept-single-branch) and the bypass-flow rows 1 to 6 and 10.
+#
+# Shapes the contract names and this section relies on (nothing else is assumed):
+#   * pr_merged.brief_names_contract(brief, slug) and pr_merged.select_linked_brief(contract_text, slug,
+#     briefs) exist; the briefs given to the selector are mappings that each carry ``_path``.
+#   * ``--status --json`` carries ``layout_defects`` (a list; each entry has a ``remedy``) for a contract
+#     with two or more mergeable blocks and a Status of draft or approved. The reason string sits in the
+#     entry's ``reason`` (or ``defect``/``kind``/``id``/``code``) field, or the entry is the string itself.
+#   * ``--record-delivery`` refuses with exit 9, guard ``G-7``, reason ``single-branch-delivery``.
+#   * ``--accept-single-branch`` rides with ``--record-delivery`` and writes ``layout: single-branch-accepted``
+#     into the delivery record.
+# Every new symbol is reached through ``_fn`` / ``getattr`` or through the CLI, so an absent behaviour is an
+# assertion about a value and never an ImportError or NameError. Fixtures are the file-backed ``_World``
+# above (a temporary tree, removed by addCleanup); nothing real is read or written.
+# ==========================================================================
+_PB_SLUG = "2026-10-30-parent-branch"
+_PB_PARENT = _BRIEF_BRANCH  # feature/acme-delivery: the brief's branch IS the parent branch
+
+
+def _pb_contract(slug=_PB_SLUG, *, status="approved", header="path", blocks="two", files1=("src/Foo.cs",)):
+    """A contract as bytes. blocks: one | two | impl-review | scope-note."""
+    lines = ["# Concept Contract - Parent branch fixture", "", "**Project:** Acme", "**Date:** 2026-10-30"]
+    if status is not None:
+        lines.append("**Status:** %s" % status)
+    if header == "path":
+        lines.append("**Work Item Brief:** .claude/work-items/%s.md" % slug)
+    elif header == "none":
+        lines.append("**Work Item Brief:** none")
+    elif header == "placeholder":
+        lines.append("**Work Item Brief:** <optional - path to the brief under .claude/work-items/ this contract serves>")
+    lines += ["", "## Implementation Handoff", "", "### 1. Backend (`acme-dev`)", "", "**Depends on:** none", "",
+              "**Files to touch:**"] + ["- %s" % f for f in files1] + [""]
+    if blocks == "two":
+        lines += ["### 2. Frontend (`acme-dev`)", "", "**Depends on:** none", "", "**Files to touch:**",
+                  "- src/Bar.cs", ""]
+    elif blocks == "impl-review":
+        lines += ["### 2. Review (`acme-reviewer`)", "", "**Depends on:** 1", "", "**Files to touch:**",
+                  "- `.claude/reviews/%s/t2-review-acme-reviewer.md`" % slug, ""]
+    elif blocks == "scope-note":
+        lines += ["### 2. Scope note on review", "",
+                  "There is no separate review sub-task. The ordinary review applies.", ""]
+    lines += ["## Review checklist (filled in after implementation)", ""]
+    lines += ["- [ ] %s" % text for text in _CHECKLIST_LINES]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _pb_brief(*, slug=_PB_SLUG, ident="100", branch=_PB_PARENT, contract="slug", pr=None, extra=()):
+    """A brief as bytes. contract: "slug" (this contract's path), None (no contract: line) or a literal."""
+    lines = ["---", "id: %s" % ident, "title: Parent branch fixture"]
+    if branch is not None:
+        lines.append("branch: %s" % branch)
+    if pr:
+        lines.append("pr: %s" % pr)
+    if contract == "slug":
+        lines.append("contract: .claude/concepts/%s.md" % slug)
+    elif contract is not None:
+        lines.append("contract: %s" % contract)
+    lines += list(extra)
+    lines += ["status: implementing", "---", "", "# Parent branch fixture", "", "Body text.", ""]
+    return ("\n".join(lines)).encode("utf-8")
+
+
+def _pb_world(case, *, slug=_PB_SLUG, contract=None, brief=None, with_brief=True):
+    return _World(case, slug,
+                  contract=_pb_contract(slug) if contract is None else contract,
+                  brief=_pb_brief(slug=slug, pr=_pr_url(_BRIEF_PR_NUMBER)) if brief is None else brief,
+                  with_brief=with_brief)
+
+
+def _pb_reasons(report):
+    """Every layout defect reason string in a --status report."""
+    found = []
+    for entry in (report or {}).get("layout_defects") or []:
+        if isinstance(entry, str):
+            found.append(entry)
+        elif isinstance(entry, dict):
+            for key in ("reason", "defect", "kind", "id", "code"):
+                if isinstance(entry.get(key), str):
+                    found.append(entry[key])
+    return found
+
+
+def _pb_entry(report, reason):
+    for entry in (report or {}).get("layout_defects") or []:
+        if isinstance(entry, dict) and reason in [entry.get(k) for k in ("reason", "defect", "kind", "id", "code")]:
+            return entry
+    return None
+
+
+def _pb_status(case, world, **kwargs):
+    res = _drive(world, ["--status"], **kwargs)
+    case.assertEqual(res.exit_code, 0, "fixture sanity: --status never refuses. %s" % res.describe())
+    case.assertIsNotNone(res.report, "fixture sanity: --status --json prints one object. %s" % res.describe())
+    return res
+
+
 # --------------------------------------------------------------------------
+# L-3: ONE matcher owns all the filtering of "names this contract"
+# --------------------------------------------------------------------------
+class TestBriefNamesContractIsTheOneMatcher(unittest.TestCase):
+
+    SLUG = "2026-10-30-demo-contract"
+
+    #: (the brief's contract: value, whether it names SLUG)
+    TABLE = (
+        ("none", False), ("None", False), ("none - the plugin repo's own work", False),
+        ("UNKNOWN", False), ("unknown", False), ("", False), ("<path to the contract>", False),
+        ("<optional - the contract path>", False),
+        (SLUG, True), (SLUG + ".md", True), (".claude/concepts/" + SLUG + ".md", True),
+        (".claude\\concepts\\" + SLUG + ".md", True), ("`.claude/concepts/" + SLUG + ".md`", True),
+        ('".claude/concepts/' + SLUG + '.md"', True), (SLUG.upper(), True),
+        (".claude/concepts/" + SLUG.upper() + ".MD", True),
+        ("2026-10-30-demo-contract-extra", False), ("2026-10-30-demo", False),
+        (".claude/concepts/2026-10-01-other.md", False),
+    )
+
+    def matcher(self):
+        fn = _fn("brief_names_contract")
+        self.assertIsNotNone(fn, "pr_merged.brief_names_contract does not exist yet (L-3: the one matcher)")
+        return fn
+
+    def test_the_table_of_contract_values(self):
+        matcher = self.matcher()
+        for value, expected in self.TABLE:
+            with self.subTest(value=value):
+                self.assertEqual(matcher({"contract": value}, self.SLUG), expected,
+                                 "contract: %r %s name %s" % (value, "must" if expected else "must not", self.SLUG))
+
+    def test_a_brief_with_no_contract_key_names_nothing(self):
+        self.assertIs(self.matcher()({"id": "1", "branch": "x"}, self.SLUG), False,
+                      "a missing contract: key reads as unset")
+
+    def test_a_non_string_or_none_value_reads_as_unset(self):
+        matcher = self.matcher()
+        for value in (None, 0, []):
+            with self.subTest(value=value):
+                self.assertIs(matcher({"contract": value}, self.SLUG), False)
+
+    def test_the_wrappers_still_exist_and_agree_with_the_matcher(self):
+        matcher = self.matcher()
+        names, brief_names = _fn("_names_contract"), _fn("_brief_names_contract")
+        self.assertIsNotNone(names, "_names_contract stays (cleanup_delivered.py, rehydration, locate_parent use it)")
+        self.assertIsNotNone(brief_names, "_brief_names_contract stays (declared_topology uses it)")
+        for value, expected in self.TABLE:
+            with self.subTest(value=value):
+                self.assertEqual(brief_names({"contract": value}, self.SLUG), matcher({"contract": value}, self.SLUG),
+                                 "_brief_names_contract is a thin wrapper over the one matcher")
+                self.assertEqual(names(value, self.SLUG), expected,
+                                 "_names_contract(%r) must agree with the matcher" % (value,))
+
+    def test_the_brief_wrapper_is_case_insensitive_like_the_matcher(self):
+        wrapper = _fn("_brief_names_contract")
+        self.assertIsNotNone(wrapper)
+        self.assertTrue(wrapper({"contract": self.SLUG.upper()}, self.SLUG),
+                        "one matcher means one case rule: the stem is compared case-insensitively")
+
+
+# --------------------------------------------------------------------------
+# L-2: ONE pure selector for the parent brief
+# --------------------------------------------------------------------------
+class TestSelectLinkedBrief(unittest.TestCase):
+
+    SLUG = "2026-10-30-demo-contract"
+    HEADER_BRIEF = ".claude/work-items/2026-10-30-113-parent.md"
+
+    def selector(self):
+        fn = _fn("select_linked_brief")
+        self.assertIsNotNone(fn, "pr_merged.select_linked_brief does not exist yet (L-2: the one selector)")
+        return fn
+
+    def text(self, header=None):
+        lines = ["# Contract", "", "**Status:** approved"]
+        if header is not None:
+            lines.append("**Work Item Brief:** %s" % header)
+        return "\n".join(lines) + "\n"
+
+    def brief(self, path, **fields):
+        item = {"id": "100", "branch": "feature/p", "_path": path}
+        item.update(fields)
+        return item
+
+    def pick(self, text, briefs):
+        with mock.patch.object(pr_merged, "default_branch", return_value="master"):
+            return self.selector()(text, self.SLUG, briefs)
+
+    def path_of(self, chosen):
+        return chosen.get("_path") if isinstance(chosen, dict) else None
+
+    def test_a_header_linked_brief_is_used_whatever_unset_value_its_contract_field_holds(self):
+        for label, value in (("none", "none"), ("none with text", "none - the plugin repo's own work"),
+                             ("placeholder", "<path to the contract>"), ("unknown", "UNKNOWN"), ("empty", ""),
+                             ("missing", None), ("names it", ".claude/concepts/%s.md" % self.SLUG)):
+            with self.subTest(contract_field=label):
+                fields = {} if value is None else {"contract": value}
+                chosen = self.pick(self.text(self.HEADER_BRIEF), [
+                    self.brief(self.HEADER_BRIEF, **fields),
+                    self.brief(".claude/work-items/other.md", id="7", contract=".claude/concepts/%s.md" % self.SLUG)])
+                self.assertEqual(self.path_of(chosen), self.HEADER_BRIEF,
+                                 "the header names this brief and its contract: value is unset, so it is the brief")
+
+    def test_a_header_brief_that_names_a_different_contract_is_not_used(self):
+        chosen = self.pick(self.text(self.HEADER_BRIEF), [
+            self.brief(self.HEADER_BRIEF, contract=".claude/concepts/2026-01-01-someone-else.md")])
+        self.assertNotEqual(self.path_of(chosen), self.HEADER_BRIEF,
+                            "the matcher says that brief names ANOTHER contract")
+
+    def test_a_header_naming_a_brief_that_is_not_in_the_list_gives_no_brief_and_no_fallback(self):
+        chosen = self.pick(self.text(self.HEADER_BRIEF), [
+            self.brief(".claude/work-items/other.md", id="7", contract=".claude/concepts/%s.md" % self.SLUG)])
+        self.assertIsNone(chosen, "no fallback: a header that names a missing brief is a missing brief")
+
+    def test_without_a_header_the_one_brief_the_matcher_accepts_is_used(self):
+        for header in (None, "none", "<optional - path>"):
+            with self.subTest(header=header):
+                chosen = self.pick(self.text(header), [
+                    self.brief(".claude/work-items/a-names-another.md", id="1",
+                               contract=".claude/concepts/2026-01-01-someone-else.md"),
+                    self.brief(".claude/work-items/b-unset.md", id="2", contract="none"),
+                    self.brief(".claude/work-items/c-ours.md", id="3", contract=".claude/concepts/%s.md" % self.SLUG)])
+                self.assertEqual(self.path_of(chosen), ".claude/work-items/c-ours.md")
+
+    def test_without_a_header_and_with_no_accepted_brief_the_answer_is_none(self):
+        chosen = self.pick(self.text(None), [
+            self.brief(".claude/work-items/b-unset.md", id="2", contract="none"),
+            self.brief(".claude/work-items/d-other.md", id="4", contract=".claude/concepts/2026-01-01-other.md")])
+        self.assertIsNone(chosen)
+
+    def test_without_a_header_the_parent_wins_over_its_children(self):
+        named = ".claude/concepts/%s.md" % self.SLUG
+        chosen = self.pick(self.text(None), [
+            self.brief(".claude/work-items/child.md", id="101", branch="task/x/t1-a", contract=named,
+                       parent_issue="100", base="feature/p"),
+            self.brief(".claude/work-items/parent.md", id="100", branch="feature/p", contract=named)])
+        self.assertEqual(self.path_of(chosen), ".claude/work-items/parent.md")
+
+    def test_the_selector_is_pure(self):
+        briefs = [self.brief(self.HEADER_BRIEF, contract="none")]
+        before = json.dumps(briefs, sort_keys=True)
+        self.pick(self.text(self.HEADER_BRIEF), briefs)
+        self.assertEqual(json.dumps(briefs, sort_keys=True), before, "the given list and mappings are not changed")
+
+
+# --------------------------------------------------------------------------
+# Row 2: the readers return the SAME brief for one fixture set
+# --------------------------------------------------------------------------
+_PB_VARIANTS = (
+    ("none", "none"), ("none with text", "none - the plugin repo's own work"),
+    ("placeholder", "<path to the contract>"), ("missing", None), ("unknown", "UNKNOWN"), ("empty", ""),
+    ("names it", "slug"),
+)
+
+
+class _ParityFolder:
+    """A temporary checkout folder with a header-linked brief (variant contract: value) and a stranger."""
+
+    HEADER_NAME = "2026-10-30-113-parent.md"
+
+    def __init__(self, case, variant_value, slug="2026-10-30-parity"):
+        tmp = tempfile.TemporaryDirectory()
+        case.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.slug = slug
+        folder = self.root / ".claude" / "work-items"
+        folder.mkdir(parents=True)
+        value = ".claude/concepts/%s.md" % slug if variant_value == "slug" else variant_value
+        lines = ["---", "id: 100", "title: parent", "branch: feature/p"]
+        if value is not None:
+            lines.append("contract: %s" % value)
+        lines += ["status: implementing", "---", "", "# parent", ""]
+        self.header_text = "\n".join(lines)
+        (folder / self.HEADER_NAME).write_text(self.header_text, encoding="utf-8")
+        self.stranger_text = ("---\nid: 7\ntitle: other\nbranch: feature/other\n"
+                              "contract: .claude/concepts/2026-01-01-someone-else.md\nstatus: implementing\n---\n\n# o\n")
+        (folder / "2026-01-01-7-other.md").write_text(self.stranger_text, encoding="utf-8")
+        self.folder = folder
+        self.contract_text = ("# Contract\n\n**Status:** approved\n**Work Item Brief:** .claude/work-items/%s\n"
+                              % self.HEADER_NAME)
+
+    def listing(self):
+        return {".claude/work-items/%s" % self.HEADER_NAME: self.header_text,
+                ".claude/work-items/2026-01-01-7-other.md": self.stranger_text}
+
+
+def _land():
+    import land_contract
+    return land_contract
+
+
+class TestTheReadersReturnTheSameBrief(unittest.TestCase):
+
+    def base(self, path):
+        return Path(str(path).replace("\\", "/")).name if path else None
+
+    def test_all_readers_agree_for_every_contract_field_variant(self):
+        select = _fn("select_linked_brief")
+        self.assertIsNotNone(select, "pr_merged.select_linked_brief does not exist yet (L-2)")
+        land = _land()
+        for label, value in _PB_VARIANTS:
+            with self.subTest(contract_field=label):
+                fx = _ParityFolder(self, value)
+                answers = {}
+                with _chdir(fx.root), mock.patch.object(pr_merged, "default_branch", return_value="master"):
+                    answers["disk reader (find_linked_brief)"] = self.base(pr_merged.find_linked_brief(
+                        fx.contract_text, fx.slug, work_items_dir=fx.folder, default_branch_name="master"))
+                    answers["landing P0 feeder"] = self.base((select(
+                        fx.contract_text, fx.slug, land._briefs_on_disk(fx.root, fx.slug)) or {}).get("_path"))
+                    answers["landing P1 feeder"] = self.base((select(
+                        fx.contract_text, fx.slug,
+                        land.build_delivery_set({"origin/feature/p": fx.listing()}, fx.slug)["briefs"]) or {}).get("_path"))
+                self.assertEqual(answers, {k: fx.HEADER_NAME for k in answers},
+                                 "every reader must return the header-linked brief %s" % fx.HEADER_NAME)
+
+    def test_the_landing_feeders_pass_the_whole_folder_and_let_the_matcher_filter(self):
+        land = _land()
+        for label, value in _PB_VARIANTS:
+            with self.subTest(contract_field=label):
+                fx = _ParityFolder(self, value)
+                on_disk = [self.base(b.get("_path")) for b in land._briefs_on_disk(fx.root, fx.slug)]
+                in_set = [self.base(b.get("_path"))
+                          for b in land.build_delivery_set({"origin/feature/p": fx.listing()}, fx.slug)["briefs"]]
+                for where, names in (("_briefs_on_disk", on_disk), ("build_delivery_set", in_set)):
+                    self.assertIn(fx.HEADER_NAME, names,
+                                  "%s must hand over the header-linked brief even when its contract: reads %r"
+                                  % (where, value))
+                    self.assertIn("2026-01-01-7-other.md", names,
+                                  "%s passes an UNFILTERED list: the matcher inside select_linked_brief filters" % where)
+
+    def test_read_work_item_briefs_still_scopes_to_the_contract_for_the_topology(self):
+        fx = _ParityFolder(self, "slug")
+        with _chdir(fx.root):
+            names = [self.base(b.get("_path")) for b in pr_merged.read_work_item_briefs(fx.slug)]
+        self.assertEqual(names, [fx.HEADER_NAME],
+                         "declared_topology reads pre-scoped briefs, so this reader keeps filtering (control)")
+
+
+class TestLocateParentReadsTheHeaderLinkedBrief(_WorktreeWorldCase):
+    """The fourth reader (row 2): --locate-parent finds the parent branch from the header-linked brief."""
+
+    def world(self, contract_value):
+        world = make_world(self.tmp)
+        main = world.main
+        git(main, "switch", "-q", "-c", WT_PARENT)
+        contract = ("# Contract\n\n**Status:** approved\n**Work Item Brief:** %s\n" % WT_BRIEF_PARENT
+                    + WT_CONTRACT_TWO)
+        commit(main, {WT_CONTRACT: contract,
+                      WT_BRIEF_PARENT: brief_text(id=460, branch=WT_PARENT, base=world.default,
+                                                  contract=contract_value),
+                      WT_BRIEF_T1: brief_text(id=473, branch=WT_T1, base=WT_PARENT, parent_issue=460)},
+               "parent branch with a header-linked brief")
+        git(main, "push", "-q", "origin", WT_PARENT)
+        git(main, "switch", "-q", world.default)
+        return main
+
+    def locate(self, main):
+        proc = self.pr_merged_cli("--contract", WT_CONTRACT, "--locate-parent", "--json", cwd=main)
+        return proc, self.need_json(proc, "--locate-parent")
+
+    def found(self, value):
+        proc, report = self.locate(self.world(value))
+        self.assertEqual(report.get("branch"), WT_PARENT,
+                         "the contract's header names the parent brief, so the parent branch is found: %s"
+                         % proc.describe())
+        self.assertEqual(report.get("status"), "not-checked-out", proc.describe())
+
+    def test_a_parent_brief_whose_contract_field_is_none_is_found_through_the_header(self):
+        self.found("none")
+
+    def test_a_parent_brief_whose_contract_field_is_none_with_text_is_found_through_the_header(self):
+        self.found("none - the parent of the work")
+
+    def test_positive_control_a_parent_brief_that_names_the_contract_is_found_today(self):
+        main = self.world(WT_CONTRACT)
+        proc, report = self.locate(main)
+        self.assertEqual(report.get("branch"), WT_PARENT, proc.describe())
+
+
+# --------------------------------------------------------------------------
+# Layout defects through --status (rows 1, 3, 4, 10; R-6)
+# --------------------------------------------------------------------------
+class TestLayoutDefectsInStatus(unittest.TestCase):
+
+    def test_a_valid_layout_reports_an_empty_defect_list_and_still_dispatches(self):
+        world = _pb_world(self)
+        res = _pb_status(self, world, prs={})
+        self.assertEqual(res.report.get("layout_defects"), [],
+                         "two mergeable blocks, a parent branch, a parent issue: layout_defects is present and "
+                         "empty. %s" % res.describe())
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "dispatch", res.describe())
+
+    def test_a_missing_or_placeholder_header_with_no_brief_is_no_parent_branch(self):
+        for header in ("absent", "none", "placeholder"):
+            with self.subTest(header=header):
+                world = _pb_world(self, contract=_pb_contract(header=header), with_brief=False)
+                res = _pb_status(self, world, prs={})
+                self.assertIn("no-parent-branch", _pb_reasons(res.report),
+                              "row 1: header %r reads as absent, so there is no parent branch. %s"
+                              % (header, res.describe()))
+                entry = _pb_entry(res.report, "no-parent-branch")
+                self.assertTrue(entry and "/task" in str(entry.get("remedy")),
+                                "the remedy sends the author to /task: %r" % (entry,))
+
+    def test_a_header_naming_a_brief_that_is_not_on_disk_is_no_parent_branch(self):
+        world = _pb_world(self, with_brief=False)
+        res = _pb_status(self, world, prs={})
+        self.assertIn("no-parent-branch", _pb_reasons(res.report), res.describe())
+
+    def test_a_brief_with_no_branch_is_no_parent_branch(self):
+        for branch in (None, "none"):
+            with self.subTest(branch=branch):
+                world = _pb_world(self, brief=_pb_brief(branch=branch))
+                res = _pb_status(self, world, prs={})
+                self.assertIn("no-parent-branch", _pb_reasons(res.report), res.describe())
+
+    def test_a_brief_on_the_default_branch_is_parent_is_default(self):
+        world = _pb_world(self, brief=_pb_brief(branch="master"))
+        res = _pb_status(self, world, prs={})
+        self.assertIn("parent-is-default", _pb_reasons(res.report), "row 10. %s" % res.describe())
+        self.assertTrue((_pb_entry(res.report, "parent-is-default") or {}).get("remedy"), "every defect has a remedy")
+
+    def test_a_parent_issue_that_is_not_a_positive_integer_is_no_parent_issue(self):
+        for ident in ("none", "PROJ-12", "0", "UNKNOWN"):
+            with self.subTest(id=ident):
+                world = _pb_world(self, brief=_pb_brief(ident=ident))
+                res = _pb_status(self, world, prs={})
+                self.assertIn("no-parent-issue", _pb_reasons(res.report),
+                              "rows 3 and 4: id %r is not an issue number. %s" % (ident, res.describe()))
+                entry = _pb_entry(res.report, "no-parent-issue")
+                self.assertTrue(entry and "id:" in str(entry.get("remedy")),
+                                "the remedy says to write the issue number into id:: %r" % (entry,))
+
+    def test_an_implementation_block_plus_a_review_block_is_a_multi_sub_task_contract(self):
+        world = _pb_world(self, contract=_pb_contract(blocks="impl-review"), with_brief=False)
+        res = _pb_status(self, world, prs={})
+        self.assertIn("no-parent-branch", _pb_reasons(res.report),
+                      "a review gate is a mergeable block, so implementation + review needs a parent branch. %s"
+                      % res.describe())
+
+    def test_a_draft_contract_is_judged_too(self):
+        world = _pb_world(self, contract=_pb_contract(status="draft"), with_brief=False)
+        res = _pb_status(self, world, prs={})
+        self.assertIn("no-parent-branch", _pb_reasons(res.report),
+                      "L-1: draft and approved are judged (and --status parses a draft's handoff). %s" % res.describe())
+
+    def test_other_statuses_and_a_missing_status_are_exempt(self):
+        for status in ("implemented", "rejected", "superseded", None):
+            with self.subTest(status=status):
+                world = _pb_world(self, contract=_pb_contract(status=status, header="absent"), with_brief=False)
+                res = _pb_status(self, world, prs={})
+                self.assertFalse(res.report.get("layout_defects"),
+                                 "R-6: Status %r is not judged, so no layout defect is reported. %s"
+                                 % (status, res.describe()))
+
+    def test_a_single_block_contract_has_no_layout_report_at_all(self):
+        for label, blocks in (("one block", "one"), ("one block plus a scope note", "scope-note")):
+            with self.subTest(shape=label):
+                world = _pb_world(self, contract=_pb_contract(blocks=blocks, header="absent"), with_brief=False)
+                res = _pb_status(self, world, prs={})
+                self.assertNotIn("layout_defects", res.report,
+                                 "L-1: only two or more mergeable blocks are computed; a single block's output "
+                                 "carries no new key. %s" % res.describe())
+
+    def test_layout_defects_never_enter_the_handoff_defects_or_the_completion_reasons(self):
+        world = _pb_world(self, brief=_pb_brief(ident="none"))
+        res = _pb_status(self, world, prs={})
+        self.assertIn("no-parent-issue", _pb_reasons(res.report), "fixture sanity: a layout defect exists")
+        self.assertEqual(res.report.get("defects"), [], "G-2's handoff defects stay a separate list")
+        self.assertNotIn("no-parent-issue", json.dumps(res.completion),
+                         "layout defects never enter is_delivered, G-2 or the completion evaluation")
+
+    def test_every_reported_defect_carries_a_remedy(self):
+        world = _pb_world(self, contract=_pb_contract(header="absent"), with_brief=False)
+        res = _pb_status(self, world, prs={})
+        entries = res.report.get("layout_defects")
+        self.assertTrue(entries, "fixture sanity: at least one defect. %s" % res.describe())
+        for entry in entries:
+            self.assertTrue(isinstance(entry, dict) and str(entry.get("remedy") or "").strip(),
+                            "each layout defect has a non-empty remedy: %r" % (entry,))
+
+    def test_status_reports_no_default_branch_base_for_a_multi_sub_task_contract_without_a_parent(self):
+        world = _pb_world(self, contract=_pb_contract(header="absent"), with_brief=False)
+        res = _pb_status(self, world, prs={})
+        for block in res.report.get("blocks") or []:
+            if block.get("kind") == "mergeable":
+                self.assertNotEqual(block.get("base_source"), "default",
+                                    "effective_base never returns the default branch for a judged multi-sub-task "
+                                    "contract: %r" % (block,))
+
+
+class TestSubTaskRaisesVersionDefect(unittest.TestCase):
+    """The Files to touch of a block names a MANIFESTS path while contractLanding.versionRaise is on."""
+
+    def conventions(self, world, raise_on):
+        rel = ".claude/work-item-conventions.json"
+        world.put(rel, json.dumps({"contractLanding": {"versionRaise": raise_on}}))
+        world.publish(rel)
+
+    def status(self, files1, raise_on=True, with_switch=True):
+        world = _pb_world(self, contract=_pb_contract(files1=files1))
+        if with_switch:
+            self.conventions(world, raise_on)
+        return _pb_status(self, world, prs={})
+
+    def test_every_manifest_path_is_refused_while_the_switch_is_on(self):
+        import check_version_bump
+        for manifest in check_version_bump.MANIFESTS:
+            with self.subTest(manifest=manifest):
+                res = self.status((manifest,))
+                self.assertIn("sub-task-raises-version", _pb_reasons(res.report),
+                              "%s is a version file; the landing raises the version once. %s" % (manifest, res.describe()))
+                self.assertTrue((_pb_entry(res.report, "sub-task-raises-version") or {}).get("remedy"))
+
+    def test_a_backslash_spelling_is_normalised(self):
+        res = self.status((".claude-plugin\\plugin.json",))
+        self.assertIn("sub-task-raises-version", _pb_reasons(res.report), res.describe())
+
+    def test_positive_control_the_defect_needs_the_switch(self):
+        for label, kwargs in (("switch off", {"raise_on": False}), ("switch absent", {"with_switch": False})):
+            with self.subTest(case=label):
+                res = self.status(("plugin.json",), **kwargs)
+                self.assertNotIn("sub-task-raises-version", _pb_reasons(res.report), res.describe())
+
+    def test_positive_control_a_neighbouring_path_is_not_a_manifest(self):
+        res = self.status(("docs/plugin.json.md", "src/plugin.json.bak"))
+        self.assertNotIn("sub-task-raises-version", _pb_reasons(res.report), res.describe())
+
+
+# --------------------------------------------------------------------------
+# R-7 and R-9: the live report, the next command and guard G-7
+# --------------------------------------------------------------------------
+class TestSingleBranchDeliveryReportAndNextCommand(unittest.TestCase):
+
+    def merged_one_branch(self, **kwargs):
+        world = _pb_world(self)
+        res = _pb_status(self, world, prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT)}, **kwargs)
+        return world, res
+
+    def test_a_known_merged_one_branch_delivery_is_reported_as_single_branch_delivery(self):
+        _world, res = self.merged_one_branch()
+        self.assertIn("single-branch-delivery", _pb_reasons(res.report),
+                      "R-7: the work went to the default branch on one branch, with no completion evidence. %s"
+                      % res.describe())
+        self.assertTrue((_pb_entry(res.report, "single-branch-delivery") or {}).get("remedy"))
+
+    def test_r9_the_next_command_names_accept_single_branch_and_never_the_refused_command(self):
+        _world, res = self.merged_one_branch()
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "delivery-unrecorded", res.describe())
+        self.assertEqual(res.commands(), ["/pr-merged %d --record-delivery --accept-single-branch" % _BRIEF_PR_NUMBER],
+                         "R-9: G-7 would refuse the plain command, so the owner is shown the accept form. %s"
+                         % res.describe())
+
+    def test_an_unreadable_github_answer_is_never_a_layout_defect(self):
+        world = _pb_world(self)
+        res = _pb_status(self, world, prs={})  # gh_pr answers None for the brief's link
+        self.assertIsInstance(res.report.get("layout_defects"), list, "a multi-sub-task contract carries the list")
+        self.assertNotIn("single-branch-delivery", _pb_reasons(res.report),
+                         "unverifiable is not a defect: %s" % res.describe())
+        self.assertEqual(res.commands(), ["/pr-merged %d" % _BRIEF_PR_NUMBER],
+                         "and the next command stays the closing phase's re-ask, not an accept")
+
+    def test_an_open_records_pull_request_hides_the_defect_and_the_move_names_that_pull_request(self):
+        records_url = _pr_url(77)
+        world = _pb_world(self)
+        res = _pb_status(self, world, prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT)},
+                         records_prs=[{"url": records_url}])
+        self.assertIsInstance(res.report.get("layout_defects"), list)
+        self.assertNotIn("single-branch-delivery", _pb_reasons(res.report),
+                         "R-7: while a Records pull request is open the records are still on the records branch")
+        self.assertEqual(res.commands(), ["/pr-merged %s" % records_url],
+                         "the existing delivery-unrecorded arm names that pull request. %s" % res.describe())
+
+    def test_positive_control_a_single_block_contract_keeps_the_plain_command(self):
+        world = _pb_world(self, contract=_pb_contract(blocks="one"), brief=_pb_brief(ident="none", pr=_pr_url(50)))
+        res = _pb_status(self, world, prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT)})
+        self.assertEqual(res.commands(), ["/pr-merged %d --record-delivery" % _BRIEF_PR_NUMBER],
+                         "unchanged for one mergeable block. %s" % res.describe())
+
+    def test_positive_control_a_real_landing_keeps_the_plain_command(self):
+        world = _pb_world(self)
+        for task_id, number, merged in (("t1-backend", 61, "2026-10-01T09:00:00Z"),
+                                        ("t2-frontend", 62, "2026-10-02T09:00:00Z")):
+            world.record(task_id, number, base_is_default=False, merged_at=merged, base_ref=_PB_PARENT)
+        res = _pb_status(self, world, prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT,
+                                                                 merged_at="2026-10-03T12:00:00Z")})
+        self.assertEqual(res.commands(), ["/pr-merged %d --record-delivery" % _BRIEF_PR_NUMBER], res.describe())
+
+
+class TestRecordDeliveryJudgesByEvidence(unittest.TestCase):
+    """R-7 / G-7: only the parent branch's landing, proved by stored records, is a Contract Delivery."""
+
+    def landing_world(self, *, t1=None, t2=None):
+        world = _pb_world(self)
+        base = dict(base_is_default=False, base_ref=_PB_PARENT)
+        world.record("t1-backend", 61, merged_at="2026-10-01T09:00:00Z", **dict(base, **(t1 or {})))
+        world.record("t2-frontend", 62, merged_at="2026-10-02T09:00:00Z", **dict(base, **(t2 or {})))
+        return world
+
+    def deliver(self, world, *flags):
+        return _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)] + list(flags),
+                      prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT, merged_at="2026-10-03T12:00:00Z")})
+
+    def assertRefusedG7(self, res, world, before, why):
+        self.assertEqual(res.exit_code, 9, "%s: a refused delivery is exit 9. %s" % (why, res.describe()))
+        self.assertEqual((res.report or {}).get("guard"), "G-7", "%s. %s" % (why, res.describe()))
+        self.assertEqual((res.report or {}).get("reason"), "single-branch-delivery", res.describe())
+        self.assertEqual(world.snapshot(), before, "%s: a refused delivery writes nothing" % why)
+
+    def test_positive_control_a_true_landing_is_recorded(self):
+        world = self.landing_world()
+        res = self.deliver(world)
+        self.assertEqual(res.exit_code, 0, res.describe())
+        record = yaml.safe_load(world.get("%s/contract-delivery.yaml" % world.results_rel))
+        self.assertNotEqual(record.get("layout"), "single-branch-accepted",
+                            "an evidenced landing is not an accepted single-branch delivery")
+
+    def test_positive_control_a_missing_base_is_default_reads_as_not_the_default(self):
+        world = self.landing_world(t1={"base_is_default": None}, t2={"base_is_default": None})
+        for task_id in ("t1-backend", "t2-frontend"):
+            data = yaml.safe_load(world.get("%s/%s.yaml" % (world.results_rel, task_id)))
+            self.assertNotIn("base_is_default", data, "fixture sanity: the flag is absent")
+        self.assertEqual(self.deliver(world).exit_code, 0,
+                         "base_ref is the deciding fact, exactly as candidate_kind reads it")
+
+    def test_a_sub_task_merged_into_the_default_branch_is_not_a_landing(self):
+        world = self.landing_world(t1={"base_is_default": True, "base_ref": "master"})
+        before = world.snapshot()
+        self.assertRefusedG7(self.deliver(world), world, before, "t1 merged into the default branch")
+
+    def test_a_record_whose_base_is_not_the_pull_requests_head_is_not_a_landing(self):
+        world = self.landing_world(t2={"base_ref": "feature/some-other-branch"})
+        before = world.snapshot()
+        self.assertRefusedG7(self.deliver(world), world, before, "t2 was merged into another branch")
+
+    def test_a_record_not_verified_by_github_is_not_evidence(self):
+        world = self.landing_world(t1={"verified": "none"})
+        before = world.snapshot()
+        self.assertRefusedG7(self.deliver(world), world, before, "t1's record is not verified: github")
+
+    def test_no_records_at_all_is_a_single_branch_delivery_and_names_the_accept_remedy(self):
+        world = _pb_world(self)
+        before = world.snapshot()
+        res = self.deliver(world)
+        self.assertRefusedG7(res, world, before, "no stored completion records")
+        self.assertIn("--accept-single-branch", json.dumps(res.report),
+                      "the work is already merged on the default branch: the remedy is the accept flag")
+
+    def test_a_dry_run_refuses_exactly_like_the_real_run(self):
+        world = _pb_world(self)
+        before = world.snapshot()
+        self.assertRefusedG7(self.deliver(world, "--dry-run"), world, before, "dry run, no records")
+
+    def test_positive_control_one_mergeable_block_is_judged_as_before(self):
+        world = _pb_world(self, contract=_pb_contract(blocks="one"), brief=_pb_brief(ident="none", pr=_pr_url(50)))
+        res = self.deliver(world)
+        self.assertEqual(res.exit_code, 0, "a single block needs no parent branch evidence. %s" % res.describe())
+
+    def test_positive_control_a_scope_note_block_does_not_make_a_contract_multi_sub_task(self):
+        world = _pb_world(self, contract=_pb_contract(blocks="scope-note"),
+                          brief=_pb_brief(ident="none", pr=_pr_url(50)))
+        res = self.deliver(world)
+        self.assertEqual(res.exit_code, 0, res.describe())
+
+
+# --------------------------------------------------------------------------
+# --accept-single-branch and the legacy shapes (row 5, R-9)
+# --------------------------------------------------------------------------
+_PB_LEGACY = {
+    # contract 2026-10-16 (PR #58): one implementation block plus a review block, brief id 57
+    "pr58": dict(slug="2026-10-16-recorded-issue-offer-outcome", blocks="impl-review", ident="57",
+                 branch="fix/57-own-repo-issue-closing", number=58, extra=()),
+    # contract 2026-10-18 (PR #82): two implementation blocks, a brief with no issue and base: master
+    "pr82": dict(slug="2026-10-18-remove-plain-language-hook", blocks="two", ident="none",
+                 branch="infra/remove-plain-language-hook", number=82,
+                 extra=("parent_issue: none", "base: master")),
+}
+
+
+def _pb_legacy_world(case, shape):
+    spec = _PB_LEGACY[shape]
+    world = _World(case, spec["slug"],
+                   contract=_pb_contract(spec["slug"], blocks=spec["blocks"]),
+                   brief=_pb_brief(slug=spec["slug"], ident=spec["ident"], branch=spec["branch"],
+                                   pr=_pr_url(spec["number"]), extra=spec["extra"]))
+    prs = {spec["number"]: _pr(spec["number"], spec["branch"])}
+    return world, spec, prs
+
+
+class TestLegacySingleBranchDeliveries(unittest.TestCase):
+    """Row 5: a merged one-branch delivery of a multi-sub-task contract, with no records, reaches complete."""
+
+    def test_each_legacy_shape_goes_from_delivery_unrecorded_to_complete_without_a_loop(self):
+        for shape in sorted(_PB_LEGACY):
+            with self.subTest(shape=shape):
+                world, spec, prs = _pb_legacy_world(self, shape)
+                number = spec["number"]
+                accept = "/pr-merged %d --record-delivery --accept-single-branch" % number
+
+                first = _pb_status(self, world, prs=prs)
+                self.assertEqual((first.report.get("next_move") or {}).get("action"), "delivery-unrecorded",
+                                 first.describe())
+                self.assertEqual(first.commands(), [accept], "R-9: the accept form, never the refused one")
+
+                before = world.snapshot()
+                refused = _drive(world, ["--record-delivery", "--pr", str(number)], prs=prs)
+                self.assertEqual((refused.exit_code, (refused.report or {}).get("guard")), (9, "G-7"),
+                                 "the plain command is refused: %s" % refused.describe())
+                self.assertEqual(world.snapshot(), before, "and writes nothing")
+
+                accepted = _drive(world, ["--record-delivery", "--pr", str(number), "--accept-single-branch"], prs=prs)
+                self.assertEqual(accepted.exit_code, 0, "the owner's accept is recorded. %s" % accepted.describe())
+                delivery = yaml.safe_load(world.get("%s/contract-delivery.yaml" % world.results_rel))
+                self.assertEqual(delivery.get("layout"), "single-branch-accepted",
+                                 "the delivery record marks it: %r" % (delivery,))
+                for task_id in ("t1-backend", "t2-frontend") if shape == "pr82" else ("t1-backend", "t2-review"):
+                    self.assertTrue(world.exists("%s/%s.yaml" % (world.results_rel, task_id)),
+                                    "a completion record exists for %s" % task_id)
+
+                for round_no in range(3):
+                    again = _pb_status(self, world, prs=prs)
+                    self.assertEqual((again.report.get("next_move") or {}).get("action"), "complete",
+                                     "round %d: once recorded the delivery exists and the move is complete. %s"
+                                     % (round_no, again.describe()))
+                    joined = " ".join(again.commands())
+                    self.assertNotIn("--record-delivery", joined, "round %d: no return to the refused command" % round_no)
+                    self.assertNotIn("--accept-single-branch", joined)
+
+    def test_positive_control_the_real_files_shape_with_a_scope_note_is_one_block_and_unchanged(self):
+        # The real 2026-10-16 and 2026-10-18 contracts carry ONE mergeable block plus a scope note.
+        spec = _PB_LEGACY["pr58"]
+        world = _World(self, spec["slug"], contract=_pb_contract(spec["slug"], blocks="scope-note"),
+                       brief=_pb_brief(slug=spec["slug"], ident="57", branch=spec["branch"], pr=_pr_url(58)))
+        res = _pb_status(self, world, prs={58: _pr(58, spec["branch"])})
+        self.assertEqual(res.commands(), ["/pr-merged 58 --record-delivery"], res.describe())
+
+    def test_r6_a_stored_legacy_delivery_is_never_rejudged(self):
+        world, spec, prs = _pb_legacy_world(self, "pr82")
+        world.record("t1-backend", 82, base_is_default=True)
+        world.record("t2-frontend", 82, base_is_default=True)
+        world.delivery(82)
+        res = _pb_status(self, world, prs=prs)
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "complete",
+                         "R-6: stored records are never re-judged. %s" % res.describe())
+        self.assertNotIn("single-branch-delivery", _pb_reasons(res.report), res.describe())
+
+
+class TestAcceptSingleBranchRefusals(unittest.TestCase):
+
+    FLAGS = ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER), "--accept-single-branch"]
+
+    def world_and_prs(self):
+        return _pb_world(self), {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT)}
+
+    def test_the_flag_rides_only_with_record_delivery(self):
+        world, prs = self.world_and_prs()
+        before = world.snapshot()
+        res = _drive(world, ["--pr", str(_BRIEF_PR_NUMBER), "--accept-single-branch"], prs=prs)
+        self.assertEqual(res.exit_code, 2, res.describe())
+        self.assertIn("--accept-single-branch", res.out, "a usage refusal that names the flag. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+    def test_a_pull_request_that_is_not_merged_is_refused(self):
+        world, _ = self.world_and_prs()
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS, prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT, state="OPEN")})
+        self.assertEqual(res.exit_code, 9, "GitHub does not say merged: %s" % res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+    def test_a_failed_record_is_refused(self):
+        world, prs = self.world_and_prs()
+        world.record("t1-backend", 61, status="failed", failure="x")
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS, prs=prs)
+        self.assertEqual(res.exit_code, 9, res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+    def test_a_sub_task_awaiting_merge_is_refused(self):
+        world, prs = self.world_and_prs()
+        state = {"contract": world.slug, "started_at": "2026-10-30T00:00:00+00:00",
+                 "sub_tasks": {"t1-backend": {"status": "awaiting-merge", "branch": "task/%s/t1-backend" % world.slug,
+                                              "pull_request": None, "issue": 101, "base": _PB_PARENT, "brief": None}}}
+        world.put(".claude/orchestrator/state/%s/state.yaml" % world.slug, yaml.dump(state, sort_keys=False))
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS, prs=prs)
+        self.assertEqual(res.exit_code, 9, "a sub-task is out for merge, so the work is not all merged. %s"
+                         % res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+    def test_an_unreachable_github_is_unverifiable_and_writes_nothing(self):
+        world, _ = self.world_and_prs()
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS, prs={})
+        self.assertEqual(res.exit_code, 10, res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+    def test_a_signed_out_gh_is_unverifiable_and_writes_nothing(self):
+        world, prs = self.world_and_prs()
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS, prs=prs, authenticated=False)
+        self.assertEqual(res.exit_code, 10, res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+    def test_a_dry_run_plans_the_marker_and_writes_nothing(self):
+        world, prs = self.world_and_prs()
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS + ["--dry-run"], prs=prs)
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual((res.report or {}).get("delivery_planned", {}).get("layout"), "single-branch-accepted",
+                         res.describe())
+        self.assertEqual(world.snapshot(), before, "a dry run writes nothing")
+
+
+# --------------------------------------------------------------------------
+# R-8: a sub-task pull request merged into the default branch on the web
+# --------------------------------------------------------------------------
+class TestAWebMergedSubTaskPullRequestIsRecordedAsFailed(unittest.TestCase):
+
+    def sub_task_pr(self, world, base="master"):
+        head = "task/%s/t1-backend" % world.slug
+        return {61: _pr(61, head, base=base, title="t1-backend")}
+
+    def test_a_sub_task_merged_into_the_default_branch_becomes_a_failed_record_and_escalates(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--pr", "61"], prs=self.sub_task_pr(world))
+        self.assertEqual(res.exit_code, 0, res.describe())
+        record = yaml.safe_load(world.get("%s/t1-backend.yaml" % world.results_rel))
+        self.assertEqual((record.get("status"), record.get("failure")), ("failed", "single-branch-delivery"),
+                         "R-8: recorded after the merge as failed, failure single-branch-delivery. %r" % (record,))
+        after = _pb_status(self, world, prs={})
+        self.assertEqual((after.report.get("next_move") or {}).get("action"), "escalate",
+                         "the existing escalate move names it. %s" % after.describe())
+
+    def test_positive_control_one_mergeable_block_merged_into_the_default_branch_is_still_completed(self):
+        world = _pb_world(self, contract=_pb_contract(blocks="one"), brief=_pb_brief(ident="none"))
+        res = _drive(world, ["--pr", "61"], prs=self.sub_task_pr(world))
+        self.assertEqual(res.exit_code, 0, res.describe())
+        record = yaml.safe_load(world.get("%s/t1-backend.yaml" % world.results_rel))
+        self.assertEqual(record.get("status"), "completed", "a single-block contract is unchanged: %r" % (record,))
+
+
+# --------------------------------------------------------------------------
+# cleanup_delivered.py keeps calling _names_contract (pinned unchanged)
+# --------------------------------------------------------------------------
+class TestCleanupStillUsesTheWrapper(unittest.TestCase):
+
+    def test_cleanup_delivered_still_calls_names_contract_and_not_the_matcher_directly(self):
+        text = (Path(__file__).resolve().parent.parent / "cleanup_delivered.py").read_text(encoding="utf-8")
+        self.assertTrue("pr_merged._names_contract(" in text, "cleanup_delivered.py is unchanged: it calls the wrapper")
+        self.assertFalse("brief_names_contract(" in text, "and does not call the new matcher itself")
 
 
 if __name__ == "__main__":
