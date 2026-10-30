@@ -138,6 +138,13 @@ This is checked first on purpose. A contract whose blocks are *all* malformed ha
 at all, so asking "is anything planned?" first would answer `nothing-planned` about a contract
 that declares nine defective blocks — which is the silent discard this action exists to end.
 
+**A layout defect also makes the move `contract-defect`, in place of `dispatch`.** The status report
+carries `layout_defects` for a contract with two or more mergeable blocks and a Status of draft or
+approved (the Parent Branch Delivery Rule). Each entry has a `reason` (`no-parent-branch`,
+`parent-is-default`, `ambiguous`, `no-parent-issue`, `sub-task-raises-version`,
+`single-branch-delivery`) and a `remedy`. Report each with its remedy, then stop and start nothing.
+A layout defect never changes a move asked before `dispatch`, and it never reaches a stored record.
+
 ### `dispatch` — there is work ready to start
 
 **Read the preconditions before choosing what to start.** One read-only call ranks every
@@ -178,16 +185,19 @@ Without one, it fetches the base first and cuts the branch locally. It then reco
 as `awaiting-merge` with the cut branch in the state store, and returns the packet.
 
 It refuses with `not-released` if the sub-task's dependencies have not landed, so a wrong
-identity cannot start work that has nothing to build on. It also refuses with exit code 7,
-`base-not-declared`, when the Work Item briefs disagree on the parent branch, or when the
-dispatched entry carries no declared base while another entry in the same state already
-declares a real parent — never a silent fallback to the default branch beside a sibling that
-says otherwise. Either refusal cuts no branch and
-writes nothing; the remedy for `base-not-declared` is recording the sub-task's own identity
+identity cannot start work that has nothing to build on. Exit code 7 carries two refusals,
+`base-not-declared` and `needs-issue`, told apart by `error`, each with its own `remedy`. `base-not-declared` is for when the Work Item briefs
+disagree on the parent branch, or when the dispatched entry carries no declared base while another
+entry in the same state already declares a real parent — never a silent fallback to the default
+branch beside a sibling that says otherwise; its remedy is recording the sub-task's own identity
 first (`--record-subtask <sub-task-id> --issue <n> --base <parent> --brief <path>`, running
-`/task` in Parent-aware mode first if it has no brief yet), then dispatching again. Add
-`--dry-run` to see the packet without cutting anything — both refusals hold under `--dry-run`
-too, so a dry run always previews what the real run would do.
+`/task` in Parent-aware mode first if it has no brief yet), then dispatching again. `needs-issue` is
+for a contract the Parent Branch Delivery Rule judges (two or more mergeable blocks, Status draft or
+approved) whose sub-task has no sub-issue recorded; it is computed before the branch is cut, so
+it cuts no branch (not even under `--dry-run`, which refuses it too), and its remedy is `/flow`
+Step 2.7. Either refusal cuts no branch and writes nothing. Add `--dry-run` to see the packet without cutting anything — both
+refusals hold under `--dry-run` too, so a dry run always previews what the real run would do,
+while `--status` and `--resume` only report them.
 
 It also refuses with exit code **8**, `gh-repo-set`, when `GH_REPO` is set in the environment —
 `--dispatch` can call `gh issue develop` to cut the sub-task's branch against its sub-issue, and
@@ -269,12 +279,18 @@ packet built by hand — `build_dispatch` is public and a caller may construct o
 rather than deleted on the operator's decision of 2026-09-16, recorded so nobody removes it as
 dead code or re-derives the contradiction.
 
-**A packet flagged `needs_issue` has no sub-issue recorded for it.** Refuse it — but say plainly
-that, unlike `needs_agent` above, this refusal *does* arise from the loop's own dispatch. By the
-time the script computes `needs_issue`, `--dispatch` has already cut the branch and written
-`awaiting-merge` into the sub-task's state entry — both happen before the flag is even checked.
-So "stop" here does not undo either one: the branch exists, and the next `--status` call reports
-this sub-task as out for merge, waiting on a pull request that was never opened. Say which
+**A packet flagged `needs_issue` has no sub-issue recorded for it.** For a contract the Parent
+Branch Delivery Rule judges, `--dispatch` and `--dry-run` refuse it with `needs-issue` before any
+branch is cut (exit code 7, above), so this flag reaches you only under `--status` or `--resume`,
+as information: say which sub-task is missing its sub-issue and send the operator to `/flow`
+Step 2.7, then dispatch again. Nothing was cut, so there is nothing to undo.
+
+**For a contract the rule does not judge** (its Status is not draft or approved) the old order
+stays, so say plainly that, unlike `needs_agent` above, this refusal *does* arise from the loop's
+own dispatch. By the time the script computes `needs_issue`, `--dispatch` cut the branch and
+wrote `awaiting-merge` into the sub-task's state entry — both happen before the flag is even
+checked. So "stop" here does not undo either one: the branch exists, and the next `--status` call
+reports this sub-task as out for merge, waiting on a pull request that was never opened. Say which
 sub-task is missing its sub-issue, and say this plainly rather than reporting a clean halt.
 
 **The remedy closes the gap forward; it does not abandon the branch.** Create the sub-issue now
@@ -315,6 +331,8 @@ decisions the architect makes.
 A merged pull request that is the brief's own, but whose branch maps to no sub-task, delivered the contract on one branch. Until that delivery is recorded the script reports every sub-task as pending, and dispatching one would redo finished work. The script asks this after `escalate` and before `awaiting-merge`.
 
 **Start nothing.** Name each candidate from the script's answer and print the Next Command verbatim. It is `/pr-merged <ref> --record-delivery` for the most recent candidate GitHub confirmed, `/pr-merged <url>` when the records are waiting in an open records pull request (merge it first, then run again in a fresh worktree cut from the default branch), or a plain `/pr-merged <ref>` when GitHub could not be asked. This move never offers `/advance`: recording the delivery is `/pr-merged`'s work, not this skill's.
+
+**For a contract with two or more mergeable blocks, a delivery on one branch is refused by guard G-7.** When the candidate is merged and G-7 would refuse the plain command, the Next Command is `/pr-merged <ref> --record-delivery --accept-single-branch` instead, never the refused command. That flag is the owner's decision, not this skill's: show it to the owner with the reason, and never run it yourself. Once the owner has recorded it the delivery exists and the move is `complete`, so the loop cannot return to the refused command.
 
 ### `complete` — every sub-task has a record
 

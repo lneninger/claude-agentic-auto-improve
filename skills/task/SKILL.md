@@ -405,6 +405,8 @@ Classify, and record the justification in the brief:
 
 Apply `/design-first` Step 1's own rule when torn: **if unsure, treat as non-trivial.** A short contract is cheaper than a parallel data shape.
 
+A contract with two or more mergeable blocks is always delivered through a parent branch and needs a GitHub parent issue (the Parent Branch Delivery Rule). When the item's `id:` is a Jira or Azure DevOps key, say in one line: "This item has no GitHub issue, so its contract must be a single block."
+
 **Record the route, then take it.** The size decides which skill runs next; it is not a proposal to put to the user. Step 6 carries the handoff and its pre-authorization.
 
 Set `status: clarified` in the frontmatter.

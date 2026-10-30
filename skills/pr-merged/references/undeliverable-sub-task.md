@@ -30,6 +30,10 @@ verified: github
 sub-tasks are built on an assumption this failure disproves. Medium means this sub-task needs
 respecifying and the rest stand. Low means the approach was wrong but the specification holds.
 
+### A sub-task merged into the default branch on the web
+
+In a contract with two or more mergeable blocks, a sub-task pull request must target the parent branch. The merge-direction check cannot stop one that is merged into the default branch on the web, so this phase records it after the merge as a failed record with `failure: single-branch-delivery` (status `failed`, `contract_impact.requires_architect: true`). The existing `escalate` move names it, and the contract is amended before anything else is dispatched. A contract with a single mergeable block is unchanged: that merge completes the sub-task.
+
 ### Release nothing
 
 **A failed sub-task releases none of its dependents.** They were going to build on work that
