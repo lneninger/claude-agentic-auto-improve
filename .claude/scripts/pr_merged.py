@@ -39,6 +39,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+# The one list of version files (Parent Branch Delivery Rule): the layout reads it, never spells it.
+from check_version_bump import MANIFESTS as VERSION_MANIFESTS
+
 CONCEPTS_DIR = Path(".claude/concepts")
 RESULTS_DIR = Path(".claude/orchestrator/results")
 
@@ -499,7 +502,8 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
                  hand_resolved: Optional[Dict[str, Any]] = None,
                  base_ref: Optional[str] = None,
                  base_is_default: Optional[bool] = None,
-                 delivered_by: Optional[str] = None) -> Dict[str, Any]:
+                 delivered_by: Optional[str] = None,
+                 failure: Optional[str] = None) -> Dict[str, Any]:
     """A record states what was observed. It never asserts what was not.
 
     A merge is not a test run, so ``tests_passed`` is ``unknown`` unless a
@@ -533,6 +537,10 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
     ``--record-delivery``. Each is stamped the same way and for the same reason:
     ``None`` means unknown, the key is OMITTED, and a record that predates the
     key reads as "base unknown", never as the default branch (Data Shapes).
+
+    ``failure`` names why a merged pull request still failed its sub-task (R-8:
+    ``single-branch-delivery``, a sub-task merged into the default branch on the web); the record is
+    ``failed`` and carries the key. Omitted otherwise.
     """
     if checks == "SUCCESS":
         tests_passed, verified_by = True, "ci"
@@ -541,7 +549,12 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
     else:
         tests_passed, verified_by = "unknown", "none"
 
-    failed = verdict == "closed-unmerged"
+    failed = verdict == "closed-unmerged" or failure is not None
+    description = ("Pull request closed without merging; the sub-task could not be "
+                   "delivered as specified.")
+    if failure == "single-branch-delivery":
+        description = ("Pull request merged into the default branch; a contract with two or more "
+                       "mergeable blocks is delivered through its parent branch.")
     record = {
         "status": "failed" if failed else "completed",
         "commit": commit,
@@ -550,8 +563,7 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
         "contract_impact": {
             "requires_architect": failed,
             "severity": "medium" if failed else "none",
-            "description": ("Pull request closed without merging; the sub-task could not be "
-                            "delivered as specified." if failed else None),
+            "description": description if failed else None,
         },
         "completed_by": "pr-merged",
         "pull_request": pr_url,
@@ -570,6 +582,8 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
         record["base_is_default"] = base_is_default
     if delivered_by is not None:
         record["delivered_by"] = delivered_by
+    if failure is not None:
+        record["failure"] = failure
     return record
 
 
@@ -931,7 +945,12 @@ def locate_parent(slug: str) -> Dict[str, Any]:
             brief = brief_for_branch(name, ref_of(name))
         except AmbiguousBrief:
             brief = None
-        if brief and _names_contract(brief.get("contract"), slug):
+        if not brief:
+            continue
+        # The contract's own header on that branch links its parent brief (L-2), whatever its contract: says.
+        on_branch = file_at_commit(ref_of(name), concept) or ""
+        linked = select_linked_brief(on_branch, slug, [dict(brief, _path=brief.get("path"))])
+        if linked is not None or _names_contract(brief.get("contract"), slug):
             candidates.append(name)
 
     report: Dict[str, Any] = {"status": "not-found", "branch": None, "worktree": None,
@@ -1408,12 +1427,35 @@ def _brief_value(brief: Dict[str, Any], key: str) -> str:
     return str(value).strip().strip("`'\"").strip()
 
 
+def _contract_field_state(brief: Dict[str, Any], slug: str) -> str:
+    """L-3: ``unset`` | ``names`` | ``other`` for a brief's ``contract:`` value against ``slug``.
+
+    ``none``, ``none - <text>``, ``UNKNOWN``, empty, a ``<...`` placeholder, a missing key and a
+    non-string value are all ``unset``. Otherwise the value names the contract when one of its
+    path tokens, minus a ``.md`` suffix, equals the slug (case-insensitive).
+    """
+    value = brief.get("contract")
+    if not isinstance(value, str):
+        return "unset"
+    text = value.strip().strip("`'\"").strip()
+    lowered = text.lower()
+    if lowered in ("", "none", "unknown") or lowered.startswith("<") or re.match(r"none\s+[-–—:]", lowered):
+        return "unset"
+    for token in re.findall(r"[A-Za-z0-9._\-]+", text):
+        stem = token[:-3] if token.lower().endswith(".md") else token
+        if stem.casefold() == slug.casefold():
+            return "names"
+    return "other"
+
+
+def brief_names_contract(brief: Dict[str, Any], slug: str) -> bool:
+    """L-3: the ONE matcher that decides "this brief names this contract", filtering included."""
+    return _contract_field_state(brief, slug) == "names"
+
+
 def _brief_names_contract(brief: Dict[str, Any], contract_id: str) -> bool:
-    """True when the brief's ``contract:`` field points at ``contract_id`` (slug or path)."""
-    named = _brief_value(brief, "contract")
-    if not named:
-        return False
-    return Path(named.replace("\\", "/")).stem == contract_id or named == contract_id
+    """Thin wrapper over ``brief_names_contract`` (kept for ``declared_topology`` and the landing)."""
+    return brief_names_contract(brief, contract_id)
 
 
 def declared_topology(contract_id: Optional[str], briefs: List[Dict[str, Any]],
@@ -1497,13 +1539,109 @@ def parent_brief_of(contract_id: Optional[str], briefs: List[Dict[str, Any]],
     return matches[0] if len(matches) == 1 else None
 
 
+#: The closed set of Layout defect reasons (Parent Branch Delivery Rule). They block dispatch and
+#: approval; they never enter ``is_delivered``, G-2 or the completion evaluation.
+LAYOUT_DEFECT_REASONS = ("no-parent-branch", "parent-is-default", "ambiguous", "no-parent-issue",
+                         "sub-task-raises-version", "single-branch-delivery")
+#: L-1: only a contract in one of these Statuses is judged (R-6); everything else is exempt.
+JUDGED_STATUSES = ("draft", "approved")
+_CONVENTIONS_REL = ".claude/work-item-conventions.json"
+
+
+def version_raise_on(default: str) -> bool:
+    """``contractLanding.versionRaise`` in the conventions file at ``origin/<default>``."""
+    text = file_at_commit("origin/" + default, _CONVENTIONS_REL)
+    try:
+        config = (json.loads(text) or {}).get("contractLanding") if text else None
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(config, dict) and config.get("versionRaise") is True
+
+
+def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
+                    all_briefs: List[Dict[str, Any]], scoped_briefs: List[Dict[str, Any]],
+                    default: str) -> Optional[Dict[str, Any]]:
+    """The Delivery Layout of a contract, derived and never stored (L-1 to L-5), or None when not judged.
+
+    Judged only for two or more mergeable blocks (a review gate is one) and a Status of draft or
+    approved. Returns ``parent_branch``, ``parent_issue`` and ``defects``: dicts with a ``reason``
+    from ``LAYOUT_DEFECT_REASONS``, a ``detail`` and a ``remedy``. ``all_briefs`` is the unfiltered
+    folder (the selector filters); ``scoped_briefs`` are the ones naming the contract (the topology).
+    """
+    mergeable = [b for b in blocks if b.kind == "mergeable"]
+    if len(mergeable) < 2 or read_contract_status(contract_text) not in JUDGED_STATUSES:
+        return None
+    defects: List[Dict[str, str]] = []
+
+    def add(reason: str, detail: str, remedy: str) -> None:
+        if reason not in [d["reason"] for d in defects]:
+            defects.append({"reason": reason, "detail": detail, "remedy": remedy})
+
+    parent = select_linked_brief(contract_text, slug, all_briefs, default)
+    parent_branch: Optional[str] = None
+    parent_issue: Optional[int] = None
+    if parent is None:
+        add("no-parent-branch", "no Work Item Brief is linked to this contract's header",
+            "run /task, then put the brief path in the contract's **Work Item Brief:** header")
+    else:
+        branch = _brief_value(parent, "branch")
+        if branch.lower() in ("", "none", "unknown") or branch.startswith("<"):
+            add("no-parent-branch", "the linked brief declares no branch:",
+                "write the parent branch into the brief's branch: field (run /task)")
+        elif branch == default:
+            add("parent-is-default", "the linked brief's branch: is the default branch %s" % default,
+                "give the brief a parent branch of its own; the default branch cannot be one")
+        else:
+            parent_branch = branch
+        ident = _brief_value(parent, "id").lstrip("#")
+        if not ident.isdigit() or int(ident) < 1:
+            add("no-parent-issue", "the linked brief's id: %r is not a GitHub issue number" % ident,
+                "open the parent issue and write its number into the brief's id:")
+        else:
+            parent_issue = int(ident)
+    reason = declared_topology(None, scoped_briefs, default, [default])["reason"]
+    if reason in ("ambiguous", "parent-is-default"):
+        add(reason, "the Sub-Task Work Items of this contract do not agree on one parent branch"
+            if reason == "ambiguous" else "the Sub-Task Work Items declare the default branch as their base",
+            "make the briefs' base: and parent_issue: agree on the one parent branch")
+    if version_raise_on(default):
+        manifests = [f.replace("\\", "/") for b in mergeable for f in b.files
+                     if f.replace("\\", "/") in VERSION_MANIFESTS]
+        if manifests:
+            add("sub-task-raises-version", "a block lists the version file %s" % manifests[0],
+                "remove the version files from the blocks' Files to touch; the landing raises the "
+                "plugin version once")
+    return {"sub_task_count": len(mergeable), "parent_branch": parent_branch,
+            "parent_issue": parent_issue, "defects": defects}
+
+
+def landing_evidence_holds(layout: Dict[str, Any], tasks: List[SubTask],
+                           records: Dict[str, Dict[str, Any]], head_ref: Optional[str]) -> bool:
+    """R-7: a pull request from the parent branch is a landing only when stored records prove it.
+
+    Every sub-task needs a record verified by GitHub whose ``base_ref`` is the pull request's
+    ``headRefName`` (which is the layout's parent branch) and whose ``base_is_default`` is not
+    true; a missing flag reads as "not the default", as ``candidate_kind`` reads it.
+    """
+    if not tasks or not head_ref or head_ref != layout.get("parent_branch"):
+        return False
+    return all((records.get(t.id) or {}).get("verified") == "github"
+               and (records.get(t.id) or {}).get("base_ref") == head_ref
+               and (records.get(t.id) or {}).get("base_is_default") is not True
+               for t in tasks)
+
+
 def effective_base(state: Dict[str, Any], subtask_id: str, topology: Dict[str, Any],
-                   default_base: str) -> Dict[str, Any]:
+                   default_base: str, layout: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """D-1: the base one sub-task is cut from, and where that came from. First match wins.
 
     Returns ``{"base", "base_source", "problem", "detail"}``. ``problem`` is
     ``base-not-declared`` (``base`` and ``base_source`` are then ``None``) or ``None``.
     ``--dispatch`` turns a problem into its refusal; ``--status`` only reports it.
+
+    ``layout`` is the Delivery Layout of a judged multi-sub-task contract: its parent branch is the
+    base when the briefs declare none (``work-item-brief``), and the default branch is never the
+    answer for it.
 
     Rule 0 (rehydration found two briefs for the branch: ``identity-ambiguous``) belongs to
     contract 460's rehydration, which is not on this branch, so it is not built here.
@@ -1535,12 +1673,18 @@ def effective_base(state: Dict[str, Any], subtask_id: str, topology: Dict[str, A
                        "dispatch again" % (subtask_id, subtask_id))
     if topology.get("parent_branch"):
         return found(topology["parent_branch"], "declared-topology")
+    if layout and layout.get("parent_branch"):
+        return found(layout["parent_branch"], "work-item-brief")
     sibling = base_not_declared(state, subtask_id, default_base)
     if sibling:
         return refused(sibling)
     own = entry.get("base")
     if own and own != default_base:
         return found(own, "state")
+    if layout is not None:
+        return refused("this contract has two or more mergeable blocks and no parent branch is "
+                       "declared, so sub-task %r cannot be cut from the default branch -- link the "
+                       "parent brief in the contract header (run /task)" % subtask_id)
     return found(default_base, "default")
 
 
@@ -1565,7 +1709,8 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
             defects: Optional[List[Any]] = None,
             briefs: Optional[List[Dict[str, Any]]] = None,
             default_branch: Optional[str] = None,
-            candidates: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+            candidates: Optional[List[Dict[str, Any]]] = None,
+            layout_defects: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Decide the contract's next single move. This never iterates.
 
     A merge-gated loop does not spin. It makes one move, then suspends until a
@@ -1594,6 +1739,10 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
     ``awaiting-merge`` -- so the loop stops offering work that was already
     delivered on one branch. An ``early`` candidate (a parent merged before its
     last sub-task landed) leaves the move below it standing.
+
+    ``layout_defects`` (Parent Branch Delivery Rule) are the reasons a judged multi-sub-task
+    contract cannot be delivered through a parent branch. They replace ONLY the ``dispatch`` move
+    with ``contract-defect``; every move asked before it is unchanged.
     """
     if defects:
         return {"action": "contract-defect", "defects": defects,
@@ -1635,6 +1784,10 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
         return done
 
     released, blocked = compute_released(tasks, records)
+    if released and layout_defects:
+        return {"action": "contract-defect", "defects": layout_defects, "layout": True,
+                "detail": "this contract cannot be delivered through a parent branch as written; "
+                          "fix the layout before anything is dispatched"}
     if released:
         return {"action": "dispatch", "sub_tasks": [t.id for t in released], "blocked": blocked}
 
@@ -1697,6 +1850,11 @@ def next_command_for(
         if records_pr:
             commands = ["/pr-merged %s" % records_pr]
             why = "records are waiting in an open pull request; merge it, then record the delivery from a fresh worktree"
+        elif known and known[-1].get("needs_accept"):
+            # R-9: G-7 would refuse the plain command, so show the owner the accept form instead.
+            commands = ["/pr-merged %s --record-delivery --accept-single-branch" % known[-1].get("pr")]
+            why = ("it went to the default branch on one branch, so --record-delivery is refused (G-7); "
+                   "only the owner may accept it as a single-branch delivery")
         elif known:
             commands = ["/pr-merged %s --record-delivery" % known[-1].get("pr")]
             why = "record the delivery so the loop agrees with GitHub"
@@ -2299,12 +2457,13 @@ def parse_brief_frontmatter(text: str) -> Dict[str, str]:
     return fields
 
 
-def read_work_item_briefs(contract_slug: str) -> List[Dict[str, str]]:
+def read_work_item_briefs(contract_slug: str, scoped: bool = True) -> List[Dict[str, str]]:
     """The Sub-Task Work Items under the checkout's ``.claude/work-items/`` naming a contract.
 
     Resolved through ``_claude_paths`` at call time, like every other locator.
     Each brief is its frontmatter mapping plus ``_path``. A contract that no
     brief names yields ``[]`` (so the briefless callers keep today's ending).
+    ``scoped=False`` hands over every brief unfiltered, for ``select_linked_brief``.
     """
     try:
         from _claude_paths import project_dir, work_items_dir
@@ -2325,7 +2484,7 @@ def read_work_item_briefs(contract_slug: str) -> List[Dict[str, str]]:
         fields = read_brief_frontmatter(path)
         if not fields:
             continue
-        if not _brief_names_contract(fields, contract_slug):
+        if scoped and not _brief_names_contract(fields, contract_slug):
             continue
         entry = dict(fields)
         entry["_path"] = str(path)
@@ -2725,43 +2884,42 @@ def read_contract_status(contract_text: str) -> Optional[str]:
 
 
 def _names_contract(value: Optional[str], slug: str) -> bool:
-    """Whether a path or name in ``value`` is this contract's (the slug, with or without ``.md``)."""
-    for token in re.findall(r"[A-Za-z0-9._\-]+", value or ""):
-        stem = token[:-3] if token.lower().endswith(".md") else token
-        if stem.casefold() == slug.casefold():
-            return True
-    return False
+    """Thin wrapper over ``brief_names_contract``: whether ``value`` names this contract's slug."""
+    return brief_names_contract({"contract": value}, slug)
 
 
 def brief_header_path(contract_text: str) -> Optional[Path]:
-    """The path in the contract's own ``**Work Item Brief:**`` header, or None when it has none."""
+    """The path in the contract's own ``**Work Item Brief:**`` header, or None when it has none.
+
+    An empty value, ``none`` and a ``<...`` placeholder all read as no header (the template's
+    unfilled line).
+    """
     m = re.search(r"^\*\*Work Item Brief:\*\*[ \t]*`?([^\s`]+)`?", contract_text, re.M)
-    return Path(m.group(1)) if m else None
+    if not m or m.group(1).lower() == "none" or m.group(1).startswith("<"):
+        return None
+    return Path(m.group(1))
 
 
-def find_linked_brief(contract_text: str, slug: str,
-                      work_items_dir: Optional[Path] = None,
-                      default_branch_name: Optional[str] = None) -> Optional[Path]:
-    """I-17 and D-4: the brief linked to a contract, or None.
+def select_linked_brief(contract_text: str, slug: str, briefs: List[Dict[str, Any]],
+                        default_branch_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """L-2: the ONE pure selector of a contract's parent brief, over briefs that each carry ``_path``.
 
-    First the contract's own ``**Work Item Brief:**`` path. Without one, among the briefs
-    under the work items folder whose ``contract:`` names this contract: the parent brief
-    (``parent_brief_of``, the rule the landing's P1 uses); failing that, the one brief with
-    no ``parent_issue:`` (absent or ``none``); otherwise None.
+    With a ``**Work Item Brief:**`` header, that brief is used -- whatever unset value its
+    ``contract:`` field holds -- unless its ``contract:`` names a different contract (then there is
+    none). A header naming a brief that is not in ``briefs`` gives none, with no fallback. Without a
+    header, among the briefs ``brief_names_contract`` accepts: the parent brief (``parent_brief_of``,
+    the rule the landing's P1 uses); failing that, the one with no ``parent_issue:`` (absent or
+    ``none``); otherwise None. ``briefs`` are passed unfiltered: the matcher does all the filtering.
     """
     header_path = brief_header_path(contract_text)
     if header_path is not None:
-        return header_path if header_path.is_file() else None
-    folder = work_items_dir if work_items_dir is not None else WORK_ITEMS_DIR
-    if not folder.is_dir():
+        wanted = header_path.as_posix()
+        for brief in briefs:
+            path = str(brief.get("_path") or "").replace("\\", "/")
+            if path == wanted or path.endswith("/" + wanted):
+                return None if _contract_field_state(brief, slug) == "other" else brief
         return None
-    named: List[Dict[str, Any]] = []
-    for candidate in sorted(folder.glob("*.md")):
-        fields = read_brief_frontmatter(candidate)
-        if fields and _names_contract(fields.get("contract"), slug):
-            entry: Dict[str, Any] = dict(fields)
-            entry["_path"] = str(candidate)
-            named.append(entry)
+    named = [b for b in briefs if brief_names_contract(b, slug)]
     parentless = [b for b in named if _brief_value(b, "parent_issue").lower() in ("", "none")]
     if len(named) > 1:
         # Only several candidates need the topology, and reading the default branch costs a
@@ -2769,8 +2927,33 @@ def find_linked_brief(contract_text: str, slug: str,
         default = default_branch_name if default_branch_name is not None else default_branch()
         parent = parent_brief_of(None, named, default, [default])
         if parent is not None:
-            return Path(parent["_path"])
-    return Path(parentless[0]["_path"]) if len(parentless) == 1 else None
+            return parent
+    return parentless[0] if len(parentless) == 1 else None
+
+
+def find_linked_brief(contract_text: str, slug: str,
+                      work_items_dir: Optional[Path] = None,
+                      default_branch_name: Optional[str] = None) -> Optional[Path]:
+    """I-17 and D-4: the brief linked to a contract, or None -- the disk reader of ``select_linked_brief``.
+
+    Hands the selector every brief under the work items folder (plus the header's own file when it
+    lives elsewhere); the selector and the matcher do the choosing.
+    """
+    folder = work_items_dir if work_items_dir is not None else WORK_ITEMS_DIR
+    briefs: List[Dict[str, Any]] = []
+    if folder.is_dir():
+        for candidate in sorted(folder.glob("*.md")):
+            fields = read_brief_frontmatter(candidate)
+            if fields:
+                entry: Dict[str, Any] = dict(fields)
+                entry["_path"] = str(candidate)
+                briefs.append(entry)
+    header_path = brief_header_path(contract_text)
+    if header_path is not None and header_path.is_file() and not any(
+            str(b["_path"]).replace("\\", "/").endswith(header_path.as_posix()) for b in briefs):
+        briefs.append(dict(read_brief_frontmatter(header_path) or {}, _path=str(header_path)))
+    chosen = select_linked_brief(contract_text, slug, briefs, default_branch_name)
+    return Path(chosen["_path"]) if chosen is not None else None
 
 
 def find_tracking_issue(contract_text: str, slug: str,
@@ -3600,6 +3783,8 @@ def _usage_refusal(args: argparse.Namespace) -> Optional[str]:
                             ("--skipped", bool(args.skipped))):
             if given:
                 return "--preconditions cannot be combined with %s" % flag
+    if getattr(args, "accept_single_branch", False) and not args.record_delivery:
+        return "--accept-single-branch rides only with --record-delivery"
     if args.record_delivery:
         if len(args.pr) != 1:
             return "--record-delivery needs exactly one --pr"
@@ -3641,6 +3826,9 @@ def main() -> int:
                     help="report where the contract's parent branch lives (reads and fetches, writes nothing)")
     ap.add_argument("--record-delivery", action="store_true",
                     help="record that the one --pr delivered every block of the contract (GitHub-verified)")
+    ap.add_argument("--accept-single-branch", action="store_true",
+                    help="with --record-delivery: the owner accepts a one-branch delivery of a "
+                         "multi-sub-task contract that already merged (human-only; never run by a skill)")
     ap.add_argument("--owner-resolved", action="append", default=[], metavar="REPORT",
                     help="the owner confirms this blocked review report was fixed (repeatable)")
     ap.add_argument("--skipped", action="append", default=[], metavar="TEXT",
@@ -3704,6 +3892,10 @@ def main() -> int:
     stored_records = dict(records)
     base = default_branch()
     briefs = read_work_item_briefs(slug)
+    #: The Delivery Layout of a judged multi-sub-task contract (L-1), or None. Recomputed every call.
+    layout = delivery_layout(contract_text, slug, blocks, read_work_item_briefs(slug, scoped=False),
+                             briefs, base) if len([b for b in blocks if b.kind == "mergeable"]) >= 2 else None
+    layout_defects: List[Dict[str, Any]] = list(layout["defects"]) if layout else []
     # `base` is already resolved on the line above -- hand it to new_state so
     # a fresh state store costs one subprocess, not two (Extension Points).
     stored_state = load_state(slug)
@@ -3992,6 +4184,20 @@ def main() -> int:
                                "%s carries records not yet merged; merge %s, then run again in a flat "
                                "worktree cut fresh from origin/%s" % (url, url, base),
                                records_pull_requests=[r.get("url") for r in open_records])
+            if args.accept_single_branch:
+                awaiting = awaiting_merge(reconcile_state(state, records))
+                if awaiting:
+                    return _refuse("G-7", "sub-task-awaiting-merge",
+                                   "a sub-task is still out for merge (%s); a one-branch delivery cannot "
+                                   "be accepted while work is unmerged" % ", ".join(awaiting))
+            elif layout is not None and not landing_evidence_holds(layout, tasks, records, pr.get("headRefName")):
+                return _refuse("G-7", "single-branch-delivery",
+                               "pull request %s is not the landing of this contract: the sub-tasks have no "
+                               "stored completion records proving they merged into its parent branch" % ref,
+                               remedy="if the work is not yet merged, deliver it through the parent branch "
+                                      "(/flow Step 2.7, then /advance); if it is already merged on the "
+                                      "default branch, the owner runs /pr-merged <pr> --record-delivery "
+                                      "--accept-single-branch")
 
             merge_sha = (pr.get("mergeCommit") or {}).get("oid")
             rollup = pr.get("statusCheckRollup")
@@ -4027,6 +4233,8 @@ def main() -> int:
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
                 "blocks_recorded": new_ids, "blocks_already_recorded": already,
             }
+            if args.accept_single_branch:
+                planned["layout"] = "single-branch-accepted"
             if writing:
                 write_delivery(slug, planned)
                 written_files.append(_list_record(RESULTS_DIR / slug / (DELIVERY_RECORD_NAME + ".yaml")))
@@ -4120,8 +4328,13 @@ def main() -> int:
         sub_issue_closed = None
         task_state_entry = state.get("sub_tasks", {}).get(task.id, {})
         task_issue = task_state_entry.get("issue")
+        # R-8: a sub-task's own pull request merged into the default branch on the web. It cannot be
+        # stopped before the merge, so it is recorded after it as a failed record, and nothing closes.
+        web_merged = (layout is not None and verdict == "merged" and not cross_repository
+                      and pr.get("baseRefName") == base
+                      and pr.get("headRefName") in (branch_for(slug, task.id), recorded_branches.get(task.id)))
         if (verdict == "merged" and task_issue is not None and not args.dry_run
-                and not args.status and not args.resume):
+                and not web_merged and not args.status and not args.resume):
             # The close comment never carries the other repository's link or
             # name (X-7): a cross-repository pull request's own url points
             # at a different repository, and naming it here would be the
@@ -4139,7 +4352,8 @@ def main() -> int:
         rec = build_record(verdict, merge_sha, pr.get("url", ""), pr.get("mergedAt"), checks,
                            review_verdict=review_verdict, sub_issue_closed=sub_issue_closed,
                            hand_resolved=hand_resolved_summary, base_ref=base_ref,
-                           base_is_default=base_is_default)
+                           base_is_default=base_is_default,
+                           failure="single-branch-delivery" if web_merged else None)
         if writing:
             write_record(slug, task.id, rec)
             written_files.append(_list_record(RESULTS_DIR / slug / (task.id + ".yaml")))
@@ -4207,6 +4421,26 @@ def main() -> int:
         if found_open:
             records_pr_url = found_open[0].get("url")
 
+    if layout is not None:
+        # R-7 / R-9: a known merged candidate that G-7 would refuse needs the owner's accept, and the
+        # live report names it -- but only while no Records pull request is open (the records are
+        # then still on the records branch) and only when GitHub answered both questions.
+        for cand in candidates:
+            if cand.get("known") and cand.get("kind") != "early" \
+                    and not landing_evidence_holds(layout, tasks, records, cand.get("branch")):
+                cand["needs_accept"] = True
+        records_read_failed = bool(_open_records_cache) and _open_records_cache[0] is None
+        if not records_pr_url and not records_read_failed and not is_delivered(tasks, records, delivery, defects)[0] \
+                and any(c.get("known") and c.get("kind") == "single-branch" for c in candidates):
+            layout_defects.append({
+                "reason": "single-branch-delivery",
+                "detail": "the work merged into the default branch on one branch, with no completion "
+                          "evidence of a parent-branch landing",
+                "remedy": "not yet merged: deliver it through the parent branch (/flow Step 2.7); already "
+                          "merged on the default branch: the owner runs /pr-merged <pr> --record-delivery "
+                          "--accept-single-branch"})
+        report["layout_defects"] = layout_defects
+
     if args.dispatch:
         by_id = {t.id: t for t in tasks}
         task = by_id.get(args.dispatch)
@@ -4215,7 +4449,8 @@ def main() -> int:
                               "known": list(by_id)}))
             return 2
         move_now = advance(tasks, records, state, defects=defects,
-                           briefs=briefs, default_branch=base, candidates=candidates)
+                           briefs=briefs, default_branch=base, candidates=candidates,
+                           layout_defects=layout_defects)
         if move_now["action"] == "delivery-unrecorded":
             print(json.dumps({"error": "delivery-unrecorded", "sub_task": task.id,
                               "candidates": move_now.get("candidates", []),
@@ -4227,9 +4462,10 @@ def main() -> int:
             if move_now["action"] == "contract-defect":
                 print(json.dumps({"error": "contract-defect", "sub_task": task.id,
                                   "defects": move_now.get("defects", []),
-                                  "detail": "one or more handoff blocks cannot be delivered as "
-                                            "written; amend the contract before anything is "
-                                            "dispatched"}))
+                                  "detail": move_now["detail"] if move_now.get("layout") else
+                                  "one or more handoff blocks cannot be delivered as "
+                                  "written; amend the contract before anything is "
+                                  "dispatched"}))
             else:
                 print(json.dumps({"error": "not-released", "sub_task": task.id,
                                   "detail": "its dependencies have not landed; dispatching it "
@@ -4250,10 +4486,14 @@ def main() -> int:
         # --status reports the same outcome and never refuses. It subsumes Defect Two's
         # sibling check (`base_not_declared`, rule 4) and I-8: a state where no OTHER entry
         # declares a non-default base dispatches from the default branch as before.
-        resolved = effective_base(state, task.id, declared_topology(None, briefs, base, [base]), base)
+        resolved = effective_base(state, task.id, declared_topology(None, briefs, base, [base]), base,
+                                  layout)
         if resolved["problem"]:
             print(json.dumps({
                 "error": resolved["problem"], "sub_task": task.id, "detail": resolved["detail"],
+                "remedy": "record the sub-task's own identity with --record-subtask %s --issue <n> "
+                          "--base <parent> --brief <path>, or make the Sub-Task Work Items agree on "
+                          "one parent branch" % task.id,
                 "next_command": {
                     "commands": [],
                     "reason": "no parent branch can be chosen for %s; make the Sub-Task Work Items "
@@ -4262,6 +4502,18 @@ def main() -> int:
             return 7
 
         task_state_entry = state.get("sub_tasks", {}).get(task.id, {})
+        # needs-issue (exit 7, its own error and remedy): computed BEFORE any branch is cut, so a
+        # judged multi-sub-task contract never gets a branch with no sub-issue. Both --dispatch and
+        # --dry-run refuse, so a preview matches the real run; --status and --resume only report it.
+        if layout is not None and task_state_entry.get("issue") is None \
+                and not (args.status or args.resume):
+            print(json.dumps({
+                "error": "needs-issue", "sub_task": task.id,
+                "detail": "sub-task %s has no sub-issue, and a contract with two or more mergeable "
+                          "blocks opens one per sub-task before any branch is cut" % task.id,
+                "remedy": "run /flow (Step 2.7) to open the sub-issues and record them, then dispatch "
+                          "again"}))
+            return 7
         # I-1 -- the acceptance criterion this whole feature exists to
         # satisfy: a sub-task branch is cut from ITS OWN declared base,
         # never unconditionally from the default branch.
@@ -4345,7 +4597,8 @@ def main() -> int:
         return 0
 
     move = advance(tasks, records, state, defects=defects,
-                   briefs=briefs, default_branch=base, candidates=candidates)
+                   briefs=briefs, default_branch=base, candidates=candidates,
+                   layout_defects=layout_defects)
     if move["action"] == "delivery-unrecorded" and records_pr_url:
         move["records_pull_request"] = records_pr_url
 
@@ -4386,7 +4639,7 @@ def main() -> int:
     planned_ids = {t.id for t in tasks}
     for block_entry in report["blocks"]:
         if block_entry["id"] in planned_ids:
-            resolved_entry = effective_base(state, block_entry["id"], topology_now, base)
+            resolved_entry = effective_base(state, block_entry["id"], topology_now, base, layout)
             block_entry.update({"base": resolved_entry["base"],
                                 "base_source": resolved_entry["base_source"],
                                 "base_problem": resolved_entry["problem"]})
@@ -4424,6 +4677,8 @@ def main() -> int:
                 parts += ["--pr", str(ref)]
             if args.record_delivery:
                 parts.append("--record-delivery")
+                if args.accept_single_branch:
+                    parts.append("--accept-single-branch")
         for name in owner:
             parts += ["--owner-resolved", name]
         for text in args.skipped:
@@ -4459,7 +4714,7 @@ def main() -> int:
         for tid in move["sub_tasks"]:
             entry = state.get("sub_tasks", {}).get(tid, {})
             # D-1's reading; a problem keeps today's value (the --dispatch path refuses it).
-            resolved_packet = effective_base(state, tid, topology_now, base)
+            resolved_packet = effective_base(state, tid, topology_now, base, layout)
             report["dispatch"].append(build_dispatch(
                 by_id[tid], slug, str(contract), bodies.get(tid, ""),
                 issue=entry.get("issue"),

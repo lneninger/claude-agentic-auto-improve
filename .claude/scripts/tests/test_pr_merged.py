@@ -9460,7 +9460,7 @@ class TestParentPullRequestKinds(unittest.TestCase):
     """I-14 kinds `parent` and `early`, and what each does to the move and to G-1. Catches: M-5."""
 
     def _parent_world(self, last_subtask_merged_at):
-        world = _World(self)
+        world = _World(self, brief=_valid_parent_brief(pr=_pr_url(_BRIEF_PR_NUMBER)))
         world.record("t1-backend", 61, base_is_default=False, merged_at="2026-10-01T09:00:00Z")
         if last_subtask_merged_at is not None:
             world.record("t2-frontend", 62, base_is_default=False, merged_at=last_subtask_merged_at)
@@ -9974,6 +9974,29 @@ def _brief_pr_map():
     return {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH)}
 
 
+# Issue 113 (Parent Branch Delivery Rule). The shared worlds above are an approved contract with two or more
+# mergeable blocks and a brief with `id: none`: exactly the shape the rule refuses (layout defect
+# no-parent-issue). A test that pins an older behaviour on the JUDGED path gives its world a VALID parent
+# instead (L-2 to L-4): the header links a brief whose branch: is not the default branch and whose id: is a
+# positive integer. The status stays approved, so the test still measures the path it was written for.
+_PARENT_ISSUE = "100"
+
+
+def _valid_parent_brief(slug=_SLUG, **kwargs):
+    return _build_brief(slug, ident=_PARENT_ISSUE, **kwargs)
+
+
+def _parent_state(world, base=_BRIEF_BRANCH, tasks=("t1-backend", "t2-frontend")):
+    """A state store whose entries carry a sub-issue and the parent branch as base (what /flow Step 2.7
+    records), so a dispatch is neither a needs-issue nor a base-not-declared refusal."""
+    entries = {tid: {"status": "pending", "branch": None, "pull_request": None, "issue": 101 + n,
+                     "base": base, "brief": None} for n, tid in enumerate(tasks)}
+    world.put(".claude/orchestrator/state/%s/state.yaml" % world.slug,
+              yaml.dump({"contract": world.slug, "started_at": "2026-10-05T00:00:00+00:00",
+                         "sub_tasks": entries}, default_flow_style=False, sort_keys=False))
+    return world
+
+
 # --------------------------------------------------------------------------
 # I-12: exit 10 has one meaning -- GitHub could not be verified and the run
 # wrote nothing. Catches: M-6 (preflight after the writes), M-9 (preflight
@@ -10055,7 +10078,7 @@ class TestDispatchNeverRunsThePreflight(unittest.TestCase):
     def test_dispatch_completes_without_calling_gh_authenticated_even_when_it_would_say_false(self):
         for extra in (["--dry-run"], []):
             with self.subTest(extra=extra):
-                world = _World(self, brief=_build_brief(pr="none"))
+                world = _parent_state(_World(self, brief=_valid_parent_brief(pr="none")))
                 res = _drive(world, ["--dispatch", "t1-backend"] + extra, authenticated=False)
                 self.assertEqual(res.exit_code, 0,
                                  "I-12: --dispatch never returns 10, so create_branch's git-switch "
@@ -10297,14 +10320,14 @@ class TestDispatchRefusesAnUnrecordedDelivery(unittest.TestCase):
 
     def test_control_without_a_brief_link_dispatch_proceeds(self):
         # CONTROL (passes today): the refusal is not a blanket one.
-        world = _World(self, brief=_build_brief(pr="none"))
+        world = _parent_state(_World(self, brief=_valid_parent_brief(pr="none")))
         res = _drive(world, ["--dispatch", "t1-backend"])
         self.assertEqual(res.exit_code, 0, res.describe())
         self.assertEqual(res.spies.create_branch.call_count, 1, "the branch is cut")
 
     def test_control_an_early_parent_does_not_refuse_the_sub_task_still_to_do_M5(self):
         # CONTROL (passes today). Catches M-5: dropping the `early` kind would make this refuse.
-        world = _World(self)
+        world = _parent_state(_World(self, brief=_valid_parent_brief(pr=_pr_url(_BRIEF_PR_NUMBER))))
         world.record("t1-backend", 61, base_is_default=False, merged_at="2026-10-01T09:00:00Z")
         res = _drive(world, ["--dispatch", "t2-frontend"],
                      prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH, merged_at="2026-10-03T12:00:00Z")})
@@ -10319,11 +10342,17 @@ class TestDispatchRefusesAnUnrecordedDelivery(unittest.TestCase):
 # Catches: M-4, M-5.
 # --------------------------------------------------------------------------
 class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
+    # Issue 113: these worlds are an approved two-block contract delivered on ONE branch with no stored
+    # records. With a valid parent (id: 100) that is a single-branch delivery, which G-7 refuses unless the
+    # owner accepts it (R-7); --accept-single-branch is that acceptance, so every write assertion below
+    # still measures the recording itself.
+    FLAGS = ["--record-delivery", "--pr", "50", "--accept-single-branch"]
 
-    FLAGS = ["--record-delivery", "--pr", "50"]
+    def _delivery_world(self):
+        return _delivery_world(self, brief=_valid_parent_brief())
 
     def test_it_writes_a_record_per_unrecorded_block_and_one_delivery_record(self):
-        world = _delivery_world(self)
+        world = self._delivery_world()
         res = _drive(world, self.FLAGS, prs=_brief_pr_map())
         self.assertEqual(res.exit_code, 0, "I-15: the guards pass. %s" % res.describe())
         for tid in ("t1-backend", "t2-frontend"):
@@ -10352,11 +10381,13 @@ class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
                          "I-20: the three tracked files this run wrote")
         self.assertFalse(res.spies.close_sub_issue.called, "I-15: it never closes an issue")
         self.assertFalse(res.spies.create_branch.called, "I-15: it never cuts a branch")
-        self.assertFalse(res.spies.gh_open_sub_issues.called,
-                         "G-4: a brief with id none has no parent issue, so no sub-issue can exist and no read is made")
+        # Was: "a brief with id none has no parent issue, so no read is made". A valid parent (L-4) has an
+        # integer id, so G-4 now makes its one read, of that parent issue.
+        self.assertEqual([str(c.args[0]) for c in res.spies.gh_open_sub_issues.call_args_list], [_PARENT_ISSUE],
+                         "G-4: ONE read of the brief's parent issue, and no other")
 
     def test_it_never_overwrites_a_record_and_names_the_ones_already_there(self):
-        world = _delivery_world(self)
+        world = self._delivery_world()
         existing = world.record("t1-backend", 61)
         before = world.get(existing)
         res = _drive(world, self.FLAGS, prs=_brief_pr_map())
@@ -10367,7 +10398,7 @@ class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
                          (["t2-frontend"], ["t1-backend"]))
 
     def test_a_second_run_for_the_same_pull_request_is_a_no_op(self):
-        world = _delivery_world(self)
+        world = self._delivery_world()
         first = _drive(world, self.FLAGS, prs=_brief_pr_map())
         self.assertEqual(first.exit_code, 0, first.describe())
         files = {rel: world.get(rel) for rel in world.under(world.results_rel)}
@@ -10377,7 +10408,7 @@ class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
                          "G-5: nothing is rewritten")
 
     def test_dry_run_writes_nothing(self):
-        world = _delivery_world(self)
+        world = self._delivery_world()
         before = world.snapshot()
         res = _drive(world, self.FLAGS + ["--dry-run"], prs=_brief_pr_map())
         self.assertEqual(res.exit_code, 0, res.describe())
@@ -10426,8 +10457,9 @@ class TestRecordDeliveryGuards(unittest.TestCase):
                          "G-4: ONE read, of the brief's parent issue")
 
     def test_g4_passes_when_the_parent_issue_has_no_open_sub_issue(self):
+        # Issue 113: no stored records means a single-branch delivery (G-7, R-7), so the owner accepts it.
         world = _delivery_world(self, brief=_build_brief(ident="123"))
-        res = _drive(world, self.FLAGS, prs=_brief_pr_map(), sub_issues=[])
+        res = _drive(world, self.FLAGS + ["--accept-single-branch"], prs=_brief_pr_map(), sub_issues=[])
         self.assertEqual(res.exit_code, 0, res.describe())
         self.assertEqual(res.spies.gh_open_sub_issues.call_count, 1)
 
@@ -10526,7 +10558,7 @@ def _fc_contract():
 
 def _fc_world(case, *, recorded=False):
     world = _World(case, slug=_FC_SLUG, contract=_fc_contract(),
-                   brief=_build_brief(_FC_SLUG, branch=_FC_BRANCH, pr=_pr_url(383)))
+                   brief=_build_brief(_FC_SLUG, branch=_FC_BRANCH, pr=_pr_url(383), ident=_PARENT_ISSUE))
     reviews = (
         ("api-contract-review.md", None, "**Counts: BLOCKER 0, WARN 2, NIT 2.** Verdict: **CONTRACT IN SYNC** on the wire."),
         ("llm-contract-review.md", None, "### Verdict\n\nNo training data needed."),
@@ -10566,8 +10598,10 @@ class TestFormatterChainReplay(unittest.TestCase):
                          "I-14: 383 is the brief's own branch; 384 (docs/...) is not a candidate. %s" % res.describe())
         self.assertEqual((cands or [{}])[0].get("kind"), "single-branch", "no records at all: single-branch")
         self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded", res.describe())
-        self.assertEqual(res.commands(), ["/pr-merged 383 --record-delivery"],
-                         "I-19: exactly the record-delivery line for 383. %s" % res.describe())
+        # Issue 113, R-9: four blocks and no stored records is a merged single-branch delivery that G-7
+        # would refuse, so the one command shown to the owner is the accept form, never the refused one.
+        self.assertEqual(res.commands(), ["/pr-merged 383 --record-delivery --accept-single-branch"],
+                         "I-19 / R-9: exactly the record-delivery line for 383, in its accept form. %s" % res.describe())
         self.assertNotIn("/advance", res.out, "criterion 7: /advance is no longer offered")
 
     def test_run_2_status_sees_the_same_candidate_through_one_bare_number_read(self):
@@ -10588,7 +10622,8 @@ class TestFormatterChainReplay(unittest.TestCase):
 
     def test_run_4_record_delivery_writes_four_records_and_leaves_only_t4_for_the_owner(self):
         world = _fc_world(self)
-        res = _fc_drive(world, ["--pr", "383", "--record-delivery"], prs=_fc_prs())
+        # Issue 113, R-7: the owner accepts the one-branch delivery (G-7 refuses it otherwise).
+        res = _fc_drive(world, ["--pr", "383", "--record-delivery", "--accept-single-branch"], prs=_fc_prs())
         self.assertEqual(res.exit_code, 0, res.describe())
         for tid in _FC_TASKS:
             rec = _yaml(world, _results(world, tid + ".yaml"))
@@ -10728,7 +10763,7 @@ class TestRecordDeliveryRefusesAPullRequestWhoseBranchIsRecordedAgainstASubTask(
     _FOREIGN = "feature/foreign-name"
 
     def _world(self, recorded_branch):
-        world = _delivery_world(self, brief=_build_brief(branch=self._FOREIGN, pr="none"))
+        world = _delivery_world(self, brief=_valid_parent_brief(branch=self._FOREIGN, pr="none"))
         state = {"contract": _SLUG, "sub_tasks": {
             "t1-backend": {"status": "pending", "branch": recorded_branch, "pull_request": None,
                            "issue": None, "base": "master", "brief": None}}}
@@ -10754,7 +10789,9 @@ class TestRecordDeliveryRefusesAPullRequestWhoseBranchIsRecordedAgainstASubTask(
         # CONTROL: the state records some OTHER branch, so the same pull request maps to no
         # sub-task and the delivery is not refused at G-1 (proves the refusal above is the rule).
         world = self._world("feature/some-other-branch")
-        res = _drive(world, ["--record-delivery", "--pr", "61"], prs={61: _pr(61, self._FOREIGN)})
+        # Issue 113: no stored records is a single-branch delivery (G-7, R-7); the owner accepts it.
+        res = _drive(world, ["--record-delivery", "--pr", "61", "--accept-single-branch"],
+                     prs={61: _pr(61, self._FOREIGN)})
         self.assertNotEqual((res.report or {}).get("guard"), "G-1",
                             "an unrecorded branch maps nowhere. %s" % res.describe())
         self.assertEqual(res.exit_code, 0,
@@ -10881,13 +10918,21 @@ class TestWrongOwnerResolvedRefusesBeforeAnyWrite(unittest.TestCase):
     def test_control_the_right_name_still_lets_both_writing_runs_write(self):
         # CONTROL: the same fixtures with the real blocked report named. The wrong-name tests
         # above would pass vacuously if these runs never wrote anything.
-        pr_world = self._last_block_world()
-        res = _drive(pr_world, ["--pr", "7", "--owner-resolved", self.BLOCKED], prs=self._prs())
+        # Issue 113: judged contract, so the sub-task pull request merges into the valid parent branch
+        # (into the default branch it would be an R-8 failed record) and the parent's landing is recorded.
+        pr_world = _parent_state(_World(self, brief=_valid_parent_brief(pr="none")))
+        pr_world.record("t2-frontend", 62, base_is_default=False, base_ref=_BRIEF_BRANCH)
+        pr_world.delivery(_BRIEF_PR_NUMBER)
+        pr_world.review(self.BLOCKED, verdict="blocked")
+        res = _drive(pr_world, ["--pr", "7", "--owner-resolved", self.BLOCKED],
+                     prs={7: _pr(7, "task/%s/t1-backend" % _SLUG, base=_BRIEF_BRANCH)})
         self.assertEqual(res.exit_code, 0, res.describe())
         self.assertTrue(pr_world.exists(_results(pr_world, "t1-backend.yaml")),
                         "fixture sanity: the --pr run writes its record when the name is right")
-        delivery = _delivery_world(self)
-        res = _drive(delivery, ["--record-delivery", "--pr", "50", "--owner-resolved", "t9-block.md"],
+        delivery = _delivery_world(self, brief=_valid_parent_brief())
+        # R-7: a one-branch delivery of two blocks is recorded only with the owner's acceptance.
+        res = _drive(delivery, ["--record-delivery", "--pr", "50", "--accept-single-branch",
+                                "--owner-resolved", "t9-block.md"],
                      prs=_brief_pr_map())
         self.assertEqual(res.exit_code, 0, res.describe())
         self.assertTrue(delivery.exists(_results(delivery, "contract-delivery.yaml")),
@@ -11152,10 +11197,15 @@ class TestADryRunsNextCommandClearsTheReasonItPreviewed(unittest.TestCase):
 
     def _pr_world(self):
         # t2 is recorded; t1 is delivered only by pull request 7, which the dry run records in memory.
-        world = _World(self, brief=_build_brief(pr="none"))
-        world.record("t2-frontend", 62)
+        # Issue 113: the contract has two blocks and is judged, so it has a valid parent and its sub-task
+        # pull requests merge into the PARENT branch (a web merge into the default branch is an R-8 failed
+        # record, pinned by TestAWebMergedSubTaskPullRequestIsRecordedAsFailed). The parent's landing is
+        # recorded, so condition one is the only thing pull request 7 still has to satisfy.
+        world = _parent_state(_World(self, brief=_valid_parent_brief(pr="none")))
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_BRIEF_BRANCH)
+        world.delivery(_BRIEF_PR_NUMBER)
         world.review(self.BLOCKED, verdict="blocked")
-        return world, {7: _pr(7, "task/%s/t1-backend" % _SLUG)}
+        return world, {7: _pr(7, "task/%s/t1-backend" % _SLUG, base=_BRIEF_BRANCH)}
 
     def test_control_the_bare_pr_run_clears_the_blocked_report_and_flips(self):
         # CONTROL (passes today): the very command W-3 wants printed does what it should, so the
@@ -11187,9 +11237,11 @@ class TestADryRunsNextCommandClearsTheReasonItPreviewed(unittest.TestCase):
                          "W-3: the printed command advances the verdict. %s" % follow.describe())
 
     def test_a_record_delivery_dry_run_prints_a_command_that_keeps_both_flags_M27(self):
-        world = _delivery_world(self)
+        # Issue 113, R-7: a one-branch delivery of two blocks needs the owner's --accept-single-branch.
+        world = _delivery_world(self, brief=_valid_parent_brief())
         before = world.snapshot()
-        dry = _drive(world, ["--record-delivery", "--pr", "50", "--dry-run"], prs=_brief_pr_map())
+        dry = _drive(world, ["--record-delivery", "--pr", "50", "--accept-single-branch", "--dry-run"],
+                     prs=_brief_pr_map())
         self.assertEqual(world.snapshot(), before, "fixture sanity: a dry run writes nothing")
         flags = _printed_flags(dry)
         self.assertIsNotNone(flags, "fixture sanity: the dry run prints exactly one command. %s" % dry.describe())
@@ -11197,6 +11249,10 @@ class TestADryRunsNextCommandClearsTheReasonItPreviewed(unittest.TestCase):
                       "W-3 / M-27: the printed command keeps --record-delivery, or the delivery is lost. "
                       "Printed flags: %r" % (flags,))
         self.assertIn("--pr", flags, "W-3 / M-27: and keeps --pr. Printed flags: %r" % (flags,))
+        self.assertIn("--accept-single-branch", flags,
+                      "Issue 113, R-7 / M-27: the dry run was given the owner's --accept-single-branch, so the "
+                      "printed writing run keeps it, or G-7 refuses the very command it prints. Printed flags: %r"
+                      % (flags,))
         follow = _drive(world, flags, prs=_brief_pr_map())
         self.assertNotIn("has no completion record", follow.out,
                          "W-3 / M-27: the printed command records the delivery. %s" % follow.describe())
@@ -13080,7 +13136,10 @@ class TestLocateParentReadsTheHeaderLinkedBrief(_WorktreeWorldCase):
 class TestLayoutDefectsInStatus(unittest.TestCase):
 
     def test_a_valid_layout_reports_an_empty_defect_list_and_still_dispatches(self):
-        world = _pb_world(self)
+        # The brief links no pull request (pr: none). With one linked, an unreadable GitHub answer withholds
+        # dispatch (I-14, delivery-unrecorded), which TestSingleBranchDeliveryReportAndNextCommand
+        # .test_an_unreadable_github_answer_is_never_a_layout_defect pins on the same layout.
+        world = _pb_world(self, brief=_pb_brief(pr="none"))
         res = _pb_status(self, world, prs={})
         self.assertEqual(res.report.get("layout_defects"), [],
                          "two mergeable blocks, a parent branch, a parent issue: layout_defects is present and "

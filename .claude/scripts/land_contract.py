@@ -62,6 +62,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import _claude_paths  # noqa: E402
 import pr_merged  # noqa: E402
+from check_version_bump import MANIFESTS  # noqa: E402  -- the one list of version files
 
 # ---------------------------------------------------------------------------
 # Closed sets
@@ -74,9 +75,9 @@ HALT_OUTCOMES: Tuple[str, ...] = (
     "environment-failure", "unresolvable-conflict", "regeneration-failed",
     "verification-not-ready", "push-rejected", "pr-mismatch", "pr-not-ready",
     "link-not-verified", "master-moved", "head-moved", "not-mergeable", "merge-refused",
-    "merge-unconfirmed",
+    "merge-unconfirmed", "version-raise-failed",
 )
-#: The closed Landing Outcome set: 3 successes and 25 halts.
+#: The closed Landing Outcome set: 3 successes and 26 halts.
 LANDING_OUTCOMES = frozenset(SUCCESS_OUTCOMES) | frozenset(HALT_OUTCOMES)
 #: The recording run's own outcomes (``--record-baseline``).
 BASELINE_OUTCOMES: Tuple[str, ...] = ("baseline-recorded", "landing-in-progress",
@@ -121,6 +122,7 @@ REMEDIES: Dict[str, str] = {
     "environment-failure": "fix the environment named in the detail, then rerun",
     "unresolvable-conflict": "merge the default branch into the parent branch by hand as a remedy sub-task",
     "regeneration-failed": "fix the regenerator named in the detail on the parent branch, then rerun",
+    "version-raise-failed": "repair the manifests named in the detail on the parent branch, then rerun",
     "verification-not-ready": "fix the new failures named in the detail, or re-record the baseline",
     "push-rejected": "fetch, reconcile the parent branch with origin, then rerun",
     "pr-mismatch": "close or retarget the existing pull request for the parent branch",
@@ -1024,11 +1026,17 @@ def run_recording(config: Dict[str, Any], cwd: Any, results_dir: Any, out_path: 
 # Conflict policy (L-6)
 # ---------------------------------------------------------------------------
 def classify_conflict(path: str, config: Dict[str, Any]) -> str:
-    """``union``, ``regenerate`` or ``halt``: the policy is closed."""
+    """``union``, ``regenerate``, ``version-fields`` or ``halt``: the policy is closed.
+
+    ``version-fields`` (R-3) is a ``MANIFESTS`` path while ``versionRaise`` is on: the conflict is
+    judged region by region and the later raise rewrites the version lines.
+    """
     if any(path_matches(path, [e.get("glob", "")]) for e in (config or {}).get("unionPaths") or []):
         return "union"
     if any(path_matches(path, r.get("paths") or []) for r in (config or {}).get("regenerators") or []):
         return "regenerate"
+    if (config or {}).get("versionRaise") is True and path in MANIFESTS:
+        return "version-fields"
     return "halt"
 
 
@@ -1192,6 +1200,34 @@ def merge_union(base: str, ours: str, theirs: str, entry_key: str) -> Dict[str, 
     return {"ok": True, "text": "\n".join(merged) + trailing, "reason": ""}
 
 
+def merge_version_fields(base: str, ours: str, theirs: str) -> Dict[str, Any]:
+    """Resolve a manifest conflict whose every region differs only in lines carrying ``"version"`` (R-3).
+
+    Outside every region the merge is git's own; inside one, the default branch's side (``theirs``) is
+    taken, and the later raise rewrites those lines. A region whose two sides also differ in any other
+    line is not admissible: ``ok`` is False and nobody picks a side blindly.
+    """
+    try:
+        segments = _split_merge_file(_merge_file_text(base, ours, theirs))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "text": "", "reason": str(exc)}
+    merged: List[str] = []
+    saw_region = False
+    for seg in segments:
+        if isinstance(seg, str):
+            merged.append(seg)
+            continue
+        saw_region = True
+        other = lambda lines: [ln for ln in lines if '"version"' not in ln]  # noqa: E731
+        if other(seg["ours"]) != other(seg["theirs"]):
+            return {"ok": False, "text": "", "reason": "a conflict region differs in a line other than a version line"}
+        merged.extend(seg["theirs"])
+    if not saw_region:
+        return {"ok": False, "text": "", "reason": "no conflict region could be read"}
+    trailing = "\n" if (base.endswith("\n") or ours.endswith("\n") or theirs.endswith("\n")) else ""
+    return {"ok": True, "text": "\n".join(merged) + trailing, "reason": ""}
+
+
 # ---------------------------------------------------------------------------
 # Gate pieces (pure)
 # ---------------------------------------------------------------------------
@@ -1222,6 +1258,7 @@ GATE_ORDER: Tuple[Tuple[str, str], ...] = (
     ("p7_unresolvable_conflict", "unresolvable-conflict"),
     ("p7_environment_failure", "environment-failure"),
     ("p7_regeneration_failed", "regeneration-failed"),
+    ("p7b_version_raise_failed", "version-raise-failed"),
     ("p8_verification_verdict", ""),
     ("p9_push_rejected", "push-rejected"),
     ("p10_pr_mismatch", "pr-mismatch"),
@@ -1394,14 +1431,16 @@ def build_delivery_set(listings: Dict[str, Dict[str, str]], slug: str) -> Dict[s
                 seen_text[sub_id] = canon
                 records[sub_id] = parsed if isinstance(parsed, dict) else {}
             elif posix.startswith(BRIEFS_DIR + "/") and posix.endswith(".md"):
+                # L-3: every brief is handed over; the one matcher inside the selector (and the topology)
+                # decides which name this contract.
                 fields = parse_frontmatter(text or "")
-                if not pr_merged._brief_names_contract(fields, slug):
-                    continue
                 fields["_path"], fields["_ref"] = posix, ref
                 if posix in briefs:
                     first = briefs[posix]
                     for key in ("base", "parent_issue", "id"):
-                        if (first.get(key) or "") != (fields.get(key) or "") and problem is None:
+                        # Only this contract's briefs can make the copies ambiguous.
+                        if pr_merged.brief_names_contract(fields, slug) \
+                                and (first.get(key) or "") != (fields.get(key) or "") and problem is None:
                             problem = {"outcome": "ambiguous-parent",
                                        "detail": "the brief %s disagrees on %s: %r on %s, %r on %s"
                                                  % (posix, key, first.get(key), first["_ref"],
@@ -1995,6 +2034,12 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     parent_issue = topology["parent_issue"]
     # D-4: the one rule for "which brief is the parent brief" lives in pr_merged, shared with /pr-merged.
     parent_brief = pr_merged.parent_brief_of(slug, briefs, default, protected)
+    if parent_brief is None:
+        # L-2: the contract's own header links its parent brief whatever that brief's contract: says.
+        linked = pr_merged.select_linked_brief(contract_text, slug, briefs, default)
+        if linked is not None and linked.get("branch") == topology["parent_branch"] \
+                and str(linked.get("id")) == str(parent_issue):
+            parent_brief = linked
     if not parent_issue or parent_brief is None:
         raise _Halt("parent-unresolved", "P1", "no brief has branch: %s and id: %s" % (parent, parent_issue))
     parent_brief_path = parent_brief["_path"]
@@ -2101,6 +2146,20 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     contract_diff, merge_diff, resolved = _p7_merge(args, wt, default, mark_m, mark_p, config, logs,
                                                     parent, slug, facts, details, notes)
     gate_check("P7")
+
+    # ---- P7b the Landing version raise (R-1, R-2) -------------------------------------------------
+    # After the default branch is merged in: minor + 1, patch 0, relative to origin/<default>, committed
+    # on the parent branch and checked with --exact. It runs whether or not P7 merged anything, and a
+    # second run changes nothing. Under `landing: manual` P1 has already ended the run (R-4).
+    phase("p7b")
+    if (config or {}).get("versionRaise") is True:
+        failure = _p7b_version_raise(wt, default)
+        if failure:
+            facts["p7b_version_raise_failed"] = True
+            details["version-raise-failed"] = failure
+        else:
+            merge_diff = diff_names(wt, mark_p, rev_parse(wt, "HEAD"))
+    gate_check("P7b")
     head = rev_parse(wt, "HEAD")
     phase("p8", merge_commit=head)
 
@@ -2363,6 +2422,20 @@ def _p7_merge(args: Dict[str, Any], wt: Path, default: str, mark_m: str, mark_p:
                     facts["p7_unresolvable_conflict"] = True
                     details["unresolvable-conflict"] = "%s cannot take the default branch's side: %s" % (path, failed)
                     return contract_diff, [], resolved
+            elif cls == "version-fields":
+                base_t, ours_t, theirs_t = (_blob(wt, ":%d:%s" % (n, path)) for n in (1, 2, 3))
+                merged = merge_version_fields(base_t or "", ours_t, theirs_t) \
+                    if ours_t is not None and theirs_t is not None else \
+                    {"ok": False, "reason": "one side deleted the file"}
+                if not merged["ok"]:
+                    _git(wt, "merge", "--abort")
+                    facts["p7_unresolvable_conflict"] = True
+                    details["unresolvable-conflict"] = "%s cannot take the default branch's version lines: %s" % (
+                        path, merged["reason"])
+                    return contract_diff, [], resolved
+                with open(wt / path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(merged["text"])
+                _git(wt, "add", "--", path)
             else:
                 base_t, ours_t, theirs_t = (_blob(wt, ":%d:%s" % (n, path)) for n in (1, 2, 3))
                 merged = merge_union(base_t or "", ours_t or "", theirs_t or "", union_entry_key(path, config)) \
@@ -2413,6 +2486,16 @@ def _p7_merge(args: Dict[str, Any], wt: Path, default: str, mark_m: str, mark_p:
             return contract_diff, staged, resolved
     head = rev_parse(wt, "HEAD")
     return contract_diff, diff_names(wt, mark_p, head), resolved
+
+
+def _p7b_version_raise(wt: Path, default: str) -> Optional[str]:
+    """Run ``check_version_bump.py --raise`` then ``--exact`` in the landing worktree; None, or why it failed."""
+    script = SCRIPTS_DIR / "check_version_bump.py"
+    for mode in ("--raise", "--exact"):
+        rc, out = _run([sys.executable, "-B", str(script), mode, "--default-branch", default], cwd=wt, timeout=120)
+        if rc != 0:
+            return "check_version_bump.py %s failed (exit %s): %s" % (mode, rc, out)
+    return None
 
 
 def _p8_verify(wt: Path, head: str, config: Dict[str, Any], baseline: Dict[str, Any], baseline_note: str,
@@ -2580,9 +2663,9 @@ def _briefs_on_disk(checkout: Path, slug: str) -> List[Dict[str, str]]:
             fields = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
-        if fields and pr_merged._brief_names_contract(fields, slug):
+        if fields:
             fields["_path"] = "%s/%s" % (BRIEFS_DIR, path.name)
-            out.append(fields)
+            out.append(fields)  # unfiltered (L-3): select_linked_brief and the topology filter
     return out
 
 
@@ -2975,7 +3058,18 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
 
     refs = [r for r in ("origin/%s" % parent, "origin/%s" % records_branch, "origin/%s" % default)
             if rev_parse(main_root, r)]
-    absent = [b["_path"] for b in disk_briefs
+    # The briefs this contract owns: the ones the one matcher accepts, plus the header-linked parent
+    # brief (L-2), whatever its contract: says. A stranger's brief is none of this landing's business.
+    try:
+        contract_text = (checkout / ".claude" / "concepts" / ("%s.md" % slug)).read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        contract_text = ""
+    own = [b for b in disk_briefs if pr_merged.brief_names_contract(b, slug)]
+    linked = pr_merged.select_linked_brief(contract_text, slug, disk_briefs, default)
+    if linked is not None and linked not in own:
+        own.append(linked)
+    absent = [b["_path"] for b in own
               if not any(_run(["git", "cat-file", "-e", "%s:%s" % (r, b["_path"])], cwd=main_root)[0] == 0
                          for r in refs)]
     if absent:
