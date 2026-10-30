@@ -62,3 +62,6 @@ M — removes a registered mechanism and touches the dispatcher, the install scr
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-10-30: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/82); contract 2026-10-18-remove-plain-language-hook flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #71: none
