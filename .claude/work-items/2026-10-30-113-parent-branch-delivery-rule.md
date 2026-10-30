@@ -55,3 +55,19 @@ L — touches the contract template, two agents, two skills, the delivery script
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+
+Run of `/flow` on issue 113, 2026-10-30. Stopped at the review stage: the retry budget (two retries) is spent.
+
+- **Intake and design:** brief written, contract drafted and attacked by three critic rounds, approved by the user with Q1 yes and Q2 refuse.
+- **Test first:** failing tests written, then the implementation made them pass (version 0.11.0, 31 files across the delivery scripts, skills, agents, template, registry and manifests).
+- **Review 1** (fresh code reviewer and test critic): no blockers in the code review, 7 warnings (W1 to W7); the test critic found 2 blockers (two R-7 evidence mutations survived, and the reader-parity test did not drive the real readers). W1 to W6 and the test findings were fixed test-first. **W7 was not fixed**: it is a contract defect and needs the user's decision (see below).
+- **Review 2** (fresh reviewer on the fix commit): 3 warnings. F1 (W4 not truly fixed), F2 (landing P0 check ignored exempt contracts), F3 (wrong refusal text). Fixed test-first.
+- **Review 3** (fresh reviewer on the final fix commit, `final-review-fullstack-code-reviewer.md`): **1 blocker, 2 warnings.**
+  - **B1 `pr_merged.py` around 4251-4276 and 4519-4525:** when the fetch of the default branch fails or `origin/<base>` cannot be read, G-7 falls through silently. With `--accept-single-branch` it can write a delivery over a real parent-branch landing; without the flag it refuses and tells the owner to run the accept; `--dry-run` plans the accepted delivery. The live report then offers the plain `--record-delivery`, which breaks R-9. Fix: exit 10 `github-unverifiable` when the origin read is `None`, before the accept branch; the live report offers a re-read.
+  - **W1 `pr_merged.py` around 2854-2864:** after the ref probe passes, a failed `ls-tree` or an unreadable record still reads as "origin holds no records". Fix: list with `ls-tree <ref> -- <folder>/`, return `None` on any failure.
+  - **W2 `pr_merged.py` around 2845-2850:** `git fetch origin <base>` has no refspec, so in a narrowed clone `origin/<base>` can stay stale. Fix: `+refs/heads/<base>:refs/remotes/origin/<base>`.
+  - Nits: set `GIT_TERMINAL_PROMPT=0` on the status fetch; an unreadable contract at landing P0 should stop as unverifiable; a padded `--default-branch` value.
+- **Open:** code-review **W7** (an R-8 failed record plus guard G-3 leaves no exit for a sub-task pull request that was opened into the default branch before the upgrade). Needs a contract amendment decided by the user.
+- **State at hand-back:** all work is committed locally on `feature/113-parent-branch-delivery-rule` (no push, no pull request). The suites last confirmed green on the final code: `test_pr_merged.py` 643 tests. The landing and cleanup suites were still running on it. Known old failures unrelated to this branch: `TestContainmentScanner` real tree (`skills/ship/SKILL.md` holds `gh pr merge`), and the brief-corpus and project-config suites.
