@@ -4,6 +4,7 @@
 **Date:** 2026-10-30
 **Requested by:** user
 **Status:** approved
+**Amended:** Amended 2026-10-30 by user approval: W7 (R-10; the implementation notes record final-review B1, W1 and W2)
 **Work Item Brief:** .claude/work-items/2026-10-30-113-parent-branch-delivery-rule.md
 **Tracking issue:** #113
 **Budget:** 12,000 tokens
@@ -60,7 +61,7 @@ Not applicable. Reason: no Angular UI surface is touched.
 |------|---------|---------------------|
 | Raise version at landing (P7b) | `land_contract.py` runs `check_version_bump.py --raise`, then `--exact` | `version-raise-failed` (a new halt; 26 halts) |
 | Record delivery, multi-sub-task | `pr_merged.py --record-delivery` | G-7 `single-branch-delivery` (R-7) |
-| Accept single-branch delivery (human-only) | `pr_merged.py --record-delivery <pr> --accept-single-branch` | the pull request is not verified merged by GitHub; any sub-task is `awaiting-merge` or has a `failed` record; GitHub is unreachable (`unverifiable`, exit 10) |
+| Accept single-branch delivery (human-only) | `pr_merged.py --record-delivery <pr> --accept-single-branch` | the pull request is not verified merged by GitHub; any sub-task is `awaiting-merge`; any `failed` record other than the R-10 kind (G-3); GitHub or origin is unreadable (`unverifiable`, exit 10) |
 
 ### Rules
 
@@ -75,8 +76,17 @@ Not applicable. Reason: no Angular UI surface is touched.
     - **The work is not yet merged:** `/flow` (Step 2.7), then `/advance`.
     - **The work is already merged on the default branch:** `--accept-single-branch`, because the work is delivered and must not be re-dispatched.
   - The live `--status` reports `single-branch-delivery` only for a Delivery Candidate that is `known` and of kind `single-branch`, and only while no Records pull request of the contract is open. While one is open, the records are still on the records branch and the existing `delivery-unrecorded` arm names that pull request. A GitHub read that fails is reported as `unverifiable`, never as a layout defect.
-- **R-8** `merge_direction.py` cannot stop a sub-task pull request into the default branch that is merged on the web. Only after the merge does `pr_merged.py` record it, as a `failed` completion record with `failure: single-branch-delivery`. The existing `escalate` move names it.
+- **R-8** `merge_direction.py` cannot stop a sub-task pull request into the default branch that is merged on the web. Only after the merge does `pr_merged.py` record it, as a `failed` completion record with `failure: single-branch-delivery`. The existing `escalate` move names it, and R-10 is its exit.
 - **R-9 No endless loop.** When the move is `delivery-unrecorded`, the candidate is merged and G-7 would refuse, `next_command_for` names `/pr-merged <pr> --record-delivery --accept-single-branch`, never the refused command. `/advance` and `/pr-merged` show that command to the owner and never run it themselves. Once it has been recorded, the delivery exists, `is_delivered` holds, and the move is `complete`.
+- **R-10 Accepting an R-8 failure (amended 2026-10-30, W7).** The human-only `--record-delivery <pr> --accept-single-branch` also clears an R-8 failed record, and only that kind: a `failed` completion record with `failure: single-branch-delivery` whose `pull_request` is `<pr>`, and only when GitHub confirms `<pr>` merged at the time of the accept.
+  - **What it writes:** the failed record is replaced by a `completed` record for the same sub-task, carrying:
+    - `verified: github`, with `base_ref` and `base_is_default` as GitHub reports them
+    - `layout: single-branch-accepted`
+    - `note: "replaces failed record (failure: single-branch-delivery)"`
+
+    It writes no delivery record unless the R-7 accept conditions also hold for `<pr>`. R-7 counts a record carrying `layout: single-branch-accepted` as landing evidence, so the parent-branch landing of the remaining sub-tasks still records.
+  - **What it refuses:** G-3 still refuses every other failed record, with the detail `only a single-branch-delivery failure can be accepted; <sub-task> failed with <failure>`. If GitHub does not report `<pr>` merged, the accept is refused (`not-merged`). If GitHub or origin cannot be read, it exits 10 with `github-unverifiable`.
+  - **What `next_command_for` prints:** when every failed record is of the R-10 kind, the `escalate` move prints `/pr-merged <pr> --record-delivery --accept-single-branch` for each, and never `/design-first` or a command that would be refused (R-9). Any other failure keeps `/design-first`. Skills show the command to the owner and never run it.
 
 ---
 
@@ -91,7 +101,7 @@ Choke point: `pr_merged.py`. Second enforcement point: the `/design-first` appro
 | 3 | Issue offer declined, or free text | `no-parent-issue`. Remedy: open the issue and write its number into `id:`. | `id: none` |
 | 4 | Jira or Azure DevOps item | `/task` Step 4 says in one line: "This item has no GitHub issue, so its contract must be a single block." `data-architect` writes no review block for it. | `id: PROJ-12`; text test |
 | 5 | `/design-first` Step 4 with one-session implementers, then `/ship` | Step 4 hands blocks over only for a single block, and otherwise routes to `/flow`. If the delivery happens anyway: R-7 and R-9. | Two legacy fixtures shaped like 2026-10-16 (PR #58) and 2026-10-18 (PR #82), each with a merged one-branch delivery and no records. `next_command` names `--accept-single-branch`. Recording with it reaches `complete`, and repeated `advance()` calls never return to the refused command |
-| 6 | A sub-task pull request merged into the default branch on the web | R-8 | A failed record, then `escalate` |
+| 6 | A sub-task pull request merged into the default branch on the web, including one opened before this rule | R-8, then R-10 | (a) A failed record, then `escalate` whose `next_command` is the accept, never `/design-first`. (b) The accept replaces the failed record with a completed one carrying `layout: single-branch-accepted` and the note. The next `advance()` dispatches or completes, with no loop, and the later parent-branch landing records. (c) A different failure kind with the accept: G-3 refusal. (d) A pull request not merged: refused. (e) GitHub or origin unreadable: exit 10. (f) Text test: skills show the accept and never run it |
 | 7 | `/advance` or `/pr-merged` typed by hand, with no Step 2.7 | Layout defects block dispatch. `effective_base` never returns `default` here. `needs_issue` is computed before the branch cut. | No issue: nothing is cut |
 | 8 | One block amended to several | Recomputed on every call, so row 7 applies | 2 blocks, 1 state entry |
 | 9 | A consumer upgrades mid-flight | R-6. Named defects come with remedies (rows 3, 5, 6, 7). Nothing is skipped silently. | Approved legacy fixture |
@@ -286,6 +296,12 @@ Condensed only. The full text of the earlier rounds was not kept.
 5. Text and the registry.
 6. The version raise.
 
+**Implementation notes (final review, 2026-10-30; the code must match these):**
+- **B1:** an unreadable origin (a fetch failure, a missing ref, or a failed listing or blob read) is `unverifiable`. G-7 exits 10 with `github-unverifiable` before any accept branch. The live report offers a re-read (`git fetch origin <base>`, then rerun), never `--record-delivery` and never the accept.
+- **W1:** the origin listing uses `git ls-tree <ref> -- <folder>/` and returns None on any failure. None means unreadable (B1), never "no records".
+- **W2:** the fetch uses the explicit refspec `+refs/heads/<base>:refs/remotes/origin/<base>` and sets `GIT_TERMINAL_PROMPT=0`.
+- **W7:** R-10, with the row 6 tests.
+
 ### 1. Parent branch delivery rule (`python-ai-developer`)
 
 **Depends on:** none
@@ -326,7 +342,8 @@ Condensed only. The full text of the earlier rounds was not kept.
 **Pre-written TASK block:**
 ```
 TASK: Implement the Parent Branch Delivery Rule and the Landing version raise exactly as the
-contract's Data Shapes, Rules R-1..R-9, Bypass flows, Extension Points and Registry text declare.
+contract's Data Shapes, Rules R-1..R-10, Bypass flows, Extension Points, Registry text and the
+Implementation notes (B1, W1, W2, W7) declare.
 CONTEXT: concept contract at .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
 FILES: <the Files to touch list above>
 CONSTRAINTS:
