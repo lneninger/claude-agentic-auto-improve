@@ -289,6 +289,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract unifies readers of briefs, records or contracts across the delivery scripts
 - **Tags:** brief-linkage, parity-test, matcher, reuse
 
+### 2026-10-30 — Widening a CI trigger changes who the check judges; list every pull request kind the old filter excluded
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
+- **Lesson:** When a contract drops a workflow's `branches:` filter, enumerate every head/base pair the filter used to skip and give each a mode; "not a `task/*` head, so unaffected" was false, because the default mode now judges stacked and hand-named pull requests into non-default bases that were never checked before.
+- **Apply when:** a contract edits `on:` triggers, branch filters or path filters of a CI workflow, or adds a mode keyed on a head-ref pattern
+- **Tags:** ci, workflow-trigger, version-bump, stacked-pr
+
+### 2026-10-30 — A failed record written by a new rule must not be the input of an older guard that blocks the rule's own exit
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
+- **Lesson:** Before a rule writes a `failed` record (R-8), trace every guard that reads failed records (G-3 refuses `--accept-single-branch`, `escalate` halts the loop) and name the way out for in-flight work; otherwise a contract that was mid-flight at upgrade reaches a dead end with no owner command.
+- **Apply when:** a contract adds a new `failure:` kind, a new failed-record writer, or a human-only exit guarded by existing refusals
+- **Tags:** failed-record, legacy, escape-hatch, guard-interplay
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
