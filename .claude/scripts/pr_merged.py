@@ -1558,21 +1558,29 @@ def _landing_config(default: str) -> Dict[str, Any]:
     return config if isinstance(config, dict) else {}
 
 
-def version_raise_on(default: str) -> bool:
-    """``contractLanding.versionRaise`` in the conventions file at ``origin/<default>``."""
-    return _landing_config(default).get("versionRaise") is True
+def version_raise_on(default: str, config: Optional[Dict[str, Any]] = None) -> bool:
+    """``contractLanding.versionRaise`` in the conventions file at ``origin/<default>`` (or in ``config``)."""
+    return (config if config is not None else _landing_config(default)).get("versionRaise") is True
 
 
-def protected_branches(default: str) -> List[str]:
-    """``contractLanding.protectedBranches`` (the key the landing reads) plus the default branch (L-4)."""
-    listed = _landing_config(default).get("protectedBranches")
-    return [default] + [b for b in listed if isinstance(b, str) and b != default] if isinstance(listed, list) else [default]
+def protected_branches(default: str, config: Optional[Dict[str, Any]] = None) -> List[str]:
+    """``contractLanding.protectedBranches`` (the ONE reader, the landing's too) plus the default branch (L-4).
+
+    A value that is not a list gives just the default branch; non-string entries are dropped.
+    """
+    listed = (config if config is not None else _landing_config(default)).get("protectedBranches")
+    if not isinstance(listed, list):
+        return [default]
+    return [default] + [b for b in listed if isinstance(b, str) and b != default]
 
 
 def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
                     all_briefs: List[Dict[str, Any]], scoped_briefs: List[Dict[str, Any]],
-                    default: str) -> Optional[Dict[str, Any]]:
+                    default: str, config: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """The Delivery Layout of a contract, derived and never stored (L-1 to L-5), or None when not judged.
+
+    ``config`` is the ``contractLanding`` mapping when the caller already holds it (the landing launcher
+    reads it from its own checkout); ``None`` reads it from the conventions file at ``origin/<default>``.
 
     Judged only for two or more mergeable blocks (a review gate is one) and a Status of draft or
     approved. Returns ``parent_branch``, ``parent_issue`` and ``defects``: dicts with a ``reason``
@@ -1583,7 +1591,9 @@ def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
     if len(mergeable) < 2 or read_contract_status(contract_text) not in JUDGED_STATUSES:
         return None
     defects: List[Dict[str, str]] = []
-    protected = protected_branches(default)
+    if config is None:
+        config = _landing_config(default)  # read once: the conventions file costs a git call
+    protected = protected_branches(default, config)
 
     def add(reason: str, detail: str, remedy: str) -> None:
         if reason not in [d["reason"] for d in defects]:
@@ -1614,15 +1624,17 @@ def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
     topology = declared_topology(None, scoped_briefs, default, protected)
     reason = topology["reason"]
     if reason in ("ambiguous", "parent-is-default"):
+        base_kind = "the default branch" if topology["declared_base"] == default else \
+            "the protected branch %s" % topology["declared_base"]
         add(reason, "the Sub-Task Work Items of this contract do not agree on one parent branch"
-            if reason == "ambiguous" else "the Sub-Task Work Items declare the default branch as their base",
+            if reason == "ambiguous" else "the Sub-Task Work Items declare %s as their base" % base_kind,
             "make the briefs' base: and parent_issue: agree on the one parent branch")
     elif parent_branch and topology["parent_branch"] and topology["parent_branch"] != parent_branch:
         # Nothing may choose silently between the header brief's branch: and the children's base:.
         add("ambiguous", "the linked brief's branch: is %s but the Sub-Task Work Items' base: is %s"
             % (parent_branch, topology["parent_branch"]),
             "make the header brief's branch: and the Sub-Task Work Items' base: the one parent branch")
-    if version_raise_on(default):
+    if version_raise_on(default, config):
         manifests = [f.replace("\\", "/") for b in mergeable for f in b.files
                      if f.replace("\\", "/") in VERSION_MANIFESTS]
         if manifests:
@@ -1683,8 +1695,11 @@ def effective_base(state: Dict[str, Any], subtask_id: str, topology: Dict[str, A
 
     if entry.get("brief") and entry.get("base"):
         return found(entry["base"], "state")
-    if topology.get("reason") == "ambiguous" or any(
-            d.get("reason") == "ambiguous" for d in (layout or {}).get("defects") or []):
+    mismatch = next((d for d in (layout or {}).get("defects") or [] if d.get("reason") == "ambiguous"), None)
+    if topology.get("reason") != "ambiguous" and mismatch is not None:
+        # The header brief and the children disagree, though the children agree with each other.
+        return refused("%s -- %s" % (mismatch.get("detail"), mismatch.get("remedy")))
+    if topology.get("reason") == "ambiguous":
         return refused("the Sub-Task Work Items of this contract disagree on base: or "
                        "parent_issue:, so no parent branch can be chosen for sub-task %r -- make the "
                        "briefs agree on one parent branch, or record this sub-task's own identity "
@@ -2836,6 +2851,29 @@ def fetch_default_branch(base: str) -> bool:
     return code == 0
 
 
+def origin_records(base: str, slug: str) -> Optional[Dict[str, Dict[str, Any]]]:
+    """The records ``origin/<base>`` holds, after fetching it; ``None`` when it cannot be read.
+
+    ``None`` (the fetch failed or ``origin/<base>`` is not a ref) differs from ``{}`` (readable, and it
+    holds no records): only a readable origin can prove or disprove a landing.
+    """
+    if not fetch_default_branch(base):
+        return None
+    if _run(["git", "rev-parse", "--verify", "origin/" + base])[0] != 0:
+        return None
+    return load_records_at("origin/" + base, slug)
+
+
+def merge_evidence(origin: Dict[str, Dict[str, Any]], records: Dict[str, Dict[str, Any]],
+                   stored: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Origin's records win over the stored local ones; only a record written by THIS run overrides origin's."""
+    merged = dict(records)
+    for tid, rec in origin.items():
+        if records.get(tid) == stored.get(tid):
+            merged[tid] = rec
+    return merged
+
+
 def list_review_files(ref: str, slug: str) -> Optional[List[str]]:
     """Paths under ``.claude/reviews/<slug>/`` at ``ref`` (I-4), or None when git failed.
 
@@ -3931,6 +3969,13 @@ def main() -> int:
     state, ambiguous_briefs = rehydrate_state(state, slug, fresh=not stored_state, default=base)
     #: One probe cache per run: an emulator or pull request is read at most once (D-1 / problem 5).
     precondition_cache: Dict[Any, Any] = {}
+    _origin_cache: List[Optional[Dict[str, Dict[str, Any]]]] = []
+
+    def _origin() -> Optional[Dict[str, Dict[str, Any]]]:
+        """The records origin/<default> holds, read once per run; None when it could not be read."""
+        if not _origin_cache:
+            _origin_cache.append(origin_records(base, slug))
+        return _origin_cache[0]
 
     if args.record_subtask:
         # /flow Step 2.7's writer: stamp one sub-task's issue, declared base
@@ -4203,6 +4248,17 @@ def main() -> int:
                                "%s carries records not yet merged; merge %s, then run again in a flat "
                                "worktree cut fresh from origin/%s" % (url, url, base),
                                records_pull_requests=[r.get("url") for r in open_records])
+            if layout is not None and not landing_evidence_holds(layout, tasks, records, pr.get("headRefName")):
+                # The Records pull request merged on the web and this checkout was never refreshed: origin
+                # holds the landing, the local folder does not. Writing now would put delivery records over
+                # the real ones, and the accept would misname a real landing as a single-branch delivery.
+                held = _origin()
+                if held is not None and landing_evidence_holds(
+                        layout, tasks, merge_evidence(held, records, stored_records), pr.get("headRefName")):
+                    return _refuse("G-7", "records-not-local",
+                                   "origin/%s holds the completion records of this landing but this checkout "
+                                   "does not; run again in a flat worktree cut fresh from origin/%s"
+                                   % (base, base))
             if args.accept_single_branch:
                 awaiting = awaiting_merge(reconcile_state(state, records))
                 if awaiting:
@@ -4435,16 +4491,20 @@ def main() -> int:
 
     # W4: a judged contract's candidate kind and landing evidence come from what origin/<default> holds
     # plus this run's records, never from a local results folder a stale checkout left empty. Read only
-    # when a known candidate exists and the open-records read answered. Best effort: an unreadable
-    # origin adds no evidence and changes nothing.
+    # when a known candidate exists and the open-records read answered. An origin that could not be read
+    # proves nothing either way, so it sets no needs_accept and offers no accept (it is not "no records").
     evidence = records
+    origin_unreadable = False
     if layout is not None and any(c.get("known") for c in candidates) and _open_records() is not None:
-        try:
-            evidence = {**load_records_at("origin/" + base, slug), **records}
-        except Exception:
-            evidence = records
-        candidates = delivery_candidates(raw_candidates, tasks, evidence)
-        report["delivery_candidates"] = candidates
+        held = _origin()
+        if held is None:
+            origin_unreadable = True
+            report["origin_read"] = ("origin/%s could not be read; run git fetch origin %s and rerun"
+                                     % (base, base))
+        else:
+            evidence = merge_evidence(held, records, stored_records)
+            candidates = delivery_candidates(raw_candidates, tasks, evidence)
+            report["delivery_candidates"] = candidates
 
     records_pr_url: Optional[str] = None
     if any(c.get("known") and c.get("kind") != "early" for c in candidates) \
@@ -4461,10 +4521,10 @@ def main() -> int:
         for cand in candidates:
             if cand.get("known") and cand.get("kind") != "early" \
                     and not landing_evidence_holds(layout, tasks, evidence, cand.get("branch")) \
-                    and _open_records() is not None:
+                    and _open_records() is not None and not origin_unreadable:
                 cand["needs_accept"] = True
         records_read_failed = bool(_open_records_cache) and _open_records_cache[0] is None
-        if not records_pr_url and not records_read_failed and not is_delivered(tasks, records, delivery, defects)[0] \
+        if not records_pr_url and not records_read_failed and not origin_unreadable and not is_delivered(tasks, records, delivery, defects)[0] \
                 and any(c.get("known") and c.get("kind") == "single-branch" for c in candidates):
             layout_defects.append({
                 "reason": "single-branch-delivery",

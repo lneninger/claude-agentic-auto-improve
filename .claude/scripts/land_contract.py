@@ -1983,7 +1983,7 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
         except ValueError:
             conventions = None
     config = conventions.get("contractLanding") if isinstance(conventions, dict) else None
-    protected = list((config or {}).get("protectedBranches") or [default])
+    protected = pr_merged.protected_branches(default, config if isinstance(config, dict) else {})
 
     # ---- P1 identify: the Delivery record set, read from three fetched refs only -----------------
     listings: Dict[str, Dict[str, str]] = {}
@@ -3030,7 +3030,8 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
     main_root, landing_dir = roots["main_root"], roots["landing_root"]
     default = detect_default_branch(checkout)
     known = _read_json_from_git(checkout, "origin/%s" % default, CONVENTIONS_PATH)
-    protected = list(((known or {}).get("contractLanding") or {}).get("protectedBranches") or [default])
+    landing_cfg = (known or {}).get("contractLanding")
+    protected = pr_merged.protected_branches(default, landing_cfg if isinstance(landing_cfg, dict) else {})
     disk_briefs = _briefs_on_disk(checkout, slug)
     topology = pr_merged.declared_topology(slug, disk_briefs, default, protected)
     if topology["reason"] == "parent-is-default" and topology.get("declared_base") != default:
@@ -3050,17 +3051,22 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
             encoding="utf-8", errors="replace")
     except OSError:
         contract_text = ""
-    linked = pr_merged.select_linked_brief(contract_text, slug, disk_briefs, default)
-    linked_branch = pr_merged._brief_value(linked, "branch") if linked is not None else ""
-    if linked_branch.lower() not in ("", "none", "unknown") and not linked_branch.startswith("<") \
-            and linked_branch != parent:
-        return finish("ambiguous-parent", "P0", "the header-linked brief's branch: is %r but the Sub-Task Work "
-                      "Items' base: is %r" % (linked_branch, parent))
+    # R-6 and the reason vocabulary live once, in delivery_layout: a header brief that differs from the
+    # children (ambiguous) or sits on a protected branch (parent-is-default) halts a judged contract only.
+    layout = pr_merged.delivery_layout(
+        contract_text, slug, pr_merged.classify_handoff(contract_text).blocks, disk_briefs,
+        [b for b in disk_briefs if pr_merged.brief_names_contract(b, slug)], default,
+        (known or {}).get("contractLanding") if isinstance((known or {}).get("contractLanding"), dict) else {})
+    mismatch = next((d for d in (layout or {}).get("defects") or []
+                     if d["reason"] in ("parent-is-default", "ambiguous")), None)
+    if mismatch is not None:
+        return finish("ambiguous-parent" if mismatch["reason"] == "ambiguous" else "parent-is-default", "P0",
+                      mismatch["detail"], remedy=mismatch["remedy"])
 
     if os.environ.get("GH_REPO"):
         return finish("gh-repo-set", "P0", "GH_REPO is set, which would retarget every gh call")
 
-    refspecs =["+refs/heads/%s:refs/remotes/origin/%s" % (b, b) for b in (parent, default)]
+    refspecs = ["+refs/heads/%s:refs/remotes/origin/%s" % (b, b) for b in (parent, default)]
     rc, out = _run(["git", "fetch", "origin"] + refspecs, cwd=main_root, timeout=300)
     if rc != 0:
         return finish("unverifiable", "P0", "git fetch failed: %s" % out)
@@ -3073,6 +3079,7 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
     # The briefs this contract owns: the ones the one matcher accepts, plus the header-linked parent
     # brief (L-2), whatever its contract: says. A stranger's brief is none of this landing's business.
     own = [b for b in disk_briefs if pr_merged.brief_names_contract(b, slug)]
+    linked = pr_merged.select_linked_brief(contract_text, slug, disk_briefs, default)
     if linked is not None and linked not in own:
         own.append(linked)
     absent = [b["_path"] for b in own

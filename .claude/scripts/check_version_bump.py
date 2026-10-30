@@ -139,6 +139,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     modes.add_argument("--exact", action="store_true")
     modes.add_argument("--raise", dest="raise_version", action="store_true")
     args = parser.parse_args(argv)
+    if not args.default_branch.strip():
+        # origin/ would make every base "non-default" and skip the check: the check could not run, never an allow.
+        print("VERSION BUMP: the default branch is unknown (--default-branch is empty)")
+        return 2
     default_ref = "origin/" + args.default_branch
     try:
         if args.exact or args.raise_version:
