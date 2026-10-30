@@ -268,6 +268,27 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract lists a New Mechanism that mirrors an existing entry's inverse operation
 - **Tags:** mechanisms, reuse, extend-by, removal
 
+### 2026-10-30 — A delivery rule must name every route into delivery, not only the one the author had in mind
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
+- **Lesson:** When a contract adds a rule about how work is delivered, list every flow that can produce the delivered shape (direct design, hand-run loop, single pull request, web merge, legacy work) in a table with the enforcement point and a test for each; test the rule against the code, not only against the flow the author imagined.
+- **Apply when:** a contract changes how sub-tasks, branches, pull requests or version raises are produced or recorded
+- **Tags:** delivery, bypass-flows, choke-point, parent-branch
+
+### 2026-10-30 — A rule that refuses must give already-delivered work a named way out
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
+- **Lesson:** When a new refusal can fire on work that already merged, add an explicit owner-only exit and make the loop's next command name it, so the refused command is never suggested twice.
+- **Apply when:** a contract adds a refusal to a record, dispatch or completion step that has in-flight or legacy cases
+- **Tags:** refusal, legacy, escape-hatch, loop
+
+### 2026-10-30 — One shared reader must own the filtering, not only the selection
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
+- **Lesson:** When two code paths read the same records, put the match filter inside the shared function; a parity test that bypasses each path's own filter proves less than it claims.
+- **Apply when:** a contract unifies readers of briefs, records or contracts across the delivery scripts
+- **Tags:** brief-linkage, parity-test, matcher, reuse
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
