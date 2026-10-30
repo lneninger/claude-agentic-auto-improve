@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-10-28
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-10-29, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/97, https://github.com/lneninger/claude-agentic-auto-improve/pull/99, https://github.com/lneninger/claude-agentic-auto-improve/pull/101, https://github.com/lneninger/claude-agentic-auto-improve/pull/102, https://github.com/lneninger/claude-agentic-auto-improve/pull/103, https://github.com/lneninger/claude-agentic-auto-improve/pull/104, https://github.com/lneninger/claude-agentic-auto-improve/pull/105, https://github.com/lneninger/claude-agentic-auto-improve/pull/106, https://github.com/lneninger/claude-agentic-auto-improve/pull/107, https://github.com/lneninger/claude-agentic-auto-improve/pull/109; 1 checklist items from review reports, 0 with no structured evidence; not performed (disclosed on #86): Implementation matches Data Shapes exactly | New Mechanisms (if any) promoted to `MECHANISMS.md` | New vocabulary terms promoted to `VOCABULARY.md`; owner confirmed resolved: none
 **Supersedes:** none
 **Work Item Brief:** .claude/work-items/2026-10-28-84-angular-tailwind-rule-documents.md
 **Tracking issue:** #86
@@ -706,11 +707,11 @@ PRIOR_FINDINGS:
 
 ## Review checklist (filled in after implementation)
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [ ] Implementation matches Data Shapes exactly — not performed (disclosed on #86)
+- [x] Reused Mechanisms are actually reused (no parallel implementations introduced) — evidence: .claude/reviews/2026-10-28-angular-tailwind-rule-documents/t9-review-fullstack-code-reviewer.md
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — not performed (disclosed on #86)
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — not performed (disclosed on #86)
+- [ ] Integration surfaces reflected on both backend and frontend sides — not applicable (.claude/reviews/2026-10-28-angular-tailwind-rule-documents/t9-review-fullstack-code-reviewer.md)
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — not applicable (.claude/reviews/2026-10-28-angular-tailwind-rule-documents/t9-review-fullstack-code-reviewer.md)
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — not applicable (.claude/reviews/2026-10-28-angular-tailwind-rule-documents/t9-review-fullstack-code-reviewer.md)
+- [x] `Status` flipped to `implemented`
