@@ -8757,13 +8757,20 @@ class _Result(object):
 
 def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_text=None,
            sub_issues=(), records_prs=(), implementers=("acme-dev",), gates=("acme-reviewer",),
-           json_out=True, replace_hook=None, fetch_ok=True, listing_ok=True):
+           json_out=True, replace_hook=None, fetch_ok=True, listing_ok=True, origin="ok"):
     """Run pr_merged.main() inside ``world`` with GitHub and git stubbed, files real.
 
     ``prs`` maps a pull request reference (number or link) to its gh payload. Every
     new edge the contract names is patched with ``create=True``, so a missing
     implementation is a missing behaviour and never an AttributeError. ``_run``
     itself raises, so no process can start down a path this fixture did not expect.
+
+    ``origin`` says what the committed tree of origin/<default> answers (issue 113, fix round 2). The origin
+    reads are the ONLY processes this fixture answers, and only through ``_run``: ``"ok"`` (the ref exists and
+    ``world.origin`` is its content; the default is an origin holding whatever the world published) or
+    ``"ref-missing"`` (origin/<default> is not a ref: every read of it fails). ``res.spies.events`` lists, in
+    order, ``fetch`` (fetch_default_branch), ``ref-probe`` and ``ls-tree``, so a test can say what came first.
+    Any other process is still refused, so the no-process guard holds.
 
     ``sub_issues`` and ``records_prs`` are passed through exactly as given: the
     default is an empty list (nothing open), a list is a list, and ``None`` is a
@@ -8798,8 +8805,31 @@ def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_te
         return copy.deepcopy(repo(name) if callable(repo) else (repo or _THIS_REPO_NEUTRAL))
 
     spies.gh_pr = []
+    spies.events = []
+
+    def fake_fetch(*_a, **_k):
+        spies.events.append("fetch")
+        return fetch_ok
+
+    def fake_run(cmd, **_kwargs):
+        cmd = [str(c) for c in cmd]
+        if cmd[:2] in (["git", "rev-parse"], ["git", "show-ref"], ["git", "cat-file"]) \
+                and any("origin/" in c for c in cmd):
+            spies.events.append("ref-probe")
+            return (0, "0" * 40) if origin == "ok" else (1, "")
+        if cmd[:2] == ["git", "ls-tree"] and "--name-only" in cmd:
+            spies.events.append("ls-tree")
+            if origin != "ok":
+                return 128, "fatal: Not a valid object name"
+            _ref, _, folder = cmd[-1].partition(":")
+            prefix = folder.rstrip("/") + "/"
+            names = sorted(p[len(prefix):] for p in world.origin
+                           if p.startswith(prefix) and "/" not in p[len(prefix):])
+            return (0, "\n".join(names)) if names else (128, "fatal: not a tree object")
+        return _no_process(cmd)
+
     spies.gh_authenticated = mock.MagicMock(return_value=authenticated)
-    spies.fetch_default_branch = mock.MagicMock(return_value=fetch_ok)
+    spies.fetch_default_branch = mock.MagicMock(side_effect=fake_fetch)
     spies.list_review_files = mock.MagicMock(side_effect=fake_list_review_files)
     spies.gh_issue_text = mock.MagicMock(side_effect=fake_issue_text)
     spies.gh_open_sub_issues = mock.MagicMock(
@@ -8833,7 +8863,7 @@ def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_te
         mock.patch.object(pr_merged, "gh_open_sub_issues", spies.gh_open_sub_issues, create=True),
         mock.patch.object(pr_merged, "open_records_pull_requests",
                           spies.open_records_pull_requests, create=True),
-        mock.patch.object(pr_merged, "_run", _no_process),
+        mock.patch.object(pr_merged, "_run", fake_run),
         mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", tuple(implementers)),
         mock.patch.object(pr_merged, "REVIEW_GATES", tuple(gates)),
     ]
@@ -13798,13 +13828,9 @@ class TestHeaderBriefAndSubTaskBriefsDisagreeOnTheParent(unittest.TestCase):
 # Code review W4: needs_accept and the live single-branch report come from fresh evidence.
 # --------------------------------------------------------------------------
 def _drive_with_origin_tree(world, flags, **kwargs):
-    """_drive with the committed-tree listing answered from ``world.origin`` (what origin/<default> holds),
-    so an implementation that reads the records AT origin/<default> sees them and nothing reaches git."""
-    def names(ref, folder):
-        prefix = folder.rstrip("/") + "/"
-        return sorted(p[len(prefix):] for p in world.origin if p.startswith(prefix) and "/" not in p[len(prefix):])
-    with mock.patch.object(pr_merged, "_tree_names_at", names):
-        return _drive(world, flags, **kwargs)
+    """_drive, whose ``_run`` stand-in now answers the committed-tree reads of origin/<default> from
+    ``world.origin`` (fix round 2), so this is the same call; the name is kept for the tests above."""
+    return _drive(world, flags, **kwargs)
 
 
 class TestAcceptIsOnlyOfferedFromFreshEvidence(unittest.TestCase):
@@ -13919,6 +13945,249 @@ class TestWebMergeRuleNeedsAKnownHeadBranch(unittest.TestCase):
         record = yaml.safe_load(world.get("%s/t1-backend.yaml" % world.results_rel))
         self.assertNotEqual(record.get("failure"), "single-branch-delivery",
                             "no head branch is known, so `None in (x, None)` must not make it a web merge: %r" % (record,))
+
+
+# ==========================================================================
+# Fix round 2 (issue 113), fix review F1 to F3 and its NITs:
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/fix-review-fullstack-code-reviewer.md
+# The origin reads below go through the fixture's `_run` stand-in (see _drive's `origin=`), so the no-process
+# guard holds and a test can say whether origin/<default> was fetched, probed and listed, and in what order.
+# ==========================================================================
+def _origin_only(world, task_id, number, merged_at, **over):
+    """A completion record that origin/<default> holds and this stale checkout does not."""
+    rel = world.record(task_id, number, merged_at=merged_at, **over)
+    world.publish(rel)
+    world.path(rel).unlink()
+    return rel
+
+
+def _origin_landing(world):
+    """Both records of a real parent-branch landing, published to origin only (the Records PR merged)."""
+    _origin_only(world, "t1-backend", 61, "2026-10-01T09:00:00Z", base_is_default=False, base_ref=_PB_PARENT)
+    _origin_only(world, "t2-frontend", 62, "2026-10-02T09:00:00Z", base_is_default=False, base_ref=_PB_PARENT)
+    return world
+
+
+def _merged_parent_pr():
+    return {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT, merged_at="2026-10-03T12:00:00Z")}
+
+
+def _accept_offered(res):
+    return any("--accept-single-branch" in c for c in res.commands())
+
+
+class TestTheOriginReadIsFreshAndFailsClosed(unittest.TestCase):
+    """F1 a, b, c: the live report's evidence comes from a fetched origin/<default>, and an unreadable one
+    adds no accept offer."""
+
+    def test_an_unreadable_origin_never_sets_needs_accept_and_says_how_to_fix_it(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[], origin="ref-missing")
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertFalse(any(c.get("needs_accept") for c in (res.report or {}).get("delivery_candidates") or []),
+                         "origin/master could not be read, so nothing proves the work is a single-branch "
+                         "delivery: needs_accept stays unset. %s" % res.describe())
+        self.assertFalse(_accept_offered(res), "and the accept command is not offered. %s" % res.describe())
+        self.assertTrue("origin/master could not be read" in res.out and "git fetch origin master" in res.out,
+                        "the report says: origin/master could not be read; run git fetch origin master and rerun. %s"
+                        % res.describe())
+
+    def test_positive_control_a_readable_origin_that_holds_no_records_still_offers_the_accept(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        self.assertEqual(res.commands(), ["/pr-merged %d --record-delivery --accept-single-branch" % _BRIEF_PR_NUMBER],
+                         res.describe())
+
+    def test_the_default_branch_is_fetched_before_origin_is_read(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        events = res.spies.events
+        reads = [i for i, e in enumerate(events) if e in ("ref-probe", "ls-tree")]
+        self.assertTrue(reads, "fixture sanity: the live report reads origin/master. events=%r" % (events,))
+        self.assertIn("fetch", events, "fetch_default_branch is called before the read. events=%r" % (events,))
+        self.assertLess(events.index("fetch"), reads[0],
+                        "and it comes FIRST, or the read sees a checkout as stale as the local folder. events=%r"
+                        % (events,))
+        self.assertIn(mock.call("master"), res.spies.fetch_default_branch.call_args_list,
+                      "the branch fetched is the default branch")
+
+    def test_the_existence_of_origin_base_is_probed_before_it_is_listed(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        events = res.spies.events
+        self.assertIn("ref-probe", events, "origin/master is checked to exist (rev-parse --verify). events=%r" % (events,))
+        self.assertIn("ls-tree", events, "fixture sanity: the records are then listed. events=%r" % (events,))
+        self.assertLess(events.index("ref-probe"), events.index("ls-tree"), "probe first. events=%r" % (events,))
+
+    def test_a_stale_local_record_does_not_override_a_newer_origin_record(self):
+        # The local t1 record is an old one-branch record (merged into the default branch); origin holds the
+        # real parent-landing records. Only a record written by THIS run may override origin's.
+        world = _pb_world(self)
+        _origin_landing(world)
+        world.record("t1-backend", 61, base_is_default=True, merged_at="2026-09-01T09:00:00Z")  # local only, stale
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        self.assertFalse(_accept_offered(res),
+                         "origin/master proves the landing; the stale local t1 record must not hide it. %s"
+                         % res.describe())
+        self.assertNotIn("single-branch-delivery", _pb_reasons(res.report), res.describe())
+
+    def test_the_harness_answers_the_origin_read_itself(self):
+        # Fix review F1.2: the production code must not need a try/except to survive the fixture. The
+        # stand-in answers the read, so a stray process is still refused.
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        self.assertIn("ls-tree", res.spies.events, "the origin read reached the fixture's stand-in: %r" % res.spies.events)
+        with mock.patch.object(pr_merged, "_run", _no_process):
+            with self.assertRaises(AssertionError):
+                pr_merged._run(["git", "status"])
+
+
+class TestOriginEvidenceNotLocalRefusesWithADistinctReason(unittest.TestCase):
+    """F1 d: origin holds the landing evidence but this checkout does not. G-7 must not push the owner to the
+    accept, and must not write contract-delivery records over the real ones."""
+
+    def _refusal(self, flags):
+        world = _origin_landing(_pb_world(self))
+        before = world.snapshot()
+        res = _drive(world, flags, prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 9, res.describe())
+        self.assertEqual(((res.report or {}).get("guard"), (res.report or {}).get("reason")),
+                         ("G-7", "records-not-local"), res.describe())
+        said = json.dumps({k: (res.report or {}).get(k) for k in ("detail", "remedy")})
+        self.assertTrue("worktree" in said and "origin/master" in said and "fresh" in said,
+                        "the remedy is the G-6 wording: run again in a flat worktree cut fresh from origin/master. "
+                        "Said: %s" % said)
+        self.assertNotIn("--accept-single-branch", said, "and it does not name the accept")
+        self.assertEqual(world.snapshot(), before, "nothing is written over the records origin holds")
+        self.assertFalse(world.exists(_results(world, "contract-delivery.yaml")))
+
+    def test_plain_record_delivery_is_refused_as_records_not_local(self):
+        self._refusal(["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)])
+
+    def test_the_accept_flag_does_not_turn_it_into_a_single_branch_delivery(self):
+        self._refusal(["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER), "--accept-single-branch"])
+
+    def test_positive_control_with_the_records_local_the_delivery_is_recorded(self):
+        world = _pb_world(self)
+        world.record("t1-backend", 61, base_is_default=False, base_ref=_PB_PARENT, merged_at="2026-10-01T09:00:00Z")
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_PB_PARENT, merged_at="2026-10-02T09:00:00Z")
+        res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)], prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
+
+
+class TestLegacyRecordsWithoutABaseRef(unittest.TestCase):
+    """F1 e. R-7 reads a missing base_is_default as "not the default" and lets base_ref decide; a record from
+    before base_ref existed (0.5.0) has neither, so it proves no parent-branch landing. Such a delivery is
+    refused G-7 single-branch-delivery, and the work, already merged, is accepted by the owner (the remedy).
+    R-6 leaves the stored records and is_delivered alone."""
+
+    def _legacy(self, world):
+        for tid, number, merged in (("t1-backend", 61, "2026-10-01T09:00:00Z"), ("t2-frontend", 62, "2026-10-02T09:00:00Z")):
+            rel = world.record(tid, number, base_is_default=None, merged_at=merged)
+            data = yaml.safe_load(world.get(rel).decode("utf-8"))
+            self.assertNotIn("base_ref", data, "fixture sanity: a pre-0.5.0 record has no base_ref")
+            self.assertNotIn("base_is_default", data)
+        return world
+
+    def test_records_without_base_ref_are_not_landing_evidence(self):
+        world = self._legacy(_pb_world(self))
+        before = world.snapshot()
+        res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)], prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 9, res.describe())
+        self.assertEqual(((res.report or {}).get("guard"), (res.report or {}).get("reason")),
+                         ("G-7", "single-branch-delivery"), res.describe())
+        self.assertIn("--accept-single-branch", json.dumps(res.report), "already merged: the owner's accept is the remedy")
+        self.assertEqual(world.snapshot(), before)
+
+    def test_is_delivered_still_reads_such_a_record_as_base_unknown(self):
+        with mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", ("acme-dev",)), \
+                mock.patch.object(pr_merged, "REVIEW_GATES", ("acme-reviewer",)):
+            tasks = pr_merged.classify_handoff(_pb_contract().decode("utf-8")).sub_tasks
+        self.assertEqual(len(tasks), 2, "fixture sanity")
+        records = {t.id: {"status": "completed", "verified": "github", "pull_request": "u"} for t in tasks}
+        holds, reasons = pr_merged.is_delivered(tasks, records, None)
+        self.assertFalse(holds)
+        self.assertTrue(all("base unknown" in r["item"] for r in reasons), reasons)
+
+
+class TestNoBroadExceptAroundTheOriginRead(unittest.TestCase):
+    """F1 f. An unreadable origin is a return value (None), not an exception; a broad except would also swallow
+    the fixture's own assertion."""
+
+    def test_pr_merged_main_has_no_except_exception_near_the_origin_records_read(self):
+        lines = (Path(__file__).resolve().parent.parent / "pr_merged.py").read_text(encoding="utf-8").splitlines()
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("def main("))
+        hits = [i for i in range(start, len(lines))
+                if re.search(r'load_records_at\(|"origin/"\s*\+\s*base|origin_records', lines[i])]
+        self.assertTrue(hits, "fixture sanity: main() reads the records at origin/<default>")
+        for i in hits:
+            window = lines[max(start, i - 4):i + 9]
+            self.assertFalse(any(re.search(r"except\s+Exception", ln) for ln in window),
+                             "line %d: no `except Exception` around the origin read:\n%s" % (i + 1, "\n".join(window)))
+
+
+class TestEffectiveBaseRefusalForAHeaderMismatch(unittest.TestCase):
+    """F3."""
+
+    TOPOLOGY = {"parent_branch": "feature/q", "parent_issue": "100", "child_ids": [], "declared_base": "feature/q",
+                "reason": None}
+
+    def test_the_refusal_carries_the_layout_defects_own_detail_and_remedy(self):
+        layout = {"parent_branch": "feature/p", "parent_issue": 100, "defects": [
+            {"reason": "ambiguous", "detail": "DETAIL-MARKER the linked brief says feature/p, the children say feature/q",
+             "remedy": "REMEDY-MARKER make the header brief and the children one branch"}]}
+        got = pr_merged.effective_base({"sub_tasks": {"t1-backend": {}}}, "t1-backend", self.TOPOLOGY, "master", layout)
+        self.assertEqual(got["problem"], "base-not-declared", got)
+        self.assertTrue("DETAIL-MARKER" in got["detail"] and "REMEDY-MARKER" in got["detail"],
+                        "the layout defect's own detail and remedy are passed through: %r" % got["detail"])
+        self.assertNotIn("disagree on base: or parent_issue", got["detail"],
+                         "the children agree with each other; the header brief is the one that differs")
+
+    def test_positive_control_children_that_really_disagree_keep_the_old_text(self):
+        topology = dict(self.TOPOLOGY, parent_branch=None, reason="ambiguous")
+        got = pr_merged.effective_base({"sub_tasks": {"t1-backend": {}}}, "t1-backend", topology, "master", None)
+        self.assertIn("disagree on base: or parent_issue", got["detail"])
+
+
+class TestParentIsDefaultNamesTheProtectedBranch(unittest.TestCase):
+    """Fix review NIT 5."""
+
+    def _detail(self, base):
+        world = _child_briefs(_pb_world(self, brief=_pb_brief(pr="none")), base)
+        _publish_conventions(world, {"protectedBranches": ["master", "release"]})
+        res = _pb_status(self, world, prs={})
+        return (_pb_entry(res.report, "parent-is-default") or {}).get("detail", "")
+
+    def test_a_non_default_protected_base_is_called_a_protected_branch_and_named(self):
+        detail = self._detail("release")
+        self.assertTrue("protected branch" in detail and "release" in detail,
+                        "the children's base release is protected, not the default branch: %r" % detail)
+
+    def test_positive_control_the_default_branch_is_still_called_the_default_branch(self):
+        self.assertIn("default branch", self._detail("master"))
+
+
+class TestProtectedBranchesReaderIgnoresAMalformedValue(unittest.TestCase):
+    """Fix review NIT 4: one reader of contractLanding.protectedBranches, shared by the landing."""
+
+    def _read(self, value):
+        text = json.dumps({"contractLanding": {"protectedBranches": value}})
+        with mock.patch.object(pr_merged, "file_at_commit", return_value=text):
+            return pr_merged.protected_branches("master")
+
+    def test_a_string_value_is_not_split_into_characters(self):
+        self.assertEqual(self._read("release"), ["master"])
+
+    def test_a_list_keeps_its_strings_and_the_default_branch(self):
+        self.assertEqual(self._read(["release", 5, "master"]), ["master", "release"])
+
+    def test_the_landing_reads_the_key_through_this_function(self):
+        text = (Path(__file__).resolve().parent.parent / "land_contract.py").read_text(encoding="utf-8")
+        self.assertTrue("pr_merged.protected_branches(" in text,
+                        "land_contract.py (P0 and P1) must call pr_merged.protected_branches, not keep its own "
+                        "`list(... or [default])` reader")
+        self.assertIsNone(re.search(r'get\("protectedBranches"\)\s+or\s+\[', text),
+                          "and no second reader of protectedBranches is left in land_contract.py")
 
 
 if __name__ == "__main__":

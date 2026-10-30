@@ -1251,11 +1251,20 @@ class TestFeedersPassUnfilteredBriefs(StageCase):
 _DISAGREE_BRIEF = BRIEF_DIR + "2026-10-05-394-demo.md"
 
 
-def disagreeing_kit(tmp):
-    contract = ("# Demo contract\n\n**Status:** approved\n**Work Item Brief:** %s\n" % _DISAGREE_BRIEF
+def disagreeing_kit(tmp, status="approved", header_branch=None, header_contract=None, brief_base="feature/q",
+                    config=None):
+    """Two mergeable blocks; the header brief is on PARENT (or ``header_branch``) while the Sub-Task briefs
+    say ``base: brief_base``. ``header_contract`` rewrites the header brief's contract: value."""
+    contract = ("# Demo contract\n\n**Status:** %s\n**Work Item Brief:** %s\n" % (status, _DISAGREE_BRIEF)
                 + CONTRACT_TEXT.split("\n", 1)[1])
-    return Kit(tmp, config=landing_config(steps=[STEP_CLEAN]), brief_base="feature/q",
-               base_files={".claude/concepts/%s.md" % SLUG: contract}, parent_files=dict(SRC_CHANGE))
+    kit = Kit(tmp, config=config or landing_config(steps=[STEP_CLEAN]), brief_base=brief_base,
+              base_files={".claude/concepts/%s.md" % SLUG: contract}, parent_files=dict(SRC_CHANGE))
+    if header_branch is not None or header_contract is not None:
+        text = brief_md(394, branch=header_branch or PARENT, parent_issue=None)
+        if header_contract is not None:
+            text = text.replace("contract: .claude/concepts/%s.md" % SLUG, "contract: %s" % header_contract)
+        write_files(kit.main, {_DISAGREE_BRIEF: text})  # the operator's disk is what P0 reads
+    return kit
 
 
 class TestLauncherHeaderBriefDisagreement(LauncherCase):
@@ -1268,6 +1277,62 @@ class TestLauncherHeaderBriefDisagreement(LauncherCase):
                          "disagreement, not launch a landing of one of them (got %s: %s)"
                          % (PARENT, report.get("outcome"), report.get("detail")))
         execm.assert_not_called()
+
+
+class TestLandingP0JudgesOnlyJudgedContracts(LauncherCase):
+    """Fix review F2. P0's header-brief check is the layout check of /pr-merged, applied to the same contracts:
+    R-6 judges Status draft or approved with two or more mergeable blocks, and nobody else."""
+
+    def test_an_exempt_contract_is_not_refused_at_p0_for_a_header_brief_that_differs(self):
+        for status in ("implemented", "rejected", "superseded", "archived"):
+            with self.subTest(status=status):
+                folder = Path(self._tmp.name) / ("exempt-" + status)
+                folder.mkdir()
+                _, execm, report = self.launch(disagreeing_kit(folder, status=status))
+                outcome = report["outcome"] if report else None
+                self.assertNotIn(outcome, ("ambiguous-parent", "parent-is-default"),
+                                 "R-6: a %s contract is not judged, so the header brief's branch is not compared "
+                                 "with the children's base at P0 (got %s: %s)"
+                                 % (status, outcome, (report or {}).get("detail")))
+
+    def test_a_judged_contract_whose_header_brief_is_on_the_default_branch_reports_parent_is_default(self):
+        folder = Path(self._tmp.name) / "default-header"
+        folder.mkdir()
+        _, execm, report = self.launch(disagreeing_kit(folder, header_branch="master"))
+        self.assertEqual(self.outcome(report), "parent-is-default",
+                         "delivery_layout calls this parent-is-default; P0 must use the same reason, not "
+                         "ambiguous-parent (got %s: %s)" % (report.get("outcome"), report.get("detail")))
+        execm.assert_not_called()
+
+    def test_a_header_brief_whose_contract_field_is_a_placeholder_is_still_the_header_brief(self):
+        # The matcher treats tbd / n/a as absent, so the header-linked brief (branch PARENT) still disagrees
+        # with the children (feature/q): the landing halts exactly as with a filled-in contract: field.
+        for value in ("tbd", "n/a"):
+            with self.subTest(contract_field=value):
+                folder = Path(self._tmp.name) / ("placeholder-" + value.replace("/", ""))
+                folder.mkdir()
+                _, execm, report = self.launch(disagreeing_kit(folder, header_contract=value))
+                self.assertEqual(self.outcome(report), "ambiguous-parent", report.get("detail"))
+                execm.assert_not_called()
+
+    def test_p0_delegates_the_check_to_the_one_layout_function(self):
+        text = (Path(__file__).resolve().parent.parent / "land_contract.py").read_text(encoding="utf-8")
+        start = text.index("def _launch_land(")
+        end = text.index("\ndef ", start + 10)
+        self.assertTrue("delivery_layout(" in text[start:end],
+                        "P0 (_launch_land) asks pr_merged.delivery_layout, so the status gate, the reason "
+                        "vocabulary and the placeholder rule exist once")
+
+    def test_a_malformed_protected_branches_value_is_not_split_into_characters(self):
+        # NIT 4: protectedBranches: "release" (a string) must read as the default only. Split into characters
+        # it would make a branch called "e" protected. The contract has no Status, so only the topology check runs.
+        folder = Path(self._tmp.name) / "malformed"
+        folder.mkdir()
+        kit = Kit(folder, config=landing_config(protectedBranches="release"), brief_base="e")
+        _, execm, report = self.launch(kit)
+        self.assertNotEqual(self.outcome(report), "parent-is-default",
+                            "'e' is not a protected branch: the string is not a list of characters (got %s: %s)"
+                            % (report.get("outcome"), report.get("detail")))
 
 
 class TestStageHeaderBriefDisagreement(StageCase):

@@ -440,6 +440,30 @@ class RaiseTests(unittest.TestCase):
                          "and no manifest was touched")
 
 
+class EmptyDefaultBranchTests(unittest.TestCase):
+    """Fix review N2: an empty --default-branch is exit 2 (the check could not run), never an allow. With
+    default_ref "origin/" every base differs from it, so a non-task pull request INTO the default branch
+    would otherwise skip the check and exit 0."""
+
+    def test_the_ci_mode_with_an_empty_default_branch_exits_2(self):
+        repo = VersionRepo(self)
+        repo.branch("feature/x")
+        repo.ship_change()  # shipped change, no raise, into master: the default rules say exit 1
+        code, out = repo.run("--base", "origin/master", "--default-branch", "", "--head-ref", "feature/x")
+        self.assertEqual(code, 2, "the default branch is unknown: never an allow. got: %s" % out)
+        self.assertTrue("VERSION BUMP" in out and "unrecognized arguments" not in out,
+                        "and the message comes from the check. got: %s" % out)
+
+    def test_exact_and_raise_with_an_empty_default_branch_exit_2_too(self):
+        repo = VersionRepo(self)
+        repo.branch("feature/x")
+        repo.ship_change("0.11.0")
+        for mode in ("--exact", "--raise"):
+            with self.subTest(mode=mode):
+                code, out = repo.run(mode, "--default-branch", "")
+                self.assertEqual(code, 2, "got: %s" % out)
+
+
 class SpawnedScriptEnvironmentTests(unittest.TestCase):
     """Test review W-5: the script under test never reads the developer's own git configuration."""
 
