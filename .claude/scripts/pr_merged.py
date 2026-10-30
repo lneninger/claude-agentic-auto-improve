@@ -1430,22 +1430,22 @@ def _brief_value(brief: Dict[str, Any], key: str) -> str:
 def _contract_field_state(brief: Dict[str, Any], slug: str) -> str:
     """L-3: ``unset`` | ``names`` | ``other`` for a brief's ``contract:`` value against ``slug``.
 
-    ``none``, ``none - <text>``, ``UNKNOWN``, empty, a ``<...`` placeholder, a missing key and a
-    non-string value are all ``unset``. Otherwise the value names the contract when one of its
-    path tokens, minus a ``.md`` suffix, equals the slug (case-insensitive).
+    ``none``, ``none (<text>)``, ``UNKNOWN``, ``TBD``, ``n/a``, empty, a ``<...`` placeholder, a
+    missing key and a non-string value are all ``unset`` (a placeholder may carry text after it).
+    Otherwise the value names the contract when the stem of its first word -- the last path
+    component minus a ``.md`` suffix -- equals the slug (case-insensitive); a later word, such as
+    the ``old`` of ``new (replaces old)``, is a mention, not a name.
     """
     value = brief.get("contract")
     if not isinstance(value, str):
         return "unset"
-    text = value.strip().strip("`'\"").strip()
-    lowered = text.lower()
-    if lowered in ("", "none", "unknown") or lowered.startswith("<") or re.match(r"none\s+[-–—:]", lowered):
+    words = value.strip().strip("`'\"").strip().split()
+    first = words[0].strip("`'\"").rstrip(",;:") if words else ""
+    if first.lower() in ("", "none", "unknown", "tbd", "n/a") or first.startswith("<"):
         return "unset"
-    for token in re.findall(r"[A-Za-z0-9._\-]+", text):
-        stem = token[:-3] if token.lower().endswith(".md") else token
-        if stem.casefold() == slug.casefold():
-            return "names"
-    return "other"
+    stem = re.split(r"[\\/]", first)[-1]
+    stem = stem[:-3] if stem.lower().endswith(".md") else stem
+    return "names" if stem.casefold() == slug.casefold() else "other"
 
 
 def brief_names_contract(brief: Dict[str, Any], slug: str) -> bool:
@@ -1548,14 +1548,25 @@ JUDGED_STATUSES = ("draft", "approved")
 _CONVENTIONS_REL = ".claude/work-item-conventions.json"
 
 
-def version_raise_on(default: str) -> bool:
-    """``contractLanding.versionRaise`` in the conventions file at ``origin/<default>``."""
+def _landing_config(default: str) -> Dict[str, Any]:
+    """``contractLanding`` in the conventions file at ``origin/<default>``; ``{}`` when absent or unreadable."""
     text = file_at_commit("origin/" + default, _CONVENTIONS_REL)
     try:
         config = (json.loads(text) or {}).get("contractLanding") if text else None
     except (ValueError, AttributeError):
-        return False
-    return isinstance(config, dict) and config.get("versionRaise") is True
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def version_raise_on(default: str) -> bool:
+    """``contractLanding.versionRaise`` in the conventions file at ``origin/<default>``."""
+    return _landing_config(default).get("versionRaise") is True
+
+
+def protected_branches(default: str) -> List[str]:
+    """``contractLanding.protectedBranches`` (the key the landing reads) plus the default branch (L-4)."""
+    listed = _landing_config(default).get("protectedBranches")
+    return [default] + [b for b in listed if isinstance(b, str) and b != default] if isinstance(listed, list) else [default]
 
 
 def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
@@ -1572,6 +1583,7 @@ def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
     if len(mergeable) < 2 or read_contract_status(contract_text) not in JUDGED_STATUSES:
         return None
     defects: List[Dict[str, str]] = []
+    protected = protected_branches(default)
 
     def add(reason: str, detail: str, remedy: str) -> None:
         if reason not in [d["reason"] for d in defects]:
@@ -1588,9 +1600,9 @@ def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
         if branch.lower() in ("", "none", "unknown") or branch.startswith("<"):
             add("no-parent-branch", "the linked brief declares no branch:",
                 "write the parent branch into the brief's branch: field (run /task)")
-        elif branch == default:
-            add("parent-is-default", "the linked brief's branch: is the default branch %s" % default,
-                "give the brief a parent branch of its own; the default branch cannot be one")
+        elif branch in protected:
+            add("parent-is-default", "the linked brief's branch: %s is the default or a protected branch" % branch,
+                "give the brief a parent branch of its own; a protected branch cannot be one")
         else:
             parent_branch = branch
         ident = _brief_value(parent, "id").lstrip("#")
@@ -1599,11 +1611,17 @@ def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
                 "open the parent issue and write its number into the brief's id:")
         else:
             parent_issue = int(ident)
-    reason = declared_topology(None, scoped_briefs, default, [default])["reason"]
+    topology = declared_topology(None, scoped_briefs, default, protected)
+    reason = topology["reason"]
     if reason in ("ambiguous", "parent-is-default"):
         add(reason, "the Sub-Task Work Items of this contract do not agree on one parent branch"
             if reason == "ambiguous" else "the Sub-Task Work Items declare the default branch as their base",
             "make the briefs' base: and parent_issue: agree on the one parent branch")
+    elif parent_branch and topology["parent_branch"] and topology["parent_branch"] != parent_branch:
+        # Nothing may choose silently between the header brief's branch: and the children's base:.
+        add("ambiguous", "the linked brief's branch: is %s but the Sub-Task Work Items' base: is %s"
+            % (parent_branch, topology["parent_branch"]),
+            "make the header brief's branch: and the Sub-Task Work Items' base: the one parent branch")
     if version_raise_on(default):
         manifests = [f.replace("\\", "/") for b in mergeable for f in b.files
                      if f.replace("\\", "/") in VERSION_MANIFESTS]
@@ -1665,7 +1683,8 @@ def effective_base(state: Dict[str, Any], subtask_id: str, topology: Dict[str, A
 
     if entry.get("brief") and entry.get("base"):
         return found(entry["base"], "state")
-    if topology.get("reason") == "ambiguous":
+    if topology.get("reason") == "ambiguous" or any(
+            d.get("reason") == "ambiguous" for d in (layout or {}).get("defects") or []):
         return refused("the Sub-Task Work Items of this contract disagree on base: or "
                        "parent_issue:, so no parent branch can be chosen for sub-task %r -- make the "
                        "briefs agree on one parent branch, or record this sub-task's own identity "
@@ -4331,7 +4350,7 @@ def main() -> int:
         # R-8: a sub-task's own pull request merged into the default branch on the web. It cannot be
         # stopped before the merge, so it is recorded after it as a failed record, and nothing closes.
         web_merged = (layout is not None and verdict == "merged" and not cross_repository
-                      and pr.get("baseRefName") == base
+                      and pr.get("baseRefName") == base and bool(pr.get("headRefName"))
                       and pr.get("headRefName") in (branch_for(slug, task.id), recorded_branches.get(task.id)))
         if (verdict == "merged" and task_issue is not None and not args.dry_run
                 and not web_merged and not args.status and not args.resume):
@@ -4414,6 +4433,19 @@ def main() -> int:
             _open_records_cache.append(open_records_pull_requests(slug))
         return _open_records_cache[0]
 
+    # W4: a judged contract's candidate kind and landing evidence come from what origin/<default> holds
+    # plus this run's records, never from a local results folder a stale checkout left empty. Read only
+    # when a known candidate exists and the open-records read answered. Best effort: an unreadable
+    # origin adds no evidence and changes nothing.
+    evidence = records
+    if layout is not None and any(c.get("known") for c in candidates) and _open_records() is not None:
+        try:
+            evidence = {**load_records_at("origin/" + base, slug), **records}
+        except Exception:
+            evidence = records
+        candidates = delivery_candidates(raw_candidates, tasks, evidence)
+        report["delivery_candidates"] = candidates
+
     records_pr_url: Optional[str] = None
     if any(c.get("known") and c.get("kind") != "early" for c in candidates) \
             and not is_delivered(tasks, records, delivery, defects)[0]:
@@ -4424,10 +4456,12 @@ def main() -> int:
     if layout is not None:
         # R-7 / R-9: a known merged candidate that G-7 would refuse needs the owner's accept, and the
         # live report names it -- but only while no Records pull request is open (the records are
-        # then still on the records branch) and only when GitHub answered both questions.
+        # then still on the records branch) and only when GitHub answered both questions. The printed
+        # accept command would exit 10 on an unreadable open-records read, so it is not offered then.
         for cand in candidates:
             if cand.get("known") and cand.get("kind") != "early" \
-                    and not landing_evidence_holds(layout, tasks, records, cand.get("branch")):
+                    and not landing_evidence_holds(layout, tasks, evidence, cand.get("branch")) \
+                    and _open_records() is not None:
                 cand["needs_accept"] = True
         records_read_failed = bool(_open_records_cache) and _open_records_cache[0] is None
         if not records_pr_url and not records_read_failed and not is_delivered(tasks, records, delivery, defects)[0] \

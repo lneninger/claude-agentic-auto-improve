@@ -7,6 +7,8 @@ Modes: default (today's check); parent (a ``task/<slug>/<id>`` head into a non-d
 version equals the base's, or the one at merge-base(origin/<default>, HEAD)); exact (minor + 1, patch 0,
 relative to origin/<default>, all entries agree); ``--raise`` writes that exact version into every manifest and commits it.
 
+A head that is not ``task/*`` into a non-default base is not checked (exit 0); default-branch bases keep the default rules.
+
 Exit 0: no shipped file changed, or the version was raised and the five manifest entries agree.
 Exit 1: shipped files changed without a higher version, or the manifests disagree.
 Exit 2: the check could not run (never an allow).
@@ -153,6 +155,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 code, message = evaluate_exact(versions_in(default), versions_in(head))
             print("VERSION BUMP: " + message)
             return code
+        if args.head_ref and not TASK_HEAD.match(args.head_ref) and args.base != default_ref:
+            print("VERSION BUMP: %s is not a task branch and its base is not %s; not checked" % (args.head_ref, default_ref))
+            return 0
         if args.head_ref and TASK_HEAD.match(args.head_ref) and args.base != default_ref:
             merge_base = _git("merge-base", default_ref, "HEAD").strip()
             allowed: List[str] = []

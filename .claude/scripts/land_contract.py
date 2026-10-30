@@ -3045,10 +3045,22 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
     if not parent_issue:
         return finish("parent-unresolved", "P0", "the Sub-Task Work Items name no parent issue")
 
+    try:
+        contract_text = (checkout / ".claude" / "concepts" / ("%s.md" % slug)).read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        contract_text = ""
+    linked = pr_merged.select_linked_brief(contract_text, slug, disk_briefs, default)
+    linked_branch = pr_merged._brief_value(linked, "branch") if linked is not None else ""
+    if linked_branch.lower() not in ("", "none", "unknown") and not linked_branch.startswith("<") \
+            and linked_branch != parent:
+        return finish("ambiguous-parent", "P0", "the header-linked brief's branch: is %r but the Sub-Task Work "
+                      "Items' base: is %r" % (linked_branch, parent))
+
     if os.environ.get("GH_REPO"):
         return finish("gh-repo-set", "P0", "GH_REPO is set, which would retarget every gh call")
 
-    refspecs = ["+refs/heads/%s:refs/remotes/origin/%s" % (b, b) for b in (parent, default)]
+    refspecs =["+refs/heads/%s:refs/remotes/origin/%s" % (b, b) for b in (parent, default)]
     rc, out = _run(["git", "fetch", "origin"] + refspecs, cwd=main_root, timeout=300)
     if rc != 0:
         return finish("unverifiable", "P0", "git fetch failed: %s" % out)
@@ -3060,13 +3072,7 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
             if rev_parse(main_root, r)]
     # The briefs this contract owns: the ones the one matcher accepts, plus the header-linked parent
     # brief (L-2), whatever its contract: says. A stranger's brief is none of this landing's business.
-    try:
-        contract_text = (checkout / ".claude" / "concepts" / ("%s.md" % slug)).read_text(
-            encoding="utf-8", errors="replace")
-    except OSError:
-        contract_text = ""
     own = [b for b in disk_briefs if pr_merged.brief_names_contract(b, slug)]
-    linked = pr_merged.select_linked_brief(contract_text, slug, disk_briefs, default)
     if linked is not None and linked not in own:
         own.append(linked)
     absent = [b["_path"] for b in own
