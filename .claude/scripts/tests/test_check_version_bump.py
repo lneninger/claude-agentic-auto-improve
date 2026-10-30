@@ -227,9 +227,20 @@ class VersionRepo:
             self.write(manifest_files(version))
         self.commit("shipped change")
 
+    def env(self):
+        """The environment the script under test is spawned with (test review W-5): a git identity, signing
+        off, and an EMPTY global config, so `--raise` (which runs `git commit`) behaves the same on a
+        developer machine, a fresh CI runner and a consumer, whatever their own git settings are."""
+        empty = self.tmp / "empty-gitconfig"
+        empty.write_text("", encoding="utf-8")
+        env = dict(_GIT_ENV)
+        env.update(GIT_CONFIG_GLOBAL=str(empty), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="1",
+                   GIT_CONFIG_KEY_0="commit.gpgsign", GIT_CONFIG_VALUE_0="false")
+        return env
+
     def run(self, *args):
         proc = subprocess.run([sys.executable, "-B", str(SCRIPT), *args], cwd=str(self.work),
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, timeout=120, env=self.env())
         return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
@@ -275,16 +286,30 @@ class ParentModeTests(unittest.TestCase):
         self.assertEqual(code, 0, "the head equals the version at merge-base(origin/master, HEAD) = 0.11.0, "
                                   "so a stale merge of the default branch is allowed. got: %s" % out)
 
-    def test_a_head_that_is_not_a_task_branch_keeps_the_default_rules_even_into_a_parent_base(self):
-        repo = self.parent_world()
-        repo.branch("feature/stacked", "feature/p")
-        repo.ship_change()  # shipped change, no raise
-        code, out = self.check(repo, head_ref="feature/stacked")
-        self.assertEqual(code, 1, "a stacked pull request of single-block work is not a task/* head, so it "
-                                  "still needs its raise. got: %s" % out)
-        repo.ship_change("0.10.1", text="more\n")
-        code, out = self.check(repo, head_ref="feature/stacked")
-        self.assertEqual(code, 0, "and passes once it raises, exactly as today. got: %s" % out)
+    def test_a_head_that_is_not_a_task_branch_into_a_non_default_base_is_not_checked_at_all(self):
+        # Code review W1 (issue 113). Before this rule the workflow ran only for pull requests into the
+        # default branch, so a stacked single-block pull request and a hand-named branch into a parent
+        # branch were never checked. The contract says they are "unaffected": the CI mode must exit 0 for
+        # them, with or without a raise.
+        for head in ("feature/stacked", "fix/remedy-for-the-review", "docs/some-note"):
+            with self.subTest(head=head):
+                repo = self.parent_world()
+                repo.branch(head, "feature/p")
+                repo.ship_change()  # shipped change, no raise
+                code, out = self.check(repo, head_ref=head)
+                self.assertEqual(code, 0, "%s is not task/*, and its base is not the default branch: no "
+                                          "check, exit 0. got: %s" % (head, out))
+                repo.ship_change("0.10.1", text="more\n")
+                code, out = self.check(repo, head_ref=head)
+                self.assertEqual(code, 0, "and a raise there is not an error either. got: %s" % out)
+
+    def test_a_head_that_is_not_a_task_branch_into_the_default_branch_keeps_the_default_rules(self):
+        # Positive control for W1: the default mode is only skipped for a NON-default base.
+        repo = VersionRepo(self)
+        repo.branch("feature/x")
+        repo.ship_change()
+        code, out = repo.run("--base", "origin/master", "--default-branch", "master", "--head-ref", "feature/x")
+        self.assertEqual(code, 1, "into the default branch the raise is still required. got: %s" % out)
 
     def test_a_task_head_into_the_default_branch_is_not_parent_mode(self):
         repo = self.parent_world()
@@ -415,6 +440,33 @@ class RaiseTests(unittest.TestCase):
                          "and no manifest was touched")
 
 
+class SpawnedScriptEnvironmentTests(unittest.TestCase):
+    """Test review W-5: the script under test never reads the developer's own git configuration."""
+
+    def git_in(self, repo, *args):
+        proc = subprocess.run(["git", *args], cwd=str(repo.work), capture_output=True, text=True, env=repo.env())
+        return proc.returncode, proc.stdout.strip()
+
+    def test_the_spawned_environment_has_an_identity_no_signing_and_an_empty_global_config(self):
+        repo = VersionRepo(self)
+        self.assertEqual(self.git_in(repo, "config", "--global", "--list")[1], "",
+                         "the global git configuration the script sees is empty")
+        self.assertEqual(self.git_in(repo, "config", "--get", "commit.gpgsign")[1], "false", "signing is off")
+        code, ident = self.git_in(repo, "var", "GIT_AUTHOR_IDENT")
+        self.assertTrue(code == 0 and "t@example.test" in ident, "an author identity is provided: %r" % ident)
+
+    def test_raise_commits_in_a_clone_that_has_no_identity_of_its_own(self):
+        repo = VersionRepo(self, "0.11.3")
+        repo.branch("feature/p")
+        repo.write(manifest_files("0.10.0"))
+        repo.commit("older version")
+        self.assertEqual(self.git_in(repo, "config", "--local", "--get", "user.name")[0], 1,
+                         "fixture sanity: the clone has no local identity")
+        code, out = repo.run("--raise", "--default-branch", "master")
+        self.assertEqual(code, 0, "the raise commit needs only the pinned environment. got: %s" % out)
+        self.assertEqual(self.git_in(repo, "status", "--porcelain")[1], "", "and it is committed")
+
+
 class ManifestsSingleSourceTests(unittest.TestCase):
     """check_version_bump.MANIFESTS is the only list of version files."""
 
@@ -452,8 +504,45 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertTrue("--default-branch" in text, "parent and exact modes need the default branch")
         self.assertTrue("--head-ref" in text, "parent mode needs the head ref")
         self.assertTrue("github.head_ref" in text, "the head ref comes from the event")
-        self.assertTrue("--base origin/${{ github.base_ref }}" in text,
-                        "the base is still the pull request's base")
+        self.assertTrue("--base origin/${{ github.base_ref }}" in text or "$BASE_REF" in text
+                        or "${BASE_REF}" in text, "the base is still the pull request's base")
+
+    # Code review W2: a pull request's head ref is attacker-chosen text. GitHub substitutes ${{ }} BEFORE
+    # the shell runs, and a git ref may hold ; | $ ( ) ` so it must travel through env: and be quoted.
+    def steps(self):
+        import yaml
+        data = yaml.safe_load(self.text())
+        found = []
+        for job in (data.get("jobs") or {}).values():
+            found.extend(job.get("steps") or [])
+        return data, found
+
+    def test_no_run_line_interpolates_a_pull_request_controlled_expression(self):
+        _data, steps = self.steps()
+        runs = [s for s in steps if s.get("run")]
+        self.assertTrue(runs, "fixture sanity: the workflow has a run: step")
+        for step in runs:
+            script = step["run"]
+            for expression in re.findall(r"\$\{\{(.*?)\}\}", script, re.S):
+                self.assertIsNone(
+                    re.search(r"head_ref|event\.pull_request|head\.ref|\.title|\.body", expression),
+                    "run: must not interpolate %r; pass it through env: and quote it" % expression.strip())
+
+    def test_the_refs_go_through_env_and_are_quoted_in_the_run_line(self):
+        _data, steps = self.steps()
+        step = next((s for s in steps if s.get("run")), {})
+        env = step.get("env") or {}
+        self.assertTrue(any("github.head_ref" in str(v) for v in env.values()),
+                        "the head ref is handed to the step through env:. env was %r" % (env,))
+        self.assertIsNotNone(re.search(r'--head-ref\s+"\$\{?[A-Za-z_]+\}?"', step.get("run", "")),
+                             'the run line passes the head ref as a quoted variable: --head-ref "$HEAD_REF"')
+
+    def test_the_workflow_declares_read_only_contents_permission(self):
+        data, _steps = self.steps()
+        job_permissions = [job.get("permissions") for job in (data.get("jobs") or {}).values()]
+        permissions = data.get("permissions") or next((p for p in job_permissions if p), None)
+        self.assertEqual(permissions, {"contents": "read"},
+                         "the job gets no write access it does not use (permissions: contents: read)")
 
 
 if __name__ == "__main__":

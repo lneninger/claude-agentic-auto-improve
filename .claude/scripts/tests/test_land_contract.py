@@ -1268,6 +1268,19 @@ class TestVersionFieldsConflictClass(LandCase):
             with self.subTest(path=path):
                 self.assertEqual(classify(path, self.CONFIG), "halt", "the policy stays closed for %s" % path)
 
+    def test_with_the_switch_off_or_absent_a_manifest_conflict_halts_as_before(self):
+        # Test review W-6: the version-fields class exists only for a project that opted in with
+        # contractLanding.versionRaise. Without it every consumer's manifest conflict is a halt, as it was.
+        import check_version_bump
+        classify = self.fn("classify_conflict")
+        for label, config in (("switch false", {"versionRaise": False, "unionPaths": [], "regenerators": []}),
+                              ("switch absent", {"unionPaths": [], "regenerators": []}),
+                              ("switch not a boolean", {"versionRaise": "yes", "unionPaths": [], "regenerators": []})):
+            for path in check_version_bump.MANIFESTS:
+                with self.subTest(case=label, path=path):
+                    self.assertEqual(classify(path, config), "halt",
+                                     "%s: %s keeps the closed policy (halt)" % (label, path))
+
     def test_a_union_path_keeps_its_class(self):
         classify = self.fn("classify_conflict")
         self.assertEqual(classify(".claude/JOURNAL.md", UNION_CONFIG), "union", "positive control")

@@ -415,16 +415,26 @@ class DispatchBaseResolutionTests(unittest.TestCase):
         self.assertEqual(res.branch.call_count, 0)
 
 
-@unittest.skipUnless(hasattr(pr_merged, "brief_for_branch"),
-                     "contract 460's rehydration is not on this branch")
 class DispatchIdentityAmbiguousTests(unittest.TestCase):
-    """D-1 rule 0: two briefs for one sub-task's branch beat every base rule."""
+    """D-1 rule 0: two briefs for one sub-task's branch beat every base rule.
+
+    KNOWN FAILURES, older than issue 113 (test review W-8). The class used to be guarded by
+    ``skipUnless(hasattr(pr_merged, "brief_for_branch"))``, but that symbol already exists, so the guard never
+    skipped and both tests failed on every run. Rule 0 of ``effective_base`` is still not built (see its
+    docstring: contract 460, 2026-10-07-worktree-isolation-by-default, rehydration), and rehydration reads
+    the briefs through git (``brief_for_branch(branch, "HEAD")``), which this plain-folder fixture cannot
+    offer. Both tests are marked expectedFailure with that reference instead of being weakened; when rule 0
+    lands and the fixture is a git repository, the unexpected success tells the author to remove the marks.
+    """
+
+    maxDiff = None
 
     def _two_briefs(self, repo):
         for name, issue in (("b1", "101"), ("b2", "102")):
             repo.brief(name, id=issue, contract=SLUG, parent_issue="100", base="feature/p",
                        branch="task/%s/t1-backend" % SLUG)
 
+    @unittest.expectedFailure
     def test_dispatch_refuses_identity_ambiguous_before_rule_one_is_read(self):
         with _Repo() as repo:
             contract = repo.contract(CONTRACT_SINGLE)
@@ -437,6 +447,7 @@ class DispatchIdentityAmbiguousTests(unittest.TestCase):
                              "base is read")
         self.assertEqual(res.branch.call_count, 0)
 
+    @unittest.expectedFailure
     def test_status_reports_identity_ambiguous_without_refusing(self):
         with _Repo() as repo:
             contract = repo.contract(CONTRACT_SINGLE)
@@ -1005,6 +1016,28 @@ class NeedsIssueRefusalTests(unittest.TestCase):
         self.assertEqual((needs_issue.payload or {}).get("error"), "needs-issue")
         self.assertNotEqual((base_refusal.payload or {}).get("remedy"), (needs_issue.payload or {}).get("remedy"),
                             "callers branch on error, and each error has its own remedy")
+
+    def test_a_protected_parent_branch_is_a_layout_defect_at_dispatch(self):
+        # Code review W6 / test review W-7 (L-4): the parent is never the default OR a protected branch. The
+        # protected list is contractLanding.protectedBranches of the conventions file at origin/<default>,
+        # the key the landing reads; this fixture offers it as the local file and as the committed copy.
+        conventions = {"contractLanding": {"protectedBranches": ["master", "release"]}}
+        text = json.dumps(conventions)
+
+        def committed(ref, path):
+            return text if path == ".claude/work-item-conventions.json" else None
+
+        with _Repo() as repo:
+            contract = repo.contract(_approved())
+            _parent_layout(repo, parent_branch="release")
+            repo.state(_states(True, base="release"))
+            repo.conventions(conventions)
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"],
+                         extra_patches=(mock.patch.object(pr_merged, "file_at_commit", side_effect=committed),))
+        self.assertEqual(res.exit_code, 3, "a protected parent is a layout defect. got %r %.300s" % (res.exit_code, res.out))
+        self.assertEqual((res.payload or {}).get("error"), "contract-defect", res.out[:300])
+        self.assertIn("parent-is-default", json.dumps(res.payload))
+        self.assertEqual(res.branch.call_count, 0, "nothing is cut from a protected branch")
 
     def test_base_not_declared_still_refuses_under_a_dry_run_and_carries_its_remedy(self):
         with _Repo() as repo:

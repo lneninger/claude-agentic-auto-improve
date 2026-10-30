@@ -1140,6 +1140,16 @@ def versions_in_tree(root):
     return found
 
 
+def isolated_git_env(folder):
+    """The environment a spawned git sees: an identity, signing off, an empty global config, no system config."""
+    empty = Path(folder) / "empty-gitconfig"
+    empty.write_text("", encoding="utf-8")
+    env = {k: _GIT_ENV[k] for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")}
+    env.update(GIT_CONFIG_GLOBAL=str(empty), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="1",
+               GIT_CONFIG_KEY_0="commit.gpgsign", GIT_CONFIG_VALUE_0="false")
+    return env
+
+
 class TestP7bVersionRaise(StageCase):
 
     def landing(self, *, master="0.11.3", parent="0.10.0", versionRaise=True, parent_extra=None,
@@ -1158,13 +1168,24 @@ class TestP7bVersionRaise(StageCase):
         if move_master:
             kit.commit_remote("master", manifests_at(master), "master moves")
         st = Stage(self, kit)
-        return st, st.run()
+        self.isolated = isolated_git_env(folder)
+        # Test review W-5: the raise commit is made by a spawned `git commit` that inherits the environment,
+        # so the landing runs under a pinned one (identity, signing off, empty global config).
+        with mock.patch.dict(os.environ, self.isolated):
+            return st, st.run()
 
     def exact(self, st):
         proc = _REAL_SUBPROCESS_RUN(
             [sys.executable, "-B", str(_VBUMP_SCRIPT), "--exact", "--default-branch", "master"],
-            cwd=str(st.worktree), capture_output=True, text=True, env=_GIT_ENV)
+            cwd=str(st.worktree), capture_output=True, text=True, env=dict(os.environ, **self.isolated))
         return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+    def test_the_landing_environment_is_isolated_from_the_developers_git_settings(self):
+        self.landing(subdir="env-pin")
+        env = self.isolated
+        self.assertEqual(Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8"), "", "an empty global config")
+        self.assertEqual((env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]), ("commit.gpgsign", "false"))
+        self.assertTrue(env.get("GIT_AUTHOR_EMAIL") and env.get("GIT_COMMITTER_EMAIL"), "an identity")
 
     def test_the_landing_commits_one_minor_raise_against_the_default_branch_after_merging_it(self):
         st, report = self.landing()
@@ -1221,6 +1242,49 @@ class TestFeedersPassUnfilteredBriefs(StageCase):
         self.assertEqual(report["outcome"], "landed",
                          "the contract's header names the parent brief; contract: none is unset, not another "
                          "contract's. got %s: %s" % (report["outcome"], report["detail"]))
+
+
+# ===========================================================================
+# Code review W3 + test review B-2 (mutant M5), landing side: the header brief's branch: is PARENT, and every
+# Sub-Task brief says base: feature/q. Neither P0 nor P1 may choose a side in silence.
+# ===========================================================================
+_DISAGREE_BRIEF = BRIEF_DIR + "2026-10-05-394-demo.md"
+
+
+def disagreeing_kit(tmp):
+    contract = ("# Demo contract\n\n**Status:** approved\n**Work Item Brief:** %s\n" % _DISAGREE_BRIEF
+                + CONTRACT_TEXT.split("\n", 1)[1])
+    return Kit(tmp, config=landing_config(steps=[STEP_CLEAN]), brief_base="feature/q",
+               base_files={".claude/concepts/%s.md" % SLUG: contract}, parent_files=dict(SRC_CHANGE))
+
+
+class TestLauncherHeaderBriefDisagreement(LauncherCase):
+
+    def test_p0_halts_ambiguous_parent_and_starts_no_landing(self):
+        kit = disagreeing_kit(self._tmp.name)
+        _, execm, report = self.launch(kit)
+        self.assertEqual(self.outcome(report), "ambiguous-parent",
+                         "the header brief says %s, the sub-task briefs say feature/q: P0 must name the "
+                         "disagreement, not launch a landing of one of them (got %s: %s)"
+                         % (PARENT, report.get("outcome"), report.get("detail")))
+        execm.assert_not_called()
+
+
+class TestStageHeaderBriefDisagreement(StageCase):
+
+    def test_p1_never_lands_whichever_parent_the_launcher_passes(self):
+        # P1 already halts today (topology versus the passed parent); this pins it as a regression guard.
+        for parent in (PARENT, "feature/q"):
+            with self.subTest(parent=parent):
+                folder = Path(self._tmp.name) / ("p1-" + parent.replace("/", "-"))
+                folder.mkdir()
+                st = Stage(self, disagreeing_kit(folder))
+                report = st.run(parent=parent)
+                self.assertIn(report["outcome"], ("ambiguous-parent", "parent-unresolved"),
+                              "no silent choice between %s and feature/q. got %s: %s"
+                              % (PARENT, report["outcome"], report["detail"]))
+                self.assertEqual(st.count("git_push"), 0, "nothing is pushed")
+                self.assertEqual(st.count("gh_pr_merge"), 0, "and nothing is merged")
 
 
 if __name__ == "__main__":
