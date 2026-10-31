@@ -174,6 +174,8 @@ For each critic finding the user **agrees with and addresses** (or agrees with a
 - **Tags:** <2-5 grep-friendly keywords>
 ```
 
+A registry append is a shipped change: batch it into a change that already raises the plugin version, or raise at least a patch version (see CLAUDE.md, "Every change to shipped plugin files bumps the plugin version").
+
 Findings the user **rejects** are NOT logged — the user's rejection is recorded inline in the contract (under the relevant Open Question or as a one-line note appended to the relevant `## Critique` finding bullet) so future readers see the decision trail. The `/journal-add` skill is the manual escape hatch if the user later changes their mind.
 
 ### Contract-level rejection (accuracy-skip bad-plan signal)

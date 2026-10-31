@@ -249,6 +249,8 @@ Flag a missing or non-compliant End-User View section as **[CRITICAL]**. The sec
 
 After the review passes, audit whether the implementation introduced anything genuinely new and reusable:
 
+A registry append is a shipped change: batch it into a change that already raises the plugin version, or raise at least a patch version (see CLAUDE.md, "Every change to shipped plugin files bumps the plugin version").
+
 **`.claude/registries/MECHANISMS.md` — append if:**
 
 - [ ] A new interface, base class, or pattern was introduced that is or will be used in more than one place
