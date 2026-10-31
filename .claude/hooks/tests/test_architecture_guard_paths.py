@@ -548,5 +548,288 @@ class AlreadyResolvedTests(unittest.TestCase):
         self.assertNotIn("/features/", text, "W2: '/features/' must not appear in the guard")
 
 
+# ---------------------------------------------------------------------------------------------
+# Fix round (review WARN-3 to WARN-7, N1, N2)
+# ---------------------------------------------------------------------------------------------
+
+#: Faults injected INSIDE the G-1 walk (WARN-4). Technique: the runner patches ``pathlib.Path.exists``
+#: so that the call on a ``.app-rules.json`` raises PermissionError (what Python 3.12 does for an
+#: unreadable folder). argv: guard, fired_file, times (0 = every call raises; N = only the first N).
+RUNNER_FS_SOURCE = '''\
+import importlib.util
+import pathlib
+import sys
+
+guard, fired_file, times = sys.argv[1], sys.argv[2], int(sys.argv[3])
+spec = importlib.util.spec_from_file_location("architecture_guard_under_test", guard)
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+open(fired_file, "w", encoding="utf-8").write("")
+
+orig_exists = pathlib.Path.exists
+state = {"n": 0}
+
+
+def exists(self, *args, **kwargs):
+    if self.name == ".app-rules.json" and (times == 0 or state["n"] < times):
+        state["n"] += 1
+        with open(fired_file, "a", encoding="utf-8") as fh:
+            fh.write("exists\\n")
+        raise PermissionError(13, "forced V-2 fault in the walk", str(self))
+    return orig_exists(self, *args, **kwargs)
+
+
+pathlib.Path.exists = exists
+try:
+    mod.main()
+except SystemExit:
+    raise
+except Exception as e:  # same outer catch as the guard's __main__ block
+    mod.log("internal error (failing open): %s" % e)
+    sys.exit(0)
+'''
+
+#: Read spy (WARN-3). Technique: the runner wraps ``Path.read_bytes`` and ``Path.read_text`` and writes
+#: one line ``read:<path>`` per call, so a test counts how often the guard read a given file.
+RUNNER_SPY_SOURCE = '''\
+import importlib.util
+import pathlib
+import sys
+
+guard, fired_file = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("architecture_guard_under_test", guard)
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+open(fired_file, "w", encoding="utf-8").write("")
+
+
+def spy(orig):
+    def wrapper(self, *args, **kwargs):
+        with open(fired_file, "a", encoding="utf-8") as fh:
+            fh.write("read:" + str(self) + "\\n")
+        return orig(self, *args, **kwargs)
+    return wrapper
+
+
+pathlib.Path.read_bytes = spy(pathlib.Path.read_bytes)
+pathlib.Path.read_text = spy(pathlib.Path.read_text)
+try:
+    mod.main()
+except SystemExit:
+    raise
+except Exception as e:
+    mod.log("internal error (failing open): %s" % e)
+    sys.exit(0)
+'''
+
+
+def run_runner(files: dict[str, str | bytes], target: str, tool_name: str, tool_input: dict,
+               runner_source: str, extra_args: list[str]) -> Result:
+    """Like ``run`` but through a custom runner; ``fired`` holds the lines the runner wrote."""
+    with tempfile.TemporaryDirectory(prefix="archguard_paths_") as tmp:
+        project = Path(tmp).resolve()
+        for rel, body in files.items():
+            p = project / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(body if isinstance(body, bytes) else body.encode("utf-8"))
+        payload = {"tool_name": tool_name, "tool_input": {"file_path": str(project / target), **tool_input}}
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_ARCH_GUARD"}
+        env["CLAUDE_PROJECT_DIR"] = str(project)
+        runner = project / "_runner.py"
+        runner.write_text(runner_source, encoding="utf-8")
+        fired_file = project / "_fired.txt"
+        proc = subprocess.run(
+            [sys.executable, "-I", str(runner), str(GUARD), str(fired_file), *extra_args],
+            input=json.dumps(payload), capture_output=True, text=True, encoding="utf-8",
+            errors="replace", cwd=str(REPO_ROOT), env=env, timeout=60,
+        )
+        fired = None
+        if fired_file.exists():
+            fired = [s for s in fired_file.read_text(encoding="utf-8").splitlines() if s]
+        return Result(proc.returncode, proc.stderr, None, fired)
+
+
+STYLE_AND_BANNED_HTML = '<div class="bg-banned" style="color: red">x</div>\n'
+
+
+class WalkFailClosedTests(unittest.TestCase):
+    """WARN-4: V-2 covers the walk's own filesystem calls, not only the root lookup."""
+
+    def test_a_walk_that_always_raises_returns_no_rules_and_the_other_rules_still_block(self):
+        r = run_runner(app_files("projects", with_settings=False), "projects/shop/src/x.component.html",
+                       "Write", {"content": STYLE_AND_BANNED_HTML}, RUNNER_FS_SOURCE, ["0"])
+        self.assertTrue(r.fired, "the fault was never injected: the walk never asked whether .app-rules.json exists")
+        self.assertEqual(r.returncode, 2,
+                         "WARN-4: Path.exists raising PermissionError inside the walk must not reach the "
+                         "outer catch (exit 0); the walk returns no rules and inline-style still blocks.\n"
+                         + r.stderr)
+        self.assertIn("inline-style", r.stderr)
+        self.assertNotIn("app-banned-class", r.stderr, "the walk failed, so no app rules were read")
+
+    def test_a_walk_that_raises_once_is_retried_with_the_default_root(self):
+        r = run_runner(app_files("projects", with_settings=False), "projects/shop/src/x.component.html",
+                       "Write", {"content": STYLE_AND_BANNED_HTML}, RUNNER_FS_SOURCE, ["1"])
+        self.assertEqual(r.fired, ["exists"], "exactly the first existence check must have been faulted")
+        self.assertEqual(r.returncode, 2,
+                         "WARN-4: the first walk raised; the guard must not exit 0 through the outer catch.\n"
+                         + r.stderr)
+        self.assertIn("app-banned-class:bg-banned", r.stderr,
+                      "WARN-4: after the raise the walk is retried with the default root 'projects', "
+                      "which finds the rules file")
+
+    def test_a_walk_that_raises_under_a_configured_root_still_blocks_other_rules(self):
+        r = run_runner(app_files("apps"), "apps/shop/src/x.component.html",
+                       "Write", {"content": STYLE_AND_BANNED_HTML}, RUNNER_FS_SOURCE, ["0"])
+        self.assertTrue(r.fired)
+        self.assertEqual(r.returncode, 2, "WARN-4: no path reaches the outer catch\n" + r.stderr)
+        self.assertIn("inline-style", r.stderr)
+
+
+class RootNormalisationTests(unittest.TestCase):
+    """WARN-5: the configured root is normalised, so these all behave like 'apps/web'."""
+
+    def _blocked_with_root(self, configured: str):
+        files = {"apps/web/shop/.app-rules.json": json.dumps({"extraBannedClasses": ["bg-banned"]}),
+                 RULES_FILE: json.dumps({"frontend_projects_root": configured})}
+        return write(files, "apps/web/shop/src/x.component.html", BANNED_HTML)
+
+    def test_control_the_plain_two_segment_root(self):
+        r = self._blocked_with_root("apps/web")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_control_surrounding_slashes_and_upper_case_keep_working(self):
+        r = self._blocked_with_root("/Apps/Web/")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_backslash_separator(self):
+        r = self._blocked_with_root("apps\\web")
+        self.assertEqual(r.returncode, 2,
+                         "WARN-5: 'apps\\\\web' must behave like 'apps/web'\n" + r.stderr)
+        self.assertIn("app-banned-class:bg-banned", r.stderr)
+
+    def test_padding_around_the_value(self):
+        r = self._blocked_with_root(" apps/web ")
+        self.assertEqual(r.returncode, 2, "WARN-5: ' apps/web ' must behave like 'apps/web'\n" + r.stderr)
+        self.assertIn("app-banned-class:bg-banned", r.stderr)
+
+    def test_doubled_slash(self):
+        r = self._blocked_with_root("apps//web")
+        self.assertEqual(r.returncode, 2, "WARN-5: 'apps//web' must behave like 'apps/web'\n" + r.stderr)
+        self.assertIn("app-banned-class:bg-banned", r.stderr)
+
+
+def reads_of(r: Result, name: str) -> int:
+    return sum(1 for line in (r.fired or []) if line.startswith("read:") and Path(line[5:]).name == name)
+
+
+def multi_edit(files, target, edits, source=RUNNER_SPY_SOURCE):
+    return run_runner(files, target, "MultiEdit",
+                      {"edits": [{"old_string": o, "new_string": n} for o, n in edits]}, source, [])
+
+
+class CostTests(unittest.TestCase):
+    """WARN-3: decide by file NAME first, and read each file once per call.
+
+    Technique: a read spy (RUNNER_SPY_SOURCE) counts the guard's Path.read_bytes / read_text calls per
+    file name. An unrelated non-component .ts is not pinned: its decision needs the text.
+    """
+
+    def test_editing_a_spec_ts_does_not_read_the_file(self):
+        r = run_runner({"src/x.spec.ts": "const a = 1;\n"}, "src/x.spec.ts", "Edit",
+                       {"old_string": "const a = 1;", "new_string": "const a = 2;"}, RUNNER_SPY_SOURCE, [])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(reads_of(r, "x.spec.ts"), 0,
+                         "WARN-3: .spec.ts is decided by its name; no post-edit view may be built for it")
+
+    def test_editing_a_d_ts_does_not_read_the_file(self):
+        r = run_runner({"src/x.d.ts": "declare const a: 1;\n"}, "src/x.d.ts", "Edit",
+                       {"old_string": "declare const a: 1;", "new_string": "declare const a: 2;"},
+                       RUNNER_SPY_SOURCE, [])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(reads_of(r, "x.d.ts"), 0,
+                         "WARN-3: .d.ts is decided by its name; no post-edit view may be built for it")
+
+    def test_a_three_edit_multiedit_reads_a_component_ts_once(self):
+        disk = "// A1\n// B1\n// C1\n" + TS_DECORATED
+        r = multi_edit({"src/x.component.ts": disk}, "src/x.component.ts",
+                       [("// A1", "// A2"), ("// B1", "// B2"), ("// C1", "// C2")])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(reads_of(r, "x.component.ts"), 1,
+                         "WARN-3: the post-edit view is built once per file per call, not once per edit "
+                         "(and not again in the whole-file pass); reads: %s" % r.fired)
+
+    def test_control_a_three_edit_multiedit_reads_a_component_html_once(self):
+        disk = "<!-- A1 -->\n<!-- B1 -->\n<!-- C1 -->\n<p>x</p>\n"
+        r = multi_edit({"src/x.component.html": disk}, "src/x.component.html",
+                       [("<!-- A1 -->", "<!-- A2 -->"), ("<!-- B1 -->", "<!-- B2 -->"),
+                        ("<!-- C1 -->", "<!-- C2 -->")])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(reads_of(r, "x.component.html"), 1, "reads: %s" % r.fired)
+
+    def test_a_multiedit_of_a_suffixless_html_reads_its_sibling_ts_once(self):
+        disk = "<!-- A1 -->\n<!-- B1 -->\n<p>x</p>\n"
+        r = multi_edit({"src/app/app.html": disk, "src/app/app.ts": TS_DECORATED}, "src/app/app.html",
+                       [("<!-- A1 -->", "<!-- A2 -->"), ("<!-- B1 -->", "<!-- B2 -->")])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(reads_of(r, "app.ts"), 1,
+                         "WARN-3: the sibling's decorator check is cached for the call; reads: %s" % r.fired)
+        self.assertEqual(reads_of(r, "app.html"), 1, "the view of app.html is built once; reads: %s" % r.fired)
+
+
+class FixRoundSkillAndDocumentTests(unittest.TestCase):
+    TAILWIND = REPO_ROOT / ".claude" / "addons" / "angular-tailwind" / "documents" / "TAILWINDCSS_RULES.md"
+
+    def test_step_four_runs_the_guard_with_claude_project_dir_set(self):
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertRegex(text, r'(?m)^[^\n]*CLAUDE_PROJECT_DIR="\$\{CLAUDE_PROJECT_DIR:-[^}]+\}"[^\n]*\bpy\s+-3\b',
+                         "WARN-6: the guard invocation line must set CLAUDE_PROJECT_DIR, defaulting to the "
+                         "current folder, so the project's rules file is the one the guard reads")
+
+    def test_step_four_tests_the_project_guard_under_claude_project_dir(self):
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertIn('"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/architecture-guard.py"', text,
+                      "WARN-6: the project lookup tests ${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/architecture-guard.py")
+
+    def test_the_inline_style_rule_names_the_same_name_sibling(self):
+        line = next((ln for ln in self.TAILWIND.read_text(encoding="utf-8").splitlines()
+                     if ln.startswith("- Enforced by: guard blocks (`inline-style`)")), "")
+        self.assertTrue(line, "the 'Enforced by' line of the inline-style rule was not found")
+        self.assertRegex(line, r"(?i)same name|same-name|<name>\.ts|<stem>\.ts",
+                         "WARN-7: the .html must be named as beside the .ts WITH THE SAME NAME, not 'a .ts file'")
+        self.assertNotIn("beside a `.ts` file", line)
+
+
+class DocstringTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = ast.get_docstring(_guard_tree()) or ""
+
+    def test_the_hook_file_order_includes_the_working_folder(self):
+        start = self.doc.find("hook_file")
+        self.assertGreaterEqual(start, 0, "the docstring describes hook_file's order")
+        segment = self.doc[start:].split("\n\n", 1)[0]
+        self.assertRegex(segment, r"(?i)working folder|working directory|current folder|current directory|cwd",
+                         "N1: hook_file's order is project copy, template beside the hook, the working "
+                         "folder's .claude/hooks, then the home folder")
+
+    def test_the_hook_file_sentence_covers_the_rules_file_too(self):
+        start = self.doc.find("Exception list")
+        self.assertGreaterEqual(start, 0, "the docstring has an 'Exception list' paragraph")
+        segment = self.doc[start:].split("\n\n", 1)[0]
+        self.assertIn("rules", segment, "N1: the same order applies to architecture-guard.rules.json")
+
+    def test_the_g2_known_limit_names_the_exclusions_and_the_written_text_fallback(self):
+        start = self.doc.find("G-2 ")
+        end = self.doc.find("G-5", start)
+        self.assertGreaterEqual(start, 0, "the G-2 limit is in the docstring")
+        block = self.doc[start:end]
+        self.assertIn(".spec.ts", block, "N2: .spec.ts is never scanned")
+        self.assertIn(".d.ts", block, "N2: .d.ts is never scanned")
+        self.assertRegex(block, r"(?i)written (text|content)|text written|new text",
+                         "N2: with no post-edit view the written text is used")
+
+
 if __name__ == "__main__":
     unittest.main()
