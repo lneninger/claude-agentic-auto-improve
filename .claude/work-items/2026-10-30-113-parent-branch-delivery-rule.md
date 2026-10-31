@@ -13,9 +13,9 @@ branch: feature/113-parent-branch-delivery-rule
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261030-feature-113-parent-branch-delivery-rule
 north_stars: none
 contract: .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
-pr: none
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/116
+issue_link: closes
+status: shipped
 created: 2026-10-30
 ---
 
