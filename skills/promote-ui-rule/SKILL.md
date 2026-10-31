@@ -55,7 +55,7 @@ Present the draft to the user via `AskUserQuestion` with these fields editable:
 
 ## Step 3: Append the rule to architecture-guard.rules.json
 
-Use `Edit` to append the new rule object to the `rules` array in `~/.claude/hooks/architecture-guard.rules.json`. Validate before writing:
+Use `Edit` to append the new rule object to the `rules` array in the project's `.claude/hooks/architecture-guard.rules.json`. Validate before writing:
 
 - `id` must not collide with any existing rule's `id` (re-read the file fresh).
 - `regex` must compile under Python's `re` module.
@@ -65,11 +65,17 @@ If any validation fails, report the failure and HALT — do not write a partial 
 
 ## Step 4: Verify the rule fires (and the kill switch still works)
 
-Construct a one-line test snippet that should trigger the new rule. Pipe it through the guard hook directly:
+Construct a one-line test snippet that should trigger the new rule. Find the guard hook (the plugin root first, then the project's copy), and feed it the payload directly.
 
 ```bash
-echo '{"tool_name":"Write","tool_input":{"file_path":"<path-matching-scope>","content":"<test-snippet>"}}' \
-  | py -3 "$HOME/.claude/hooks/architecture-guard.py"
+GUARD=
+if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/.claude/hooks/architecture-guard.py" ]; then GUARD=$CLAUDE_PLUGIN_ROOT/.claude/hooks/architecture-guard.py
+elif [ -f .claude/hooks/architecture-guard.py ]; then GUARD=.claude/hooks/architecture-guard.py
+fi
+[ -n "$GUARD" ] || { echo "architecture-guard.py not found: tried \$CLAUDE_PLUGIN_ROOT/.claude/hooks/architecture-guard.py and the project's .claude/hooks/architecture-guard.py"; exit 1; }
+py -3 "$GUARD" <<'EOF'
+{"tool_name":"Write","tool_input":{"file_path":"<path-matching-scope>","content":"<test-snippet>"}}
+EOF
 ```
 
 Confirm:

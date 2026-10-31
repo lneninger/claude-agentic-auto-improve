@@ -23,7 +23,7 @@ Bypass:
     CLAUDE_ARCH_GUARD=off -- disable the hook for a session
 
 Exception list:
-    ~/.claude/hooks/architecture-guard.exceptions.json
+    architecture-guard.exceptions.json, found by hook_file: the project copy, then the template beside the hook, then ~/.claude/hooks
 
 Post-edit view (G-4):
     For an Edit or MultiEdit the guard builds the file as it will be after the
@@ -41,7 +41,9 @@ Known limits (accepted; each is pinned by a test):
          `text-gray-500` pass.
     W8   Stylesheet rules only warn; the nesting check works one line at a time.
     W11  An edit that completes a violation started on disk passes.
-    G-2  Only `*.component.html`, `*.component.ts` and `*.component.scss` files are scanned.
+    G-2  `*.component.html`, `*.component.ts`, `*.component.scss` are always scanned; any other
+         `.html`, `.scss`, `.css` or `.ts` file only when its `.ts` sibling (for a `.ts`, its own
+         post-edit text) already carries `@Component(`.
     G-5  A 3- or 6-character token with no digit that stands alone after
          whitespace (such as `  #fff`) is read as a template reference variable.
          Quotes are counted per kind, so an apostrophe inside a double-quoted value
@@ -66,19 +68,20 @@ except Exception:
     def log_event(*args, **kwargs):  # type: ignore[no-redef]
         return
 
-HOME = Path.home()
+HOOK_DIR = Path(__file__).resolve().parent
 try:  # project-local .claude first, global second
     import _project_paths as _pp
 except Exception:  # pragma: no cover - hooks must never crash a tool call
     _pp = None
 
+# Without _project_paths the fallback is the hook's own folder (G-3).
 EXCEPTIONS_FILE = (
     _pp.hook_file("architecture-guard.exceptions.json") if _pp
-    else HOME / ".claude" / "hooks" / "architecture-guard.exceptions.json"
+    else HOOK_DIR / "architecture-guard.exceptions.json"
 )
 EXTERNAL_RULES_FILE = (
     _pp.hook_file("architecture-guard.rules.json") if _pp
-    else HOME / ".claude" / "hooks" / "architecture-guard.rules.json"
+    else HOOK_DIR / "architecture-guard.rules.json"
 )
 
 # External rules loaded once per process; populated by /promote-ui-rule skill.
@@ -236,6 +239,11 @@ def detect_app(file_path: Path) -> str | None:
     return None
 
 
+def app_root_segments() -> list[str]:
+    """G-1: the configured root of the front-end applications, one lower-case entry per path segment."""
+    return load_project_settings()["frontend_projects_root"].split("/")
+
+
 def load_app_rules(file_path: Path) -> dict | None:
     """
     Load the .app-rules.json that sits at the Angular project root above the
@@ -249,10 +257,16 @@ def load_app_rules(file_path: Path) -> dict | None:
         return _APP_RULES_CACHE.get(app)
     _APP_RULES_LOADED.add(app)
 
-    # Walk up to find <frontend_projects_root>/<app>/.app-rules.json.
+    # Walk up to find <frontend_projects_root>/<app>/.app-rules.json (V-2: the default root when the root is unreadable).
+    try:
+        root_parts = app_root_segments()
+    except Exception as e:  # noqa: BLE001
+        log(f"app root lookup failed (using '{_DEFAULT_FRONTEND_PROJECTS_ROOT}'): {e}")
+        root_parts = [_DEFAULT_FRONTEND_PROJECTS_ROOT]
+    depth = len(root_parts)
     parts = list(file_path.resolve().parts) if file_path.is_absolute() else list(Path.cwd().joinpath(file_path).resolve().parts)
-    for i in range(len(parts) - 1, 0, -1):
-        if parts[i].lower() == app and i >= 2 and parts[i - 1].lower() == "projects":
+    for i in range(len(parts) - 1, depth, -1):
+        if parts[i].lower() == app and [p.lower() for p in parts[i - depth:i]] == root_parts:
             project_root = Path(*parts[: i + 1])
             rules_file = project_root / ".app-rules.json"
             if rules_file.exists():
@@ -707,7 +721,7 @@ def scan_whole_file_rules(
     if is_template_html(path):
         for text in ([view.text] if view.text is not None else fragments):
             warnings.extend(scan_height_chain_invariant(text, path, exemptions))
-    elif is_component_ts(path) and view.text is not None and view.disk is not None:
+    elif view.text is not None and view.disk is not None and is_component_ts(path, view.text):
         blocking.extend(scan_inline_component_rules(view.text, path, exemptions, view.disk))
     return blocking, warnings
 
@@ -904,14 +918,18 @@ def classify_sibling_component(scss_path: Path) -> tuple[str, str]:
     """
     Return (mode, element_scope) for the component that owns ``scss_path``.
 
-    Reads ``<stem>.component.ts`` next to the stylesheet as strict UTF-8. Mode is
+    Reads ``<stem>.component.ts``, else ``<stem>.ts``, next to the stylesheet (the stem
+    is the name without its ``.component``, ``.scss`` or ``.css``) as strict UTF-8. Mode is
     'none' only for a recognised ViewEncapsulation.None spelling (any identifier
     ending in .None, or the number 2); every other outcome -- missing or
     undecodable file, other encapsulation, no recognised value -- is
     'unclassified' or 'default', which keep today's warnings. Never raises.
     """
     try:
-        ts_path = scss_path.with_name(scss_path.name[: -len(".scss")] + ".ts")
+        stem = scss_path.name[: -len(scss_path.suffix)].removesuffix(".component")
+        ts_path = scss_path.with_name(stem + ".component.ts")
+        if not ts_path.is_file():
+            ts_path = scss_path.with_name(stem + ".ts")
         source = strip_ts_comments(ts_path.read_text(encoding="utf-8"))
         key = RX_ENCAPSULATION_KEY.search(source)
         if key is None:
@@ -1123,16 +1141,58 @@ def extract_contents(payload: dict) -> list[tuple[str, str]]:
     return pairs
 
 
+RX_COMPONENT_DECORATOR = re.compile(r"@Component\s*\(")
+
+
+def sibling_has_decorator(path: Path) -> bool:
+    """G-2: True when the ``<stem>.ts`` beside ``path`` is on disk and carries ``@Component(``."""
+    ts_path = path.with_name(path.name[: -len(path.suffix)] + ".ts")
+    return ts_path.is_file() and RX_COMPONENT_DECORATOR.search(ts_path.read_text(encoding="utf-8")) is not None
+
+
+def text_has_decorator(text: str) -> bool:
+    """G-2: True when ``text`` carries ``@Component(``."""
+    return RX_COMPONENT_DECORATOR.search(text) is not None
+
+
+def counts_as_found(check, *args) -> bool:
+    """V-2: a check that raises counts as found, so the file is scanned (the stricter outcome)."""
+    try:
+        return check(*args)
+    except Exception as e:  # noqa: BLE001
+        log(f"file check failed (scanning the file): {e}")
+        return True
+
+
 def is_template_html(path: Path) -> bool:
-    return path.name.endswith(".component.html")
+    if path.name.endswith(".component.html"):
+        return True
+    return path.suffix == ".html" and counts_as_found(sibling_has_decorator, path)
 
 
-def is_component_ts(path: Path) -> bool:
-    return path.name.endswith(".component.ts")
+def is_component_ts(path: Path, text: str) -> bool:
+    """``text`` is the file as it will be after the edit (the written text when no view exists)."""
+    if path.name.endswith(".component.ts"):
+        return True
+    if path.suffix != ".ts" or path.name.endswith((".spec.ts", ".d.ts")):
+        return False
+    return counts_as_found(text_has_decorator, text)
 
 
 def is_component_scss(path: Path) -> bool:
-    return path.name.endswith(".component.scss")
+    if path.name.endswith(".component.scss"):
+        return True
+    return path.suffix in (".scss", ".css") and counts_as_found(sibling_has_decorator, path)
+
+
+def post_edit_text(payload: dict, file_path_str: str, written: str) -> str:
+    """G-2: the post-edit view's text, or the written text when the view is unavailable."""
+    try:
+        view = build_post_edit_view(payload, file_path_str)
+    except Exception as e:  # noqa: BLE001
+        log(f"post-edit view failed (using the written text): {e}")
+        return written
+    return written if view.text is None else view.text
 
 
 # ---------------------------------------------------------------------------
@@ -1275,7 +1335,8 @@ def main() -> None:
             findings.setdefault(file_path_str, []).extend(
                 scan_template_html(new_content, path, rule_exemptions))
             fragments.setdefault(file_path_str, []).append(new_content)
-        elif is_component_ts(path):
+        elif path.suffix == ".ts" and is_component_ts(
+                path, post_edit_text(payload, file_path_str, new_content)):
             findings.setdefault(file_path_str, []).extend(
                 scan_component_ts(new_content, path, rule_exemptions))
             fragments.setdefault(file_path_str, []).append(new_content)
