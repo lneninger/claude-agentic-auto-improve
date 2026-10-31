@@ -8,6 +8,7 @@
 **Work Item Brief:** .claude/work-items/2026-10-30-86-angular-tailwind-followups.md
 **Tracking issue:** #86
 **Budget:** 12,000 tokens
+**Amended:** 2026-10-31 by user approval ("resume 86"): Rule V and the version files of every block
 
 ---
 
@@ -325,7 +326,7 @@ Confidence: Medium.
 
 - [x] **Q1 — Kill switches.** Answer: B, remove them. 2026-10-30. Applied in K-1 to K-4 and t3. The narrow reading of `CLAUDE_CONCEPT_GATE` (only the strict-shell-gate add-on stops reading it) was confirmed by the user at approval, 2026-10-30.
 - [x] **Q2 — Candidate patterns.** Answer: accept the recommendation (2026-10-30). P-002 ships; the status badge, card surface and `constrained-panel` are rejected (t6).
-- [x] **Q3 — Promote the parent's terms.** Answer: yes. 2026-10-30. The text is in `## Registry appends`. t8 appends it, with its own version raise, after t1, t3 and t5 have merged.
+- [x] **Q3 — Promote the parent's terms.** Answer: yes. 2026-10-30. The text is in `## Registry appends`. t8 appends it after t1, t3 and t5 have merged; the landing's single raise covers it (Rule V).
 
 ---
 
@@ -433,12 +434,9 @@ The full text of rounds 1 to 3 is to be archived by the main session in `.claude
 
 ## Implementation Handoff
 
-**Rule V (version).** Every sub-task that changes a shipped file raises the plugin version in its own pull request. That includes t7's record and t8's registry appends.
-- The version is written in five places: `plugin.json`, `.claude-plugin/plugin.json`, `.cursor-plugin/plugin.json`, and the two entries of `.claude-plugin/marketplace.json`.
-- Compute it from the target branch when the pull request opens. Patch: `x.y.z` → `x.y.(z+1)`. Minor: `x.y.z` → `x.(y+1).0`.
-- If the target branch moves first, rebase and recompute with the same kind.
-- Run `py -3 .claude/scripts/check_version_bump.py --base origin/master`.
-- `README.md` and the review artefact are exempt.
+**Delivery.** The layout is the Parent Branch Delivery Rule: parent branch `feature/86-angular-tailwind-followups`, parent issue #86.
+
+**Rule V (version).** No sub-task raises the plugin version, and no block lists a version file. Each sub-task pull request into the parent branch keeps the parent's version (`check_version_bump.py` parent mode). The landing merges master into the parent branch and raises the version once: minor + 1, patch 0, relative to master (0.10.1 → 0.11.0 if nothing else lands first), via `--raise` then `--exact`. That one raise covers every shipped change here, including t7's record and t8's registry appends.
 
 ### 1. Guard post-edit view and matching precision (`python-ai-developer`)
 
@@ -448,10 +446,6 @@ The full text of rounds 1 to 3 is to be archived by the main session in `.claude
 - `.claude/hooks/architecture-guard.py`
 - `.claude/hooks/tests/test_architecture_guard_precision.py`
 - `.claude/addons/angular-tailwind/documents/TAILWINDCSS_RULES.md`
-- `plugin.json`
-- `.claude-plugin/plugin.json`
-- `.cursor-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`
 
 **Pre-written TASK block:**
 ```
@@ -471,7 +465,6 @@ CONSTRAINTS:
     test_angular_rule_coverage.py.
   - Run test_architecture_guard_scss.py, test_architecture_guard_messages.py and
     test_hook_data_files_project_first.py unchanged.
-  - Rule V: patch.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-30-angular-tailwind-followups.md
   contract_status: approved
@@ -488,10 +481,6 @@ PRIOR_FINDINGS:
 - `.claude/addons/angular-tailwind/documents/TAILWINDCSS_RULES.md`
 - `.claude/addons/angular-tailwind/documents/ANGULAR_CODE_RULES.md`
 - `skills/promote-ui-rule/SKILL.md`
-- `plugin.json`
-- `.claude-plugin/plugin.json`
-- `.cursor-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`
 
 **Pre-written TASK block:**
 ```
@@ -508,7 +497,6 @@ CONSTRAINTS:
     documents exists; install-time paths and the foundation.md:47 note are excluded by name.
   - Correct only the "Enforced by" lines TAILWINDCSS_RULES.md:29 and :54, and ANGULAR_CODE_RULES.md:37. Run
     test_angular_rule_coverage.py and the three guard suites unchanged.
-  - Rule V: patch.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-30-angular-tailwind-followups.md
   contract_status: approved
@@ -535,10 +523,6 @@ PRIOR_FINDINGS:
 - `.claude/hooks/tests/test_main_checkout_guard.py`
 - `.claude/hooks/tests/test_shell_write_targets.py`
 - `.claude/hooks/tests/test_codegraph_first_guard.py`
-- `plugin.json`
-- `.claude-plugin/plugin.json`
-- `.cursor-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`
 
 **Pre-written TASK block:**
 ```
@@ -563,7 +547,6 @@ CONSTRAINTS:
   - Leave the environment strip lists (test_flat_worktree.py:62, test_shell_write_targets.py:227-228,
     test_worktree_path_guards.py:379) as they are: they guard against a shell that still sets an old value.
   - Pull request body: the three lines of the user's global CLAUDE.md that only the user changes.
-  - Rule V: minor.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-30-angular-tailwind-followups.md
   contract_status: approved
@@ -576,10 +559,6 @@ PRIOR_FINDINGS:
 **Files to touch:**
 - `.claude/addons/angular-tailwind/DISABLED.md`
 - `.claude/hooks/tests/test_addons.py`
-- `plugin.json`
-- `.claude-plugin/plugin.json`
-- `.cursor-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`
 
 **Pre-written TASK block:**
 ```
@@ -594,7 +573,6 @@ CONSTRAINTS:
     * add the new hash to released_sha256.
     Step 2 becomes "add-ons declare no kill switch".
   - A test asserts that DISABLED.md names both defects. Do not edit the advisor script.
-  - Rule V: patch.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-30-angular-tailwind-followups.md
   contract_status: approved
@@ -609,10 +587,6 @@ PRIOR_FINDINGS:
 - `.claude/scripts/tests/test_plugin_doctor.py`
 - `agents/python-ai-developer.md`
 - `.claude/scripts/tests/test_agent_skill_preloads.py`
-- `plugin.json`
-- `.claude-plugin/plugin.json`
-- `.cursor-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`
 
 **Pre-written TASK block:**
 ```
@@ -626,7 +600,6 @@ CONSTRAINTS:
   - Remove the skills: block of python-ai-developer. New test: every skills: entry in agents/*.md resolves to a
     shipped skills/<name>/SKILL.md, resolved the way test_angular_rule_delivery.py does. A planted missing
     name fails.
-  - Rule V: minor.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-30-angular-tailwind-followups.md
   contract_status: approved
@@ -638,10 +611,6 @@ PRIOR_FINDINGS:
 
 **Files to touch:**
 - `.claude/addons/angular-tailwind/documents/UI-UX-PATTERNS.md`
-- `plugin.json`
-- `.claude-plugin/plugin.json`
-- `.cursor-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`
 
 **Pre-written TASK block:**
 ```
@@ -658,7 +627,6 @@ CONSTRAINTS:
     * card surface: product look and feel;
     * constrained-panel: a project class name; T-014 and the scroll container already bound height.
   - Run .claude/hooks/tests/test_angular_rule_coverage.py.
-  - Rule V: minor.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-30-angular-tailwind-followups.md
   contract_status: approved
@@ -670,10 +638,6 @@ PRIOR_FINDINGS:
 
 **Files to touch:**
 - `.claude/references/claude-rules-route-trial.md`
-- `plugin.json`
-- `.claude-plugin/plugin.json`
-- `.cursor-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`
 
 **Pre-written TASK block:**
 ```
@@ -688,7 +652,6 @@ CONSTRAINTS:
     Record each output and exit code.
   - Record what was observed, including "did not load". Add one line on whether a follow-up issue is worth
     opening.
-  - Rule V: patch.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-30-angular-tailwind-followups.md
   contract_status: approved
@@ -701,10 +664,6 @@ PRIOR_FINDINGS:
 **Files to touch:**
 - `.claude/registries/VOCABULARY.md`
 - `.claude/registries/MECHANISMS.md`
-- `plugin.json`
-- `.claude-plugin/plugin.json`
-- `.cursor-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`
 
 **Pre-written TASK block:**
 ```
@@ -719,7 +678,6 @@ CONSTRAINTS:
   - Before appending, check each appended fact against master: no add-on declares kill_switches; the codegraph
     message names no CLAUDE_SKIP_CG; --drift emits disabled-hook-installed.
   - Regenerate the digest if the generator exists (py -3 .claude/scripts/generate_registry_digest.py).
-  - Rule V: patch.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-30-angular-tailwind-followups.md
   contract_status: approved
@@ -734,8 +692,8 @@ PRIOR_FINDINGS:
 
 **Pre-written TASK block:**
 ```
-TASK: Write one "Changed in <version>" note for each merged version raise from t1 to t8, and update the README
-version line.
+TASK: Write one "Changed in <version>" note covering t1 to t8, and update the README version line. <version> is
+the landing's raise (Rule V): master's minor + 1, patch 0, read from master when this pull request opens.
 CONTEXT: concept contract (all groups).
 FILES: README.md
 CONSTRAINTS:
@@ -773,7 +731,7 @@ CONSTRAINTS:
     * P-002 and the rejections;
     * the registry appends verbatim, merged after t1, t3 and t5;
     * the trial record's commands and exit codes;
-    * one version raise in each pull request that changes a shipped file;
+    * no sub-task pull request changes a version file (the landing raises once, Rule V);
     * the guard suites ran unchanged.
   - Write the six-section artefact. The file does NOT exist yet; you create it. Name the commit range base..head.
   - "## Evidence" lists the commands with their exit codes and is never empty.
