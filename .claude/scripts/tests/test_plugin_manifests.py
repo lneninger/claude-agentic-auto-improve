@@ -1029,6 +1029,65 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
               sorted(h.replace("\\", "/") for h in _data.get(af.KEY_HELPERS) or []) == sorted([
                   ".claude/hooks/_project_paths.py", ".claude/hooks/_shell_write_targets.py",
                   ".claude/scripts/_contract_index.py"]), "helpers %r" % (_data.get(af.KEY_HELPERS),))
+
+# K-1 to K-3 (angular-tailwind followups contract, Kill-switch removal). No shipped add-on has a kill switch.
+REMOVED_SWITCHES = ("CLAUDE_SKIP_CG", "CLAUDE_BASH_GATE", "CLAUDE_CONCEPT_GATE")
+
+
+def kill_switch_key_problems(folder: pathlib.Path) -> list:
+    """K-1: every add-on manifest under ``folder`` that still has the ``kill_switches`` key."""
+    problems = []
+    for manifest_file in sorted(folder.glob("*/addon.json")):
+        data = json.loads(manifest_file.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and af.KEY_KILL_SWITCHES in data:
+            problems.append("%s declares %s %r" % (manifest_file.parent.name, af.KEY_KILL_SWITCHES,
+                                                   data[af.KEY_KILL_SWITCHES]))
+    return problems
+
+
+def removed_switch_text_problems(folder: pathlib.Path) -> list:
+    """K-2, text half: every add-on hook file under ``folder`` whose text names a removed switch."""
+    problems = []
+    for hook_file in sorted(folder.glob("*/hooks/*.py")):
+        text = hook_file.read_text(encoding="utf-8")
+        for switch in REMOVED_SWITCHES:
+            if switch in text:
+                problems.append("%s/%s names %s" % (hook_file.parent.parent.name, hook_file.name, switch))
+    return problems
+
+
+def removed_switch_read_problems(folder: pathlib.Path) -> list:
+    """K-2, scan half: the CLAUDE_* variables the install's ``_scan_env_vars`` finds in the add-on hooks."""
+    problems = []
+    for hooks_folder in sorted(folder.glob("*/hooks")):
+        for switch in finish_install._scan_env_vars(hooks_folder):
+            if switch in REMOVED_SWITCHES:
+                problems.append("the scan of %s/hooks finds %s" % (hooks_folder.parent.name, switch))
+    return problems
+
+
+check("K-1: no shipped add-on manifest has a kill_switches key",
+      not kill_switch_key_problems(ADDONS_DIR), "\n".join(kill_switch_key_problems(ADDONS_DIR)))
+check("K-2: no add-on hook file names CLAUDE_SKIP_CG, CLAUDE_BASH_GATE or CLAUDE_CONCEPT_GATE",
+      not removed_switch_text_problems(ADDONS_DIR), "\n".join(removed_switch_text_problems(ADDONS_DIR)))
+check("K-2: the env-var scan of the add-on hooks finds none of the removed switches",
+      not removed_switch_read_problems(ADDONS_DIR), "\n".join(removed_switch_read_problems(ADDONS_DIR)))
+with tempfile.TemporaryDirectory(prefix="k2-control-") as _k2_name:
+    _k2 = pathlib.Path(_k2_name)
+    (_k2 / "demo" / "hooks").mkdir(parents=True)
+    (_k2 / "demo" / "hooks" / "planted.py").write_text(
+        'import os\nos.environ.get("CLAUDE_SKIP_CG")\n', encoding="utf-8")
+    (_k2 / "demo" / "addon.json").write_text(json.dumps({af.KEY_KILL_SWITCHES: ["CLAUDE_SKIP_CG"]}),
+                                             encoding="utf-8")
+    check("K-1 control: a manifest with a kill_switches key is caught", bool(kill_switch_key_problems(_k2)))
+    check("K-2 control: a planted os.environ.get(\"CLAUDE_SKIP_CG\") is caught by the text check",
+          bool(removed_switch_text_problems(_k2)))
+    check("K-2 control: a planted os.environ.get(\"CLAUDE_SKIP_CG\") is caught by the env-var scan",
+          bool(removed_switch_read_problems(_k2)))
+_concept_gate_text = (ROOT / ".claude" / "hooks" / "concept-gate.py").read_text(encoding="utf-8")
+check("K-3: concept-gate.py still reads CLAUDE_CONCEPT_GATE",
+      re.search(r"environ\.get\(\s*[\"']CLAUDE_CONCEPT_GATE[\"']", _concept_gate_text) is not None)
+
 check("the add-on manifests together name exactly the five add-on hook files and the advisor's former name "
       "(installed, disabled or former) that hooks.json must never register",
       _all_addon_hook_files == CUT_HOOKS, "named %s" % sorted(_all_addon_hook_files))

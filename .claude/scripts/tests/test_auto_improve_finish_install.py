@@ -247,7 +247,7 @@ GATE_SUPPORT_FILES = ["concept-gate.py", "_gate_launch.py", "_main_checkout_guar
 
 _HOOK_SOURCES = {
     "concept-gate.py": 'import os\nos.environ.get("CLAUDE_CONCEPT_GATE", "")\nos.environ.get("CLAUDE_PROJECT_DIR")\n',
-    "bash-gate.py": 'import os\nos.environ.get("CLAUDE_BASH_GATE", "")\n',
+    "bash-gate.py": 'import os\n',
     "architecture-guard.py": 'import os\nos.environ.get("CLAUDE_ARCH_GUARD", "")\n',
 }
 
@@ -2782,7 +2782,7 @@ class TestReadiness(Base):
     def test_kill_switches_are_read_from_the_hook_sources_without_the_project_dir(self):
         self.install_plugin()
         names = self.need(self.report(), "kill-switches")
-        self.assertEqual(set(names), {"CLAUDE_CONCEPT_GATE", "CLAUDE_BASH_GATE", "CLAUDE_ARCH_GUARD"},
+        self.assertEqual(set(names), {"CLAUDE_CONCEPT_GATE", "CLAUDE_ARCH_GUARD"},
                          msg="environ.get(CLAUDE_...) in the hook sources, CLAUDE_PROJECT_DIR excluded")
 
     def test_the_env_scan_finds_a_planted_variable_and_skips_the_excluded_ones_positive_control(self):
@@ -3409,7 +3409,7 @@ ADDON_SPECS = {
                  ("UserPromptSubmit", None, "codegraph-turn-reset.py", []),
                  ("PostToolUse", "mcp__codegraph__.*", "codegraph-turn-tracker.py", [])],
         "prerequisites": [{"kind": "mcp-server", "name": "codegraph"}],
-        "kill": ["CLAUDE_SKIP_CG"],
+        "kill": None,
     },
     "strict-shell-gate": {
         "hooks": ["bash-gate.py"],
@@ -3417,7 +3417,7 @@ ADDON_SPECS = {
                     ".claude/scripts/_contract_index.py"],
         "rows": [("PreToolUse", "Bash", "bash-gate.py", [])],
         "prerequisites": [],
-        "kill": ["CLAUDE_BASH_GATE"],
+        "kill": None,
     },
 }
 
@@ -4889,8 +4889,8 @@ class TestAddonRemoval(AddonHarness):
                     self.assertTrue((self.project / helper).is_file(), msg="%s is shared and stays" % helper)
                     self.assertIn(helper, kept)
                     self.assertTrue(kept[helper].strip())
-                self.assertEqual(plan["kill-switches"], list(ADDON_SPECS[name]["kill"] or []),
-                                 msg="the kill switches are named, never changed")
+                self.assertEqual(plan["kill-switches"], [],
+                                 msg="no shipped add-on has a kill switch (K-1), so the plan names none")
 
     def test_a_missing_file_is_absent_and_a_row_with_no_file_is_still_removed(self):
         self.install_addon("strict-shell-gate")

@@ -206,7 +206,7 @@ approval and `CLAUDE_CONFIG_DIR` names a folder. This table lists exactly the va
 
 | Variable | Effect |
 |---|---|
-| `CLAUDE_CONCEPT_GATE=off` | disable the concept gate and the Changed-file check |
+| `CLAUDE_CONCEPT_GATE=off` | disable the concept gate and the Changed-file check (not the strict-shell-gate add-on) |
 | `CLAUDE_PLAN_QUESTION_ADVISOR=off` | disable the plan-question advisor |
 | `CLAUDE_ARCH_GUARD=off` | disable the architecture guard |
 | `CLAUDE_INTEGRATION_CHECK=off` | disable the integration check (one piece of the dispatcher) |
@@ -265,9 +265,12 @@ as 0.9.22, and the version moved on while its sub-tasks were merged.
   but no install copies it or writes its row. `.claude/addons/angular-tailwind/DISABLED.md` says
   what it did, what it cost, why it is off and how to turn it back on.
 
-The kill switches of `codegraph` (`CLAUDE_SKIP_CG`) and `strict-shell-gate` (`CLAUDE_BASH_GATE`
-and `CLAUDE_CONCEPT_GATE`) are unchanged. `angular-tailwind` declares none, and the retired
-`CLAUDE_ARCH_ADVISOR` is no longer read.
+**No add-on has a kill switch.** `CLAUDE_SKIP_CG` (codegraph) and `CLAUDE_BASH_GATE`
+(strict-shell-gate) are no longer read, and **`CLAUDE_CONCEPT_GATE=off` no longer turns off the
+strict-shell-gate add-on**: it still turns off the concept gate and the Changed-file check, and
+nothing else. The way out of an add-on is its uninstall skill. The retired `CLAUDE_ARCH_ADVISOR`
+is no longer read either. If your own `CLAUDE.md` or shell profile tells you to set one of these
+variables, take the line out: it does nothing now.
 
 **Upgrading a project that has the old advisor.** Which rows the project carries depends on
 when it installed. Every one is a `UserPromptSubmit` row with no matcher:
@@ -338,7 +341,26 @@ delete a hook file by hand before its row is gone: a row that points at a missin
 with code 2 and blocks every prompt. It deletes a file only when it is identical to the plugin's
 copy (line endings and a leading byte order mark ignored) or matches a copy an earlier release
 shipped; an edited file is kept and reported. Helper files and the stylesheet snippet are never
-deleted. A second run finds nothing to do. Removing an add-on does not touch its kill switches.
+deleted. A second run finds nothing to do. The skill never edits `settings.json` by hand; only when a
+hook cannot run, as in the table below, do you remove its row by hand.
+
+#### Ways out when a hook cannot run
+
+In normal operation the uninstall skill is the way out. When an add-on's hook cannot run, its row
+has to come out of `.claude/settings.json` by hand. Which route works depends on which hook fails:
+
+| Failure | What you see | Route |
+|---|---|---|
+| `bash-gate.py` cannot import its parser | the hook's own message, which names `_shell_write_targets.py` | remove the row with the Edit tool. `bash-gate.py` judges only Bash, and the concept gate allows `.claude/` files |
+| `bash-gate.py` is missing | Python's own error, exit 2, on every Bash call | the same Edit-tool route |
+| `codegraph-first-guard.py` is missing | Python's error on every Read, Grep and Glob, including the read of `settings.json` that Edit needs first | edit the row through the shell, or edit the file outside the session |
+| `codegraph-turn-reset.py` is missing | Python's error on `UserPromptSubmit`, so every prompt is blocked | edit `.claude/settings.json` outside the session, in an editor |
+| `codegraph-turn-tracker.py` is missing | an error after each CodeGraph call; the marker is never set, so reads stay blocked | as for a missing `codegraph-first-guard.py` |
+
+A session with no `mcp__codegraph__*` tool is not a failure of the hook, but every source Read
+is blocked, because the guard never checks for an index. Reading through the shell works, as does
+running `/auto-improve-codegraph-uninstall` and then starting a new session. If the CodeGraph index
+is stale, run `codegraph sync` or `codegraph init -i`.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
 `post-edit-dispatcher.py` rather than as four separate hook entries.

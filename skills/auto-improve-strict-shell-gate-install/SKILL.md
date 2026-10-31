@@ -110,7 +110,7 @@ Show the user, in plain words:
   `.claude/scripts/`), with the action for each. A file marked `present` is already identical
   and is not touched. A helper marked `keep-existing` is kept as it is.
 - the exact `unified-diff` for `.claude/settings.json`, and how many rows it adds.
-- the kill switches from `kill-switches`. They are set by the user and never by an agent.
+- that the add-on has no kill switch (`kill-switches` is an empty list): the way out is `/auto-improve-strict-shell-gate-uninstall`.
 - any `notes`.
 
 State your recommendation first, in one or two sentences. Then ask **once**: install this
@@ -136,7 +136,7 @@ back). Tell the user to add `.claude/settings.json.bak-*` to `.gitignore`.
 
 If the answer says `nothing-to-do`, the add-on was already installed. Nothing was written.
 
-The user sets `CLAUDE_BASH_GATE=off` to switch off only this gate for a session. `CLAUDE_CONCEPT_GATE=off` switches off both this gate and the concept gate. The agent never sets either.
+This gate has no kill switch. `CLAUDE_BASH_GATE` is not read, and `CLAUDE_CONCEPT_GATE=off` no longer turns this gate off (it still turns off the concept gate and the Changed-file check). To get past the gate, remove it with `/auto-improve-strict-shell-gate-uninstall`.
 
 ### Refusals
 
@@ -157,9 +157,9 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 
 ## How to remove it
 
-This install never removes anything. The removal is its own skill, `/auto-improve-strict-shell-gate-uninstall`. It previews, asks once, then removes the `PreToolUse` row (matcher `Bash`) from `settings.json` (with a backup) and only then deletes `.claude/hooks/bash-gate.py`. It keeps the file if you edited it, leaves `_project_paths.py`, `_shell_write_targets.py` and `.claude/scripts/_contract_index.py` because the default main-checkout guard and the concept gate use them, and leaves the `CLAUDE_BASH_GATE` and `CLAUDE_CONCEPT_GATE` kill switches as they are.
+This install never removes anything. The removal is its own skill, `/auto-improve-strict-shell-gate-uninstall`. It previews, asks once, then removes the `PreToolUse` row (matcher `Bash`) from `settings.json` (with a backup) and only then deletes `.claude/hooks/bash-gate.py`. It keeps the file if you edited it, leaves `_project_paths.py`, `_shell_write_targets.py` and `.claude/scripts/_contract_index.py` because the default main-checkout guard and the concept gate use them.
 
-Do not delete the hook file or the row by hand: a row that points at a missing script blocks every shell command.
+Do not delete the hook file or the row by hand while the hook can run: a row that points at a missing script blocks every shell command. Only when the hook cannot run (the README table, section "Ways out when a hook cannot run") does the user remove its row by hand.
 
 ## Closing
 
@@ -183,6 +183,6 @@ twice.
 ## When NOT to use
 
 - To catch files a program wrote. The Changed-file check does that, and it is already on.
-- To switch the gate off for a session. The user sets `CLAUDE_BASH_GATE=off`.
+- To switch the gate off. There is no switch; `/auto-improve-strict-shell-gate-uninstall` removes it.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
 - On Cursor or Codex. Hooks are Claude-only in this release.

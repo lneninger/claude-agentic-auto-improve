@@ -115,9 +115,12 @@ has the same behaviour. Workaround: read through Bash (`cat`, `sed -n`), which t
 intercept. A source path under `.claude/worktrees/` is gated like any other source path: the guard
 strips the worktree segment before it tests the path against the allowlist.
 
-**Escape hatch.** The **user** (not an agent) sets `CLAUDE_SKIP_CG=1` in the environment for one
-session. To stop the block for good, remove the three hooks' rows from the project's
-`settings.json`. The install skill refuses to run when no CodeGraph server is configured, but a
+**Ways out.** There is no bypass variable. In a session with no `mcp__codegraph__*` tool, read
+through the shell, or run `/auto-improve-codegraph-uninstall` and start a new session. To stop the
+block for good, that uninstall skill removes the three hooks' rows from the project's
+`settings.json`; only when a hook cannot run does the user remove a row by hand (the README table
+"Ways out when a hook cannot run"). A stale index is fixed with `codegraph sync` or
+`codegraph init -i`. The install skill refuses to run when no CodeGraph server is configured, but a
 project that removes or disables the server afterwards keeps the installed hooks and their block.
 The README's "Retired hooks" section lists the add-ons and their skills.
 

@@ -16,7 +16,6 @@ Allowed bash (unconditionally):
       anything under .claude/, node_modules/, bin/, obj/, dist/)
     * package managers (npm, pip, dotnet) writing to their own lockfiles
     * mkdir, rmdir, chmod, chown without file content changes
-    * commands with CLAUDE_CONCEPT_GATE=off or CLAUDE_BASH_GATE=off set
 
 Blocked bash:
     * `>` or `>>` redirection to a non-trivial source file
@@ -59,7 +58,7 @@ except Exception as _exc:  # noqa: BLE001 - any failure to load the parser must 
         f"{Path(__file__).resolve().parent / '_shell_write_targets.py'} "
         f"is missing or unreadable ({type(_exc).__name__}: {_exc}). "
         "Re-run /auto-improve-strict-shell-gate-install to restore it, or remove the bash-gate row "
-        "from .claude/settings.json.",
+        "from .claude/settings.json with the Edit tool (this hook judges only Bash, so Edit still works).",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -405,9 +404,7 @@ def block(reason: str, command: str, targets: list[tuple[str, str]]) -> None:
         "Useful commands:",
         "  /list-contracts       -- see all contracts and their statuses",
         "",
-        "Escape hatches (use sparingly):",
-        "  * CLAUDE_CONCEPT_GATE=off  (disables both concept-gate and bash-gate)",
-        "  * CLAUDE_BASH_GATE=off     (disables only this hook)",
+        "To remove this gate from the project, run /auto-improve-strict-shell-gate-uninstall.",
         bar,
         "",
     ])
@@ -436,11 +433,6 @@ def main() -> None:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         sys.exit(0)  # fail open
-
-    if os.environ.get("CLAUDE_CONCEPT_GATE", "").lower() in {"off", "0", "false", "no"}:
-        sys.exit(0)
-    if os.environ.get("CLAUDE_BASH_GATE", "").lower() in {"off", "0", "false", "no"}:
-        sys.exit(0)
 
     tool_name = payload.get("tool_name", "")
     if tool_name != "Bash":
