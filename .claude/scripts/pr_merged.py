@@ -1639,10 +1639,10 @@ def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
 
 
 def layout_warnings_for(parent_branch: Optional[str], records: Dict[str, Dict[str, Any]],
-                        candidates: Sequence[Dict[str, Any]], origin_base: Optional[str],
+                        candidates: Sequence[Dict[str, Any]], failed_ref: Optional[str],
                         remaining: bool = True) -> List[Dict[str, str]]:
     """R-8: the warnings of a judged contract, derived from facts (never stored), blocking nothing.
-    ``origin_base`` is the default branch when origin/<default> could not be read, else None; ``remaining``
+    ``failed_ref`` names the ref whose read failed (``origin/<branch>``), else None; ``remaining``
     says a sub-task is still to deliver (the warning clears when none is); no parent branch, no warning (N1)."""
     warning = {"reason": "single-branch-delivery",
                "detail": "work of this contract is on the default branch, or on a branch that is not the parent "
@@ -1650,10 +1650,10 @@ def layout_warnings_for(parent_branch: Optional[str], records: Dict[str, Dict[st
                "remedy": "This work is already on the default branch and is recorded as done; nothing needs "
                          "undoing. Deliver the remaining sub-tasks through the parent branch (/flow Step 2.7, "
                          "then /advance)."}
-    if origin_base is not None:
+    if failed_ref is not None:
         return [{"reason": "unverifiable",
-                 "detail": "origin/%s could not be read, so the layout cannot be judged" % origin_base,
-                 "remedy": "run git fetch origin %s and rerun" % origin_base}]
+                 "detail": "%s could not be read, so the layout cannot be judged" % failed_ref,
+                 "remedy": "run git fetch origin %s and rerun" % failed_ref.split("/", 1)[-1]}]
     if not remaining or parent_branch is None:
         return []
     off_parent = any(r.get("status") == "completed"
@@ -4721,18 +4721,18 @@ def main() -> int:
                 "reason": "held",
                 "detail": "records pull request open: %s" % open_now[0].get("url"),
                 "remedy": "merge the open Records pull request, then run --status again"}]
-        elif all(t.id in records for t in tasks):
+        elif is_delivered(tasks, records, {})[0]:  # {}: only status completed AND verified github counts
             report["layout_warnings"] = []  # nothing remains to deliver: the warning clears
         else:
             origin_held = _origin()
             if origin_held is None:
-                report["layout_warnings"] = layout_warnings_for(None, {}, [], base)
+                report["layout_warnings"] = layout_warnings_for(None, {}, [], "origin/" + base)
             else:
                 evidence = merge_evidence(origin_held, records, stored_records)
                 report["layout_warnings"] = layout_warnings_for(
                     layout.get("parent_branch"), evidence,
                     delivery_candidates(raw_candidates, tasks, evidence), None,
-                    remaining=any(t.id not in evidence for t in tasks))
+                    remaining=not is_delivered(tasks, evidence, {})[0])
 
     # D-1: the base each block would be cut from. --status reports it and never refuses.
     topology_now = declared_topology(None, briefs, base, [base])

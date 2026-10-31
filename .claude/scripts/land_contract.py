@@ -1987,7 +1987,7 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
 
     # ---- P1 identify: the Delivery record set, read from three fetched refs only -----------------
     listings: Dict[str, Dict[str, str]] = {}
-    listing_failed = False  # a failed listing is `unverifiable` in layout_warnings, never an empty list (B1)
+    failed_listing: Optional[str] = None  # the ref whose listing failed: `unverifiable`, never an empty list (B1)
     # The parent's copy is origin/<parent>. The launcher has just detached this worktree at exactly
     # that commit, so when --parent names a ref that is not fetched, HEAD IS the parent tip and the
     # topology check below reports the disagreement (ambiguous-parent) instead of a blind halt.
@@ -1997,7 +1997,10 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
             continue
         rc, out = _git(wt, "ls-tree", "-r", "--name-only", ref, "--",
                        "%s/%s" % (RECORDS_ROOT, slug), BRIEFS_DIR)
-        listing_failed = listing_failed or rc != 0
+        if rc != 0:
+            if ref == parent_ref:  # the parent's records and briefs cannot be read: nothing can be judged
+                raise _Halt("unverifiable", "P1", "cannot list the records and briefs at %s" % ref)
+            failed_listing = failed_listing or ref
         files: Dict[str, str] = {}
         for rel in (out.splitlines() if rc == 0 else []):
             text = git_show(ref, rel.strip(), cwd=wt)
@@ -2055,7 +2058,7 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
         config if isinstance(config, dict) else {}) is not None
     if judged:  # the key is ABSENT for an unjudged contract, never []
         base_report["layout_warnings"] = pr_merged.layout_warnings_for(
-            parent, records, [], default if listing_failed else None)
+            parent, records, [], failed_listing)
     # L-18: `landing: manual` in the parent brief means the operator merges the parent pull request.
     # A real run ends here; a dry run changes nothing anyway, so it records the fact and goes on to P5.
     if (parent_brief.get("landing") or "").strip().lower() == "manual":
