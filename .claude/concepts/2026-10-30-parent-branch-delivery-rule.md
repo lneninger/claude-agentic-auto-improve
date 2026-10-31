@@ -4,7 +4,7 @@
 **Date:** 2026-10-30
 **Requested by:** user
 **Status:** approved
-**Amended:** Amended 2026-10-30 by user approval: W7 (R-10; the implementation notes record final-review B1, W1 and W2)
+**Amended:** Amended 2026-10-30 by user approval: W7 (R-10; the implementation notes record final-review B1, W1 and W2). Amended 2026-10-30 by user approval ("fix cycle with option (a)"): R-10 limited to merges before `adoptedAt`; narrowed landing evidence and `accepted_blocks`; last-review B-1, W-1, W-2, W-3, N-1, N-3 and N-4.
 **Work Item Brief:** .claude/work-items/2026-10-30-113-parent-branch-delivery-rule.md
 **Tracking issue:** #113
 **Budget:** 12,000 tokens
@@ -61,7 +61,7 @@ Not applicable. Reason: no Angular UI surface is touched.
 |------|---------|---------------------|
 | Raise version at landing (P7b) | `land_contract.py` runs `check_version_bump.py --raise`, then `--exact` | `version-raise-failed` (a new halt; 26 halts) |
 | Record delivery, multi-sub-task | `pr_merged.py --record-delivery` | G-7 `single-branch-delivery` (R-7) |
-| Accept single-branch delivery (human-only) | `pr_merged.py --record-delivery <pr> --accept-single-branch` | the pull request is not verified merged by GitHub; any sub-task is `awaiting-merge`; any `failed` record other than the R-10 kind (G-3); GitHub or origin is unreadable (`unverifiable`, exit 10) |
+| Accept single-branch delivery (human-only) | `pr_merged.py --record-delivery <pr> --accept-single-branch` | the pull request is not verified merged by GitHub; any sub-task is `awaiting-merge`; any `failed` record other than the R-10 kind, or an R-8 record merged on or after `adoptedAt` (G-3, `merged-after-rule`); a delivery already recorded (G-5); GitHub or origin is unreadable (`unverifiable`, exit 10) |
 
 ### Rules
 
@@ -78,15 +78,32 @@ Not applicable. Reason: no Angular UI surface is touched.
   - The live `--status` reports `single-branch-delivery` only for a Delivery Candidate that is `known` and of kind `single-branch`, and only while no Records pull request of the contract is open. While one is open, the records are still on the records branch and the existing `delivery-unrecorded` arm names that pull request. A GitHub read that fails is reported as `unverifiable`, never as a layout defect.
 - **R-8** `merge_direction.py` cannot stop a sub-task pull request into the default branch that is merged on the web. Only after the merge does `pr_merged.py` record it, as a `failed` completion record with `failure: single-branch-delivery`. The existing `escalate` move names it, and R-10 is its exit.
 - **R-9 No endless loop.** When the move is `delivery-unrecorded`, the candidate is merged and G-7 would refuse, `next_command_for` names `/pr-merged <pr> --record-delivery --accept-single-branch`, never the refused command. `/advance` and `/pr-merged` show that command to the owner and never run it themselves. Once it has been recorded, the delivery exists, `is_delivered` holds, and the move is `complete`.
-- **R-10 Accepting an R-8 failure (amended 2026-10-30, W7).** The human-only `--record-delivery <pr> --accept-single-branch` also clears an R-8 failed record, and only that kind: a `failed` completion record with `failure: single-branch-delivery` whose `pull_request` is `<pr>`, and only when GitHub confirms `<pr>` merged at the time of the accept.
-  - **What it writes:** the failed record is replaced by a `completed` record for the same sub-task, carrying:
+- **R-10 Accepting an R-8 failure (amended 2026-10-30, W7, option a).** The accept exit also clears a failed record caused by the new rule, **limited to pull requests that merged BEFORE the upgrade.** The human-only `--record-delivery <pr> --accept-single-branch` clears an R-8 failed record (`failure: single-branch-delivery`, `pull_request` = `<pr>`), and nothing else. It does so only when GitHub confirms `<pr>` merged, with a `mergedAt` strictly before the contract's `adoptedAt`.
+  - **Adoption time, `adoptedAt`:**
+    - **Where it lives:** the file `.claude/orchestrator/results/<slug>/rule-adoption.yaml`, in the git-tracked results folder that already holds the contract's completion and delivery records. It travels in the same Records pull request. `load_records` skips this file, the same way it skips the delivery record.
+    - **When it is written:** exactly once, as the UTC instant of the first recording run of this code that writes an R-8 failed record for the contract, in the same write as that record. It is never rewritten.
+    - **A contract that already holds an R-8 failed record from before this amendment shipped, with no `adoptedAt`:** the first recording run of the amended code for that contract writes `adoptedAt` as that run's instant. Read-only modes (`--status`, `--dry-run`, `--resume`) use "now" and write nothing. Those existing failures (merged earlier) can therefore be accepted.
+    - **Accepted limit:** a web merge made after the upgrade but before the first R-8 run is read as before the rule.
+  - **What it writes:** the failed record is replaced by a `completed` record for the same sub-task with:
     - `verified: github`, with `base_ref` and `base_is_default` as GitHub reports them
     - `layout: single-branch-accepted`
+    - `replaces: {failure: single-branch-delivery, pull_request, merged_at, recorded_at}`, the structured copy of the record it replaced (W-3)
     - `note: "replaces failed record (failure: single-branch-delivery)"`
+  - **The sub-issue:** the accept closes the sub-task's sub-issue the way a normal completion does, and stamps `sub_issue_closed` (B-1).
+  - **No delivery record** is written unless the R-7 accept conditions also hold for `<pr>`.
+  - **Sticky (B-1):** a later plain `/pr-merged <pr>` run for the same pull request URL never rewrites an accepted record into an R-8 failed record. `web_merged` is false when the existing record is an accepted one for that URL, and the rewrite keeps `layout`, `replaces` and `note`.
+  - **Landing evidence (narrowed):** R-7 counts an accepted record only when it is `status: completed`, `verified: github`, `layout: single-branch-accepted`, `base_is_default: true`, and carries `replaces.failure: single-branch-delivery`. The later landing's Contract Delivery Record stamps `accepted_blocks: [<sub-task ids>]` whenever any of its evidence records is accepted, so the bypass stays visible.
+  - **What it refuses (G-3):**
+    - `merged-after-rule`: `mergedAt` is on or after `adoptedAt`.
+    - Any other failed record: `only a single-branch-delivery failure can be accepted; <sub-task> failed with <failure>`.
+    - `not-merged`: GitHub does not report `<pr>` merged.
+    - `github-unverifiable`, exit 10: GitHub or origin cannot be read.
+  - **What `next_command_for` prints (R-9, N-1):** the `escalate` move prints `/pr-merged <pr> --record-delivery --accept-single-branch` only when all of these hold:
+    - every failed record is R-8 with `merged_at` before `adoptedAt`
+    - no delivery is recorded (so G-5 cannot refuse it)
+    - the pull request reference parses as a number
 
-    It writes no delivery record unless the R-7 accept conditions also hold for `<pr>`. R-7 counts a record carrying `layout: single-branch-accepted` as landing evidence, so the parent-branch landing of the remaining sub-tasks still records.
-  - **What it refuses:** G-3 still refuses every other failed record, with the detail `only a single-branch-delivery failure can be accepted; <sub-task> failed with <failure>`. If GitHub does not report `<pr>` merged, the accept is refused (`not-merged`). If GitHub or origin cannot be read, it exits 10 with `github-unverifiable`.
-  - **What `next_command_for` prints:** when every failed record is of the R-10 kind, the `escalate` move prints `/pr-merged <pr> --record-delivery --accept-single-branch` for each, and never `/design-first` or a command that would be refused (R-9). Any other failure keeps `/design-first`. Skills show the command to the owner and never run it.
+    An R-8 record merged on or after `adoptedAt`, or any other failure, prints `/design-first`, because the work must be re-scoped. A printed command is never one a guard refuses. Skills show it to the owner and never run it.
 
 ---
 
@@ -101,7 +118,7 @@ Choke point: `pr_merged.py`. Second enforcement point: the `/design-first` appro
 | 3 | Issue offer declined, or free text | `no-parent-issue`. Remedy: open the issue and write its number into `id:`. | `id: none` |
 | 4 | Jira or Azure DevOps item | `/task` Step 4 says in one line: "This item has no GitHub issue, so its contract must be a single block." `data-architect` writes no review block for it. | `id: PROJ-12`; text test |
 | 5 | `/design-first` Step 4 with one-session implementers, then `/ship` | Step 4 hands blocks over only for a single block, and otherwise routes to `/flow`. If the delivery happens anyway: R-7 and R-9. | Two legacy fixtures shaped like 2026-10-16 (PR #58) and 2026-10-18 (PR #82), each with a merged one-branch delivery and no records. `next_command` names `--accept-single-branch`. Recording with it reaches `complete`, and repeated `advance()` calls never return to the refused command |
-| 6 | A sub-task pull request merged into the default branch on the web, including one opened before this rule | R-8, then R-10 | (a) A failed record, then `escalate` whose `next_command` is the accept, never `/design-first`. (b) The accept replaces the failed record with a completed one carrying `layout: single-branch-accepted` and the note. The next `advance()` dispatches or completes, with no loop, and the later parent-branch landing records. (c) A different failure kind with the accept: G-3 refusal. (d) A pull request not merged: refused. (e) GitHub or origin unreadable: exit 10. (f) Text test: skills show the accept and never run it |
+| 6 | A sub-task pull request merged into the default branch on the web | R-8, then R-10 (only for a merge before `adoptedAt`) | All with a real parent issue and an OPEN sub-issue: (a) the first R-8 writes `adoptedAt` once, and a second R-8 leaves it unchanged; (b) a merge before `adoptedAt`: `escalate` prints the accept, and the accept writes `replaces` and `layout` and closes the sub-issue; (c) re-recording the same pull request leaves the record accepted (sticky); (d) the later landing records with `accepted_blocks`, with no G-4 refusal; (e) running every remedy the next guard prints keeps the accept; (f) a merge on or after `adoptedAt`: G-3 `merged-after-rule`, and `next_command` is `/design-first`; (g) a pre-amendment failed record with no `adoptedAt` is acceptable, and read-only modes write nothing; (h) a different failure kind gives G-3; a pull request not merged is refused; unreadable GitHub or origin exits 10; a recorded delivery prints no accept (N-1); (i) a hand-made record with `layout: single-branch-accepted` but no `replaces` is not landing evidence; (j) text test: skills show the accept and never run it |
 | 7 | `/advance` or `/pr-merged` typed by hand, with no Step 2.7 | Layout defects block dispatch. `effective_base` never returns `default` here. `needs_issue` is computed before the branch cut. | No issue: nothing is cut |
 | 8 | One block amended to several | Recomputed on every call, so row 7 applies | 2 blocks, 1 state entry |
 | 9 | A consumer upgrades mid-flight | R-6. Named defects come with remedies (rows 3, 5, 6, 7). Nothing is skipped silently. | Approved legacy fixture |
@@ -298,9 +315,12 @@ Condensed only. The full text of the earlier rounds was not kept.
 
 **Implementation notes (final review, 2026-10-30; the code must match these):**
 - **B1:** an unreadable origin (a fetch failure, a missing ref, or a failed listing or blob read) is `unverifiable`. G-7 exits 10 with `github-unverifiable` before any accept branch. The live report offers a re-read (`git fetch origin <base>`, then rerun), never `--record-delivery` and never the accept.
-- **W1:** the origin listing uses `git ls-tree <ref> -- <folder>/` and returns None on any failure. None means unreadable (B1), never "no records".
+- **W1 (amended by last-review W-1):** the origin listing runs `git ls-tree --full-tree --name-only -z <ref> -- <folder>/`, splits on NUL, and returns None on any failure. That form works from any subfolder. A test pins the argv, and another runs it from a subfolder. None means unreadable (B1), never "no records".
 - **W2:** the fetch uses the explicit refspec `+refs/heads/<base>:refs/remotes/origin/<base>` and sets `GIT_TERMINAL_PROMPT=0`.
-- **W7:** R-10, with the row 6 tests.
+- **N-3:** documented in the docstring and in `/pr-merged`: read-only modes (`--status`, `--dry-run`, `--resume`) also run that fetch. They refresh the shared `refs/remotes/origin/<base>`, which every worktree sees, and they write `FETCH_HEAD`.
+- **Last-review W-2:** origin is read only when no Records pull request is open. When origin cannot be read while one is open, the report keeps the pointer to that pull request, and the reason names origin, not GitHub: "origin/<default> could not be read; run git fetch origin <default> and rerun". The candidate list is not rewritten to unknown.
+- **N-4:** a contract file missing at landing P0 halts `unverifiable` with the remedy "restore .claude/concepts/<slug>.md on the parent branch, then rerun".
+- **W7:** R-10 (option a), with the row 6 tests.
 
 ### 1. Parent branch delivery rule (`python-ai-developer`)
 
