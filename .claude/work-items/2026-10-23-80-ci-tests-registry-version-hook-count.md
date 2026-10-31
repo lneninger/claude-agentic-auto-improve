@@ -13,9 +13,9 @@ branch: feature/80-ci-tests-registry-version-hook-count
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261023-infra-80-ci-tests-registry-version-hook-count
 north_stars: none
 contract: none
-pr: none
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/115
+issue_link: closes
+status: shipped
 created: 2026-10-23
 ---
 
