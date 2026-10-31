@@ -110,3 +110,14 @@ Run of `/flow` on issue 113, 2026-10-30. Stopped at the review stage: the retry 
   - Nits: N1 a None parent branch makes every record with a `base_ref` fire the warning; N2 the warning never clears after completion and its remedy still says "Deliver the remaining sub-tasks"; N3 an extra `gh pr list` per judged `--status`; N4 the landing and cleanup suites are not re-run on this commit.
 - **Not run on the final code:** `test_land_contract.py` and `test_cleanup_delivered.py` (Claude Code stopped them for low memory). Last known on earlier commits: landing 305 tests with one old unrelated failure (`gh pr merge` text in `skills/ship/SKILL.md`), cleanup 126 passed.
 - **State:** everything committed locally on `feature/113-parent-branch-delivery-rule`; nothing pushed; no pull request.
+
+### Run log, fifth hand-back (fixed warning forms and the freshness refusal)
+
+- **Done:** fixed `layout_warnings` forms (absent, `[]`, `held`, `unverifiable`), origin read for every judged contract, warning clears on completion, G-7 `records-not-local` freshness refusal for every contract, advance skill preamble. Suites per the implementer: `test_pr_merged.py` 643 OK and ten further suites exit 0.
+- **Review 7** (fresh reviewer, `forms-review-fullstack-code-reviewer.md`, commit 1c51beb): **0 blockers, 3 warnings, 5 nits.** Verdict: fix then ship. R-7 intact; R-10 cannot block a legitimate recording; no leftovers of removed symbols.
+  - **W1 `pr_merged.py:4724,4735`:** "complete" is tested as `t.id in records`, so a `failed` record counts as delivered and clears the warning early. Fix: reuse `is_delivered`; test with t1 off the parent and t2 failed.
+  - **W2 (contract decision) `pr_merged.py:4704,4712`:** the key is also absent in recording runs, `--dry-run` and `--preconditions`, so "absent" no longer means only "unjudged". Options: amend R-8 to name the modes that emit it (`--status`, `--resume`, Landing Report) or emit it in every mode.
+  - **W3 (contract decision) `land_contract.py:2057`:** R-8 says the warning clears once complete, R-9 and Bypass row 6 say the landing repeats it, and the landing only runs on a complete contract. Fix: amend the contract (recommended: the landing repeats the record facts) or pass `remaining=False`.
+  - Nits: N1 local records read relative to the current folder while origin's are not (R-10 refuses for good from a subfolder, fail-closed); N2 `origin/HEAD` unset falls back to `master`; N3 the landing's `unverifiable` detail can name the wrong ref; N4 the text test still forbids the token `G-7`; N5 no test pins exit 10 for an unreadable origin on `--record-delivery`.
+- **Not run on the final code:** `test_land_contract.py`, `test_cleanup_delivered.py` (Claude Code stopped them for low memory earlier).
+- **State:** everything committed locally on `feature/113-parent-branch-delivery-rule`; nothing pushed; no pull request.
