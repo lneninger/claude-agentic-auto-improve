@@ -17,13 +17,18 @@ WHAT THIS PINS DOWN
           extension inside the project, and an unknown extension when the project root is unknown
   #612-D  a source-code extension outside the project stays gated (another repository's code is
           still investigated through CodeGraph's projectPath)
+  K-4     the hook has no kill switch: CLAUDE_SKIP_CG (any value) no longer bypasses, and the block
+          message is self-contained plain text that names the uninstall skill, the shell route and the
+          sync commands, and carries no references/ path and no CLAUDE_SKIP_CG
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -64,7 +69,38 @@ def load_hook():
     return mod
 
 
+def run_hook_process(hook: Path, project: Path, extra_env: dict[str, str]) -> subprocess.CompletedProcess:
+    """Run the installed hook as Claude Code does: JSON on stdin, cwd = the project, no sentinel."""
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_SKIP_CG"}
+    env["CLAUDE_PROJECT_DIR"] = str(project)
+    env.update(extra_env)
+    payload = {"tool_name": "Read", "tool_input": {"file_path": str(project / "src" / "Thing.cs")}}
+    return subprocess.run([sys.executable, str(hook)], input=json.dumps(payload), capture_output=True,
+                          text=True, encoding="utf-8", cwd=str(project), env=env, timeout=60)
+
+
+def run_k4() -> None:
+    project = af.new_project("cgguard-k4-")
+    hook = {p.name: p for p in af.install(ADD_ON, project)}[HOOK_FILE]
+    control = run_hook_process(hook, project, {})
+    check("K-4 control: with no switch set, a Read of a project source file is blocked (exit 2)",
+          control.returncode == 2, f"exit {control.returncode}: {control.stderr}")
+    for value in ("1", "on", "true", "yes", "off"):
+        done = run_hook_process(hook, project, {"CLAUDE_SKIP_CG": value})
+        check(f"K-4: CLAUDE_SKIP_CG={value} no longer bypasses the gate (exit 2)",
+              done.returncode == 2, f"exit {done.returncode}: {done.stderr}")
+    message = control.stderr
+    for needle in ("mcp__codegraph__", "/auto-improve-codegraph-uninstall", "new session", "shell",
+                   "codegraph sync", "codegraph init -i", "/auto-improve-codegraph-install"):
+        check(f"K-4: the block message names {needle!r}", needle in message, message)
+    check("K-4: the block message carries no references/ path", "references/" not in message, message)
+    check("K-4: the block message does not name CLAUDE_SKIP_CG", "CLAUDE_SKIP_CG" not in message, message)
+    check("K-4: the hook text does not name CLAUDE_SKIP_CG",
+          "CLAUDE_SKIP_CG" not in hook.read_text(encoding="utf-8"))
+
+
 def run() -> None:
+    run_k4()
     try:
         guard = load_hook()
     except af.AddonFixtureError as exc:

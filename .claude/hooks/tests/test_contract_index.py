@@ -1038,20 +1038,29 @@ MARKER_STUB = (
 
 def section_f() -> None:
     print("-- (f) escape hatches and D5 --")
-    # CLAUDE_CONCEPT_GATE=off / CLAUDE_BASH_GATE=off: exit 0, index untouched, no trace
-    for gate in GATES:
-        for var, val in (("CLAUDE_CONCEPT_GATE", "off"), ("CLAUDE_CONCEPT_GATE", "0"),
-                         ("CLAUDE_BASH_GATE", "off")):
-            if gate == "concept" and var == "CLAUDE_BASH_GATE":
-                continue
-            sb, T_a, T_b = basic_sandbox("f")
-            sb.run(gate, T_a)
-            before = {p: (p.read_bytes(), p.stat().st_mtime_ns)
-                      for p in sb.index_files("main")}
-            r = sb.run(gate, T_b, env={var: val})
-            after = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in sb.index_files("main")}
-            check(f"(f) {gate}-gate with {var}={val}: exit 0, no trace line, index untouched",
-                  r.code == 0 and not r.trace and before == after, short(r))
+    # CLAUDE_CONCEPT_GATE=off: the concept gate exits 0, index untouched, no trace
+    for var, val in (("CLAUDE_CONCEPT_GATE", "off"), ("CLAUDE_CONCEPT_GATE", "0")):
+        sb, T_a, T_b = basic_sandbox("f")
+        sb.run("concept", T_a)
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in sb.index_files("main")}
+        r = sb.run("concept", T_b, env={var: val})
+        after = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in sb.index_files("main")}
+        check(f"(f) concept-gate with {var}={val}: exit 0, no trace line, index untouched",
+              r.code == 0 and not r.trace and before == after, short(r))
+
+    # K-3: the bash gate (an add-on) has no kill switch. CLAUDE_CONCEPT_GATE=off no longer turns it off,
+    # and CLAUDE_BASH_GATE is not read at all: the uncovered target is blocked exactly as with no variable.
+    sb, T_a, T_b = basic_sandbox("f")
+    control = sb.run("bash", T_b)
+    check("(f) bash-gate control, no switch set: the uncovered target is blocked (exit 2)",
+          control.code == 2, short(control))
+    for var, val in (("CLAUDE_CONCEPT_GATE", "off"), ("CLAUDE_CONCEPT_GATE", "0"),
+                     ("CLAUDE_BASH_GATE", "off"), ("CLAUDE_BASH_GATE", "0")):
+        r = sb.run("bash", T_b, env={var: val})
+        check(f"(f) bash-gate with {var}={val} has no effect: still blocked, same exit code as the control",
+              r.code == control.code == 2, short(r))
+        check(f"(f) bash-gate with {var}={val}: the block message names neither switch",
+              "CLAUDE_CONCEPT_GATE" not in r.plain_err and "CLAUDE_BASH_GATE" not in r.plain_err, short(r))
 
     # the stub on the (CLAUDE_CONCEPT_GATE=off) path and the pinned-contract path
     sb, T_a, T_b = basic_sandbox("f")

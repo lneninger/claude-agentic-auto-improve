@@ -1,6 +1,6 @@
 ---
 name: auto-improve-codegraph-uninstall
-description: "Remove the codegraph add-on of the agentic-auto-improve plugin from this project: the three settings.json rows of the code-search-first guard, then its three hook files. Previews every row and file, asks for one confirmation, then writes: rows first with a backup, then the files. Keeps any hook file you edited, and keeps the shared helpers. Leaves the CLAUDE_SKIP_CG kill switch as it is. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-codegraph-uninstall, 'remove the codegraph add-on', 'turn off the code-search-first guard', or 'uninstall the CodeGraph gate'. Never deletes a helper."
+description: "Remove the codegraph add-on of the agentic-auto-improve plugin from this project: the three settings.json rows of the code-search-first guard, then its three hook files. Previews every row and file, asks for one confirmation, then writes: rows first with a backup, then the files. Keeps any hook file you edited, and keeps the shared helpers. The add-on has no kill switch, so this skill is the way out. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-codegraph-uninstall, 'remove the codegraph add-on', 'turn off the code-search-first guard', or 'uninstall the CodeGraph gate'. Never deletes a helper."
 user_invocable: true
 ---
 
@@ -14,14 +14,16 @@ This skill proposes first. It writes only after one yes, and it reads and touche
 
 **The skill carries the conversation. The script carries every rule.**
 
-Which rows match, which files are deleted, which are kept and in which order everything is written all live in `auto_improve_finish_install.py addon-remove`, which has its own test suite. Read its answer. Do not work any of it out yourself, and never delete a hook file or edit `settings.json` by hand to remove this add-on: a hook row that points at a missing script exits 2 and blocks every prompt (and here, every source read). The script writes `settings.json` first, with a backup, and deletes a file last.
+Which rows match, which files are deleted, which are kept and in which order everything is written all live in `auto_improve_finish_install.py addon-remove`, which has its own test suite. Read its answer. Do not work any of it out yourself. The skill never deletes a hook file and never edits `settings.json` by hand to remove this add-on: a hook row that points at a missing script exits 2 and blocks every prompt (and here, every source read). The script writes `settings.json` first, with a backup, and deletes a file last. Only when a hook cannot run (the table in the README, section "Ways out when a hook cannot run") does the user remove its row by hand.
+
+This add-on has no kill switch and no bypass variable. This skill is the way out.
 
 What the script will not do:
 
 - It deletes a hook file only when it is identical to the plugin's copy (line endings and a leading byte order mark are ignored). A file you edited is kept and reported as `kept-differs`; its row is still removed.
 - It keeps a hook file that a `settings.local.json` or user settings row still names (`kept-referenced`).
 - It never deletes a helper. `_project_paths.py` and `_error_log.py` stay: other hooks use them.
-- It does not touch the `CLAUDE_SKIP_CG` kill switch, and it does not delete `.claude/.codegraph-used-this-turn`. That sentinel is a leftover of a turn; the user may delete it.
+- It does not delete `.claude/.codegraph-used-this-turn`. That sentinel is a leftover of a turn; the user may delete it.
 
 ## Step 0: Find the script
 
@@ -76,7 +78,7 @@ The answer carries:
 - `rows`: every `settings.json` row it would remove, with its `event`, `matcher`, `file` and the `command` as written. A row matches by the hook file name, under any event and in any form.
 - `files`: each hook file with its action: `delete`, `kept-differs`, `kept-referenced` or `absent`.
 - `kept`: what it leaves, each with the reason: the two helpers, and every file it kept.
-- `kill-switches`: `CLAUDE_SKIP_CG`. It is named only; the script never changes it.
+- `kill-switches`: an empty list. The add-on has none.
 - `profile` (`null` for this add-on), `uninstall-skill`, `target`, `plugin-root` and `plan-sha256`.
 
 **Keep `plan-sha256`.** The apply needs it as `--expect-sha256`. It covers the `settings.json` bytes and the project's bytes of every file to delete, so anything that moves between the preview and the write is refused as `changed-since-preview`.
@@ -89,7 +91,7 @@ Show the user, in plain words:
 
 - the rows it would remove from `.claude/settings.json`, and that a backup is taken first.
 - the files it would delete, and the files it would keep with the reason.
-- what it leaves: the helpers, and the `CLAUDE_SKIP_CG` switch.
+- what it leaves: the helpers.
 - that after the removal a source `Read`, `Grep` or `Glob` is no longer held back until a CodeGraph tool has run.
 
 State your recommendation first, in one or two sentences. Then ask **once**: remove this add-on?
@@ -125,15 +127,15 @@ End with a short summary: which rows were removed, which files were deleted, whi
 ## Anti-patterns
 
 - **Deleting a hook file yourself before its row is gone.** A row that points at a missing script blocks every prompt. The script removes the rows first.
-- **Hand-editing `settings.json` instead of using the script.**
+- **Hand-editing `settings.json` instead of using the script.** Only a hook that cannot run (the README table) is removed by hand, by the user.
 - **Writing without the preview's `plan-sha256`**, or with an old one. The hash is what proves the user saw the change as it is now.
-- **Unsetting `CLAUDE_SKIP_CG` or setting it for the user.** The script leaves it as it is.
+- **Telling the user to set a bypass variable.** The guard has none. The way out is this skill.
 - **Deleting a kept file because the script kept it.** A `kept-differs` file may hold the team's edits.
 - **Skipping the new-session note.** The user will otherwise test in this session and conclude the guard is still on.
 
 ## When NOT to use
 
 - To install the add-on. That is `/auto-improve-codegraph-install`.
-- To pause the guard for one turn. That is the user's own `CLAUDE_SKIP_CG`, which this skill never sets.
+- To pause the guard for one turn. There is no pause; call a CodeGraph tool, or read through the shell.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
 - On Cursor or Codex. Hooks are Claude-only in this release.

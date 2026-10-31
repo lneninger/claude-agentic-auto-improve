@@ -122,7 +122,7 @@ Show the user, in plain words:
   `.claude/scripts/`), with the action for each. A file marked `present` is already identical
   and is not touched. A helper marked `keep-existing` is kept as it is.
 - the exact `unified-diff` for `.claude/settings.json`, and how many rows it adds.
-- the kill switches from `kill-switches`. They are set by the user and never by an agent.
+- that the add-on has no kill switch (`kill-switches` is an empty list): the way out is `/auto-improve-codegraph-uninstall`.
 - any `notes`.
 
 State your recommendation first, in one or two sentences. Then ask **once**: install this
@@ -148,7 +148,7 @@ back). Tell the user to add `.claude/settings.json.bak-*` to `.gitignore`.
 
 If the answer says `nothing-to-do`, the add-on was already installed. Nothing was written.
 
-To bypass the guard for one session, the user sets `CLAUDE_SKIP_CG=1`. The agent never sets it.
+The guard has no bypass variable. In a session with no `mcp__codegraph__*` tool, source reads through the shell still work, and `/auto-improve-codegraph-uninstall` followed by a new session takes the guard out.
 
 A project with a CodeGraph index builds it with the `codegraph` command line tool (`codegraph init -i`). This skill does not build the index.
 
@@ -172,9 +172,9 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 
 ## How to remove it
 
-This install never removes anything. The removal is its own skill, `/auto-improve-codegraph-uninstall`. It previews, asks once, then removes the three `settings.json` rows (with a backup) and only then the three hook files. It keeps a hook file you edited, leaves `_project_paths.py` and `_error_log.py` because other hooks use them, and leaves the `CLAUDE_SKIP_CG` kill switch as it is. `.claude/.codegraph-used-this-turn`, if it exists, is a leftover of a turn that the user may delete.
+This install never removes anything. The removal is its own skill, `/auto-improve-codegraph-uninstall`. It previews, asks once, then removes the three `settings.json` rows (with a backup) and only then the three hook files. It keeps a hook file you edited, leaves `_project_paths.py` and `_error_log.py` because other hooks use them. `.claude/.codegraph-used-this-turn`, if it exists, is a leftover of a turn that the user may delete.
 
-Do not delete the hook files or the rows by hand: a row that points at a missing script blocks every prompt.
+Do not delete the hook files or the rows by hand while the hooks can run: a row that points at a missing script blocks every prompt. Only when a hook cannot run (the README table, section "Ways out when a hook cannot run") does the user remove its row by hand.
 
 ## Closing
 
@@ -186,7 +186,7 @@ twice.
 ## Anti-patterns
 
 - **Installing without the server.** The script refuses. Do not look for a way around it.
-- **Setting `CLAUDE_SKIP_CG` for the user.** It is the user's escape hatch, never an agent's.
+- **Telling the user to set a bypass variable.** The guard has none; the way out is the uninstall skill.
 
 - **Writing `settings.json` without the preview's `plan-sha256`**, or with an old one. The hash
   is what proves the user saw the change as it is now.
@@ -198,6 +198,6 @@ twice.
 ## When NOT to use
 
 - To index the code. That is `codegraph init -i`, run by the user.
-- To bypass the guard for a turn. That is `CLAUDE_SKIP_CG`, set by the user.
+- To bypass the guard for a turn. There is no bypass; call a CodeGraph tool, or remove the add-on with `/auto-improve-codegraph-uninstall`.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
 - On Cursor or Codex. Hooks are Claude-only in this release.

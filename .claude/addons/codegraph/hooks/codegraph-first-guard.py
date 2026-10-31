@@ -16,10 +16,6 @@ Hook contract (Claude Code):
     exit 2: block (stderr shown to Claude)
     other:  error (hook fails open -- logs to stderr, allows the call)
 
-Bypass:
-    CLAUDE_SKIP_CG=1   -- user-set escape hatch for one session
-    CLAUDE_SKIP_CG=off -- same as above (matches concept-gate convention)
-
 Sentinel:
     <cwd>/.claude/.codegraph-used-this-turn
     Created by codegraph-turn-tracker.py after any mcp__codegraph__* call.
@@ -172,12 +168,6 @@ BYPASS_FILENAMES = {
 def log(msg: str) -> None:
     """Log to stderr so Claude sees the diagnostic line."""
     print(f"[codegraph-first-guard] {msg}", file=sys.stderr)
-
-
-def bypass_env() -> bool:
-    """Hard bypass via environment variable."""
-    val = os.environ.get("CLAUDE_SKIP_CG", "").lower()
-    return val in {"1", "on", "true", "yes", "off"}
 
 
 def sentinel_path() -> Path:
@@ -444,11 +434,12 @@ def block(reason: str, tool_name: str, tool_input: dict) -> None:
         "",
         suggestion,
         "",
-        "Decision table: ~/.claude/references/codegraph-decision-table.md",
+        "If this session has no mcp__codegraph__* tool:",
+        "  * read the file through the shell (for example `cat <path>`), or",
+        "  * run /auto-improve-codegraph-uninstall and start a new session.",
         "",
-        "Escape hatches (use sparingly):",
-        "  * One-shot:  set CLAUDE_SKIP_CG=1 in the environment",
-        "  * Index dead/stale: run `codegraph sync` or `codegraph init -i`",
+        "If the index is stale, run `codegraph sync` or `codegraph init -i`.",
+        "/auto-improve-codegraph-install installs the add-on.",
         bar,
         "",
     ])
@@ -472,10 +463,6 @@ def main() -> None:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError as e:
         log(f"failed to parse stdin payload: {e}")
-        sys.exit(0)
-
-    if bypass_env():
-        log("bypass via CLAUDE_SKIP_CG")
         sys.exit(0)
 
     tool_name = payload.get("tool_name", "")
