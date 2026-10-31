@@ -77,8 +77,8 @@
     "map": [
       {
         "tag": "INFRA",
-        "globs": ["skills/**", "agents/**", ".claude/**", ".claude-plugin/**", ".cursor-plugin/**", "plugin.json"],
-        "means": "the plugin's scripts, skills, agents, manifests and .claude records"
+        "globs": ["skills/**", "agents/**", ".claude/**", ".claude-plugin/**", ".cursor-plugin/**", ".github/**", "plugin.json", "CLAUDE.md"],
+        "means": "the plugin's scripts, skills, agents, manifests, CI workflows, project rules and .claude records"
       },
       { "tag": "TESTS", "globs": ["**/tests/**"], "means": "any test folder" },
       { "tag": "DOCS", "globs": ["README.md", "docs/**"], "means": "the README and prose documentation outside .claude" }
