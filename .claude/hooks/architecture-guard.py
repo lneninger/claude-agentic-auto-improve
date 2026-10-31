@@ -44,6 +44,9 @@ Known limits (accepted; each is pinned by a test):
     G-2  Only `*.component.html`, `*.component.ts` and `*.component.scss` files are scanned.
     G-5  A 3- or 6-character token with no digit that stands alone after
          whitespace (such as `  #fff`) is read as a template reference variable.
+         Quotes are counted per kind, so an apostrophe inside a double-quoted value
+         (`aria-label="Don't save" #add`) makes the count odd and that reference
+         variable is still read as a colour (accepted, not fixed).
 """
 
 from __future__ import annotations

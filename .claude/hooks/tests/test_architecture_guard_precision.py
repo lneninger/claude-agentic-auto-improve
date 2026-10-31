@@ -381,6 +381,16 @@ class PostEditViewTests(unittest.TestCase):
         self.assertEqual(r2.returncode, 0,
                          "W11 is an accepted limit: new text 'y-500' alone has no violation\n" + r2.stderr)
 
+    def test_g5_apostrophe_inside_a_double_quoted_value_is_an_accepted_limit(self):
+        # G-5 counts each quote kind separately, so an apostrophe inside a double-quoted
+        # value makes the count odd and a real reference variable after it reads as a colour.
+        # Accepted by the maintainer (2026-10-31): pinned here and named in the docstring,
+        # not fixed. Changing this test means amending G-5 condition 2 in the contract.
+        r = write(HTML, '<button aria-label="Don\'t save" #add></button>\n')
+        self.assertEqual(r.returncode, 2,
+                         "accepted limit: the apostrophe throws the quote count off, so #add blocks\n" + r.stderr)
+        self.assertIn("[hex-color]", r.stderr)
+
 
 class HexColorPrecisionTests(unittest.TestCase):
     """G-5: a template reference variable is not a colour."""
@@ -502,6 +512,12 @@ class KnownLimitsDocstringTests(unittest.TestCase):
         g2 = next((ln for ln in block.splitlines() if "G-2" in ln), "")
         self.assertIn("*.component.ts", g2, "N-3: the G-2 line must name the real file patterns")
         self.assertIn("*.component.scss", g2, "N-3: the G-2 line must name the real file patterns")
+
+    def test_g5_apostrophe_limit_is_named_in_the_known_limits_block(self):
+        doc = ast.get_docstring(ast.parse(GUARD.read_text(encoding="utf-8"))) or ""
+        block = doc[doc.index("Known limits"):] if "Known limits" in doc else ""
+        self.assertIn("apostrophe", block.lower(),
+                      "the Known limits block must name the apostrophe-in-quoted-value limit of G-5")
 
 
 if __name__ == "__main__":
