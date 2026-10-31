@@ -1448,6 +1448,81 @@ class TestLandingReportWarningForms(StageCase):
                          "a failed listing is unverifiable, not []. got %r" % (report.get("layout_warnings"),))
 
 
+class TestLandingReportForACompleteContract(StageCase):
+    """Forms review W3 / R-9: the Landing Report exists only for a complete contract. It repeats what the records
+    show in the absent, [] and unverifiable forms, never `held`, and the landing never halts on it."""
+
+    def reasons(self, report):
+        return [w.get("reason") if isinstance(w, dict) else w for w in report.get("layout_warnings") or []]
+
+    def land(self, name, patches=(), **record):
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        extra = {REC_DIR + "t1-backend.yaml": record_yaml(**record)} if record else None
+        return Stage(self, disagreeing_kit(folder, brief_base=PARENT, parent_extra=extra)).run(extra_patches=list(patches))
+
+    def test_it_repeats_what_the_records_show_for_a_complete_contract_and_never_reports_held(self):
+        import land_contract as lc_module
+        real = lc_module._git
+
+        def failing(cwd, *args, **kwargs):
+            if args and args[0] == "ls-tree" and "origin/master" in args:
+                return 128, "fatal: unable to read tree"
+            return real(cwd, *args, **kwargs)
+
+        seen = {}
+        seen["clean"] = self.land("clean", base_ref=PARENT, base_is_default=False)
+        seen["single-branch"] = self.land("single", base_ref="master", base_is_default=True)
+        seen["unreadable"] = self.land("unreadable", patches=[mock.patch.object(lc_module, "_git", failing)])
+        for label, report in seen.items():
+            self.assertEqual(report["outcome"], "landed", "%s: the landing never halts on a warning: %s"
+                             % (label, report["detail"]))
+            self.assertNotIn("held", self.reasons(report), "%s: the landing runs only when no Records pull request "
+                                                           "is open, so it never reports held" % label)
+        self.assertEqual(seen["clean"].get("layout_warnings"), [], "[] for a complete contract with nothing to report")
+        self.assertEqual(self.reasons(seen["single-branch"]), ["single-branch-delivery"],
+                         "it repeats what the records show, even though the contract is complete")
+        self.assertEqual(self.reasons(seen["unreadable"]), ["unverifiable"])
+
+
+class TestTheLandingUnverifiableNamesTheFailedRead(StageCase):
+    """Forms review N3 / R-9: the landing's `unverifiable` detail and remedy name the ref or listing whose read
+    failed: the parent listing, the records listing, or origin/<default>. One test per failing input."""
+
+    def _named(self, name, ref, kit_setup=None):
+        import land_contract as lc_module
+        real = lc_module._git
+
+        def failing(cwd, *args, **kwargs):
+            if args and args[0] == "ls-tree" and ref in args:
+                return 128, "fatal: unable to read tree"
+            return real(cwd, *args, **kwargs)
+
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        kit = disagreeing_kit(folder, brief_base=PARENT)
+        if kit_setup:
+            kit_setup(kit)
+        report = Stage(self, kit).run(extra_patches=[mock.patch.object(lc_module, "_git", failing)])
+        said = " ".join(str(x) for x in (report.get("detail"), report.get("remedy"),
+                                         json.dumps(report.get("layout_warnings"))))
+        self.assertIn(ref, said, "the report names the listing that failed (%s). outcome=%s: %s"
+                      % (ref, report["outcome"], said[:300]))
+        self.assertIn(report["outcome"], ("landed", "unverifiable"), "and the failure is never a silent 'no records'")
+        return report
+
+    def test_the_default_branch_listing(self):
+        self._named("default", "origin/master")
+
+    def test_the_parent_branch_listing(self):
+        self._named("parent", "origin/%s" % PARENT)
+
+    def test_the_records_branch_listing(self):
+        slug_branch = "docs/%s-records" % SLUG
+        self._named("records", "origin/%s" % slug_branch,
+                    kit_setup=lambda kit: kit.commit_remote(slug_branch, {"RECORDS.txt": "x\n"}, "records branch"))
+
+
 class TestStageHeaderBriefDisagreement(StageCase):
 
     def test_p1_never_lands_whichever_parent_the_launcher_passes(self):

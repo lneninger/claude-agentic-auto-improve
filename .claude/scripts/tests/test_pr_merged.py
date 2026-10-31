@@ -13972,7 +13972,12 @@ class TestRecordsArePlain(unittest.TestCase):
                                  prs=_merged_parent_pr(), **kwargs)
                     self.assertEqual(res.exit_code, 10, "%s. %s" % (mode, res.describe()))
                     self.assertEqual((res.report or {}).get("error"), "github-unverifiable", res.describe())
-                    self.assertEqual(world.snapshot(), before)
+                    # Forms review N5, strengthened: a regression to `_origin() or {}` would treat the unreadable
+                    # origin as "holds no records" and record (exit 0, files written); all five modes, plain and
+                    # dry-run, with local records empty, fail that.
+                    self.assertNotEqual((res.report or {}).get("reason"), "records-not-local", res.describe())
+                    self.assertIn("origin/master", res.out, "the detail names the origin that could not be read")
+                    self.assertEqual(world.snapshot(), before, "%s %s: nothing is written" % (mode, extra))
 
 
 class TestLegacySingleBranchDeliveries(unittest.TestCase):
@@ -14166,6 +14171,75 @@ class TestLayoutWarningForms(unittest.TestCase):
         for case in cases:
             seen |= set(_pbw_reasons(self._status(case["world"], **case["kw"]).report))
         self.assertEqual(seen, _CLOSED_WARNING_REASONS, "every form is produced, and nothing else")
+
+
+class TestDeliveredMeansCompletedAndVerified(unittest.TestCase):
+    """Forms review W1: 'delivered' (clearing the warning, and 'remaining sub-tasks') is is_delivered's reading:
+    status completed AND verified github. Nothing else counts."""
+
+    REMAINING = "Deliver the remaining sub-tasks through the parent branch"
+
+    def _status(self, world):
+        return _pb_status(self, world, prs={}, records_prs=[])
+
+    def test_a_failed_record_keeps_the_warning_and_its_sub_task_still_remains(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)  # genuinely merged into the default branch
+        world.record("t2-frontend", 62, status="failed", failure="x", base_is_default=False, base_ref=_PB_PARENT)
+        res = self._status(world)
+        self.assertIn(_WARNING, _pbw_reasons(res.report),
+                      "t2 failed, so it is not delivered: the key must not be []. layout_warnings=%r"
+                      % (res.report.get("layout_warnings"),))
+        remedy = " ".join(str((_pbw_entry(res.report, _WARNING) or {}).get("remedy") or "").split())
+        self.assertIn(self.REMAINING, remedy, "and the failed sub-task still counts as remaining")
+
+    def test_a_completed_record_without_github_verification_keeps_the_warning(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_PB_PARENT, verified="none")
+        res = self._status(world)
+        self.assertIn(_WARNING, _pbw_reasons(res.report), "layout_warnings=%r" % (res.report.get("layout_warnings"),))
+
+    def test_positive_control_both_completed_and_verified_clears_it(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_PB_PARENT)
+        res = self._status(world)
+        self.assertEqual(res.report.get("layout_warnings"), [], res.describe())
+
+
+class TestWarningsAreEmittedOnlyByStatusResumeAndTheLanding(unittest.TestCase):
+    """Forms review W2 / R-8 Modes: the key appears in --status and --resume (and the Landing Report) and in no
+    other mode; there its absence means nothing."""
+
+    def test_status_and_resume_emit_the_key(self):
+        for flag in ("--status", "--resume"):
+            with self.subTest(mode=flag):
+                res = _drive(_parent_world(self), [flag], prs={}, records_prs=[])
+                self.assertEqual(res.exit_code, 0, res.describe())
+                self.assertIn("layout_warnings", res.report or {}, "%s emits layout_warnings. %s" % (flag, res.describe()))
+
+    def test_a_recording_run_never_emits_it(self):
+        res = _drive(_parent_world(self), ["--pr", "61"], prs=_web_pr("t1-backend", 61))
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertNotIn("layout_warnings", res.report or {}, "--pr: the next step is --status. %s" % res.describe())
+
+    def test_record_delivery_never_emits_it(self):
+        res = _drive(_pb_world(self), ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)], prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertNotIn("layout_warnings", res.report or {}, res.describe())
+
+    def test_dry_run_never_emits_it(self):
+        for flags in ([], ["--pr", "61"]):
+            with self.subTest(flags=flags):
+                res = _drive(_parent_world(self), flags + ["--dry-run"], prs=_web_pr("t1-backend", 61))
+                self.assertEqual(res.exit_code, 0, res.describe())
+                self.assertNotIn("layout_warnings", res.report or {}, "--dry-run computes no warnings. %s" % res.describe())
+
+    def test_preconditions_never_emits_it(self):
+        res = _drive(_parent_world(self), ["--preconditions"], prs={})
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertNotIn("layout_warnings", res.report or {}, res.describe())
 
 
 class TestRecordingRefusesStaleLocalRecords(unittest.TestCase):

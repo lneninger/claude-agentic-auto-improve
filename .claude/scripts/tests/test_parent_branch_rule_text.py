@@ -281,11 +281,12 @@ class ProjectRulesTextTests(TextCase):
 
 class LayoutWarningSkillTextTests(TextCase):
     """R-7 / R-8 (amended 2026-10-30): the skills and references describe the layout warning that `--status`
-    lists in `layout_warnings`, and no longer mention the removed accept exit, guard G-7, the failed record or
-    adoption time. The warning's reason is read from the script, not from the authors' wording."""
+    lists in `layout_warnings`, and no longer mention the removed accept exit, the old `G-7 single-branch`
+    guard, the failed record or adoption time. (The bare id G-7 is reused with the meaning `records-not-local`,
+    R-10, so only the old wording is forbidden: forms review N4.) The warning's reason is read from the script."""
 
     SCRIPTS = Path(__file__).resolve().parent.parent
-    REMOVED = ("--accept-single-branch", "G-7", "single-branch-accepted", "merged-after-rule", "adoptedAt",
+    REMOVED = ("--accept-single-branch", "single-branch-accepted", "merged-after-rule", "adoptedAt",
                "rule-adoption", "accepted_blocks")
 
     def warning_reason(self):
@@ -342,6 +343,19 @@ class LayoutWarningSkillTextTests(TextCase):
             text = path.read_text(encoding="utf-8", errors="replace")
             for token in self.REMOVED:
                 self.assertNotIn(token, text, "%s still mentions %s" % (path.relative_to(PLUGIN_ROOT), token))
+            self.assertIsNone(re.search(r"G-7[^.\n]{0,40}single-branch", text),
+                              "%s still uses the old `G-7 single-branch` guard wording" % path.relative_to(PLUGIN_ROOT))
+
+    def test_pr_merged_skill_says_to_run_status_after_a_recording_run(self):
+        # Forms review W2: the recording modes never emit layout_warnings, so the step text sends the reader to the
+        # mode that does. The key and the mode name are the script's own.
+        source = (self.SCRIPTS / "pr_merged.py").read_text(encoding="utf-8")
+        self.assertTrue('add_argument("--status"' in source and "layout_warnings" in source, "fixture sanity")
+        hit = [p for p in self.paragraphs("skills/pr-merged/SKILL.md")
+               if "layout_warnings" in p and "--status" in p and re.search(r"recording", p, re.I)
+               and re.search(r"after|next", p, re.I)]
+        self.assertTrue(hit, "skills/pr-merged/SKILL.md: after a recording run, run --status to see the "
+                             "layout_warnings (a recording run never prints them)")
 
 
 class VocabularyTextTests(TextCase):
