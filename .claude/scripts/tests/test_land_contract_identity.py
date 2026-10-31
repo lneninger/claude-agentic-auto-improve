@@ -1489,7 +1489,7 @@ class TestTheLandingUnverifiableNamesTheFailedRead(StageCase):
     """Forms review N3 / R-9: the landing's `unverifiable` detail and remedy name the ref or listing whose read
     failed: the parent listing, the records listing, or origin/<default>. One test per failing input."""
 
-    def _named(self, name, ref, kit_setup=None):
+    def _fail_listing(self, name, ref, kit_setup=None):
         import land_contract as lc_module
         real = lc_module._git
 
@@ -1503,24 +1503,39 @@ class TestTheLandingUnverifiableNamesTheFailedRead(StageCase):
         kit = disagreeing_kit(folder, brief_base=PARENT)
         if kit_setup:
             kit_setup(kit)
-        report = Stage(self, kit).run(extra_patches=[mock.patch.object(lc_module, "_git", failing)])
-        said = " ".join(str(x) for x in (report.get("detail"), report.get("remedy"),
-                                         json.dumps(report.get("layout_warnings"))))
-        self.assertIn(ref, said, "the report names the listing that failed (%s). outcome=%s: %s"
-                      % (ref, report["outcome"], said[:300]))
-        self.assertIn(report["outcome"], ("landed", "unverifiable"), "and the failure is never a silent 'no records'")
-        return report
+        st = Stage(self, kit)
+        head_before = st.head()
+        report = st.run(extra_patches=[mock.patch.object(lc_module, "_git", failing)])
+        return st, report, head_before
 
-    def test_the_default_branch_listing(self):
-        self._named("default", "origin/master")
+    def test_the_default_branch_listing_gives_only_the_warning_and_the_landing_lands(self):
+        _st, report, _head = self._fail_listing("default", "origin/master")
+        self.assertEqual(report["outcome"], "landed", "a warning never halts the landing: %s" % report["detail"])
+        said = json.dumps(report.get("layout_warnings"))
+        self.assertIn("origin/master", said, "the unverifiable warning names the listing that failed. %s" % said)
 
-    def test_the_parent_branch_listing(self):
-        self._named("parent", "origin/%s" % PARENT)
-
-    def test_the_records_branch_listing(self):
+    def test_the_records_branch_listing_gives_only_the_warning_and_the_landing_lands(self):
         slug_branch = "docs/%s-records" % SLUG
-        self._named("records", "origin/%s" % slug_branch,
-                    kit_setup=lambda kit: kit.commit_remote(slug_branch, {"RECORDS.txt": "x\n"}, "records branch"))
+        ref = "origin/%s" % slug_branch
+        _st, report, _head = self._fail_listing(
+            "records", ref,
+            kit_setup=lambda kit: kit.commit_remote(slug_branch, {"RECORDS.txt": "x\n"}, "records branch"))
+        self.assertEqual(report["outcome"], "landed", "a warning never halts the landing: %s" % report["detail"])
+        said = json.dumps(report.get("layout_warnings"))
+        self.assertIn(ref, said, "the unverifiable warning names the listing that failed. %s" % said)
+
+    def test_the_parent_branch_listing_halts_unverifiable_at_p1_before_anything_is_merged_or_pushed(self):
+        # Last-review W1: the parent's records cannot be read, so the landing cannot judge the contract at all.
+        ref = "origin/%s" % PARENT
+        st, report, head_before = self._fail_listing("parent", ref)
+        self.assertEqual((report["outcome"], report["gate"]), ("unverifiable", "P1"),
+                         "a failed parent listing is a halt at P1, not 'records missing'. got %s at %s: %s"
+                         % (report["outcome"], report["gate"], report["detail"]))
+        said = " ".join(str(x) for x in (report.get("detail"), report.get("remedy")))
+        self.assertIn(ref, said, "and the failed ref is named in the detail or remedy: %s" % said)
+        self.assertEqual(st.head(), head_before, "nothing was merged or reset")
+        self.assertEqual(st.count("git_push"), 0, "nothing was pushed")
+        self.assertEqual(st.count("gh_pr_merge"), 0, "and no pull request was merged")
 
 
 class TestStageHeaderBriefDisagreement(StageCase):
