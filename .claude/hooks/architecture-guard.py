@@ -24,6 +24,26 @@ Bypass:
 
 Exception list:
     ~/.claude/hooks/architecture-guard.exceptions.json
+
+Post-edit view (G-4):
+    For an Edit or MultiEdit the guard builds the file as it will be after the
+    edit (disk text as UTF-8, CRLF folded to LF, old_string found exactly once
+    unless replace_all). Line rules judge each edit's new text. The whole-file
+    rules (height chain, inline template, inline styles) run once per file per
+    call: the height chain on the view; the two inline rules when any edit's new
+    text holds the pattern, or when the view holds it and the disk text did not.
+    When the view cannot be built, every rule judges the new text alone.
+    Each new step falls back to the stricter outcome when it raises (V-2).
+
+Known limits (accepted; each is pinned by a test):
+    W5   `relative` and `absolute` are never checked.
+    W6b  Line rules judge each edit's new text, so two edits that together form
+         `text-gray-500` pass.
+    W8   Stylesheet rules only warn; the nesting check works one line at a time.
+    W11  An edit that completes a violation started on disk passes.
+    G-2  File recognition is by file name (`*.component.html`, `.ts`, `.scss`).
+    G-5  A 3- or 6-character token with no digit that stands alone after
+         whitespace (such as `  #fff`) is read as a template reference variable.
 """
 
 from __future__ import annotations
@@ -294,6 +314,15 @@ class Violation(NamedTuple):
     document: str | None = None
 
 
+class PostEditView(NamedTuple):
+    """The file as it will be after the edit. ``reason`` is set exactly when ``text`` is None."""
+    path: str
+    text: str | None
+    disk: str | None  # the disk text before the edit; None for a Write or when unavailable
+    source: str  # 'write-content' | 'disk-plus-edits'
+    reason: str = ""
+
+
 # Guard rule map (contract 2026-10-28-angular-tailwind-rule-documents, t6).
 # Keys are matched exactly first, then by prefix. Each value is (Rule ID, document).
 # `external:` rules carry their own id and no document (handled in resolve_rule_id).
@@ -550,6 +579,148 @@ def scan_height_chain_invariant(content: str, path: Path, exemptions: dict) -> l
     )]
 
 
+def is_template_reference_variable(line: str, match: re.Match) -> bool:
+    """
+    G-5: True when the `#` token at ``match`` is a template reference variable, not a colour.
+
+    All four hold: whitespace or the line start comes before it; the quotes
+    between the last `<` and the token are balanced (even `"` and even `'`);
+    whitespace, `>`, `/`, `=` or the line end comes after it; the hex run has no digit.
+    """
+    start, end = match.start(), match.end()
+    if start > 0 and not line[start - 1].isspace():
+        return False
+    segment = line[line.rfind("<", 0, start) + 1: start]
+    if segment.count('"') % 2 or segment.count("'") % 2:
+        return False
+    if end < len(line) and not (line[end].isspace() or line[end] in ">/="):
+        return False
+    return not any(ch.isdigit() for ch in match.group(0))
+
+
+def line_has_hex_color(line: str) -> bool:
+    """True when the line holds a hex colour; a template reference variable does not count."""
+    for m in RX_HEX_COLOR.finditer(line):
+        try:
+            if is_template_reference_variable(line, m):
+                continue
+        except Exception as e:  # noqa: BLE001 -- V-2: when the test fails, the token is a colour
+            log(f"reference-variable test failed (treating as colour): {e}")
+        return True
+    return False
+
+
+# (rule, decorator pattern, line pattern, suggestion) for the whole-file inline rules.
+INLINE_COMPONENT_RULES = (
+    ("inline-component-template", RX_INLINE_TEMPLATE, r"\btemplate\s*:",
+     "Use templateUrl: './xxx.component.html' -- never inline template:."),
+    ("inline-component-styles", RX_INLINE_STYLES, r"\bstyles\s*:",
+     "Use styleUrl: './xxx.component.scss' -- never inline styles:."),
+)
+
+
+def inline_pattern_is_introduced(rx: re.Pattern, disk_text: str) -> bool:
+    """True when the disk text did not already hold the inline pattern."""
+    return not rx.search(disk_text)
+
+
+def scan_inline_component_rules(
+    content: str, path: Path, exemptions: dict, disk_text: str | None = None,
+) -> list[Violation]:
+    """
+    Inline `template:` / `styles:` in @Component({}). With ``disk_text`` the pattern
+    must be introduced by the edit (G-4); a failed comparison counts as introduced (V-2).
+    """
+    out: list[Violation] = []
+    for rule, rx, line_pattern, suggestion in INLINE_COMPONENT_RULES:
+        if file_rule_exempted(path, rule, exemptions) or not rx.search(content):
+            continue
+        if disk_text is not None:
+            try:
+                if not inline_pattern_is_introduced(rx, disk_text):
+                    continue
+            except Exception as e:  # noqa: BLE001
+                log(f"view-against-disk comparison failed (counting as introduced): {e}")
+        for i, line in enumerate(content.splitlines(), start=1):
+            if re.search(line_pattern, line):
+                out.append(Violation(rule=rule, line_no=i, line_text=line.strip(), suggestion=suggestion))
+                break
+    return out
+
+
+def build_post_edit_view(payload: dict, file_path_str: str) -> PostEditView:
+    """
+    G-4: the file as it will be after this call's edits. A Write is its own content.
+    Otherwise the disk text (strict UTF-8, CRLF folded to LF) with each edit applied in
+    order; ``old_string`` must occur once unless ``replace_all``. The reason names why
+    the view is unavailable: file-unreadable, not-utf8, old-string-missing, old-string-ambiguous.
+    """
+    tool_input = payload.get("tool_input") or {}
+    if isinstance(tool_input.get("content"), str):
+        return PostEditView(file_path_str, tool_input["content"], None, "write-content")
+
+    def unavailable(reason: str) -> PostEditView:
+        return PostEditView(file_path_str, None, None, "disk-plus-edits", reason)
+
+    edits: list[dict] = []
+    if isinstance(tool_input.get("new_string"), str):
+        edits.append(tool_input)
+    for edit in tool_input.get("edits") or []:
+        if isinstance(edit, dict) and (edit.get("file_path") or file_path_str) == file_path_str:
+            edits.append(edit)
+
+    try:
+        disk = Path(file_path_str).read_bytes().decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        return unavailable("not-utf8")
+    except OSError:
+        return unavailable("file-unreadable")
+
+    text = disk
+    for edit in edits:
+        old = str(edit.get("old_string", "")).replace("\r\n", "\n")
+        new = str(edit.get("new_string", "")).replace("\r\n", "\n")
+        found = text.count(old)
+        if found == 0:
+            return unavailable("old-string-missing")
+        if found > 1 and not edit.get("replace_all"):
+            return unavailable("old-string-ambiguous")
+        text = text.replace(old, new) if edit.get("replace_all") else text.replace(old, new, 1)
+    return PostEditView(file_path_str, text, disk, "disk-plus-edits")
+
+
+def scan_whole_file_rules(
+    path: Path, fragments: list[str], view: PostEditView, exemptions: dict,
+) -> tuple[list[Violation], list[Violation]]:
+    """
+    G-4: the whole-file rules, once per file per call. Returns (blocking, warnings).
+
+    The height chain judges the view, or each fragment when there is no view. The two
+    inline rules block on a view that holds the pattern when the disk text did not; the
+    fragments were already judged by scan_component_ts. A Write has no disk text.
+    """
+    blocking: list[Violation] = []
+    warnings: list[Violation] = []
+    if is_template_html(path):
+        for text in ([view.text] if view.text is not None else fragments):
+            warnings.extend(scan_height_chain_invariant(text, path, exemptions))
+    elif is_component_ts(path) and view.text is not None and view.disk is not None:
+        blocking.extend(scan_inline_component_rules(view.text, path, exemptions, view.disk))
+    return blocking, warnings
+
+
+def dedupe_violations(violations: list[Violation]) -> list[Violation]:
+    """Drop a finding repeated with the same rule, line and text; first occurrence wins."""
+    seen: set[tuple[str, int, str]] = set()
+    unique: list[Violation] = []
+    for v in violations:
+        key = (v.rule, v.line_no, v.line_text)
+        if key not in seen:
+            seen.add(key)
+            unique.append(v)
+    return unique
+
+
 def scan_template_html(content: str, path: Path, exemptions: dict) -> list[Violation]:
     violations: list[Violation] = []
     app_rules = load_app_rules(path)
@@ -597,7 +768,7 @@ def scan_template_html(content: str, path: Path, exemptions: dict) -> list[Viola
 
         # Rule: hex colors in templates (except SVG chart exception list).
         if not file_rule_exempted(path, "hex-color", exemptions):
-            if RX_HEX_COLOR.search(line):
+            if line_has_hex_color(line):
                 violations.append(Violation(
                     rule="hex-color",
                     line_no=i,
@@ -639,31 +810,8 @@ def scan_component_ts(content: str, path: Path, exemptions: dict) -> list[Violat
                 continue
             violations.extend(scan_extra_banned_classes(line, path, app_rules, exemptions, i))
 
-    # Rule: inline @Component({ template: ... }) — separate exemption.
-    if not file_rule_exempted(path, "inline-component-template", exemptions):
-        if RX_INLINE_TEMPLATE.search(content):
-            for i, line in enumerate(content.splitlines(), start=1):
-                if re.search(r"\btemplate\s*:", line):
-                    violations.append(Violation(
-                        rule="inline-component-template",
-                        line_no=i,
-                        line_text=line.strip(),
-                        suggestion="Use templateUrl: './xxx.component.html' -- never inline template:.",
-                    ))
-                    break
-
-    # Rule: inline @Component({ styles: ... }) — separate exemption.
-    if not file_rule_exempted(path, "inline-component-styles", exemptions):
-        if RX_INLINE_STYLES.search(content):
-            for i, line in enumerate(content.splitlines(), start=1):
-                if re.search(r"\bstyles\s*:", line):
-                    violations.append(Violation(
-                        rule="inline-component-styles",
-                        line_no=i,
-                        line_text=line.strip(),
-                        suggestion="Use styleUrl: './xxx.component.scss' -- never inline styles:.",
-                    ))
-                    break
+    # Rules: inline @Component({ template: ... }) and ({ styles: ... }).
+    violations.extend(scan_inline_component_rules(content, path, exemptions))
 
     # Rule: gray-utility class strings inside TS string literals.
     # Catches STATE_BADGE-style maps and getStatusClass()-style helpers that
@@ -1109,6 +1257,8 @@ def main() -> None:
     blocking: list[Violation] = []
     warnings: list[Violation] = []
     target_for_block = ""
+    findings: dict[str, list[Violation]] = {}  # per file, in first-seen order
+    fragments: dict[str, list[str]] = {}  # new text of each edit, for the whole-file pass
 
     for file_path_str, new_content in pairs:
         if not file_path_str:
@@ -1119,21 +1269,13 @@ def main() -> None:
             continue
 
         if is_template_html(path):
-            vs = scan_template_html(new_content, path, rule_exemptions)
-            if vs:
-                blocking.extend(vs)
-                target_for_block = target_for_block or file_path_str
-            # WARN-level: scroll-edge height-chain invariant. Trial window —
-            # not added to `blocking`, only emitted via stderr. Promote to BLOCK
-            # by moving inside scan_template_html after two regression-free weeks.
-            hw = scan_height_chain_invariant(new_content, path, rule_exemptions)
-            if hw:
-                emit_warnings(file_path_str, hw)
+            findings.setdefault(file_path_str, []).extend(
+                scan_template_html(new_content, path, rule_exemptions))
+            fragments.setdefault(file_path_str, []).append(new_content)
         elif is_component_ts(path):
-            vs = scan_component_ts(new_content, path, rule_exemptions)
-            if vs:
-                blocking.extend(vs)
-                target_for_block = target_for_block or file_path_str
+            findings.setdefault(file_path_str, []).extend(
+                scan_component_ts(new_content, path, rule_exemptions))
+            fragments.setdefault(file_path_str, []).append(new_content)
         elif is_component_scss(path):
             vs = scan_component_scss(new_content, path, {
                 **rule_exemptions,
@@ -1141,6 +1283,38 @@ def main() -> None:
             # SCSS violations are WARN only.
             if vs:
                 emit_scss_warnings(file_path_str, vs)
+
+    # Whole-file rules: once per file per call, on the post-edit view (G-4). Each
+    # step falls back to the stricter or the earlier outcome when it raises (V-2).
+    for file_path_str, texts in fragments.items():
+        path = Path(file_path_str)
+        try:
+            view = build_post_edit_view(payload, file_path_str)
+        except Exception as e:  # noqa: BLE001
+            log(f"post-edit view failed (judging fragments): {e}")
+            view = PostEditView(file_path_str, None, None, "disk-plus-edits", "builder-error")
+        try:
+            extra, hw = scan_whole_file_rules(path, texts, view, rule_exemptions)
+        except Exception as e:  # noqa: BLE001
+            log(f"whole-file pass failed (judging fragments): {e}")
+            extra = []
+            hw = [w for t in texts for w in scan_height_chain_invariant(t, path, rule_exemptions)
+                  ] if is_template_html(path) else []
+        findings.setdefault(file_path_str, []).extend(extra)
+        # WARN-level: scroll-edge height-chain invariant. Trial window —
+        # not added to `blocking`, only emitted via stderr. Promote to BLOCK
+        # by moving inside scan_template_html after two regression-free weeks.
+        if hw:
+            emit_warnings(file_path_str, hw)
+
+    for file_path_str, vs in findings.items():
+        try:
+            vs = dedupe_violations(vs)
+        except Exception as e:  # noqa: BLE001
+            log(f"de-duplication failed (printing every finding): {e}")
+        if vs:
+            blocking.extend(vs)
+            target_for_block = target_for_block or file_path_str
 
     if blocking:
         print(format_block_message(target_for_block, blocking), file=sys.stderr)
