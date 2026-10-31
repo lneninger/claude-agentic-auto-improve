@@ -58,7 +58,7 @@ Banned: text-gray-*, bg-gray-*, border-gray-* -> use text-on-surface-variant, bg
 
 Banned: hardcoded hex colors in templates -> use Material token utilities (text-primary, bg-surface-container, border-outline-variant, etc.).
 
-- Enforced by: guard blocks (`hex-color`), in templates only. The check also matches a template reference variable such as `#add`. If it does, rename the variable.
+- Enforced by: guard blocks (`hex-color`), in templates only. The check skips a template reference variable such as `#add`. A token that stands alone after whitespace and has no digit (for example `#fff`) is read as a reference variable and passes.
 - Allowed exceptions: none. For a chart, bind a signal that reads a `var(--mat-sys-*)` token (`T-008`).
 
 ### T-005 — The theme bridge
@@ -106,7 +106,7 @@ A static `style` never carries a colour, background or border value. A fixed the
 
 When you edit a file that has inline token styles, migrate them in the same edit. Do not touch files outside the task.
 
-- Enforced by: not enforced. The guard scans only the new text of an edit.
+- Enforced by: not enforced. The guard's line rules scan only the new text of an edit, so they do not see the inline styles a file already holds.
 
 ## Component stylesheets
 
@@ -145,7 +145,7 @@ Set the scroll height with a Tailwind class on the `scroll-edge` element (`h-80`
 
 A scroll wrapper that fills its parent needs a parent with a height. Add `h-full min-h-0` to the template's root element, or `flex-1 min-h-0` inside a flex parent. If you do not, the content collapses to zero height and the page looks empty. This broke twice in the source project.
 
-- Enforced by: guard warns (`height-chain-warn:scroll-edge-no-root-height`). On an edit it sees only the new fragment, so it cannot judge the whole file.
+- Enforced by: guard warns (`height-chain-warn:scroll-edge-no-root-height`). On an edit it judges the whole file as it will be after the edit; when that file cannot be built (missing, not UTF-8, or the old text is absent or ambiguous) it judges the new fragment alone.
 
 ## Other styling rules
 
