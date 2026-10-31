@@ -77,15 +77,16 @@
     "map": [
       {
         "tag": "INFRA",
-        "globs": ["skills/**", "agents/**", ".claude/**", ".claude-plugin/**", ".cursor-plugin/**", "plugin.json"],
-        "means": "the plugin's scripts, skills, agents, manifests and .claude records"
+        "globs": ["skills/**", "agents/**", ".claude/**", ".claude-plugin/**", ".cursor-plugin/**", ".github/**", "plugin.json", "CLAUDE.md"],
+        "means": "the plugin's scripts, skills, agents, manifests, CI workflows, project rules and .claude records"
       },
       { "tag": "TESTS", "globs": ["**/tests/**"], "means": "any test folder" },
       { "tag": "DOCS", "globs": ["README.md", "docs/**"], "means": "the README and prose documentation outside .claude" }
     ]
   },
   "contractLanding": {
-    "$comment": "This project's landing gate. land_contract.py runs each step in its own landing checkout of the parent branch, after merging the default branch into it, and merges nothing unless every step exits 0. Every step reads its result from the exit code alone, so no result file is written into the tree. The hook-tests step runs each hook test file directly, because two of them are script-style and fail unittest discovery at import. test_gate_cost.py is left out on purpose: it is a timing measurement that needs a production-sized contracts folder named by an environment variable, not a correctness check.",
+    "$comment": "This project's landing gate. land_contract.py runs each step in its own landing checkout of the parent branch, after merging the default branch into it, and merges nothing unless every step exits 0. Every step reads its result from the exit code alone, so no result file is written into the tree. The hook-tests step runs each hook test file directly, because two of them are script-style and fail unittest discovery at import. test_gate_cost.py is left out on purpose: it is a timing measurement that needs a production-sized contracts folder named by an environment variable, not a correctness check. versionRaise turns on the landing's version raise (P7b): a sub-task pull request never raises the plugin version, and the landing raises it once, minor + 1, after the default branch is merged in.",
+    "versionRaise": true,
     "verification": {
       "steps": [
         {

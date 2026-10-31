@@ -340,7 +340,8 @@ class TestVerifyOutcomeSets(T.LandCase):
 
     def test_passes_today_by_design_landing_outcomes_is_unchanged(self):
         lc = self.mod()
-        self.assertEqual(len(lc.LANDING_OUTCOMES), 28, msg="3 successes and 25 halts")
+        self.assertEqual(len(lc.LANDING_OUTCOMES), 29, msg="3 successes and 26 halts (issue 113 adds "
+                                                           "version-raise-failed)")
         self.assertEqual(set(lc.LANDING_OUTCOMES) & NEW_MEMBERS, set(), msg="none of the new four")
 
     def test_verified_and_module_tags_read_are_successes_with_exit_zero(self):

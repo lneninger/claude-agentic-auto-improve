@@ -2884,5 +2884,44 @@ class ForbiddenTokenScanTests(unittest.TestCase):
         self.assertEqual(hits, [], msg=f"INV-5: cleanup_delivered.py must never force a removal, prune, or rmtree; found {hits}")
 
 
+class ParentBranchRuleLeavesCleanupUnchangedTests(unittest.TestCase):
+    """Issue 113, L-3: `_names_contract` and `_brief_names_contract` become thin wrappers over ONE matcher.
+    cleanup_delivered.py keeps calling `pr_merged._names_contract` exactly as before: a brief whose
+    `contract:` is unset (the value `none`, as this very work item's) is still read as "another contract's".
+    """
+
+    SLUG = "2026-10-30-demo-contract"
+
+    def pr_merged(self):
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import pr_merged
+        finally:
+            sys.path.pop(0)
+        return pr_merged
+
+    def test_the_call_site_is_unchanged(self):
+        text = CLEANUP.read_text(encoding="utf-8")
+        self.assertTrue("pr_merged._names_contract(" in text, "cleanup_delivered.py calls the wrapper, as before")
+        self.assertFalse("brief_names_contract(" in text, "and does not call the new matcher itself")
+
+    def test_the_wrapper_answers_as_it_always_did(self):
+        names = self.pr_merged()._names_contract
+        for value, expected in (
+            (".claude/concepts/%s.md" % self.SLUG, True), (self.SLUG, True), (self.SLUG + ".md", True),
+            ("none", False), ("", False), (".claude/concepts/2026-01-01-other.md", False),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(names(value, self.SLUG), expected)
+
+    def test_the_one_matcher_exists_and_the_wrapper_agrees_with_it(self):
+        module = self.pr_merged()
+        matcher = getattr(module, "brief_names_contract", None)
+        self.assertIsNotNone(matcher, "pr_merged.brief_names_contract (the one matcher) does not exist yet")
+        for value in (".claude/concepts/%s.md" % self.SLUG, "none", "none - text", "", "<placeholder>", "UNKNOWN"):
+            with self.subTest(value=value):
+                self.assertEqual(module._names_contract(value, self.SLUG), matcher({"contract": value}, self.SLUG))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

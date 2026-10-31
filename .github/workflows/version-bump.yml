@@ -2,7 +2,9 @@ name: version-bump
 
 on:
   pull_request:
-    branches: [master]
+
+permissions:
+  contents: read
 
 jobs:
   version-bump:
@@ -12,7 +14,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Plugin version is raised when shipped files change
-        run: python3 .claude/scripts/check_version_bump.py --base origin/${{ github.base_ref }}
+        # The refs are pull-request-controlled text: pass them through env: and quote them, never ${{ }} in run:.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 .claude/scripts/check_version_bump.py --base "origin/$BASE_REF" --default-branch "$DEFAULT_BRANCH" --head-ref "$HEAD_REF"
 
   tests:
     runs-on: ubuntu-latest

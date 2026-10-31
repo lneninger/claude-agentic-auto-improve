@@ -1106,5 +1106,454 @@ class TestP15ForgetsTheRemovedCheckout(StageCase):
         self.assertEqual(norm(phase["worktree"]), norm(path), "and carried forward while it still exists")
 
 
+# ===========================================================================
+# Issue 113: P7b, the Landing version raise (R-1, R-2, R-5), and the landing readers' feeders.
+#
+# P7b runs after P7 (the default branch merged into the parent branch) and before the verification:
+# `check_version_bump.py --raise`, then `--exact`, committed on the parent branch. It reads its switch,
+# contractLanding.versionRaise, from the conventions file at origin/<default>. It runs whether or not P7
+# merged anything, and is idempotent. A raise that cannot be made halts `version-raise-failed`.
+#
+# The fixture puts the real check_version_bump.py and four manifest files into the repository, so the
+# assertions hold wherever the implementation finds the script. Real git, fake network edges (Stage).
+# ===========================================================================
+_VBUMP_SCRIPT = Path(__file__).resolve().parent.parent / "check_version_bump.py"
+_MANIFEST_NAMES = ("plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json",
+                   ".claude-plugin/marketplace.json")
+
+
+def manifests_at(version):
+    plugin = json.dumps({"name": "x", "version": version, "description": "d"}, indent=2) + "\n"
+    market = json.dumps({"name": "m", "version": version,
+                         "plugins": [{"name": "x", "version": version}]}, indent=2) + "\n"
+    return {"plugin.json": plugin, ".claude-plugin/plugin.json": plugin,
+            ".cursor-plugin/plugin.json": plugin, ".claude-plugin/marketplace.json": market}
+
+
+def versions_in_tree(root):
+    found = []
+    for name in _MANIFEST_NAMES:
+        data = json.loads((Path(root) / name).read_text(encoding="utf-8"))
+        if "version" in data:
+            found.append(data["version"])
+        found.extend(entry["version"] for entry in data.get("plugins", []))
+    return found
+
+
+def isolated_git_env(folder):
+    """The environment a spawned git sees: an identity, signing off, an empty global config, no system config."""
+    empty = Path(folder) / "empty-gitconfig"
+    empty.write_text("", encoding="utf-8")
+    env = {k: _GIT_ENV[k] for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")}
+    env.update(GIT_CONFIG_GLOBAL=str(empty), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="1",
+               GIT_CONFIG_KEY_0="commit.gpgsign", GIT_CONFIG_VALUE_0="false")
+    return env
+
+
+class TestP7bVersionRaise(StageCase):
+
+    def landing(self, *, master="0.11.3", parent="0.10.0", versionRaise=True, parent_extra=None,
+                move_master=True, subdir="k"):
+        """The parent branch holds ``parent``; origin/master holds ``master``; one source change on the parent."""
+        folder = Path(self._tmp.name) / subdir
+        folder.mkdir()
+        base_files = dict(manifests_at(parent))
+        base_files[".claude/scripts/check_version_bump.py"] = _VBUMP_SCRIPT.read_text(encoding="utf-8")
+        cfg = landing_config(steps=[STEP_CLEAN])
+        if versionRaise is not None:
+            cfg["versionRaise"] = versionRaise
+        parent_files = dict(SRC_CHANGE)
+        parent_files.update(parent_extra or {})
+        kit = Kit(folder, config=cfg, base_files=base_files, parent_files=parent_files)
+        if move_master:
+            kit.commit_remote("master", manifests_at(master), "master moves")
+        st = Stage(self, kit)
+        self.isolated = isolated_git_env(folder)
+        # Test review W-5: the raise commit is made by a spawned `git commit` that inherits the environment,
+        # so the landing runs under a pinned one (identity, signing off, empty global config).
+        with mock.patch.dict(os.environ, self.isolated):
+            return st, st.run()
+
+    def exact(self, st):
+        proc = _REAL_SUBPROCESS_RUN(
+            [sys.executable, "-B", str(_VBUMP_SCRIPT), "--exact", "--default-branch", "master"],
+            cwd=str(st.worktree), capture_output=True, text=True, env=dict(os.environ, **self.isolated))
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+    def test_the_landing_environment_is_isolated_from_the_developers_git_settings(self):
+        self.landing(subdir="env-pin")
+        env = self.isolated
+        self.assertEqual(Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8"), "", "an empty global config")
+        self.assertEqual((env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]), ("commit.gpgsign", "false"))
+        self.assertTrue(env.get("GIT_AUTHOR_EMAIL") and env.get("GIT_COMMITTER_EMAIL"), "an identity")
+
+    def test_the_landing_commits_one_minor_raise_against_the_default_branch_after_merging_it(self):
+        st, report = self.landing()
+        self.assertEqual(report["outcome"], "landed", "fixture sanity: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(versions_in_tree(st.worktree), ["0.12.0"] * 5,
+                         "R-1: the default branch is at 0.11.3, so the landing head carries 0.12.0 (minor + 1, patch 0)")
+        code, out = self.exact(st)
+        self.assertEqual(code, 0, "and --exact accepts the committed head. got: %s" % out)
+        self.assertEqual(git(st.worktree, "status", "--porcelain"), "", "the raise is committed, not left in the tree")
+
+    def test_p7b_runs_even_when_p7_had_nothing_to_merge(self):
+        # The parent branch was cut from a master that is already at 0.11.3: M is an ancestor of the head.
+        st, report = self.landing(master="0.11.3", parent="0.11.3", move_master=False)
+        self.assertEqual(report["outcome"], "landed", "fixture sanity: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(versions_in_tree(st.worktree), ["0.12.0"] * 5, "R-2: P7b does not depend on P7 merging")
+
+    def test_positive_control_p7b_is_idempotent_when_the_head_already_carries_the_raise(self):
+        st, report = self.landing(master="0.11.3", parent="0.11.3", move_master=False,
+                                  parent_extra=manifests_at("0.12.0"))
+        self.assertEqual(report["outcome"], "landed", "fixture sanity: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(versions_in_tree(st.worktree), ["0.12.0"] * 5, "R-2: never 0.13.0 on a second pass")
+
+    def test_a_raise_that_cannot_be_made_halts_version_raise_failed_and_pushes_nothing(self):
+        st, report = self.landing(master="0.11.3", parent="0.11.3", move_master=False,
+                                  parent_extra={"plugin.json": "{ this is not json"})
+        self.assertEqual(report["outcome"], "version-raise-failed",
+                         "an unreadable manifest cannot be raised: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(st.count("git_push"), 0, "nothing is pushed after a halt")
+        self.assertEqual(st.count("gh_pr_merge"), 0)
+
+    def test_positive_control_without_the_switch_the_manifests_are_not_touched(self):
+        for label, value in (("switch absent", None), ("switch off", False)):
+            with self.subTest(case=label):
+                st, report = self.landing(versionRaise=value, subdir="switch-" + label.replace(" ", "-"))
+                self.assertEqual(report["outcome"], "landed", "%s %s" % (report["outcome"], report["detail"]))
+                self.assertEqual(versions_in_tree(st.worktree), ["0.11.3"] * 5,
+                                 "contractLanding.versionRaise is off: the landing leaves the version alone")
+
+
+class TestFeedersPassUnfilteredBriefs(StageCase):
+    """L-3: the landing's P1 reads the parent brief through the one selector, whatever its contract: field holds."""
+
+    def test_a_parent_brief_whose_contract_field_is_none_does_not_stop_the_landing_at_parent_unresolved(self):
+        brief_rel = BRIEF_DIR + "2026-10-05-394-demo.md"
+        parent_brief = brief_md(394, branch=PARENT, parent_issue=None).replace(
+            "contract: .claude/concepts/%s.md" % SLUG, "contract: none")
+        self.assertIn("contract: none", parent_brief, "fixture sanity")
+        contract = ("# Demo contract\n\n**Status:** approved\n**Work Item Brief:** %s\n" % brief_rel
+                    + CONTRACT_TEXT.split("\n", 1)[1])
+        kit = Kit(Path(self._tmp.name), config=landing_config(steps=[STEP_CLEAN]),
+                  base_files={".claude/concepts/%s.md" % SLUG: contract},
+                  parent_files=dict(SRC_CHANGE, **{brief_rel: parent_brief}))
+        report = Stage(self, kit).run()
+        self.assertEqual(report["outcome"], "landed",
+                         "the contract's header names the parent brief; contract: none is unset, not another "
+                         "contract's. got %s: %s" % (report["outcome"], report["detail"]))
+
+
+# ===========================================================================
+# Code review W3 + test review B-2 (mutant M5), landing side: the header brief's branch: is PARENT, and every
+# Sub-Task brief says base: feature/q. Neither P0 nor P1 may choose a side in silence.
+# ===========================================================================
+_DISAGREE_BRIEF = BRIEF_DIR + "2026-10-05-394-demo.md"
+
+
+def disagreeing_kit(tmp, status="approved", header_branch=None, header_contract=None, brief_base="feature/q",
+                    config=None, parent_extra=None):
+    """Two mergeable blocks; the header brief is on PARENT (or ``header_branch``) while the Sub-Task briefs
+    say ``base: brief_base``. ``header_contract`` rewrites the header brief's contract: value."""
+    contract = ("# Demo contract\n\n**Status:** %s\n**Work Item Brief:** %s\n" % (status, _DISAGREE_BRIEF)
+                + CONTRACT_TEXT.split("\n", 1)[1])
+    kit = Kit(tmp, config=config or landing_config(steps=[STEP_CLEAN]), brief_base=brief_base,
+              base_files={".claude/concepts/%s.md" % SLUG: contract},
+              parent_files={**SRC_CHANGE, **(parent_extra or {})})
+    if header_branch is not None or header_contract is not None:
+        text = brief_md(394, branch=header_branch or PARENT, parent_issue=None)
+        if header_contract is not None:
+            text = text.replace("contract: .claude/concepts/%s.md" % SLUG, "contract: %s" % header_contract)
+        write_files(kit.main, {_DISAGREE_BRIEF: text})  # the operator's disk is what P0 reads
+    return kit
+
+
+class TestLauncherHeaderBriefDisagreement(LauncherCase):
+
+    def test_p0_halts_ambiguous_parent_and_starts_no_landing(self):
+        kit = disagreeing_kit(self._tmp.name)
+        _, execm, report = self.launch(kit)
+        self.assertEqual(self.outcome(report), "ambiguous-parent",
+                         "the header brief says %s, the sub-task briefs say feature/q: P0 must name the "
+                         "disagreement, not launch a landing of one of them (got %s: %s)"
+                         % (PARENT, report.get("outcome"), report.get("detail")))
+        execm.assert_not_called()
+
+
+class TestLandingP0JudgesOnlyJudgedContracts(LauncherCase):
+    """Fix review F2. P0's header-brief check is the layout check of /pr-merged, applied to the same contracts:
+    R-6 judges Status draft or approved with two or more mergeable blocks, and nobody else."""
+
+    def test_an_exempt_contract_is_not_refused_at_p0_for_a_header_brief_that_differs(self):
+        for status in ("implemented", "rejected", "superseded", "archived"):
+            with self.subTest(status=status):
+                folder = Path(self._tmp.name) / ("exempt-" + status)
+                folder.mkdir()
+                _, execm, report = self.launch(disagreeing_kit(folder, status=status))
+                outcome = report["outcome"] if report else None
+                self.assertNotIn(outcome, ("ambiguous-parent", "parent-is-default"),
+                                 "R-6: a %s contract is not judged, so the header brief's branch is not compared "
+                                 "with the children's base at P0 (got %s: %s)"
+                                 % (status, outcome, (report or {}).get("detail")))
+
+    def test_a_judged_contract_whose_header_brief_is_on_the_default_branch_reports_parent_is_default(self):
+        folder = Path(self._tmp.name) / "default-header"
+        folder.mkdir()
+        _, execm, report = self.launch(disagreeing_kit(folder, header_branch="master"))
+        self.assertEqual(self.outcome(report), "parent-is-default",
+                         "delivery_layout calls this parent-is-default; P0 must use the same reason, not "
+                         "ambiguous-parent (got %s: %s)" % (report.get("outcome"), report.get("detail")))
+        execm.assert_not_called()
+
+    def test_a_header_brief_whose_contract_field_is_a_placeholder_is_still_the_header_brief(self):
+        # The matcher treats tbd / n/a as absent, so the header-linked brief (branch PARENT) still disagrees
+        # with the children (feature/q): the landing halts exactly as with a filled-in contract: field.
+        for value in ("tbd", "n/a"):
+            with self.subTest(contract_field=value):
+                folder = Path(self._tmp.name) / ("placeholder-" + value.replace("/", ""))
+                folder.mkdir()
+                _, execm, report = self.launch(disagreeing_kit(folder, header_contract=value))
+                self.assertEqual(self.outcome(report), "ambiguous-parent", report.get("detail"))
+                execm.assert_not_called()
+
+    def test_a_parent_branch_landing_whose_contract_cannot_be_read_halts_unverifiable(self):
+        # Final review N3: an unreadable contract must not make the header check vanish (zero blocks, no
+        # layout, nothing to compare). Here every brief agrees, so only the missing contract can stop it.
+        folder = Path(self._tmp.name) / "no-contract"
+        folder.mkdir()
+        kit = disagreeing_kit(folder, brief_base=PARENT)
+        (kit.main / ".claude" / "concepts" / ("%s.md" % SLUG)).unlink()
+        _, execm, report = self.launch(kit)
+        self.assertEqual(self.outcome(report), "unverifiable",
+                         "P0 cannot judge the layout of a contract it cannot read (got %s: %s)"
+                         % (report.get("outcome"), report.get("detail")))
+        execm.assert_not_called()
+
+    def test_the_remedy_for_a_missing_contract_is_to_restore_it_not_to_retry(self):
+        # Final review N-4 / contract note: the default `unverifiable` remedy ("make the read succeed ... and
+        # rerun") reads as a retry, and a retry cannot bring a missing file back.
+        folder = Path(self._tmp.name) / "no-contract-remedy"
+        folder.mkdir()
+        kit = disagreeing_kit(folder, brief_base=PARENT)
+        (kit.main / ".claude" / "concepts" / ("%s.md" % SLUG)).unlink()
+        _, _execm, report = self.launch(kit)
+        self.assertEqual(self.outcome(report), "unverifiable", report.get("detail"))
+        remedy = report.get("remedy") or ""
+        self.assertTrue("restore" in remedy and (".claude/concepts/%s.md" % SLUG) in remedy
+                        and "parent branch" in remedy,
+                        "the remedy: restore .claude/concepts/<slug>.md on the parent branch, then rerun. got %r" % remedy)
+        self.assertNotIn("network", remedy)
+
+    def test_p0_delegates_the_check_to_the_one_layout_function(self):
+        text = (Path(__file__).resolve().parent.parent / "land_contract.py").read_text(encoding="utf-8")
+        start = text.index("def _launch_land(")
+        end = text.index("\ndef ", start + 10)
+        self.assertTrue("delivery_layout(" in text[start:end],
+                        "P0 (_launch_land) asks pr_merged.delivery_layout, so the status gate, the reason "
+                        "vocabulary and the placeholder rule exist once")
+
+    def test_a_malformed_protected_branches_value_is_not_split_into_characters(self):
+        # NIT 4: protectedBranches: "release" (a string) must read as the default only. Split into characters
+        # it would make a branch called "e" protected. The contract has no Status, so only the topology check runs.
+        folder = Path(self._tmp.name) / "malformed"
+        folder.mkdir()
+        kit = Kit(folder, config=landing_config(protectedBranches="release"), brief_base="e")
+        _, execm, report = self.launch(kit)
+        self.assertNotEqual(self.outcome(report), "parent-is-default",
+                            "'e' is not a protected branch: the string is not a list of characters (got %s: %s)"
+                            % (report.get("outcome"), report.get("detail")))
+
+
+class TestLandingNeverReadsARecordVerdict(StageCase):
+    """R-9 (amended 2026-10-30): the landing relies on its own checks and never on a record's verdict, because a
+    record has none. It repeats R-8's layout warning in the Landing Report and does not halt on it."""
+
+    WARNING = "single-branch-delivery"
+
+    def land(self, name, **record):
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        extra = {REC_DIR + "t1-backend.yaml": record_yaml(**record)} if record else None
+        st = Stage(self, disagreeing_kit(folder, brief_base=PARENT, parent_extra=extra))
+        return st.run()
+
+    def reasons(self, report):
+        return [w.get("reason") if isinstance(w, dict) else w for w in report.get("layout_warnings") or []]
+
+    def test_a_record_merged_into_the_default_branch_is_landed_and_the_report_repeats_the_warning(self):
+        report = self.land("on-default", base_ref="master", base_is_default=True)
+        self.assertEqual(report["outcome"], "landed", "the landing does not halt on it: %s: %s"
+                         % (report["outcome"], report["detail"]))
+        self.assertIn(self.WARNING, self.reasons(report), "the Landing Report repeats the warning (R-9)")
+
+    def test_records_on_the_parent_branch_give_an_empty_warning_list(self):
+        report = self.land("on-parent", base_ref=PARENT, base_is_default=False)
+        self.assertEqual(report["outcome"], "landed", report["detail"])
+        self.assertEqual(report.get("layout_warnings"), [], "the key is present and empty")
+
+    def test_a_hand_made_layout_or_failure_field_is_never_read(self):
+        report = self.land("verdict-fields", base_ref=PARENT, base_is_default=False,
+                           layout="single-branch-accepted", failure="single-branch-delivery")
+        self.assertEqual(report["outcome"], "landed", "no record carries a verdict, so none is read: %s"
+                         % report["detail"])
+
+    def test_the_landing_script_reads_no_accepted_blocks_and_no_record_layout(self):
+        text = (Path(__file__).resolve().parent.parent / "land_contract.py").read_text(encoding="utf-8")
+        for token in ("accepted_blocks", "single-branch-accepted"):
+            self.assertFalse(token in text, "land_contract.py must not mention %s" % token)
+        self.assertIsNone(re.search(r"""\.get\(\s*["']layout["']|\[\s*["']layout["']\s*\]""", text),
+                          "and reads no `layout` field of a record")
+
+
+class TestLandingReportWarningForms(StageCase):
+    """R-9 (amended): the Landing Report repeats layout_warnings in the same forms as --status: absent for an
+    unjudged contract, [] when judged and every read succeeded, `unverifiable` when the listing failed. The
+    landing never halts on a warning."""
+
+    def run_landing(self, name, kit_factory, **run_kwargs):
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        st = Stage(self, kit_factory(folder))
+        return st, st.run(**run_kwargs)
+
+    def test_the_key_is_absent_for_an_unjudged_contract(self):
+        # The default Kit contract has no Status, so it is not judged (R-6).
+        _st, report = self.run_landing(
+            "unjudged", lambda folder: Kit(folder, config=landing_config(steps=[STEP_CLEAN]),
+                                           parent_files=dict(SRC_CHANGE)))
+        self.assertEqual(report["outcome"], "landed", report["detail"])
+        self.assertNotIn("layout_warnings", report, "absent, never [] (W1)")
+
+    def test_the_key_is_absent_for_an_implemented_contract(self):
+        _st, report = self.run_landing("implemented",
+                                       lambda folder: disagreeing_kit(folder, status="implemented", brief_base=PARENT))
+        self.assertEqual(report["outcome"], "landed", report["detail"])
+        self.assertNotIn("layout_warnings", report)
+
+    def test_a_failed_origin_listing_is_unverifiable_and_the_landing_still_lands(self):
+        import land_contract as lc_module
+        real = lc_module._git
+
+        def failing(cwd, *args, **kwargs):
+            if args and args[0] == "ls-tree" and "origin/master" in args:
+                return 128, "fatal: unable to read tree"
+            return real(cwd, *args, **kwargs)
+
+        _st, report = self.run_landing(
+            "listing-fails", lambda folder: disagreeing_kit(folder, brief_base=PARENT),
+            extra_patches=[mock.patch.object(lc_module, "_git", failing)])
+        self.assertEqual(report["outcome"], "landed", "the landing does not halt on it: %s" % report["detail"])
+        reasons = [w.get("reason") if isinstance(w, dict) else w for w in report.get("layout_warnings") or []]
+        self.assertEqual(reasons, ["unverifiable"],
+                         "a failed listing is unverifiable, not []. got %r" % (report.get("layout_warnings"),))
+
+
+class TestLandingReportForACompleteContract(StageCase):
+    """Forms review W3 / R-9: the Landing Report exists only for a complete contract. It repeats what the records
+    show in the absent, [] and unverifiable forms, never `held`, and the landing never halts on it."""
+
+    def reasons(self, report):
+        return [w.get("reason") if isinstance(w, dict) else w for w in report.get("layout_warnings") or []]
+
+    def land(self, name, patches=(), **record):
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        extra = {REC_DIR + "t1-backend.yaml": record_yaml(**record)} if record else None
+        return Stage(self, disagreeing_kit(folder, brief_base=PARENT, parent_extra=extra)).run(extra_patches=list(patches))
+
+    def test_it_repeats_what_the_records_show_for_a_complete_contract_and_never_reports_held(self):
+        import land_contract as lc_module
+        real = lc_module._git
+
+        def failing(cwd, *args, **kwargs):
+            if args and args[0] == "ls-tree" and "origin/master" in args:
+                return 128, "fatal: unable to read tree"
+            return real(cwd, *args, **kwargs)
+
+        seen = {}
+        seen["clean"] = self.land("clean", base_ref=PARENT, base_is_default=False)
+        seen["single-branch"] = self.land("single", base_ref="master", base_is_default=True)
+        seen["unreadable"] = self.land("unreadable", patches=[mock.patch.object(lc_module, "_git", failing)])
+        for label, report in seen.items():
+            self.assertEqual(report["outcome"], "landed", "%s: the landing never halts on a warning: %s"
+                             % (label, report["detail"]))
+            self.assertNotIn("held", self.reasons(report), "%s: the landing runs only when no Records pull request "
+                                                           "is open, so it never reports held" % label)
+        self.assertEqual(seen["clean"].get("layout_warnings"), [], "[] for a complete contract with nothing to report")
+        self.assertEqual(self.reasons(seen["single-branch"]), ["single-branch-delivery"],
+                         "it repeats what the records show, even though the contract is complete")
+        self.assertEqual(self.reasons(seen["unreadable"]), ["unverifiable"])
+
+
+class TestTheLandingUnverifiableNamesTheFailedRead(StageCase):
+    """Forms review N3 / R-9: the landing's `unverifiable` detail and remedy name the ref or listing whose read
+    failed: the parent listing, the records listing, or origin/<default>. One test per failing input."""
+
+    def _fail_listing(self, name, ref, kit_setup=None):
+        import land_contract as lc_module
+        real = lc_module._git
+
+        def failing(cwd, *args, **kwargs):
+            if args and args[0] == "ls-tree" and ref in args:
+                return 128, "fatal: unable to read tree"
+            return real(cwd, *args, **kwargs)
+
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        kit = disagreeing_kit(folder, brief_base=PARENT)
+        if kit_setup:
+            kit_setup(kit)
+        st = Stage(self, kit)
+        head_before = st.head()
+        report = st.run(extra_patches=[mock.patch.object(lc_module, "_git", failing)])
+        return st, report, head_before
+
+    def test_the_default_branch_listing_gives_only_the_warning_and_the_landing_lands(self):
+        _st, report, _head = self._fail_listing("default", "origin/master")
+        self.assertEqual(report["outcome"], "landed", "a warning never halts the landing: %s" % report["detail"])
+        said = json.dumps(report.get("layout_warnings"))
+        self.assertIn("origin/master", said, "the unverifiable warning names the listing that failed. %s" % said)
+
+    def test_the_records_branch_listing_gives_only_the_warning_and_the_landing_lands(self):
+        slug_branch = "docs/%s-records" % SLUG
+        ref = "origin/%s" % slug_branch
+        _st, report, _head = self._fail_listing(
+            "records", ref,
+            kit_setup=lambda kit: kit.commit_remote(slug_branch, {"RECORDS.txt": "x\n"}, "records branch"))
+        self.assertEqual(report["outcome"], "landed", "a warning never halts the landing: %s" % report["detail"])
+        said = json.dumps(report.get("layout_warnings"))
+        self.assertIn(ref, said, "the unverifiable warning names the listing that failed. %s" % said)
+
+    def test_the_parent_branch_listing_halts_unverifiable_at_p1_before_anything_is_merged_or_pushed(self):
+        # Last-review W1: the parent's records cannot be read, so the landing cannot judge the contract at all.
+        ref = "origin/%s" % PARENT
+        st, report, head_before = self._fail_listing("parent", ref)
+        self.assertEqual((report["outcome"], report["gate"]), ("unverifiable", "P1"),
+                         "a failed parent listing is a halt at P1, not 'records missing'. got %s at %s: %s"
+                         % (report["outcome"], report["gate"], report["detail"]))
+        said = " ".join(str(x) for x in (report.get("detail"), report.get("remedy")))
+        self.assertIn(ref, said, "and the failed ref is named in the detail or remedy: %s" % said)
+        self.assertEqual(st.head(), head_before, "nothing was merged or reset")
+        self.assertEqual(st.count("git_push"), 0, "nothing was pushed")
+        self.assertEqual(st.count("gh_pr_merge"), 0, "and no pull request was merged")
+
+
+class TestStageHeaderBriefDisagreement(StageCase):
+
+    def test_p1_never_lands_whichever_parent_the_launcher_passes(self):
+        # P1 already halts today (topology versus the passed parent); this pins it as a regression guard.
+        for parent in (PARENT, "feature/q"):
+            with self.subTest(parent=parent):
+                folder = Path(self._tmp.name) / ("p1-" + parent.replace("/", "-"))
+                folder.mkdir()
+                st = Stage(self, disagreeing_kit(folder))
+                report = st.run(parent=parent)
+                self.assertIn(report["outcome"], ("ambiguous-parent", "parent-unresolved"),
+                              "no silent choice between %s and feature/q. got %s: %s"
+                              % (PARENT, report["outcome"], report["detail"]))
+                self.assertEqual(st.count("git_push"), 0, "nothing is pushed")
+                self.assertEqual(st.count("gh_pr_merge"), 0, "and nothing is merged")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

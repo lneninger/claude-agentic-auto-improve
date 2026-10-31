@@ -485,5 +485,62 @@ class TestSkillScriptLookup(unittest.TestCase):
         self.each(check)
 
 
+class TestDesignFirstApprovalGateLookup(unittest.TestCase):
+    """Issue 113 (Parent Branch Delivery Rule): the /design-first approval gate runs
+    `pr_merged.py --status --json` through the STANDARD script lookup block, so the generic cases above
+    (newest cache folder, recorded install path, project copy first, nothing found) also cover it.
+
+    Contract: .claude/concepts/2026-10-30-parent-branch-delivery-rule.md, Bypass flows ("the /design-first
+    approval gate, which runs --status through the standard script lookup block") and the 2026-10-15 journal
+    lesson: a skill that adds or edits a lookup block names the test that pins it; this class is that test's
+    entry for the gate.
+    """
+
+    REL = "skills/design-first/SKILL.md"
+
+    def gate_snippets(self) -> list[dict]:
+        return [s for s in snippets() if s["file"] == self.REL]
+
+    def run_lines(self) -> list[str]:
+        """The `py -3 "$VAR" ...` line of every fenced block in the gate's skill that holds a cache search line."""
+        lines = (SKILLS / "design-first" / "SKILL.md").read_text(encoding="utf-8", errors="replace").splitlines()
+        found, i = [], 0
+        while i < len(lines):
+            if lines[i].lstrip().startswith("```"):
+                j = i + 1
+                while j < len(lines) and not lines[j].lstrip().startswith("```"):
+                    j += 1
+                block = lines[i + 1:j]
+                if any(NEEDLE in line for line in block):
+                    found.extend(line.strip() for line in block if RUN_LINE.match(line))
+                i = j
+            i += 1
+        return found
+
+    def test_the_approval_gate_carries_a_lookup_block(self):
+        self.assertGreater(len(self.gate_snippets()), 0,
+                           "%s holds no fenced bash block with the plugin-cache search line (%r), so the gate has "
+                           "no way to find pr_merged.py" % (self.REL, NEEDLE))
+
+    def test_the_block_finds_pr_merged_py_into_PRM_and_the_gate_asks_for_the_status(self):
+        found = self.gate_snippets()
+        self.assertGreater(len(found), 0, "no lookup block in %s" % self.REL)
+        for snip in found:
+            with self.subTest(block="%s:%d" % (snip["file"], snip["start"])):
+                self.assertEqual((snip["script"], snip["var"]), ("pr_merged.py", "PRM"),
+                                 "the gate looks up pr_merged.py into $PRM like /advance, /flow and /pr-merged")
+        runs = self.run_lines()
+        self.assertTrue(any("--status" in line and "--contract" in line for line in runs),
+                        "the gate's run line asks for --status --contract <slug>; found %r" % runs)
+
+    def test_the_gate_block_is_the_same_text_as_the_standard_one(self):
+        gate = [s for s in self.gate_snippets() if s["var"] == "PRM"]
+        standard = [s for s in snippets() if s["var"] == "PRM" and s["file"] == "skills/advance/SKILL.md"]
+        self.assertGreater(len(standard), 0, "fixture sanity: /advance carries the standard PRM block")
+        self.assertGreater(len(gate), 0, "the gate carries a PRM block")
+        self.assertEqual(gate[0]["text"], standard[0]["text"],
+                         "one snippet is shared by every copy: the gate must not carry a variant")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

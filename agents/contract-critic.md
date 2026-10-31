@@ -98,6 +98,8 @@ Work through the checklist in order. For each item, either record a finding (BLO
     b. **NIT if hit:** none of the contract's `## Lessons referenced` entries cite `Advances north-star: <slug>` or `Orthogonal to north-stars: <slugs>` despite the existence of one or more active north-stars in the project. Step 0.5 requires explicit grading, even if the grade is "orthogonal" — silence is a defect of process, not of design.
     c. **Exception:** when `.claude/north-stars/` contains zero `Status: active` files, this checklist item produces no findings.
 
+14. **Parent Branch Delivery Rule (BLOCKER if hit)** — a contract with two or more mergeable blocks is delivered through a parent branch: BLOCKER if hit when any block's `Files to touch` lists a plugin version file, so that a sub-task would raise the version (`sub-task-raises-version`; the landing raises it once), or when the contract has two or more mergeable blocks and the `**Work Item Brief:**` header is missing, or when a sub-task is meant to merge into the default branch. Run `pr_merged.py --contract <slug> --status --json` and cite each `layout_defects` entry.
+
 ### Step 5 — Append the Critique section
 
 The contract budget, and where a superseded critique round goes, are in `.claude/templates/concept-contract.md`; follow them.

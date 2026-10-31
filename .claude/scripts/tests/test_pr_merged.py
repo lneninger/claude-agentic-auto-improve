@@ -8757,13 +8757,35 @@ class _Result(object):
 
 def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_text=None,
            sub_issues=(), records_prs=(), implementers=("acme-dev",), gates=("acme-reviewer",),
-           json_out=True, replace_hook=None, fetch_ok=True, listing_ok=True):
+           json_out=True, replace_hook=None, fetch_ok=True, listing_ok=True, origin="ok", real_fetch=False,
+           close_log=None, git_cwd=""):
     """Run pr_merged.main() inside ``world`` with GitHub and git stubbed, files real.
+
+    Final cycle (issue 113): ``close_log`` (a list) collects every issue number close_sub_issue was asked to
+    close, across runs, and ``sub_issues`` may be a callable ``number -> open sub-issue numbers`` so a test can
+    model GitHub keeping state. ``git_cwd`` (a path inside the repository, e.g. ``tools/sub``) makes the
+    ls-tree stand-in behave like git run from that folder: without ``--full-tree`` the pathspec is read
+    relative to it, so the records folder matches nothing (exit 0, empty output). ``-z`` output is NUL separated.
+
+    Last cycle (issue 113): ``origin`` has more modes -- ``"ls-tree-fails"`` (the ref probe passes and the
+    listing of the records folder exits non-zero), ``"blob-missing"`` and ``"blob-unparseable"`` (the listing
+    works and a record blob cannot be read or parsed). ``real_fetch=True`` leaves the real
+    ``fetch_default_branch`` in place so the git command and environment it uses reach this stand-in
+    (``fetch_ok`` then decides its exit code). ``res.spies.run_calls`` holds every ``(command, env)`` the
+    stand-in saw. The listing is answered in both forms: ``git ls-tree [--name-only] <ref>:<folder>`` and
+    ``git ls-tree [--name-only] <ref> -- <folder>/`` (exit 0 with no output when the folder is absent).
 
     ``prs`` maps a pull request reference (number or link) to its gh payload. Every
     new edge the contract names is patched with ``create=True``, so a missing
     implementation is a missing behaviour and never an AttributeError. ``_run``
     itself raises, so no process can start down a path this fixture did not expect.
+
+    ``origin`` says what the committed tree of origin/<default> answers (issue 113, fix round 2). The origin
+    reads are the ONLY processes this fixture answers, and only through ``_run``: ``"ok"`` (the ref exists and
+    ``world.origin`` is its content; the default is an origin holding whatever the world published) or
+    ``"ref-missing"`` (origin/<default> is not a ref: every read of it fails). ``res.spies.events`` lists, in
+    order, ``fetch`` (fetch_default_branch), ``ref-probe`` and ``ls-tree``, so a test can say what came first.
+    Any other process is still refused, so the no-process guard holds.
 
     ``sub_issues`` and ``records_prs`` are passed through exactly as given: the
     default is an empty list (nothing open), a list is a list, and ``None`` is a
@@ -8783,6 +8805,9 @@ def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_te
 
     def fake_file_at_commit(sha, path):
         data = world.origin.get(path)
+        if origin in ("blob-missing", "blob-unparseable") and "/orchestrator/results/" in path \
+                and path.endswith(".yaml"):
+            return None if origin == "blob-missing" else "{ not: [yaml"
         return None if data is None else _fold_like_run(data)
 
     def fake_list_review_files(ref, slug):
@@ -8798,17 +8823,64 @@ def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_te
         return copy.deepcopy(repo(name) if callable(repo) else (repo or _THIS_REPO_NEUTRAL))
 
     spies.gh_pr = []
+    spies.events = []
+
+    def fake_fetch(*_a, **_k):
+        spies.events.append("fetch")
+        return fetch_ok
+
+    spies.run_calls = []
+
+    def fake_run(cmd, **_kwargs):
+        cmd = [str(c) for c in cmd]
+        spies.run_calls.append((cmd, _kwargs.get("env")))
+        if real_fetch and cmd[:2] == ["git", "fetch"]:
+            spies.events.append("fetch")
+            return (0, "") if fetch_ok else (1, "fatal: unable to access")
+        if cmd[:2] in (["git", "rev-parse"], ["git", "show-ref"], ["git", "cat-file"]) \
+                and any("origin/" in c for c in cmd):
+            spies.events.append("ref-probe")
+            return (1, "") if origin == "ref-missing" else (0, "0" * 40)
+        if cmd[:2] == ["git", "ls-tree"]:
+            spies.events.append("ls-tree")
+            if origin == "ref-missing":
+                return 128, "fatal: Not a valid object name"
+            if origin == "ls-tree-fails":
+                return 1, ""
+            if "--" in cmd:
+                folder = cmd[cmd.index("--") + 1]
+                if git_cwd and "--full-tree" not in cmd:
+                    folder = git_cwd.rstrip("/") + "/" + folder  # git reads the pathspec from the current folder
+                prefix = folder.rstrip("/") + "/"
+                paths = sorted(p for p in world.origin if p.startswith(prefix) and "/" not in p[len(prefix):])
+                lines = paths if "--name-only" in cmd else ["100644 blob %s\t%s" % ("0" * 40, p) for p in paths]
+                return 0, ("\0" if "-z" in cmd else "\n").join(lines)
+            _ref, _, folder = cmd[-1].partition(":")
+            prefix = folder.rstrip("/") + "/"
+            names = sorted(p[len(prefix):] for p in world.origin
+                           if p.startswith(prefix) and "/" not in p[len(prefix):])
+            return (0, "\n".join(names)) if names else (128, "fatal: not a tree object")
+        return _no_process(cmd)
+
     spies.gh_authenticated = mock.MagicMock(return_value=authenticated)
-    spies.fetch_default_branch = mock.MagicMock(return_value=fetch_ok)
+    spies.fetch_default_branch = mock.MagicMock(side_effect=fake_fetch)
     spies.list_review_files = mock.MagicMock(side_effect=fake_list_review_files)
     spies.gh_issue_text = mock.MagicMock(side_effect=fake_issue_text)
-    spies.gh_open_sub_issues = mock.MagicMock(
-        return_value=None if sub_issues is None else list(sub_issues))
+    if callable(sub_issues):  # a stateful GitHub: the open sub-issues NOW (see close_log)
+        spies.gh_open_sub_issues = mock.MagicMock(side_effect=lambda number: list(sub_issues(number)))
+    else:
+        spies.gh_open_sub_issues = mock.MagicMock(
+            return_value=None if sub_issues is None else list(sub_issues))
     spies.open_records_pull_requests = mock.MagicMock(
         return_value=None if records_prs is None else list(records_prs))
     spies.repo_view = mock.MagicMock(side_effect=fake_repo_view)
     spies.create_branch = mock.MagicMock(return_value=(True, "created"))
-    spies.close_sub_issue = mock.MagicMock(return_value="closed")
+    def fake_close(issue, comment=""):
+        if close_log is not None:
+            close_log.append(issue)
+        return "closed"
+
+    spies.close_sub_issue = mock.MagicMock(side_effect=fake_close)
     spies.file_at_commit = mock.MagicMock(side_effect=fake_file_at_commit)
 
     argv = ["pr_merged.py", "--contract", world.contract_rel] + list(flags) + (["--json"] if json_out else [])
@@ -8827,13 +8899,14 @@ def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_te
         mock.patch.object(pr_merged, "close_sub_issue", spies.close_sub_issue),
         mock.patch.object(pr_merged, "repo_view", spies.repo_view, create=True),
         mock.patch.object(pr_merged, "gh_authenticated", spies.gh_authenticated, create=True),
-        mock.patch.object(pr_merged, "fetch_default_branch", spies.fetch_default_branch, create=True),
+        (mock.patch.dict(os.environ, {}, clear=False) if real_fetch
+         else mock.patch.object(pr_merged, "fetch_default_branch", spies.fetch_default_branch, create=True)),
         mock.patch.object(pr_merged, "list_review_files", spies.list_review_files, create=True),
         mock.patch.object(pr_merged, "gh_issue_text", spies.gh_issue_text, create=True),
         mock.patch.object(pr_merged, "gh_open_sub_issues", spies.gh_open_sub_issues, create=True),
         mock.patch.object(pr_merged, "open_records_pull_requests",
                           spies.open_records_pull_requests, create=True),
-        mock.patch.object(pr_merged, "_run", _no_process),
+        mock.patch.object(pr_merged, "_run", fake_run),
         mock.patch.object(pr_merged, "IMPLEMENTER_AGENTS", tuple(implementers)),
         mock.patch.object(pr_merged, "REVIEW_GATES", tuple(gates)),
     ]
@@ -8912,7 +8985,7 @@ class TestTheNewEdgesAssertArgvAndAnswer(unittest.TestCase):
     def _call(self, fn, args, answer):
         calls = []
 
-        def fake_run(cmd):
+        def fake_run(cmd, **_kwargs):  # issue 113 W2: fetch_default_branch passes env=
             calls.append(list(cmd))
             return answer
 
@@ -9064,7 +9137,8 @@ class TestTheNewEdgesAssertArgvAndAnswer(unittest.TestCase):
     def test_fetch_default_branch_is_one_git_fetch(self):
         fn = self._edge("fetch_default_branch")
         value, calls = self._call(fn, ("master",), (0, ""))
-        self.assertEqual(calls, [["git", "fetch", "origin", "master"]])
+        # Issue 113 W2: the explicit refspec (the environment is pinned by TestTheOriginCommandsAreExact).
+        self.assertEqual(calls, [["git", "fetch", "origin", "+refs/heads/master:refs/remotes/origin/master"]])
         self.assertIs(value, True)
         self.assertIs(self._call(fn, ("master",), (1, ""))[0], False,
                       "a failed fetch is False; the run reports unverifiable")
@@ -9460,7 +9534,7 @@ class TestParentPullRequestKinds(unittest.TestCase):
     """I-14 kinds `parent` and `early`, and what each does to the move and to G-1. Catches: M-5."""
 
     def _parent_world(self, last_subtask_merged_at):
-        world = _World(self)
+        world = _World(self, brief=_valid_parent_brief(pr=_pr_url(_BRIEF_PR_NUMBER)))
         world.record("t1-backend", 61, base_is_default=False, merged_at="2026-10-01T09:00:00Z")
         if last_subtask_merged_at is not None:
             world.record("t2-frontend", 62, base_is_default=False, merged_at=last_subtask_merged_at)
@@ -9974,6 +10048,29 @@ def _brief_pr_map():
     return {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH)}
 
 
+# Issue 113 (Parent Branch Delivery Rule). The shared worlds above are an approved contract with two or more
+# mergeable blocks and a brief with `id: none`: exactly the shape the rule refuses (layout defect
+# no-parent-issue). A test that pins an older behaviour on the JUDGED path gives its world a VALID parent
+# instead (L-2 to L-4): the header links a brief whose branch: is not the default branch and whose id: is a
+# positive integer. The status stays approved, so the test still measures the path it was written for.
+_PARENT_ISSUE = "100"
+
+
+def _valid_parent_brief(slug=_SLUG, **kwargs):
+    return _build_brief(slug, ident=_PARENT_ISSUE, **kwargs)
+
+
+def _parent_state(world, base=_BRIEF_BRANCH, tasks=("t1-backend", "t2-frontend")):
+    """A state store whose entries carry a sub-issue and the parent branch as base (what /flow Step 2.7
+    records), so a dispatch is neither a needs-issue nor a base-not-declared refusal."""
+    entries = {tid: {"status": "pending", "branch": None, "pull_request": None, "issue": 101 + n,
+                     "base": base, "brief": None} for n, tid in enumerate(tasks)}
+    world.put(".claude/orchestrator/state/%s/state.yaml" % world.slug,
+              yaml.dump({"contract": world.slug, "started_at": "2026-10-05T00:00:00+00:00",
+                         "sub_tasks": entries}, default_flow_style=False, sort_keys=False))
+    return world
+
+
 # --------------------------------------------------------------------------
 # I-12: exit 10 has one meaning -- GitHub could not be verified and the run
 # wrote nothing. Catches: M-6 (preflight after the writes), M-9 (preflight
@@ -10055,7 +10152,7 @@ class TestDispatchNeverRunsThePreflight(unittest.TestCase):
     def test_dispatch_completes_without_calling_gh_authenticated_even_when_it_would_say_false(self):
         for extra in (["--dry-run"], []):
             with self.subTest(extra=extra):
-                world = _World(self, brief=_build_brief(pr="none"))
+                world = _parent_state(_World(self, brief=_valid_parent_brief(pr="none")))
                 res = _drive(world, ["--dispatch", "t1-backend"] + extra, authenticated=False)
                 self.assertEqual(res.exit_code, 0,
                                  "I-12: --dispatch never returns 10, so create_branch's git-switch "
@@ -10228,7 +10325,7 @@ class TestBriefLinkReadIsOneBareNumberCall(unittest.TestCase):
                 self.assertTrue(cands and cands[0].get("known") is True and cands[0].get("pr") in (50, "50"),
                                 "I-14 / M-7: the brief's merged pr is a candidate in every mode. %s" % res.describe())
                 self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded")
-                self.assertNotIn("/advance", res.out, "I-19: /advance is withheld")
+                _assert_no_advance_command(self, res, "I-19: /advance is withheld")
 
     def test_an_answer_whose_url_is_not_the_link_is_no_candidate(self):
         world = _World(self)
@@ -10247,7 +10344,7 @@ class TestBriefLinkReadIsOneBareNumberCall(unittest.TestCase):
         commands = res.commands()
         self.assertTrue(commands and commands[0].startswith("/pr-merged") and "--record-delivery" not in commands[0],
                         "I-19: an unknown candidate asks for a plain /pr-merged run. Got %r" % (commands,))
-        self.assertNotIn("/advance", res.out)
+        _assert_no_advance_command(self, res)
 
     def test_an_open_records_pull_request_redirects_the_command_after_exactly_one_read(self):
         world = _World(self)
@@ -10297,14 +10394,14 @@ class TestDispatchRefusesAnUnrecordedDelivery(unittest.TestCase):
 
     def test_control_without_a_brief_link_dispatch_proceeds(self):
         # CONTROL (passes today): the refusal is not a blanket one.
-        world = _World(self, brief=_build_brief(pr="none"))
+        world = _parent_state(_World(self, brief=_valid_parent_brief(pr="none")))
         res = _drive(world, ["--dispatch", "t1-backend"])
         self.assertEqual(res.exit_code, 0, res.describe())
         self.assertEqual(res.spies.create_branch.call_count, 1, "the branch is cut")
 
     def test_control_an_early_parent_does_not_refuse_the_sub_task_still_to_do_M5(self):
         # CONTROL (passes today). Catches M-5: dropping the `early` kind would make this refuse.
-        world = _World(self)
+        world = _parent_state(_World(self, brief=_valid_parent_brief(pr=_pr_url(_BRIEF_PR_NUMBER))))
         world.record("t1-backend", 61, base_is_default=False, merged_at="2026-10-01T09:00:00Z")
         res = _drive(world, ["--dispatch", "t2-frontend"],
                      prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _BRIEF_BRANCH, merged_at="2026-10-03T12:00:00Z")})
@@ -10319,11 +10416,15 @@ class TestDispatchRefusesAnUnrecordedDelivery(unittest.TestCase):
 # Catches: M-4, M-5.
 # --------------------------------------------------------------------------
 class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
-
+    # Issue 113, R-7 (records are plain): an approved two-block contract with a valid parent (id: 100), delivered
+    # on ONE branch with no stored records, is recorded like any delivery. Nothing refuses it.
     FLAGS = ["--record-delivery", "--pr", "50"]
 
+    def _delivery_world(self):
+        return _delivery_world(self, brief=_valid_parent_brief())
+
     def test_it_writes_a_record_per_unrecorded_block_and_one_delivery_record(self):
-        world = _delivery_world(self)
+        world = self._delivery_world()
         res = _drive(world, self.FLAGS, prs=_brief_pr_map())
         self.assertEqual(res.exit_code, 0, "I-15: the guards pass. %s" % res.describe())
         for tid in ("t1-backend", "t2-frontend"):
@@ -10352,11 +10453,13 @@ class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
                          "I-20: the three tracked files this run wrote")
         self.assertFalse(res.spies.close_sub_issue.called, "I-15: it never closes an issue")
         self.assertFalse(res.spies.create_branch.called, "I-15: it never cuts a branch")
-        self.assertFalse(res.spies.gh_open_sub_issues.called,
-                         "G-4: a brief with id none has no parent issue, so no sub-issue can exist and no read is made")
+        # Was: "a brief with id none has no parent issue, so no read is made". A valid parent (L-4) has an
+        # integer id, so G-4 now makes its one read, of that parent issue.
+        self.assertEqual([str(c.args[0]) for c in res.spies.gh_open_sub_issues.call_args_list], [_PARENT_ISSUE],
+                         "G-4: ONE read of the brief's parent issue, and no other")
 
     def test_it_never_overwrites_a_record_and_names_the_ones_already_there(self):
-        world = _delivery_world(self)
+        world = self._delivery_world()
         existing = world.record("t1-backend", 61)
         before = world.get(existing)
         res = _drive(world, self.FLAGS, prs=_brief_pr_map())
@@ -10367,7 +10470,7 @@ class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
                          (["t2-frontend"], ["t1-backend"]))
 
     def test_a_second_run_for_the_same_pull_request_is_a_no_op(self):
-        world = _delivery_world(self)
+        world = self._delivery_world()
         first = _drive(world, self.FLAGS, prs=_brief_pr_map())
         self.assertEqual(first.exit_code, 0, first.describe())
         files = {rel: world.get(rel) for rel in world.under(world.results_rel)}
@@ -10377,7 +10480,7 @@ class TestRecordDeliveryWritesTheStoreAndNothingElse(unittest.TestCase):
                          "G-5: nothing is rewritten")
 
     def test_dry_run_writes_nothing(self):
-        world = _delivery_world(self)
+        world = self._delivery_world()
         before = world.snapshot()
         res = _drive(world, self.FLAGS + ["--dry-run"], prs=_brief_pr_map())
         self.assertEqual(res.exit_code, 0, res.describe())
@@ -10526,7 +10629,7 @@ def _fc_contract():
 
 def _fc_world(case, *, recorded=False):
     world = _World(case, slug=_FC_SLUG, contract=_fc_contract(),
-                   brief=_build_brief(_FC_SLUG, branch=_FC_BRANCH, pr=_pr_url(383)))
+                   brief=_build_brief(_FC_SLUG, branch=_FC_BRANCH, pr=_pr_url(383), ident=_PARENT_ISSUE))
     reviews = (
         ("api-contract-review.md", None, "**Counts: BLOCKER 0, WARN 2, NIT 2.** Verdict: **CONTRACT IN SYNC** on the wire."),
         ("llm-contract-review.md", None, "### Verdict\n\nNo training data needed."),
@@ -10566,9 +10669,10 @@ class TestFormatterChainReplay(unittest.TestCase):
                          "I-14: 383 is the brief's own branch; 384 (docs/...) is not a candidate. %s" % res.describe())
         self.assertEqual((cands or [{}])[0].get("kind"), "single-branch", "no records at all: single-branch")
         self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded", res.describe())
+        # Issue 113, R-7: records are plain, so the one command is the plain record-delivery line (no accept form).
         self.assertEqual(res.commands(), ["/pr-merged 383 --record-delivery"],
                          "I-19: exactly the record-delivery line for 383. %s" % res.describe())
-        self.assertNotIn("/advance", res.out, "criterion 7: /advance is no longer offered")
+        _assert_no_advance_command(self, res, "criterion 7: /advance is no longer offered")
 
     def test_run_2_status_sees_the_same_candidate_through_one_bare_number_read(self):
         world = _fc_world(self)
@@ -10577,7 +10681,7 @@ class TestFormatterChainReplay(unittest.TestCase):
                          "I-14: one gh_pr(383), a bare number. %s" % res.describe())
         self.assertFalse(res.spies.repo_view.called, "X-1: no repo_view call")
         self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded", res.describe())
-        self.assertNotIn("/advance", res.out)
+        _assert_no_advance_command(self, res)
 
     def test_run_3_dispatch_is_refused_with_exit_3_and_cuts_no_branch(self):
         world = _fc_world(self)
@@ -10605,7 +10709,7 @@ class TestFormatterChainReplay(unittest.TestCase):
         states = list(_checklist_states(res).values())
         self.assertEqual(states.count("no-evidence"), 8, "eight lines with no structured evidence. Got %r" % states)
         self.assertEqual(comp.get("disclosure_lines_missing"), [])
-        self.assertNotIn("/advance", res.out)
+        _assert_no_advance_command(self, res)
 
     def test_run_5_status_after_the_delivery_is_recorded_is_complete(self):
         world = _fc_world(self, recorded=True)
@@ -10613,7 +10717,7 @@ class TestFormatterChainReplay(unittest.TestCase):
         self.assertTrue((res.report or {}).get("complete"), res.describe())
         self.assertEqual((res.report or {}).get("delivery_candidates"), [],
                          "I-14: nothing is a candidate once a delivery record exists. %s" % res.describe())
-        self.assertNotIn("/advance", res.out)
+        _assert_no_advance_command(self, res)
 
     def test_run_6_the_owner_confirmation_and_two_declared_skips_flip_the_contract(self):
         world = _fc_world(self, recorded=True)
@@ -10637,7 +10741,7 @@ class TestFormatterChainReplay(unittest.TestCase):
         implemented = next(l for l in text.splitlines() if l.startswith("**Implemented:**"))
         for piece in (_FC_T4, _MANUAL_LINE, "full-suite rerun"):
             self.assertIn(piece, implemented, "I-10: the Implemented line names %r" % piece)
-        self.assertNotIn("/advance", flipped.out)
+        _assert_no_advance_command(self, flipped)
 
 
 class TestNoCommandOfAnyDeliveryRunContainsAdvanceWhileDeliveryIsUnrecorded(unittest.TestCase):
@@ -10650,7 +10754,7 @@ class TestNoCommandOfAnyDeliveryRunContainsAdvanceWhileDeliveryIsUnrecorded(unit
                 res = _fc_drive(world, flags, prs=_fc_prs())
                 self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded",
                                  res.describe())
-                self.assertNotIn("/advance", res.out)
+                _assert_no_advance_command(self, res)
 
 
 class TestLoadRecordsSkipsTheReservedDeliveryFile(unittest.TestCase):
@@ -10728,7 +10832,7 @@ class TestRecordDeliveryRefusesAPullRequestWhoseBranchIsRecordedAgainstASubTask(
     _FOREIGN = "feature/foreign-name"
 
     def _world(self, recorded_branch):
-        world = _delivery_world(self, brief=_build_brief(branch=self._FOREIGN, pr="none"))
+        world = _delivery_world(self, brief=_valid_parent_brief(branch=self._FOREIGN, pr="none"))
         state = {"contract": _SLUG, "sub_tasks": {
             "t1-backend": {"status": "pending", "branch": recorded_branch, "pull_request": None,
                            "issue": None, "base": "master", "brief": None}}}
@@ -10846,16 +10950,26 @@ class TestWrongOwnerResolvedRefusesBeforeAnyWrite(unittest.TestCase):
 
     BLOCKED = "t4-blocked.md"
 
+    # Issue 113 (test review W-3): ONE world per writing run, shared by the wrong-name tests and the
+    # control, so the control's "the right name still writes" proves the wrong-name tests'
+    # "writes nothing" is not vacuous. The contract is judged and has a valid parent; the sub-task pull request
+    # merges into the parent branch and the parent's landing is recorded. Records are plain (R-7).
+    RD_FLAGS = ["--record-delivery", "--pr", "50"]
+
     def _last_block_world(self):
         """t2-frontend is recorded, so `--pr 7` records the LAST block: condition one holds after
         the run and the owner-resolved name is judged on any reading of I-3."""
-        world = _World(self, brief=_build_brief(pr="none"))
-        world.record("t2-frontend", 62)
+        world = _parent_state(_World(self, brief=_valid_parent_brief(pr="none")))
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_BRIEF_BRANCH)
+        world.delivery(_BRIEF_PR_NUMBER)
         world.review(self.BLOCKED, verdict="blocked")
         return world
 
+    def _record_delivery_world(self):
+        return _delivery_world(self, brief=_valid_parent_brief())
+
     def _prs(self):
-        return {7: _pr(7, "task/%s/t1-backend" % _SLUG)}
+        return {7: _pr(7, "task/%s/t1-backend" % _SLUG, base=_BRIEF_BRANCH)}
 
     def test_a_wrong_name_on_a_pr_run_exits_2_and_writes_nothing_at_all(self):
         world = self._last_block_world()
@@ -10869,26 +10983,24 @@ class TestWrongOwnerResolvedRefusesBeforeAnyWrite(unittest.TestCase):
             "file, no contract or brief change")
 
     def test_a_wrong_name_on_record_delivery_exits_2_and_writes_nothing_at_all(self):
-        world = _delivery_world(self)
+        world = self._record_delivery_world()
         before = world.snapshot()
-        res = _drive(world, ["--record-delivery", "--pr", "50", "--owner-resolved", "nope.md"],
-                     prs=_brief_pr_map())
+        res = _drive(world, self.RD_FLAGS + ["--owner-resolved", "nope.md"], prs=_brief_pr_map())
         self.assertEqual(res.exit_code, 2, "I-7: a wrong name exits 2. %s" % res.describe())
         self.assertEqual((res.report or {}).get("error"), "owner-resolved-not-blocked", res.describe())
         self.assertEqual(world.snapshot(), before,
                          "I-7 / M-15: no completion record and no delivery record were written")
 
     def test_control_the_right_name_still_lets_both_writing_runs_write(self):
-        # CONTROL: the same fixtures with the real blocked report named. The wrong-name tests
-        # above would pass vacuously if these runs never wrote anything.
+        # CONTROL: the SAME worlds as the two wrong-name tests above (built by the same helpers), with the
+        # real blocked report named. The wrong-name tests would pass vacuously if these runs never wrote.
         pr_world = self._last_block_world()
         res = _drive(pr_world, ["--pr", "7", "--owner-resolved", self.BLOCKED], prs=self._prs())
         self.assertEqual(res.exit_code, 0, res.describe())
         self.assertTrue(pr_world.exists(_results(pr_world, "t1-backend.yaml")),
                         "fixture sanity: the --pr run writes its record when the name is right")
-        delivery = _delivery_world(self)
-        res = _drive(delivery, ["--record-delivery", "--pr", "50", "--owner-resolved", "t9-block.md"],
-                     prs=_brief_pr_map())
+        delivery = self._record_delivery_world()
+        res = _drive(delivery, self.RD_FLAGS + ["--owner-resolved", "t9-block.md"], prs=_brief_pr_map())
         self.assertEqual(res.exit_code, 0, res.describe())
         self.assertTrue(delivery.exists(_results(delivery, "contract-delivery.yaml")),
                         "fixture sanity: --record-delivery writes its delivery record when the name is right")
@@ -10940,7 +11052,7 @@ class TestAFailedBriefLinkReadWithholdsInEveryMode(unittest.TestCase):
             "candidate (known: false). %s" % res.describe())
         self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded",
                          "I-19: an unknown candidate withholds the move. %s" % res.describe())
-        self.assertNotIn("/advance", res.out, "I-19: /advance is withheld")
+        _assert_no_advance_command(self, res, "I-19: /advance is withheld")
 
     def test_a_pr_run_on_an_unrelated_pull_request_whose_link_read_fails_withholds(self):
         world = _World(self)
@@ -11124,6 +11236,22 @@ class TestTheMergedCopyRuleAndTheOpenRecordsPullRequestHoldTheFlip(unittest.Test
 #         command does not clear the reason the dry run previewed (W-3).
 #   M-28: the `writing run:` label on a dry run's completion.next is deleted.
 # --------------------------------------------------------------------------
+def _assert_no_advance_command(case, res, message=""):
+    """Criterion 7 / I-19: no PRINTED COMMAND is /advance while the delivery is unrecorded.
+
+    The check is on the commands the run prints (the report's next_command and the completion's next), not on
+    the whole output: the layout warning's remedy (R-8) legitimately reads "... /flow Step 2.7, then /advance",
+    and --status --json prints the whole report.
+    """
+    report = res.report or {}
+    printed = list((report.get("next_command") or {}).get("commands") or [])
+    printed += list(((report.get("completion") or {}).get("next") or {}).get("commands") or [])
+    printed += [c for entry in (report.get("dispatch") or []) if isinstance(entry, dict)
+                for c in (entry.get("commands") or [])]
+    case.assertFalse(any(str(c).strip().startswith("/advance") for c in printed),
+                     "%s printed commands: %r" % (message or "no command is /advance", printed))
+
+
 def _printed_flags(res):
     """The flags after `pr_merged.py` in the single command printed in completion.next, as a list.
 
@@ -11152,10 +11280,15 @@ class TestADryRunsNextCommandClearsTheReasonItPreviewed(unittest.TestCase):
 
     def _pr_world(self):
         # t2 is recorded; t1 is delivered only by pull request 7, which the dry run records in memory.
-        world = _World(self, brief=_build_brief(pr="none"))
-        world.record("t2-frontend", 62)
+        # Issue 113: the contract has two blocks and is judged, so it has a valid parent and its sub-task
+        # pull requests merge into the PARENT branch (a web merge into the default branch is an R-8 failed
+        # record, pinned by TestAWebMergedSubTaskPullRequestIsRecordedAsFailed). The parent's landing is
+        # recorded, so condition one is the only thing pull request 7 still has to satisfy.
+        world = _parent_state(_World(self, brief=_valid_parent_brief(pr="none")))
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_BRIEF_BRANCH)
+        world.delivery(_BRIEF_PR_NUMBER)
         world.review(self.BLOCKED, verdict="blocked")
-        return world, {7: _pr(7, "task/%s/t1-backend" % _SLUG)}
+        return world, {7: _pr(7, "task/%s/t1-backend" % _SLUG, base=_BRIEF_BRANCH)}
 
     def test_control_the_bare_pr_run_clears_the_blocked_report_and_flips(self):
         # CONTROL (passes today): the very command W-3 wants printed does what it should, so the
@@ -11187,7 +11320,8 @@ class TestADryRunsNextCommandClearsTheReasonItPreviewed(unittest.TestCase):
                          "W-3: the printed command advances the verdict. %s" % follow.describe())
 
     def test_a_record_delivery_dry_run_prints_a_command_that_keeps_both_flags_M27(self):
-        world = _delivery_world(self)
+        # Issue 113, R-7: a one-branch delivery of two blocks is recorded plainly; no accept flag exists.
+        world = _delivery_world(self, brief=_valid_parent_brief())
         before = world.snapshot()
         dry = _drive(world, ["--record-delivery", "--pr", "50", "--dry-run"], prs=_brief_pr_map())
         self.assertEqual(world.snapshot(), before, "fixture sanity: a dry run writes nothing")
@@ -12691,7 +12825,1496 @@ class TestAtRefRecordReadersAndAdvanceAlias(unittest.TestCase):
                             "advance name still 'matches' a longer slug")
 
 
+# ==========================================================================
+# Parent Branch Delivery Rule (issue 113)
+#   .claude/concepts/2026-10-30-parent-branch-delivery-rule.md (approved), RED phase.
+#
+# Rules pinned here: L-1..L-5 (one matcher, one selector, the layout), the closed set of layout defect
+# reasons, R-6 (status decides who is judged), R-7 (records are plain), R-8 (the layout warning
+# ``single-branch-delivery`` in ``layout_warnings``, never in a record) and the bypass-flow rows 1 to 6 and 10.
+# (Amended on the user's direction, "the record cannot have that kind of rule": the evidence guard G-7, the
+# accept flag, the failed R-8 record, adoption time and everything built on them were removed from the
+# contract, and their tests were deleted.)
+#
+# Shapes the contract names and this section relies on (nothing else is assumed):
+#   * pr_merged.brief_names_contract(brief, slug) and pr_merged.select_linked_brief(contract_text, slug,
+#     briefs) exist; the briefs given to the selector are mappings that each carry ``_path``.
+#   * ``--status --json`` carries ``layout_defects`` (a list; each entry has a ``remedy``) for a contract
+#     with two or more mergeable blocks and a Status of draft or approved. The reason string sits in the
+#     entry's ``reason`` (or ``defect``/``kind``/``id``/``code``) field, or the entry is the string itself.
+#   * ``--status --json`` also carries ``layout_warnings`` (same entry shape as a defect, plus a ``remedy``) for a
+#     judged multi-sub-task contract; ``single-branch-delivery`` lives there and nowhere else.
+# Every new symbol is reached through ``_fn`` / ``getattr`` or through the CLI, so an absent behaviour is an
+# assertion about a value and never an ImportError or NameError. Fixtures are the file-backed ``_World``
+# above (a temporary tree, removed by addCleanup); nothing real is read or written.
+# ==========================================================================
+_PB_SLUG = "2026-10-30-parent-branch"
+_PB_PARENT = _BRIEF_BRANCH  # feature/acme-delivery: the brief's branch IS the parent branch
+
+
+def _pb_contract(slug=_PB_SLUG, *, status="approved", header="path", blocks="two", files1=("src/Foo.cs",)):
+    """A contract as bytes. blocks: one | two | impl-review | scope-note."""
+    lines = ["# Concept Contract - Parent branch fixture", "", "**Project:** Acme", "**Date:** 2026-10-30"]
+    if status is not None:
+        lines.append("**Status:** %s" % status)
+    if header == "path":
+        lines.append("**Work Item Brief:** .claude/work-items/%s.md" % slug)
+    elif header == "none":
+        lines.append("**Work Item Brief:** none")
+    elif header == "placeholder":
+        lines.append("**Work Item Brief:** <optional - path to the brief under .claude/work-items/ this contract serves>")
+    lines += ["", "## Implementation Handoff", "", "### 1. Backend (`acme-dev`)", "", "**Depends on:** none", "",
+              "**Files to touch:**"] + ["- %s" % f for f in files1] + [""]
+    if blocks == "two":
+        lines += ["### 2. Frontend (`acme-dev`)", "", "**Depends on:** none", "", "**Files to touch:**",
+                  "- src/Bar.cs", ""]
+    elif blocks == "impl-review":
+        lines += ["### 2. Review (`acme-reviewer`)", "", "**Depends on:** 1", "", "**Files to touch:**",
+                  "- `.claude/reviews/%s/t2-review-acme-reviewer.md`" % slug, ""]
+    elif blocks == "scope-note":
+        lines += ["### 2. Scope note on review", "",
+                  "There is no separate review sub-task. The ordinary review applies.", ""]
+    lines += ["## Review checklist (filled in after implementation)", ""]
+    lines += ["- [ ] %s" % text for text in _CHECKLIST_LINES]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _pb_brief(*, slug=_PB_SLUG, ident="100", branch=_PB_PARENT, contract="slug", pr=None, extra=()):
+    """A brief as bytes. contract: "slug" (this contract's path), None (no contract: line) or a literal."""
+    lines = ["---", "id: %s" % ident, "title: Parent branch fixture"]
+    if branch is not None:
+        lines.append("branch: %s" % branch)
+    if pr:
+        lines.append("pr: %s" % pr)
+    if contract == "slug":
+        lines.append("contract: .claude/concepts/%s.md" % slug)
+    elif contract is not None:
+        lines.append("contract: %s" % contract)
+    lines += list(extra)
+    lines += ["status: implementing", "---", "", "# Parent branch fixture", "", "Body text.", ""]
+    return ("\n".join(lines)).encode("utf-8")
+
+
+def _pb_world(case, *, slug=_PB_SLUG, contract=None, brief=None, with_brief=True):
+    return _World(case, slug,
+                  contract=_pb_contract(slug) if contract is None else contract,
+                  brief=_pb_brief(slug=slug, pr=_pr_url(_BRIEF_PR_NUMBER)) if brief is None else brief,
+                  with_brief=with_brief)
+
+
+def _pb_reasons(report):
+    """Every layout defect reason string in a --status report."""
+    found = []
+    for entry in (report or {}).get("layout_defects") or []:
+        if isinstance(entry, str):
+            found.append(entry)
+        elif isinstance(entry, dict):
+            for key in ("reason", "defect", "kind", "id", "code"):
+                if isinstance(entry.get(key), str):
+                    found.append(entry[key])
+    return found
+
+
+def _pb_entry(report, reason):
+    for entry in (report or {}).get("layout_defects") or []:
+        if isinstance(entry, dict) and reason in [entry.get(k) for k in ("reason", "defect", "kind", "id", "code")]:
+            return entry
+    return None
+
+
+def _pbw_reasons(report):
+    """Every reason string in the report's ``layout_warnings`` (R-8)."""
+    found = []
+    for entry in (report or {}).get("layout_warnings") or []:
+        if isinstance(entry, str):
+            found.append(entry)
+        elif isinstance(entry, dict) and isinstance(entry.get("reason"), str):
+            found.append(entry["reason"])
+    return found
+
+
+def _pbw_entry(report, reason):
+    for entry in (report or {}).get("layout_warnings") or []:
+        if isinstance(entry, dict) and entry.get("reason") == reason:
+            return entry
+    return None
+
+
+def _pb_status(case, world, **kwargs):
+    res = _drive(world, ["--status"], **kwargs)
+    case.assertEqual(res.exit_code, 0, "fixture sanity: --status never refuses. %s" % res.describe())
+    case.assertIsNotNone(res.report, "fixture sanity: --status --json prints one object. %s" % res.describe())
+    return res
+
+
 # --------------------------------------------------------------------------
+# L-3: ONE matcher owns all the filtering of "names this contract"
+# --------------------------------------------------------------------------
+class TestBriefNamesContractIsTheOneMatcher(unittest.TestCase):
+
+    SLUG = "2026-10-30-demo-contract"
+
+    #: (the brief's contract: value, whether it names SLUG)
+    TABLE = (
+        ("none", False), ("None", False), ("none - the plugin repo's own work", False),
+        ("UNKNOWN", False), ("unknown", False), ("", False), ("<path to the contract>", False),
+        ("<optional - the contract path>", False),
+        (SLUG, True), (SLUG + ".md", True), (".claude/concepts/" + SLUG + ".md", True),
+        (".claude\\concepts\\" + SLUG + ".md", True), ("`.claude/concepts/" + SLUG + ".md`", True),
+        ('".claude/concepts/' + SLUG + '.md"', True), (SLUG.upper(), True),
+        (".claude/concepts/" + SLUG.upper() + ".MD", True),
+        ("2026-10-30-demo-contract-extra", False), ("2026-10-30-demo", False),
+        (".claude/concepts/2026-10-01-other.md", False),
+    )
+
+    def matcher(self):
+        fn = _fn("brief_names_contract")
+        self.assertIsNotNone(fn, "pr_merged.brief_names_contract does not exist yet (L-3: the one matcher)")
+        return fn
+
+    def test_the_table_of_contract_values(self):
+        matcher = self.matcher()
+        for value, expected in self.TABLE:
+            with self.subTest(value=value):
+                self.assertEqual(matcher({"contract": value}, self.SLUG), expected,
+                                 "contract: %r %s name %s" % (value, "must" if expected else "must not", self.SLUG))
+
+    def test_a_brief_with_no_contract_key_names_nothing(self):
+        self.assertIs(self.matcher()({"id": "1", "branch": "x"}, self.SLUG), False,
+                      "a missing contract: key reads as unset")
+
+    def test_a_non_string_or_none_value_reads_as_unset(self):
+        matcher = self.matcher()
+        for value in (None, 0, []):
+            with self.subTest(value=value):
+                self.assertIs(matcher({"contract": value}, self.SLUG), False)
+
+    def test_the_wrappers_still_exist_and_agree_with_the_matcher(self):
+        matcher = self.matcher()
+        names, brief_names = _fn("_names_contract"), _fn("_brief_names_contract")
+        self.assertIsNotNone(names, "_names_contract stays (cleanup_delivered.py, rehydration, locate_parent use it)")
+        self.assertIsNotNone(brief_names, "_brief_names_contract stays (declared_topology uses it)")
+        for value, expected in self.TABLE:
+            with self.subTest(value=value):
+                self.assertEqual(brief_names({"contract": value}, self.SLUG), matcher({"contract": value}, self.SLUG),
+                                 "_brief_names_contract is a thin wrapper over the one matcher")
+                self.assertEqual(names(value, self.SLUG), expected,
+                                 "_names_contract(%r) must agree with the matcher" % (value,))
+
+    def test_the_brief_wrapper_is_case_insensitive_like_the_matcher(self):
+        wrapper = _fn("_brief_names_contract")
+        self.assertIsNotNone(wrapper)
+        self.assertTrue(wrapper({"contract": self.SLUG.upper()}, self.SLUG),
+                        "one matcher means one case rule: the stem is compared case-insensitively")
+
+
+# --------------------------------------------------------------------------
+# L-2: ONE pure selector for the parent brief
+# --------------------------------------------------------------------------
+class TestSelectLinkedBrief(unittest.TestCase):
+
+    SLUG = "2026-10-30-demo-contract"
+    HEADER_BRIEF = ".claude/work-items/2026-10-30-113-parent.md"
+
+    def selector(self):
+        fn = _fn("select_linked_brief")
+        self.assertIsNotNone(fn, "pr_merged.select_linked_brief does not exist yet (L-2: the one selector)")
+        return fn
+
+    def text(self, header=None):
+        lines = ["# Contract", "", "**Status:** approved"]
+        if header is not None:
+            lines.append("**Work Item Brief:** %s" % header)
+        return "\n".join(lines) + "\n"
+
+    def brief(self, path, **fields):
+        item = {"id": "100", "branch": "feature/p", "_path": path}
+        item.update(fields)
+        return item
+
+    def pick(self, text, briefs):
+        with mock.patch.object(pr_merged, "default_branch", return_value="master"):
+            return self.selector()(text, self.SLUG, briefs)
+
+    def path_of(self, chosen):
+        return chosen.get("_path") if isinstance(chosen, dict) else None
+
+    def test_a_header_linked_brief_is_used_whatever_unset_value_its_contract_field_holds(self):
+        for label, value in (("none", "none"), ("none with text", "none - the plugin repo's own work"),
+                             ("placeholder", "<path to the contract>"), ("unknown", "UNKNOWN"), ("empty", ""),
+                             ("missing", None), ("names it", ".claude/concepts/%s.md" % self.SLUG)):
+            with self.subTest(contract_field=label):
+                fields = {} if value is None else {"contract": value}
+                chosen = self.pick(self.text(self.HEADER_BRIEF), [
+                    self.brief(self.HEADER_BRIEF, **fields),
+                    self.brief(".claude/work-items/other.md", id="7", contract=".claude/concepts/%s.md" % self.SLUG)])
+                self.assertEqual(self.path_of(chosen), self.HEADER_BRIEF,
+                                 "the header names this brief and its contract: value is unset, so it is the brief")
+
+    def test_a_header_brief_that_names_a_different_contract_is_not_used(self):
+        chosen = self.pick(self.text(self.HEADER_BRIEF), [
+            self.brief(self.HEADER_BRIEF, contract=".claude/concepts/2026-01-01-someone-else.md")])
+        self.assertNotEqual(self.path_of(chosen), self.HEADER_BRIEF,
+                            "the matcher says that brief names ANOTHER contract")
+
+    def test_a_header_naming_a_brief_that_is_not_in_the_list_gives_no_brief_and_no_fallback(self):
+        chosen = self.pick(self.text(self.HEADER_BRIEF), [
+            self.brief(".claude/work-items/other.md", id="7", contract=".claude/concepts/%s.md" % self.SLUG)])
+        self.assertIsNone(chosen, "no fallback: a header that names a missing brief is a missing brief")
+
+    def test_without_a_header_the_one_brief_the_matcher_accepts_is_used(self):
+        for header in (None, "none", "<optional - path>"):
+            with self.subTest(header=header):
+                chosen = self.pick(self.text(header), [
+                    self.brief(".claude/work-items/a-names-another.md", id="1",
+                               contract=".claude/concepts/2026-01-01-someone-else.md"),
+                    self.brief(".claude/work-items/b-unset.md", id="2", contract="none"),
+                    self.brief(".claude/work-items/c-ours.md", id="3", contract=".claude/concepts/%s.md" % self.SLUG)])
+                self.assertEqual(self.path_of(chosen), ".claude/work-items/c-ours.md")
+
+    def test_without_a_header_and_with_no_accepted_brief_the_answer_is_none(self):
+        chosen = self.pick(self.text(None), [
+            self.brief(".claude/work-items/b-unset.md", id="2", contract="none"),
+            self.brief(".claude/work-items/d-other.md", id="4", contract=".claude/concepts/2026-01-01-other.md")])
+        self.assertIsNone(chosen)
+
+    def test_without_a_header_the_parent_wins_over_its_children(self):
+        named = ".claude/concepts/%s.md" % self.SLUG
+        chosen = self.pick(self.text(None), [
+            self.brief(".claude/work-items/child.md", id="101", branch="task/x/t1-a", contract=named,
+                       parent_issue="100", base="feature/p"),
+            self.brief(".claude/work-items/parent.md", id="100", branch="feature/p", contract=named)])
+        self.assertEqual(self.path_of(chosen), ".claude/work-items/parent.md")
+
+    def test_the_selector_is_pure(self):
+        briefs = [self.brief(self.HEADER_BRIEF, contract="none")]
+        before = json.dumps(briefs, sort_keys=True)
+        self.pick(self.text(self.HEADER_BRIEF), briefs)
+        self.assertEqual(json.dumps(briefs, sort_keys=True), before, "the given list and mappings are not changed")
+
+
+# --------------------------------------------------------------------------
+# Row 2: the readers return the SAME brief for one fixture set
+# --------------------------------------------------------------------------
+_PB_VARIANTS = (
+    ("none", "none"), ("none with text", "none - the plugin repo's own work"),
+    ("placeholder", "<path to the contract>"), ("missing", None), ("unknown", "UNKNOWN"), ("empty", ""),
+    ("names it", "slug"),
+)
+
+
+class _ParityFolder:
+    """A temporary checkout folder with a header-linked brief (variant contract: value) and a stranger."""
+
+    HEADER_NAME = "2026-10-30-113-parent.md"
+
+    def __init__(self, case, variant_value, slug="2026-10-30-parity"):
+        tmp = tempfile.TemporaryDirectory()
+        case.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.slug = slug
+        folder = self.root / ".claude" / "work-items"
+        folder.mkdir(parents=True)
+        value = ".claude/concepts/%s.md" % slug if variant_value == "slug" else variant_value
+        lines = ["---", "id: 100", "title: parent", "branch: feature/p"]
+        if value is not None:
+            lines.append("contract: %s" % value)
+        lines += ["status: implementing", "---", "", "# parent", ""]
+        self.header_text = "\n".join(lines)
+        (folder / self.HEADER_NAME).write_text(self.header_text, encoding="utf-8")
+        self.stranger_text = ("---\nid: 7\ntitle: other\nbranch: feature/other\n"
+                              "contract: .claude/concepts/2026-01-01-someone-else.md\nstatus: implementing\n---\n\n# o\n")
+        (folder / "2026-01-01-7-other.md").write_text(self.stranger_text, encoding="utf-8")
+        self.folder = folder
+        self.contract_text = ("# Contract\n\n**Status:** approved\n**Work Item Brief:** .claude/work-items/%s\n"
+                              % self.HEADER_NAME)
+
+    def listing(self):
+        return {".claude/work-items/%s" % self.HEADER_NAME: self.header_text,
+                ".claude/work-items/2026-01-01-7-other.md": self.stranger_text}
+
+
+def _land():
+    import land_contract
+    return land_contract
+
+
+class TestTheReadersReturnTheSameBrief(unittest.TestCase):
+
+    def base(self, path):
+        return Path(str(path).replace("\\", "/")).name if path else None
+
+    def test_all_readers_agree_for_every_contract_field_variant(self):
+        select = _fn("select_linked_brief")
+        self.assertIsNotNone(select, "pr_merged.select_linked_brief does not exist yet (L-2)")
+        land = _land()
+        for label, value in _PB_VARIANTS:
+            with self.subTest(contract_field=label):
+                fx = _ParityFolder(self, value)
+                answers = {}
+                with _chdir(fx.root), mock.patch.object(pr_merged, "default_branch", return_value="master"):
+                    answers["disk reader (find_linked_brief)"] = self.base(pr_merged.find_linked_brief(
+                        fx.contract_text, fx.slug, work_items_dir=fx.folder, default_branch_name="master"))
+                    answers["landing P0 feeder"] = self.base((select(
+                        fx.contract_text, fx.slug, land._briefs_on_disk(fx.root, fx.slug)) or {}).get("_path"))
+                    answers["landing P1 feeder"] = self.base((select(
+                        fx.contract_text, fx.slug,
+                        land.build_delivery_set({"origin/feature/p": fx.listing()}, fx.slug)["briefs"]) or {}).get("_path"))
+                self.assertEqual(answers, {k: fx.HEADER_NAME for k in answers},
+                                 "every reader must return the header-linked brief %s" % fx.HEADER_NAME)
+
+    def test_the_landing_feeders_pass_the_whole_folder_and_let_the_matcher_filter(self):
+        land = _land()
+        for label, value in _PB_VARIANTS:
+            with self.subTest(contract_field=label):
+                fx = _ParityFolder(self, value)
+                on_disk = [self.base(b.get("_path")) for b in land._briefs_on_disk(fx.root, fx.slug)]
+                in_set = [self.base(b.get("_path"))
+                          for b in land.build_delivery_set({"origin/feature/p": fx.listing()}, fx.slug)["briefs"]]
+                for where, names in (("_briefs_on_disk", on_disk), ("build_delivery_set", in_set)):
+                    self.assertIn(fx.HEADER_NAME, names,
+                                  "%s must hand over the header-linked brief even when its contract: reads %r"
+                                  % (where, value))
+                    self.assertIn("2026-01-01-7-other.md", names,
+                                  "%s passes an UNFILTERED list: the matcher inside select_linked_brief filters" % where)
+
+    def test_read_work_item_briefs_still_scopes_to_the_contract_for_the_topology(self):
+        fx = _ParityFolder(self, "slug")
+        with _chdir(fx.root):
+            names = [self.base(b.get("_path")) for b in pr_merged.read_work_item_briefs(fx.slug)]
+        self.assertEqual(names, [fx.HEADER_NAME],
+                         "declared_topology reads pre-scoped briefs, so this reader keeps filtering (control)")
+
+
+class TestLocateParentReadsTheHeaderLinkedBrief(_WorktreeWorldCase):
+    """The fourth reader (row 2): --locate-parent finds the parent branch from the header-linked brief."""
+
+    def world(self, contract_value):
+        world = make_world(self.tmp)
+        main = world.main
+        git(main, "switch", "-q", "-c", WT_PARENT)
+        contract = ("# Contract\n\n**Status:** approved\n**Work Item Brief:** %s\n" % WT_BRIEF_PARENT
+                    + WT_CONTRACT_TWO)
+        commit(main, {WT_CONTRACT: contract,
+                      WT_BRIEF_PARENT: brief_text(id=460, branch=WT_PARENT, base=world.default,
+                                                  contract=contract_value),
+                      WT_BRIEF_T1: brief_text(id=473, branch=WT_T1, base=WT_PARENT, parent_issue=460)},
+               "parent branch with a header-linked brief")
+        git(main, "push", "-q", "origin", WT_PARENT)
+        git(main, "switch", "-q", world.default)
+        return main
+
+    def locate(self, main):
+        proc = self.pr_merged_cli("--contract", WT_CONTRACT, "--locate-parent", "--json", cwd=main)
+        return proc, self.need_json(proc, "--locate-parent")
+
+    def found(self, value):
+        proc, report = self.locate(self.world(value))
+        self.assertEqual(report.get("branch"), WT_PARENT,
+                         "the contract's header names the parent brief, so the parent branch is found: %s"
+                         % proc.describe())
+        self.assertEqual(report.get("status"), "not-checked-out", proc.describe())
+
+    def test_a_parent_brief_whose_contract_field_is_none_is_found_through_the_header(self):
+        self.found("none")
+
+    def test_a_parent_brief_whose_contract_field_is_none_with_text_is_found_through_the_header(self):
+        self.found("none - the parent of the work")
+
+    def test_positive_control_a_parent_brief_that_names_the_contract_is_found_today(self):
+        main = self.world(WT_CONTRACT)
+        proc, report = self.locate(main)
+        self.assertEqual(report.get("branch"), WT_PARENT, proc.describe())
+
+
+# --------------------------------------------------------------------------
+# Layout defects through --status (rows 1, 3, 4, 10; R-6)
+# --------------------------------------------------------------------------
+class TestLayoutDefectsInStatus(unittest.TestCase):
+
+    def test_a_valid_layout_reports_an_empty_defect_list_and_still_dispatches(self):
+        # The brief links no pull request (pr: none). With one linked, an unreadable GitHub answer withholds
+        # dispatch (I-14, delivery-unrecorded), which TestSingleBranchDeliveryReportAndNextCommand
+        # .test_an_unreadable_github_answer_is_never_a_layout_defect pins on the same layout.
+        world = _pb_world(self, brief=_pb_brief(pr="none"))
+        res = _pb_status(self, world, prs={})
+        self.assertEqual(res.report.get("layout_defects"), [],
+                         "two mergeable blocks, a parent branch, a parent issue: layout_defects is present and "
+                         "empty. %s" % res.describe())
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "dispatch", res.describe())
+
+    def test_a_missing_or_placeholder_header_with_no_brief_is_no_parent_branch(self):
+        for header in ("absent", "none", "placeholder"):
+            with self.subTest(header=header):
+                world = _pb_world(self, contract=_pb_contract(header=header), with_brief=False)
+                res = _pb_status(self, world, prs={})
+                self.assertIn("no-parent-branch", _pb_reasons(res.report),
+                              "row 1: header %r reads as absent, so there is no parent branch. %s"
+                              % (header, res.describe()))
+                entry = _pb_entry(res.report, "no-parent-branch")
+                self.assertTrue(entry and "/task" in str(entry.get("remedy")),
+                                "the remedy sends the author to /task: %r" % (entry,))
+
+    def test_a_header_naming_a_brief_that_is_not_on_disk_is_no_parent_branch(self):
+        world = _pb_world(self, with_brief=False)
+        res = _pb_status(self, world, prs={})
+        self.assertIn("no-parent-branch", _pb_reasons(res.report), res.describe())
+
+    def test_a_brief_with_no_branch_is_no_parent_branch(self):
+        for branch in (None, "none"):
+            with self.subTest(branch=branch):
+                world = _pb_world(self, brief=_pb_brief(branch=branch))
+                res = _pb_status(self, world, prs={})
+                self.assertIn("no-parent-branch", _pb_reasons(res.report), res.describe())
+
+    def test_a_brief_on_the_default_branch_is_parent_is_default(self):
+        world = _pb_world(self, brief=_pb_brief(branch="master"))
+        res = _pb_status(self, world, prs={})
+        self.assertIn("parent-is-default", _pb_reasons(res.report), "row 10. %s" % res.describe())
+        self.assertTrue((_pb_entry(res.report, "parent-is-default") or {}).get("remedy"), "every defect has a remedy")
+
+    def test_a_parent_issue_that_is_not_a_positive_integer_is_no_parent_issue(self):
+        for ident in ("none", "PROJ-12", "0", "UNKNOWN"):
+            with self.subTest(id=ident):
+                world = _pb_world(self, brief=_pb_brief(ident=ident))
+                res = _pb_status(self, world, prs={})
+                self.assertIn("no-parent-issue", _pb_reasons(res.report),
+                              "rows 3 and 4: id %r is not an issue number. %s" % (ident, res.describe()))
+                entry = _pb_entry(res.report, "no-parent-issue")
+                self.assertTrue(entry and "id:" in str(entry.get("remedy")),
+                                "the remedy says to write the issue number into id:: %r" % (entry,))
+
+    def test_an_implementation_block_plus_a_review_block_is_a_multi_sub_task_contract(self):
+        world = _pb_world(self, contract=_pb_contract(blocks="impl-review"), with_brief=False)
+        res = _pb_status(self, world, prs={})
+        self.assertIn("no-parent-branch", _pb_reasons(res.report),
+                      "a review gate is a mergeable block, so implementation + review needs a parent branch. %s"
+                      % res.describe())
+
+    def test_a_draft_contract_is_judged_too(self):
+        world = _pb_world(self, contract=_pb_contract(status="draft"), with_brief=False)
+        res = _pb_status(self, world, prs={})
+        self.assertIn("no-parent-branch", _pb_reasons(res.report),
+                      "L-1: draft and approved are judged (and --status parses a draft's handoff). %s" % res.describe())
+
+    def test_other_statuses_and_a_missing_status_are_exempt(self):
+        for status in ("implemented", "rejected", "superseded", None):
+            with self.subTest(status=status):
+                world = _pb_world(self, contract=_pb_contract(status=status, header="absent"), with_brief=False)
+                res = _pb_status(self, world, prs={})
+                self.assertFalse(res.report.get("layout_defects"),
+                                 "R-6: Status %r is not judged, so no layout defect is reported. %s"
+                                 % (status, res.describe()))
+
+    def test_a_single_block_contract_has_no_layout_report_at_all(self):
+        for label, blocks in (("one block", "one"), ("one block plus a scope note", "scope-note")):
+            with self.subTest(shape=label):
+                world = _pb_world(self, contract=_pb_contract(blocks=blocks, header="absent"), with_brief=False)
+                res = _pb_status(self, world, prs={})
+                self.assertNotIn("layout_defects", res.report,
+                                 "L-1: only two or more mergeable blocks are computed; a single block's output "
+                                 "carries no new key. %s" % res.describe())
+
+    def test_layout_defects_never_enter_the_handoff_defects_or_the_completion_reasons(self):
+        world = _pb_world(self, brief=_pb_brief(ident="none"))
+        res = _pb_status(self, world, prs={})
+        self.assertIn("no-parent-issue", _pb_reasons(res.report), "fixture sanity: a layout defect exists")
+        self.assertEqual(res.report.get("defects"), [], "G-2's handoff defects stay a separate list")
+        self.assertNotIn("no-parent-issue", json.dumps(res.completion),
+                         "layout defects never enter is_delivered, G-2 or the completion evaluation")
+
+    def test_every_reported_defect_carries_a_remedy(self):
+        world = _pb_world(self, contract=_pb_contract(header="absent"), with_brief=False)
+        res = _pb_status(self, world, prs={})
+        entries = res.report.get("layout_defects")
+        self.assertTrue(entries, "fixture sanity: at least one defect. %s" % res.describe())
+        for entry in entries:
+            self.assertTrue(isinstance(entry, dict) and str(entry.get("remedy") or "").strip(),
+                            "each layout defect has a non-empty remedy: %r" % (entry,))
+
+    def test_status_reports_no_default_branch_base_for_a_multi_sub_task_contract_without_a_parent(self):
+        world = _pb_world(self, contract=_pb_contract(header="absent"), with_brief=False)
+        res = _pb_status(self, world, prs={})
+        for block in res.report.get("blocks") or []:
+            if block.get("kind") == "mergeable":
+                self.assertNotEqual(block.get("base_source"), "default",
+                                    "effective_base never returns the default branch for a judged multi-sub-task "
+                                    "contract: %r" % (block,))
+
+
+class TestSubTaskRaisesVersionDefect(unittest.TestCase):
+    """The Files to touch of a block names a MANIFESTS path while contractLanding.versionRaise is on."""
+
+    def conventions(self, world, raise_on):
+        rel = ".claude/work-item-conventions.json"
+        world.put(rel, json.dumps({"contractLanding": {"versionRaise": raise_on}}))
+        world.publish(rel)
+
+    def status(self, files1, raise_on=True, with_switch=True):
+        world = _pb_world(self, contract=_pb_contract(files1=files1))
+        if with_switch:
+            self.conventions(world, raise_on)
+        return _pb_status(self, world, prs={})
+
+    def test_every_manifest_path_is_refused_while_the_switch_is_on(self):
+        import check_version_bump
+        for manifest in check_version_bump.MANIFESTS:
+            with self.subTest(manifest=manifest):
+                res = self.status((manifest,))
+                self.assertIn("sub-task-raises-version", _pb_reasons(res.report),
+                              "%s is a version file; the landing raises the version once. %s" % (manifest, res.describe()))
+                self.assertTrue((_pb_entry(res.report, "sub-task-raises-version") or {}).get("remedy"))
+
+    def test_a_backslash_spelling_is_normalised(self):
+        res = self.status((".claude-plugin\\plugin.json",))
+        self.assertIn("sub-task-raises-version", _pb_reasons(res.report), res.describe())
+
+    def test_positive_control_the_defect_needs_the_switch(self):
+        for label, kwargs in (("switch off", {"raise_on": False}), ("switch absent", {"with_switch": False})):
+            with self.subTest(case=label):
+                res = self.status(("plugin.json",), **kwargs)
+                self.assertNotIn("sub-task-raises-version", _pb_reasons(res.report), res.describe())
+
+    def test_positive_control_a_neighbouring_path_is_not_a_manifest(self):
+        res = self.status(("docs/plugin.json.md", "src/plugin.json.bak"))
+        self.assertNotIn("sub-task-raises-version", _pb_reasons(res.report), res.describe())
+
+
+# --------------------------------------------------------------------------
+# The legacy shapes (row 5): a merged one-branch delivery of a multi-sub-task contract
+# --------------------------------------------------------------------------
+_PB_LEGACY = {
+    # contract 2026-10-16 (PR #58): one implementation block plus a review block, brief id 57
+    "pr58": dict(slug="2026-10-16-recorded-issue-offer-outcome", blocks="impl-review", ident="57",
+                 branch="fix/57-own-repo-issue-closing", number=58, extra=()),
+    # contract 2026-10-18 (PR #82): two implementation blocks, a brief with no issue and base: master
+    "pr82": dict(slug="2026-10-18-remove-plain-language-hook", blocks="two", ident="none",
+                 branch="infra/remove-plain-language-hook", number=82,
+                 extra=("parent_issue: none", "base: master")),
+}
+
+
+def _pb_legacy_world(case, shape):
+    spec = _PB_LEGACY[shape]
+    world = _World(case, spec["slug"],
+                   contract=_pb_contract(spec["slug"], blocks=spec["blocks"]),
+                   brief=_pb_brief(slug=spec["slug"], ident=spec["ident"], branch=spec["branch"],
+                                   pr=_pr_url(spec["number"]), extra=spec["extra"]))
+    prs = {spec["number"]: _pr(spec["number"], spec["branch"])}
+    return world, spec, prs
+
+
+# --------------------------------------------------------------------------
+# cleanup_delivered.py keeps calling _names_contract (pinned unchanged)
+# --------------------------------------------------------------------------
+class TestCleanupStillUsesTheWrapper(unittest.TestCase):
+
+    def test_cleanup_delivered_still_calls_names_contract_and_not_the_matcher_directly(self):
+        text = (Path(__file__).resolve().parent.parent / "cleanup_delivered.py").read_text(encoding="utf-8")
+        self.assertTrue("pr_merged._names_contract(" in text, "cleanup_delivered.py is unchanged: it calls the wrapper")
+        self.assertFalse("brief_names_contract(" in text, "and does not call the new matcher itself")
+
+
+# ==========================================================================
+# Fix round (issue 113): code review fullstack-code-reviewer W3 to W6 and the R-8 minor, test review
+# test-strategy-critic B-1, B-2, W-1, W-2. Reviews:
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/code-review-fullstack-code-reviewer.md
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/test-review-test-strategy-critic.md
+# ==========================================================================
+def _child_briefs(world, base):
+    """Two Sub-Task Work Items of the world's contract, based on ``base`` (parent issue 100)."""
+    for n, tid in enumerate(("t1-backend", "t2-frontend")):
+        world.put(".claude/work-items/child-%d.md" % (n + 1),
+                  _pb_brief(slug=world.slug, ident=str(101 + n), branch="task/%s/%s" % (world.slug, tid),
+                            pr="none", extra=("parent_issue: %s" % _PARENT_ISSUE, "base: %s" % base)))
+    return world
+
+
+def _publish_conventions(world, contract_landing):
+    rel = ".claude/work-item-conventions.json"
+    world.put(rel, json.dumps({"contractLanding": contract_landing}))
+    world.publish(rel)
+
+
+# --------------------------------------------------------------------------
+# Test review W-1 / W-2: the plain --record-delivery write path keeps its detailed assertions on a world
+# where the plain path still applies (ONE mergeable block, brief id none).
+# --------------------------------------------------------------------------
+class TestPlainRecordDeliveryKeepsItsWriteAssertions(unittest.TestCase):
+
+    FLAGS = ["--record-delivery", "--pr", "50"]
+
+    def _world(self):
+        return _delivery_world(self, contract=_pb_contract(_SLUG, blocks="one"),
+                               brief=_pb_brief(slug=_SLUG, ident="none", pr=_pr_url(50)))
+
+    def test_it_writes_the_record_and_the_one_delivery_record_and_nothing_else(self):
+        world = self._world()
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual((rec.get("status"), rec.get("verified"), rec.get("base_ref"), rec.get("base_is_default"),
+                          rec.get("delivered_by"), rec.get("pull_request")),
+                         ("completed", "github", "master", True, "contract-delivery", _pr_url(50)), repr(rec))
+        delivery = _yaml(world, _results(world, "contract-delivery.yaml"))
+        self.assertEqual({k: delivery.get(k) for k in ("status", "pull_request", "number", "head_ref", "base_ref",
+                                                       "base_is_default", "commit", "verified", "recorded_by",
+                                                       "blocks_recorded", "blocks_already_recorded")},
+                         {"status": "delivered", "pull_request": _pr_url(50), "number": 50,
+                          "head_ref": _BRIEF_BRANCH, "base_ref": "master", "base_is_default": True,
+                          "commit": "merge-50", "verified": "github",
+                          "recorded_by": "pr-merged --record-delivery",
+                          "blocks_recorded": ["t1-backend"], "blocks_already_recorded": []})
+        self.assertNotEqual(delivery.get("layout"), "single-branch-accepted", "the plain path is not an accept")
+        self.assertEqual(sorted((res.report or {}).get("written_files") or []),
+                         sorted([_results(world, "t1-backend.yaml"), _results(world, "contract-delivery.yaml")]))
+        self.assertFalse(res.spies.close_sub_issue.called, "it never closes an issue")
+        self.assertFalse(res.spies.create_branch.called, "it never cuts a branch")
+
+    def test_a_brief_with_id_none_costs_no_sub_issue_read(self):
+        # Test review W-2: the original G-4 property, moved to the world where it still applies.
+        world = self._world()
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertFalse(res.spies.gh_open_sub_issues.called,
+                         "G-4: a brief with id none has no parent issue, so no sub-issue can exist and no read is made")
+
+    def test_it_never_overwrites_a_record_and_names_the_ones_already_there(self):
+        world = self._world()
+        existing = world.record("t1-backend", 61)
+        before = world.get(existing)
+        res = _drive(world, self.FLAGS, prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(world.get(existing), before)
+        delivery = _yaml(world, _results(world, "contract-delivery.yaml"))
+        self.assertEqual((delivery.get("blocks_recorded"), delivery.get("blocks_already_recorded")),
+                         ([], ["t1-backend"]))
+
+    def test_a_second_run_for_the_same_pull_request_is_a_no_op(self):
+        world = self._world()
+        self.assertEqual(_drive(world, self.FLAGS, prs=_brief_pr_map()).exit_code, 0)
+        files = {rel: world.get(rel) for rel in world.under(world.results_rel)}
+        second = _drive(world, self.FLAGS, prs=_brief_pr_map())
+        self.assertEqual(second.exit_code, 0, second.describe())
+        self.assertEqual({rel: world.get(rel) for rel in world.under(world.results_rel)}, files)
+
+    def test_dry_run_writes_nothing(self):
+        world = self._world()
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS + ["--dry-run"], prs=_brief_pr_map())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+
+# --------------------------------------------------------------------------
+# Code review W3 + test review B-2 (mutant M5): the header brief's branch: differs from the Sub-Task
+# briefs' base:. Nothing may choose silently. Driven through the real entry points.
+# --------------------------------------------------------------------------
+class TestHeaderBriefAndSubTaskBriefsDisagreeOnTheParent(unittest.TestCase):
+
+    def _world(self, child_base):
+        return _child_briefs(_pb_world(self, brief=_pb_brief(pr="none")), child_base)
+
+    def test_status_reports_an_ambiguous_layout_naming_both_branches(self):
+        res = _pb_status(self, self._world("feature/q"), prs={})
+        self.assertIn("ambiguous", _pb_reasons(res.report),
+                      "the header brief says %s, the sub-task briefs say feature/q: a defect, not a choice. %s"
+                      % (_PB_PARENT, res.describe()))
+        entry = _pb_entry(res.report, "ambiguous") or {}
+        both = json.dumps(entry)
+        self.assertTrue("feature/q" in both and _PB_PARENT in both,
+                        "the defect names both branches so the author can pick one: %r" % (entry,))
+
+    def test_status_does_not_report_a_base_for_a_block_it_would_cut_from_the_wrong_branch(self):
+        res = _pb_status(self, self._world("feature/q"), prs={})
+        for block in res.report.get("blocks") or []:
+            if block.get("kind") == "mergeable":
+                self.assertNotEqual(block.get("base"), "feature/q",
+                                    "the blocks must not silently take the sub-task briefs' branch: %r" % (block,))
+
+    def test_dispatch_refuses_as_a_contract_defect_and_cuts_nothing(self):
+        world = _parent_state(self._world("feature/q"), base="feature/q")
+        before = world.snapshot()
+        res = _drive(world, ["--dispatch", "t1-backend"])
+        self.assertEqual(res.exit_code, 3, res.describe())
+        self.assertEqual((res.report or {}).get("error"), "contract-defect", res.describe())
+        self.assertIn("ambiguous", json.dumps(res.report))
+        self.assertFalse(res.spies.create_branch.called, "no branch is cut from either parent")
+        self.assertEqual(world.snapshot(), before)
+
+    def test_positive_control_briefs_that_agree_report_no_defect(self):
+        res = _pb_status(self, self._world(_PB_PARENT), prs={})
+        self.assertEqual(res.report.get("layout_defects"), [], res.describe())
+
+
+# --------------------------------------------------------------------------
+# Code review W4: needs_accept and the live single-branch report come from fresh evidence.
+# --------------------------------------------------------------------------
+def _drive_with_origin_tree(world, flags, **kwargs):
+    """_drive, whose ``_run`` stand-in now answers the committed-tree reads of origin/<default> from
+    ``world.origin`` (fix round 2), so this is the same call; the name is kept for the tests above."""
+    return _drive(world, flags, **kwargs)
+
+
+# --------------------------------------------------------------------------
+# Code review W5: the one matcher compares the contract STEM, not any token of the value.
+# --------------------------------------------------------------------------
+class TestTheMatcherComparesTheStemNotAnyToken(unittest.TestCase):
+
+    OLD, NEW = "2026-10-01-old", "2026-10-30-new"
+
+    def test_a_brief_that_mentions_an_older_contract_does_not_name_it(self):
+        matcher = _fn("brief_names_contract")
+        self.assertIsNotNone(matcher, "pr_merged.brief_names_contract does not exist")
+        brief = {"contract": "%s (replaces %s)" % (self.NEW, self.OLD)}
+        self.assertIs(matcher(brief, self.OLD), False, "'new (replaces old)' names neither the old contract nor a token of it")
+
+    def test_such_a_brief_does_not_make_the_older_contracts_topology_ambiguous(self):
+        briefs = [{"contract": "%s (replaces %s)" % (self.NEW, self.OLD), "base": "feature/new", "id": "5"},
+                  {"contract": ".claude/concepts/%s.md" % self.OLD, "base": "feature/old", "id": "6",
+                   "parent_issue": "1"}]
+        topology = pr_merged.declared_topology(self.OLD, briefs, "master", ["master"])
+        self.assertEqual((topology["parent_branch"], topology["reason"]), ("feature/old", None),
+                         "only the brief that names %s counts: %r" % (self.OLD, topology))
+
+    def test_placeholders_with_text_are_absent_not_another_contracts_name(self):
+        select = _fn("select_linked_brief")
+        self.assertIsNotNone(select, "pr_merged.select_linked_brief does not exist")
+        header = ".claude/work-items/2026-10-30-113-parent.md"
+        text = "# Contract\n\n**Status:** approved\n**Work Item Brief:** %s\n" % header
+        for value in ("none (pending)", "TBD", "tbd", "n/a", "N/A", "unknown (set at /ship)"):
+            with self.subTest(contract_field=value):
+                with mock.patch.object(pr_merged, "default_branch", return_value="master"):
+                    chosen = select(text, self.NEW, [{"id": "100", "branch": "feature/p", "_path": header,
+                                                      "contract": value}])
+                self.assertEqual((chosen or {}).get("_path"), header,
+                                "%r is an unfilled placeholder: the header-linked brief is still the brief" % value)
+
+
+# --------------------------------------------------------------------------
+# Code review W6 / test review W-7 (L-4): a protected branch is never a parent branch.
+# --------------------------------------------------------------------------
+class TestAProtectedBranchIsNotAParentBranch(unittest.TestCase):
+
+    def _world(self, branch):
+        world = _pb_world(self, brief=_pb_brief(branch=branch, pr="none"))
+        _publish_conventions(world, {"protectedBranches": ["master", "release"]})
+        return world
+
+    def test_status_reports_parent_is_default_for_a_protected_parent(self):
+        res = _pb_status(self, self._world("release"), prs={})
+        self.assertIn("parent-is-default", _pb_reasons(res.report),
+                      "branch: release is in contractLanding.protectedBranches. %s" % res.describe())
+        self.assertTrue((_pb_entry(res.report, "parent-is-default") or {}).get("remedy"))
+
+    def test_positive_control_an_unprotected_branch_is_a_parent(self):
+        res = _pb_status(self, self._world("feature/p"), prs={})
+        self.assertEqual(res.report.get("layout_defects"), [], res.describe())
+
+    def test_positive_control_the_default_branch_is_still_refused_without_any_config(self):
+        res = _pb_status(self, _pb_world(self, brief=_pb_brief(branch="master", pr="none")), prs={})
+        self.assertIn("parent-is-default", _pb_reasons(res.report), res.describe())
+
+
+# ==========================================================================
+# Fix round 2 (issue 113), fix review F1 to F3 and its NITs:
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/fix-review-fullstack-code-reviewer.md
+# The origin reads below go through the fixture's `_run` stand-in (see _drive's `origin=`), so the no-process
+# guard holds and a test can say whether origin/<default> was fetched, probed and listed, and in what order.
+# ==========================================================================
+def _origin_only(world, task_id, number, merged_at, **over):
+    """A completion record that origin/<default> holds and this stale checkout does not."""
+    rel = world.record(task_id, number, merged_at=merged_at, **over)
+    world.publish(rel)
+    world.path(rel).unlink()
+    return rel
+
+
+def _origin_landing(world):
+    """Both records of a real parent-branch landing, published to origin only (the Records PR merged)."""
+    _origin_only(world, "t1-backend", 61, "2026-10-01T09:00:00Z", base_is_default=False, base_ref=_PB_PARENT)
+    _origin_only(world, "t2-frontend", 62, "2026-10-02T09:00:00Z", base_is_default=False, base_ref=_PB_PARENT)
+    return world
+
+
+def _merged_parent_pr():
+    return {_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT, merged_at="2026-10-03T12:00:00Z")}
+
+
+class TestNoBroadExceptAroundTheOriginRead(unittest.TestCase):
+    """F1 f. An unreadable origin is a return value (None), not an exception; a broad except would also swallow
+    the fixture's own assertion."""
+
+    def test_pr_merged_main_has_no_except_exception_near_the_origin_records_read(self):
+        lines = (Path(__file__).resolve().parent.parent / "pr_merged.py").read_text(encoding="utf-8").splitlines()
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("def main("))
+        hits = [i for i in range(start, len(lines))
+                if re.search(r'load_records_at\(|"origin/"\s*\+\s*base|origin_records', lines[i])]
+        self.assertTrue(hits, "fixture sanity: main() reads the records at origin/<default>")
+        for i in hits:
+            window = lines[max(start, i - 4):i + 9]
+            self.assertFalse(any(re.search(r"except\s+Exception", ln) for ln in window),
+                             "line %d: no `except Exception` around the origin read:\n%s" % (i + 1, "\n".join(window)))
+
+
+class TestEffectiveBaseRefusalForAHeaderMismatch(unittest.TestCase):
+    """F3."""
+
+    TOPOLOGY = {"parent_branch": "feature/q", "parent_issue": "100", "child_ids": [], "declared_base": "feature/q",
+                "reason": None}
+
+    def test_the_refusal_carries_the_layout_defects_own_detail_and_remedy(self):
+        layout = {"parent_branch": "feature/p", "parent_issue": 100, "defects": [
+            {"reason": "ambiguous", "detail": "DETAIL-MARKER the linked brief says feature/p, the children say feature/q",
+             "remedy": "REMEDY-MARKER make the header brief and the children one branch"}]}
+        got = pr_merged.effective_base({"sub_tasks": {"t1-backend": {}}}, "t1-backend", self.TOPOLOGY, "master", layout)
+        self.assertEqual(got["problem"], "base-not-declared", got)
+        self.assertTrue("DETAIL-MARKER" in got["detail"] and "REMEDY-MARKER" in got["detail"],
+                        "the layout defect's own detail and remedy are passed through: %r" % got["detail"])
+        self.assertNotIn("disagree on base: or parent_issue", got["detail"],
+                         "the children agree with each other; the header brief is the one that differs")
+
+    def test_positive_control_children_that_really_disagree_keep_the_old_text(self):
+        topology = dict(self.TOPOLOGY, parent_branch=None, reason="ambiguous")
+        got = pr_merged.effective_base({"sub_tasks": {"t1-backend": {}}}, "t1-backend", topology, "master", None)
+        self.assertIn("disagree on base: or parent_issue", got["detail"])
+
+
+class TestParentIsDefaultNamesTheProtectedBranch(unittest.TestCase):
+    """Fix review NIT 5."""
+
+    def _detail(self, base):
+        world = _child_briefs(_pb_world(self, brief=_pb_brief(pr="none")), base)
+        _publish_conventions(world, {"protectedBranches": ["master", "release"]})
+        res = _pb_status(self, world, prs={})
+        return (_pb_entry(res.report, "parent-is-default") or {}).get("detail", "")
+
+    def test_a_non_default_protected_base_is_called_a_protected_branch_and_named(self):
+        detail = self._detail("release")
+        self.assertTrue("protected branch" in detail and "release" in detail,
+                        "the children's base release is protected, not the default branch: %r" % detail)
+
+    def test_positive_control_the_default_branch_is_still_called_the_default_branch(self):
+        self.assertIn("default branch", self._detail("master"))
+
+
+# ==========================================================================
+# Last cycle (issue 113): the contract's R-10 and its Implementation notes B1, W1, W2, W7, and
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/final-review-fullstack-code-reviewer.md
+# ==========================================================================
+_UNREADABLE_ORIGIN_MODES = ("ref-missing", "fetch-fails", "ls-tree-fails", "blob-missing", "blob-unparseable")
+
+
+def _unreadable_origin(case, mode):
+    """(world, drive kwargs) for one way origin/<default> cannot be read. The blob modes need records on
+    origin for the failing blob read to matter."""
+    world = _pb_world(case)
+    if mode == "fetch-fails":
+        return world, {"fetch_ok": False}
+    if mode in ("blob-missing", "blob-unparseable"):
+        _origin_landing(world)
+    return world, {"origin": mode}
+
+
+def _snapshot_mentions(world, needle):
+    return any(needle in data for data in world.snapshot().values())
+
+
+class TestTheOriginCommandsAreExact(unittest.TestCase):
+    """W1 (the listing form) and W2 (the fetch refspec and environment)."""
+
+    def test_the_records_are_listed_with_ls_tree_ref_dash_dash_folder(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        listings = [c for c, _env in res.spies.run_calls if c[:2] == ["git", "ls-tree"]]
+        self.assertTrue(listings, "fixture sanity: the live report lists origin's records. calls=%r" % res.spies.run_calls)
+        for command in listings:
+            positional = [c for c in command if not c.startswith("-") or c == "--"]
+            self.assertEqual(positional, ["git", "ls-tree", "origin/master", "--", world.results_rel + "/"],
+                             "git ls-tree <ref> -- <folder>/ (options aside); saw %r" % (command,))
+
+    def test_the_default_branch_is_fetched_with_the_explicit_refspec_and_no_prompt(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[], real_fetch=True)
+        fetches = [(c, env) for c, env in res.spies.run_calls if c[:2] == ["git", "fetch"]]
+        self.assertTrue(fetches, "fixture sanity: origin/master is fetched through _run. calls=%r" % res.spies.run_calls)
+        command, env = fetches[0]
+        self.assertEqual(command, ["git", "fetch", "origin", "+refs/heads/master:refs/remotes/origin/master"],
+                         "an explicit refspec updates origin/master in a narrowed clone too")
+        self.assertTrue(env and env.get("GIT_TERMINAL_PROMPT") == "0",
+                        "the read-only status must never wait on a credential prompt. env=%r" % (env,))
+
+
+# ==========================================================================
+# Final cycle (issue 113): R-10 limited by rule-adoption.yaml (adoptedAt), the sub-issue and sticky rules (B-1),
+# narrowed landing evidence with accepted_blocks and `replaces` (W-3), accept_prs gating (N-1), the origin
+# listing form (W-1) and the open Records pull request (W-2). Review:
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/last-review-fullstack-code-reviewer.md
+# ==========================================================================
+from datetime import datetime as _datetime, timezone as _timezone  # noqa: E402
+
+class TestTheOriginListingForm(unittest.TestCase):
+    """W-1: the listing does not depend on the folder the script runs from."""
+
+    def test_the_argv_is_exactly_ls_tree_full_tree_name_only_z_ref_dash_dash_folder(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        listings = [c for c, _env in res.spies.run_calls if c[:2] == ["git", "ls-tree"]]
+        self.assertTrue(listings, "fixture sanity: origin's records are listed")
+        for command in listings:
+            self.assertEqual(command, ["git", "ls-tree", "--full-tree", "--name-only", "-z", "origin/master", "--",
+                                       world.results_rel + "/"], "saw %r" % (command,))
+
+    def test_run_from_a_subfolder_it_still_finds_the_records(self):
+        world = _origin_landing(_pb_world(self))
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[], git_cwd="tools/sub")
+        self.assertNotIn("single-branch-delivery", _pbw_reasons(res.report),
+                         "R-8: origin's records (a true parent-branch landing) are seen from a subfolder too; an "
+                         "empty listing from the wrong folder is not 'origin holds no records'. %s" % res.describe())
+
+
+# ==========================================================================
+# Design change (issue 113, user, 2026-10-30): "the record cannot have that kind of rule. Its only responsibility
+# is to close the already done work." Contract R-7 (records are plain), R-8 (layout warning, in layout_warnings),
+# R-9 (the landing's own safety). The tests below replace the deleted ones about G-7, --accept-single-branch,
+# the failed R-8 record, adoptedAt and accepted records.
+# ==========================================================================
+_WARNING = "single-branch-delivery"
+_REMEDY_PARTS = ("already on the default branch", "nothing needs undoing", "/flow", "/advance")
+
+
+def _parent_world(case, pr_link="none"):
+    """A judged contract with a real parent issue (100) and sub-issues 101 and 102 recorded in the state."""
+    return _parent_state(_pb_world(case, brief=_pb_brief(pr=pr_link)))
+
+
+def _web_pr(tid, number, **kwargs):
+    """A sub-task pull request merged into the default branch on the web."""
+    return {number: _pr(number, "task/%s/%s" % (_PB_SLUG, tid), base="master", **kwargs)}
+
+
+def _record_keys(world):
+    """{file: keys} of every yaml under the results folder (a delivery record included)."""
+    found = {}
+    for rel in world.under(world.results_rel):
+        data = yaml.safe_load(world.get(rel).decode("utf-8")) or {}
+        found[rel] = set(data) if isinstance(data, dict) else set()
+    return found
+
+
+def _assert_plain(case, world):
+    for rel, keys in _record_keys(world).items():
+        case.assertFalse(keys & {"layout", "failure", "replaces", "accepted_blocks", "adoptedAt"},
+                         "R-7: %s carries a layout verdict or marker: %r" % (rel, sorted(keys)))
+    case.assertFalse(any(rel.endswith("rule-adoption.yaml") for rel in world.under(world.results_rel)),
+                     "and no adoption file exists")
+
+
+class TestLayoutWarningInStatus(unittest.TestCase):
+    """R-8: `layout_warnings`, derived from facts, blocks nothing."""
+
+    def _status(self, world, **kwargs):
+        kwargs.setdefault("prs", {})
+        return _pb_status(self, world, **kwargs)
+
+    def test_a_known_merged_one_branch_candidate_is_a_warning_and_not_a_defect(self):
+        res = self._status(_pb_world(self), prs=_merged_parent_pr(), records_prs=[])
+        self.assertIn(_WARNING, _pbw_reasons(res.report), "a warning in layout_warnings. %s" % res.describe())
+        self.assertNotIn(_WARNING, _pb_reasons(res.report), "and no longer a layout defect. %s" % res.describe())
+        remedy = " ".join(str((_pbw_entry(res.report, _WARNING) or {}).get("remedy") or "").split())
+        for part in _REMEDY_PARTS:
+            self.assertIn(part, remedy, "the contract's remedy text: %r" % remedy)
+
+    def test_the_next_command_for_that_candidate_is_the_plain_record_delivery(self):
+        res = self._status(_pb_world(self), prs=_merged_parent_pr(), records_prs=[])
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "delivery-unrecorded", res.describe())
+        self.assertEqual(res.commands(), ["/pr-merged %d --record-delivery" % _BRIEF_PR_NUMBER], res.describe())
+        self.assertFalse(any(c.get("needs_accept") for c in res.report.get("delivery_candidates") or []))
+
+    def test_a_record_merged_into_the_default_branch_fires_it(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world)
+        self.assertIn(_WARNING, _pbw_reasons(res.report), res.describe())
+
+    def test_a_record_whose_base_is_not_the_parent_branch_fires_it(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=False, base_ref="feature/some-other-branch")
+        res = self._status(world)
+        self.assertIn(_WARNING, _pbw_reasons(res.report), res.describe())
+
+    def test_positive_control_records_on_the_parent_branch_raise_no_warning(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=False, base_ref=_PB_PARENT)
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_PB_PARENT)
+        res = self._status(world)
+        self.assertEqual(res.report.get("layout_warnings"), [], "the key is present and empty. %s" % res.describe())
+
+    def test_an_open_records_pull_request_holds_it_back(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world, records_prs=[{"url": _pr_url(77)}])
+        self.assertNotIn(_WARNING, _pbw_reasons(res.report),
+                         "the records are still on the records branch. %s" % res.describe())
+
+    def test_origin_records_are_merged_in_and_win_over_a_stale_local_record(self):
+        # The local t1 record is an old one-branch record; origin holds the real parent-landing records.
+        world = _origin_landing(_pb_world(self))
+        world.record("t1-backend", 61, base_is_default=True, merged_at="2026-09-01T09:00:00Z")  # local only, stale
+        res = self._status(world, prs=_merged_parent_pr(), records_prs=[])
+        self.assertNotIn(_WARNING, _pbw_reasons(res.report),
+                         "origin/master proves the landing; the stale local record must not raise a false "
+                         "warning. %s" % res.describe())
+
+    def test_a_stale_checkout_is_judged_from_origin_not_from_its_empty_folder(self):
+        world = _origin_landing(_pb_world(self))  # the records exist on origin only
+        res = self._status(world, prs=_merged_parent_pr(), records_prs=[])
+        self.assertNotIn(_WARNING, _pbw_reasons(res.report), res.describe())
+
+    def test_an_unreadable_origin_reports_unverifiable_never_the_warning_and_never_its_absence(self):
+        for mode in _UNREADABLE_ORIGIN_MODES:
+            with self.subTest(origin=mode):
+                world, kwargs = _unreadable_origin(self, mode)
+                res = self._status(world, prs=_merged_parent_pr(), records_prs=[], **kwargs)
+                self.assertNotIn(_WARNING, _pbw_reasons(res.report), "%s: not the warning. %s" % (mode, res.describe()))
+                entry = _pbw_entry(res.report, "unverifiable")
+                self.assertTrue(entry and "git fetch origin master" in str(entry.get("remedy")),
+                                "%s: an 'unverifiable' entry with the re-read remedy (not an empty list). got %r"
+                                % (mode, res.report.get("layout_warnings")))
+
+    def test_the_warning_blocks_nothing_not_dispatch_not_completion(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world)
+        self.assertIn(_WARNING, _pbw_reasons(res.report), "fixture sanity: %s" % res.describe())
+        self.assertEqual(res.report.get("layout_defects"), [], "no defect")
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "dispatch", res.describe())
+        self.assertNotIn(_WARNING, json.dumps(res.completion), "and it never enters the completion evaluation")
+        dispatched = _drive(world, ["--dispatch", "t2-frontend"])
+        self.assertEqual(dispatched.exit_code, 0, "t2 is still cut. %s" % dispatched.describe())
+        self.assertEqual(dispatched.spies.create_branch.call_count, 1)
+
+    def test_exempt_and_single_block_contracts_get_no_warning(self):
+        for label, contract in (("implemented", _pb_contract(status="implemented")),
+                                ("one block", _pb_contract(blocks="one"))):
+            with self.subTest(case=label):
+                world = _pb_world(self, contract=contract, brief=_pb_brief(pr="none"))
+                world.record("t1-backend", 61, base_is_default=True)
+                res = self._status(world)
+                # Amended R-8: the key is ABSENT for an unjudged contract, never [] (was: absent or empty).
+                self.assertNotIn("layout_warnings", res.report,
+                                 "%s: an unjudged contract carries no layout_warnings key. %s" % (label, res.describe()))
+
+
+class TestRecordsArePlain(unittest.TestCase):
+    """R-7 (and Bypass row 6): a recording is never refused, failed or marked by the layout."""
+
+    def test_a_web_merged_sub_task_pull_request_is_a_plain_completion_that_closes_its_sub_issue(self):
+        world = _parent_world(self)
+        closed = []
+        res = _drive(world, ["--pr", "61"], prs=_web_pr("t1-backend", 61), sub_issues=[101], close_log=closed)
+        self.assertEqual(res.exit_code, 0, res.describe())
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual((rec.get("status"), rec.get("verified"), rec.get("base_ref"), rec.get("base_is_default")),
+                         ("completed", "github", "master", True), repr(rec))
+        self.assertEqual(closed, [101], "it closes its sub-issue like any completion")
+        self.assertEqual(rec.get("sub_issue_closed"), "closed")
+        self.assertEqual((res.report or {}).get("failed"), [], "and reports no failure")
+        _assert_plain(self, world)
+        status = _pb_status(self, world, prs={})
+        self.assertIn(_WARNING, _pbw_reasons(status.report), "the later --status lists the warning")
+        self.assertEqual(status.report.get("layout_defects"), [], "and blocks nothing")
+
+    def test_a_pull_request_with_no_head_branch_is_still_a_plain_completion(self):
+        world = _parent_world(self)
+        pr = _pr(61, "ignored", base="master", title="t1-backend: the backend block")
+        del pr["headRefName"]
+        res = _drive(world, ["--pr", "61"], prs={61: pr})
+        self.assertEqual(res.exit_code, 0, res.describe())
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual(rec.get("status"), "completed", repr(rec))
+        _assert_plain(self, world)
+        self.assertIn(_WARNING, _pbw_reasons(_pb_status(self, world, prs={}).report),
+                      "the warning detection reads the record's facts, not the head branch name")
+
+    def test_record_delivery_records_a_merged_one_branch_delivery_like_any_delivery(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)], prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        delivery = _yaml(world, _results(world, "contract-delivery.yaml"))
+        self.assertEqual(delivery.get("blocks_recorded"), ["t1-backend", "t2-frontend"], repr(delivery))
+        _assert_plain(self, world)
+
+    def test_a_layout_defect_does_not_refuse_a_recording(self):
+        # id: none is the layout defect no-parent-issue; it blocks dispatch and approval only.
+        world = _pb_world(self, brief=_pb_brief(ident="none", pr=_pr_url(_BRIEF_PR_NUMBER)))
+        res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)], prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        _assert_plain(self, world)
+
+    def test_the_accept_flag_no_longer_exists(self):
+        world = _pb_world(self)
+        before = world.snapshot()
+        res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER), "--accept-single-branch"],
+                     prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 2, "an unknown flag: argparse refuses it. %s" % res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+    def test_an_unreadable_origin_exits_10_unverifiable_and_writes_nothing(self):
+        # Amended (R-10, B1): the freshness check needs origin, so an unreadable one is unverifiable, exit 10.
+        # (Was: "an unreadable origin never refuses a recording"; that held before R-10 read origin at recording.)
+        for mode in _UNREADABLE_ORIGIN_MODES:
+            for extra in ([], ["--dry-run"]):
+                with self.subTest(origin=mode, extra=extra):
+                    world, kwargs = _unreadable_origin(self, mode)
+                    before = world.snapshot()
+                    res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)] + extra,
+                                 prs=_merged_parent_pr(), **kwargs)
+                    self.assertEqual(res.exit_code, 10, "%s. %s" % (mode, res.describe()))
+                    self.assertEqual((res.report or {}).get("error"), "github-unverifiable", res.describe())
+                    # Forms review N5, strengthened: a regression to `_origin() or {}` would treat the unreadable
+                    # origin as "holds no records" and record (exit 0, files written); all five modes, plain and
+                    # dry-run, with local records empty, fail that.
+                    self.assertNotEqual((res.report or {}).get("reason"), "records-not-local", res.describe())
+                    self.assertIn("origin/master", res.out, "the detail names the origin that could not be read")
+                    self.assertEqual(world.snapshot(), before, "%s %s: nothing is written" % (mode, extra))
+
+
+class TestLegacySingleBranchDeliveries(unittest.TestCase):
+    """Row 5 and row 9: the PR #58 and PR #82 shapes record with the plain command and reach complete."""
+
+    def _world(self, shape):
+        world, spec, prs = _pb_legacy_world(self, shape)
+        world.review("t9-block.md", verdict="blocked")  # keeps the contract approved, so it stays judged
+        return world, spec, prs
+
+    def test_each_shape_records_plainly_reaches_complete_and_shows_the_warning(self):
+        for shape in sorted(_PB_LEGACY):
+            with self.subTest(shape=shape):
+                world, spec, prs = self._world(shape)
+                number = spec["number"]
+                first = _pb_status(self, world, prs=prs)
+                self.assertEqual(first.commands(), ["/pr-merged %d --record-delivery" % number],
+                                 "the plain command, never an accept form. %s" % first.describe())
+                self.assertIn(_WARNING, _pbw_reasons(first.report), "while sub-tasks remain --status shows the warning")
+                res = _drive(world, ["--record-delivery", "--pr", str(number)], prs=prs)
+                self.assertEqual(res.exit_code, 0, "nothing refuses it. %s" % res.describe())
+                _assert_plain(self, world)
+                for round_no in range(3):
+                    again = _pb_status(self, world, prs=prs)
+                    self.assertEqual((again.report.get("next_move") or {}).get("action"), "complete",
+                                     "round %d: %s" % (round_no, again.describe()))
+                    self.assertNotIn("--record-delivery", " ".join(again.commands()), "no loop")
+                # Amended R-8 (N2): the warning clears once nothing remains to deliver; the key is [] (judged,
+                # every read succeeded), no longer the warning. (Was: the warning still showed after complete.)
+                self.assertEqual(again.report.get("layout_warnings"), [], "and clears once the contract is complete")
+
+    def test_positive_control_the_real_files_shape_with_a_scope_note_is_one_block_and_unchanged(self):
+        spec = _PB_LEGACY["pr58"]
+        world = _World(self, spec["slug"], contract=_pb_contract(spec["slug"], blocks="scope-note"),
+                       brief=_pb_brief(slug=spec["slug"], ident="57", branch=spec["branch"], pr=_pr_url(58)))
+        res = _pb_status(self, world, prs={58: _pr(58, spec["branch"])})
+        self.assertEqual(res.commands(), ["/pr-merged 58 --record-delivery"], res.describe())
+        self.assertNotIn("layout_warnings", res.report)
+
+    def test_r6_a_legacy_contract_that_is_already_implemented_is_not_judged(self):
+        world, spec, prs = _pb_legacy_world(self, "pr82")
+        world.put(world.contract_rel, _pb_contract(spec["slug"], status="implemented"))
+        world.record("t1-backend", 82, base_is_default=True)
+        world.record("t2-frontend", 82, base_is_default=True)
+        world.delivery(82)
+        res = _pb_status(self, world, prs=prs)
+        self.assertFalse(res.report.get("layout_warnings") or res.report.get("layout_defects"), res.describe())
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "complete", res.describe())
+
+
+class TestTheOriginReadIsFreshAndFailsClosed(unittest.TestCase):
+    """B1, W2: the live report reads a fetched origin/<default>, probed before it is listed."""
+
+    def test_the_default_branch_is_fetched_before_origin_is_read(self):
+        res = _drive(_pb_world(self), ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        events = res.spies.events
+        reads = [i for i, e in enumerate(events) if e in ("ref-probe", "ls-tree")]
+        self.assertTrue(reads, "fixture sanity: the live report reads origin/master. events=%r" % (events,))
+        self.assertIn("fetch", events, "fetch_default_branch is called before the read. events=%r" % (events,))
+        self.assertLess(events.index("fetch"), reads[0], "and it comes FIRST. events=%r" % (events,))
+        self.assertIn(mock.call("master"), res.spies.fetch_default_branch.call_args_list)
+
+    def test_the_existence_of_origin_base_is_probed_before_it_is_listed(self):
+        res = _drive(_pb_world(self), ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        events = res.spies.events
+        self.assertIn("ref-probe", events, "origin/master is checked to exist. events=%r" % (events,))
+        self.assertIn("ls-tree", events, "fixture sanity. events=%r" % (events,))
+        self.assertLess(events.index("ref-probe"), events.index("ls-tree"), "probe first. events=%r" % (events,))
+
+    def test_the_harness_answers_the_origin_read_itself(self):
+        res = _drive(_pb_world(self), ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        self.assertIn("ls-tree", res.spies.events, "the origin read reached the stand-in: %r" % res.spies.events)
+        with mock.patch.object(pr_merged, "_run", _no_process):
+            with self.assertRaises(AssertionError):
+                pr_merged._run(["git", "status"])
+
+
+class TestAnOpenRecordsPullRequestComesFirst(unittest.TestCase):
+    """Last-review W-2."""
+
+    RECORDS_URL = _pr_url(77)
+
+    def test_origin_is_not_read_while_a_records_pull_request_is_open(self):
+        res = _drive(_pb_world(self), ["--status"], prs=_merged_parent_pr(), records_prs=[{"url": self.RECORDS_URL}],
+                     origin="ref-missing")
+        self.assertEqual(res.commands(), ["/pr-merged %s" % self.RECORDS_URL], res.describe())
+        self.assertFalse(set(res.spies.events) & {"fetch", "ref-probe", "ls-tree"}, repr(res.spies.events))
+        self.assertNotIn("GitHub could not be asked", res.out, res.describe())
+        self.assertNotIn("unverifiable", _pbw_reasons(res.report), "origin was not read, so nothing is unverifiable")
+        self.assertTrue(all(c.get("known") for c in (res.report or {}).get("delivery_candidates") or []))
+        held = _pbw_entry(res.report, "held") or {}
+        self.assertEqual(held.get("detail"), "records pull request open: %s" % self.RECORDS_URL,
+                         "R-8: held, never read as clean. layout_warnings=%r" % (res.report.get("layout_warnings"),))
+
+    def test_without_one_an_unreadable_origin_is_blamed_not_github(self):
+        res = _drive(_pb_world(self), ["--status"], prs=_merged_parent_pr(), records_prs=[], origin="ref-missing")
+        reason = json.dumps((res.report or {}).get("next_command"))
+        self.assertNotIn("GitHub could not be asked", reason, res.describe())
+        self.assertIn("unverifiable", _pbw_reasons(res.report), res.describe())
+
+
+# ==========================================================================
+# Final cycle (issue 113), plain-records review W1 to W5, N1, N2 and the freshness refusal. Contract R-8 (the
+# fixed forms of layout_warnings), R-9 (the same forms in the Landing Report) and R-10 (G-7 records-not-local).
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/plain-records-review-fullstack-code-reviewer.md
+# ==========================================================================
+_CLOSED_WARNING_REASONS = {"single-branch-delivery", "held", "unverifiable"}
+
+
+class TestLayoutWarningForms(unittest.TestCase):
+    """R-8 forms: absent / [] / held / unverifiable / single-branch-delivery, and when each applies."""
+
+    def _status(self, world, **kwargs):
+        kwargs.setdefault("prs", {})
+        return _pb_status(self, world, **kwargs)
+
+    def test_the_key_is_an_empty_list_only_when_judged_every_read_succeeded_and_nothing_remains_to_report(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=False, base_ref=_PB_PARENT)  # t2 remains, record is clean
+        res = self._status(world, records_prs=[])
+        self.assertEqual(res.report.get("layout_warnings"), [], res.describe())
+
+    def test_a_failed_open_records_lookup_is_unverifiable_with_a_re_read_remedy_never_an_empty_list(self):
+        res = self._status(_pb_world(self), prs=_merged_parent_pr(), records_prs=None)
+        entry = _pbw_entry(res.report, "unverifiable")
+        self.assertTrue(entry and "rerun" in str(entry.get("remedy")),
+                        "the lookup returned None: an 'unverifiable' entry with a re-read remedy. got %r"
+                        % (res.report.get("layout_warnings"),))
+
+    def test_an_open_records_pull_request_is_held_never_read_as_clean(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world, records_prs=[{"url": _pr_url(77)}])
+        entry = _pbw_entry(res.report, "held") or {}
+        self.assertEqual(entry.get("detail"), "records pull request open: %s" % _pr_url(77),
+                         "layout_warnings=%r" % (res.report.get("layout_warnings"),))
+        self.assertNotIn(_WARNING, _pbw_reasons(res.report), "and the warning itself is held back")
+
+    def test_origin_is_read_for_every_judged_status_even_with_no_candidate(self):
+        res = self._status(_pb_world(self, brief=_pb_brief(pr="none")), records_prs=[])
+        events = res.spies.events
+        self.assertTrue({"fetch", "ref-probe", "ls-tree"} <= set(events),
+                        "W2: a judged contract with no candidate still fetches, probes and lists origin. events=%r"
+                        % (events,))
+
+    def test_a_parent_branch_checkout_sees_a_web_merge_whose_record_is_only_on_origin(self):
+        # t1 was merged into master on the web, its Records pull request merged; this checkout (on the parent
+        # branch) never saw the record and no candidate exists.
+        world = _pb_world(self, brief=_pb_brief(pr="none"))
+        _origin_only(world, "t1-backend", 61, "2026-10-01T09:00:00Z", base_is_default=True)
+        res = self._status(world, records_prs=[])
+        self.assertIn(_WARNING, _pbw_reasons(res.report), "W2. %s" % res.describe())
+
+    def test_an_unresolved_parent_branch_raises_no_warning_the_layout_defect_explains_it(self):
+        world = _pb_world(self, contract=_pb_contract(header="absent"), with_brief=False)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world, records_prs=[])
+        self.assertIn("no-parent-branch", _pb_reasons(res.report), "fixture sanity")
+        self.assertNotIn(_WARNING, _pbw_reasons(res.report), "N1. %s" % res.describe())
+
+    def test_the_warning_clears_once_the_contract_is_complete(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        world.record("t2-frontend", 62, base_is_default=True)
+        res = self._status(world, records_prs=[])
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "complete", "fixture sanity")
+        self.assertEqual(res.report.get("layout_warnings"), [], "N2: nothing remains to deliver. %s" % res.describe())
+
+    def test_a_complete_exempt_contract_has_no_key(self):
+        world = _pb_world(self, contract=_pb_contract(status="implemented"), brief=_pb_brief(pr="none"))
+        world.record("t1-backend", 61, base_is_default=True)
+        world.record("t2-frontend", 62, base_is_default=True)
+        res = self._status(world, records_prs=[])
+        self.assertNotIn("layout_warnings", res.report, res.describe())
+
+    def test_while_sub_tasks_remain_the_remedy_keeps_the_deliver_the_remaining_sub_tasks_sentence(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world, records_prs=[])
+        remedy = " ".join(str((_pbw_entry(res.report, _WARNING) or {}).get("remedy") or "").split())
+        self.assertIn("Deliver the remaining sub-tasks through the parent branch", remedy, repr(remedy))
+
+    def test_the_reasons_are_the_closed_set_of_three(self):
+        seen = set()
+        cases = [
+            dict(world=_pb_world(self), kw=dict(prs=_merged_parent_pr(), records_prs=[])),
+            dict(world=_pb_world(self), kw=dict(prs=_merged_parent_pr(), records_prs=[{"url": _pr_url(77)}])),
+            dict(world=_pb_world(self), kw=dict(prs=_merged_parent_pr(), records_prs=None)),
+            dict(world=_pb_world(self), kw=dict(prs=_merged_parent_pr(), records_prs=[], origin="ref-missing")),
+        ]
+        for case in cases:
+            seen |= set(_pbw_reasons(self._status(case["world"], **case["kw"]).report))
+        self.assertEqual(seen, _CLOSED_WARNING_REASONS, "every form is produced, and nothing else")
+
+
+class TestDeliveredMeansCompletedAndVerified(unittest.TestCase):
+    """Forms review W1: 'delivered' (clearing the warning, and 'remaining sub-tasks') is is_delivered's reading:
+    status completed AND verified github. Nothing else counts."""
+
+    REMAINING = "Deliver the remaining sub-tasks through the parent branch"
+
+    def _status(self, world):
+        return _pb_status(self, world, prs={}, records_prs=[])
+
+    def test_a_failed_record_keeps_the_warning_and_its_sub_task_still_remains(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)  # genuinely merged into the default branch
+        world.record("t2-frontend", 62, status="failed", failure="x", base_is_default=False, base_ref=_PB_PARENT)
+        res = self._status(world)
+        self.assertIn(_WARNING, _pbw_reasons(res.report),
+                      "t2 failed, so it is not delivered: the key must not be []. layout_warnings=%r"
+                      % (res.report.get("layout_warnings"),))
+        remedy = " ".join(str((_pbw_entry(res.report, _WARNING) or {}).get("remedy") or "").split())
+        self.assertIn(self.REMAINING, remedy, "and the failed sub-task still counts as remaining")
+
+    def test_a_completed_record_without_github_verification_keeps_the_warning(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_PB_PARENT, verified="none")
+        res = self._status(world)
+        self.assertIn(_WARNING, _pbw_reasons(res.report), "layout_warnings=%r" % (res.report.get("layout_warnings"),))
+
+    def test_positive_control_both_completed_and_verified_clears_it(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_PB_PARENT)
+        res = self._status(world)
+        self.assertEqual(res.report.get("layout_warnings"), [], res.describe())
+
+
+class TestWarningsAreEmittedOnlyByStatusResumeAndTheLanding(unittest.TestCase):
+    """Forms review W2 / R-8 Modes: the key appears in --status and --resume (and the Landing Report) and in no
+    other mode; there its absence means nothing."""
+
+    def test_status_and_resume_emit_the_key(self):
+        for flag in ("--status", "--resume"):
+            with self.subTest(mode=flag):
+                res = _drive(_parent_world(self), [flag], prs={}, records_prs=[])
+                self.assertEqual(res.exit_code, 0, res.describe())
+                self.assertIn("layout_warnings", res.report or {}, "%s emits layout_warnings. %s" % (flag, res.describe()))
+
+    def test_a_recording_run_never_emits_it(self):
+        res = _drive(_parent_world(self), ["--pr", "61"], prs=_web_pr("t1-backend", 61))
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertNotIn("layout_warnings", res.report or {}, "--pr: the next step is --status. %s" % res.describe())
+
+    def test_record_delivery_never_emits_it(self):
+        res = _drive(_pb_world(self), ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)], prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertNotIn("layout_warnings", res.report or {}, res.describe())
+
+    def test_dry_run_never_emits_it(self):
+        for flags in ([], ["--pr", "61"]):
+            with self.subTest(flags=flags):
+                res = _drive(_parent_world(self), flags + ["--dry-run"], prs=_web_pr("t1-backend", 61))
+                self.assertEqual(res.exit_code, 0, res.describe())
+                self.assertNotIn("layout_warnings", res.report or {}, "--dry-run computes no warnings. %s" % res.describe())
+
+    def test_preconditions_never_emits_it(self):
+        res = _drive(_parent_world(self), ["--preconditions"], prs={})
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertNotIn("layout_warnings", res.report or {}, res.describe())
+
+
+class TestRecordingRefusesStaleLocalRecords(unittest.TestCase):
+    """R-10: G-7 records-not-local, for EVERY contract; stale data, not layout; writes nothing."""
+
+    FLAGS = ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)]
+
+    def _world(self, blocks):
+        contract = _pb_contract(blocks=blocks)
+        brief = _pb_brief(ident="none", pr=_pr_url(_BRIEF_PR_NUMBER)) if blocks == "one" else None
+        return _pb_world(self, contract=contract, brief=brief)
+
+    def _assert_refused(self, world, extra=()):
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS + list(extra), prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 9, res.describe())
+        self.assertEqual(((res.report or {}).get("guard"), (res.report or {}).get("reason")),
+                         ("G-7", "records-not-local"), res.describe())
+        said = json.dumps({k: (res.report or {}).get(k) for k in ("detail", "remedy")})
+        self.assertIn("flat worktree cut fresh from origin/master", said, "the G-6 wording")
+        self.assertNotIn("layout", said.lower(), "stale data, not a layout check")
+        self.assertEqual(world.snapshot(), before, "it writes nothing")
+
+    def test_a_two_block_contract_is_refused_when_origin_holds_records_the_local_folder_lacks(self):
+        self._assert_refused(_origin_landing(self._world("two")))
+
+    def test_a_single_block_contract_is_refused_too(self):
+        world = self._world("one")
+        _origin_only(world, "t1-backend", 61, "2026-10-01T09:00:00Z", base_is_default=True)
+        self._assert_refused(world)
+
+    def test_a_partly_stale_folder_is_refused(self):
+        world = self._world("two")
+        world.record("t1-backend", 61, base_is_default=False, base_ref=_PB_PARENT, merged_at="2026-10-01T09:00:00Z")
+        _origin_only(world, "t2-frontend", 62, "2026-10-02T09:00:00Z", base_is_default=False, base_ref=_PB_PARENT)
+        self._assert_refused(world)
+
+    def test_a_dry_run_is_refused_like_the_real_run(self):
+        self._assert_refused(_origin_landing(self._world("two")), ["--dry-run"])
+
+    def test_positive_control_with_the_records_local_the_recording_works(self):
+        world = self._world("two")
+        for tid, number, merged in (("t1-backend", 61, "2026-10-01T09:00:00Z"), ("t2-frontend", 62, "2026-10-02T09:00:00Z")):
+            rel = world.record(tid, number, base_is_default=False, base_ref=_PB_PARENT, merged_at=merged)
+            world.publish(rel)
+        res = _drive(world, self.FLAGS, prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
+
+    def test_a_layout_defect_alone_still_never_refuses_a_recording(self):
+        world = _pb_world(self, brief=_pb_brief(ident="none", pr=_pr_url(_BRIEF_PR_NUMBER)))
+        res = _drive(world, self.FLAGS, prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
+
+
+class TestProtectedBranchesReaderIgnoresAMalformedValue(unittest.TestCase):
+    """Fix review NIT 4: one reader of contractLanding.protectedBranches, shared by the landing."""
+
+    def _read(self, value):
+        text = json.dumps({"contractLanding": {"protectedBranches": value}})
+        with mock.patch.object(pr_merged, "file_at_commit", return_value=text):
+            return pr_merged.protected_branches("master")
+
+    def test_a_string_value_is_not_split_into_characters(self):
+        self.assertEqual(self._read("release"), ["master"])
+
+    def test_a_list_keeps_its_strings_and_the_default_branch(self):
+        self.assertEqual(self._read(["release", 5, "master"]), ["master", "release"])
+
+    def test_the_landing_reads_the_key_through_this_function(self):
+        text = (Path(__file__).resolve().parent.parent / "land_contract.py").read_text(encoding="utf-8")
+        self.assertTrue("pr_merged.protected_branches(" in text,
+                        "land_contract.py (P0 and P1) must call pr_merged.protected_branches, not keep its own "
+                        "`list(... or [default])` reader")
+        self.assertIsNone(re.search(r'get\("protectedBranches"\)\s+or\s+\[', text),
+                          "and no second reader of protectedBranches is left in land_contract.py")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,10 @@ verified: github
 sub-tasks are built on an assumption this failure disproves. Medium means this sub-task needs
 respecifying and the rest stand. Low means the approach was wrong but the specification holds.
 
+### A sub-task merged into the default branch on the web
+
+In a contract with two or more mergeable blocks, a sub-task pull request should target the parent branch. The merge-direction check cannot stop one that is merged into the default branch on the web, and that is not an undeliverable sub-task: the work is done. This phase records it after the merge as an ordinary completion (status `completed`, `verified: github`, `base_is_default: true`) and closes its sub-issue. The layout is reported as a warning instead: `--status --json` lists `single-branch-delivery` in `layout_warnings`, with the remedy that this work is already on the default branch and is recorded as done, nothing needs undoing, and the remaining sub-tasks go through the parent branch (`/flow` Step 2.7, then `/advance`). The warning blocks nothing. A contract with a single mergeable block is unchanged: that merge completes the sub-task.
+
 ### Release nothing
 
 **A failed sub-task releases none of its dependents.** They were going to build on work that

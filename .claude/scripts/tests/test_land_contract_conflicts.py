@@ -455,5 +455,113 @@ class TestConflictRegions(LandCase):
                          "no conflict hunk, so an empty list")
 
 
+# ===========================================================================
+# Issue 113, R-3: P7's per-path branch for the new class ``version-fields``.
+#
+# Inside _p7_merge, a conflict on a check_version_bump.MANIFESTS path is judged region by region
+# (conflict_regions). When every region differs only in lines carrying "version", the default branch's
+# side is taken (and the later raise rewrites those lines); otherwise the merge halts unresolvable-conflict.
+# Real git in a temporary repository; the repository is removed by addCleanup whatever the outcome.
+# ===========================================================================
+def _g(cwd, *args, check=True):
+    proc = _REAL_SUBPROCESS_RUN(["git", "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", *args],
+                                cwd=str(cwd), capture_output=True, text=True, env=_GIT_ENV)
+    if check and proc.returncode != 0:
+        raise AssertionError("fixture git %r failed: %s" % (args, proc.stderr))
+    return proc.stdout.strip()
+
+
+def force_rmtree(path):
+    """Remove a folder holding a git repository. Git object files are read-only on Windows, so a plain
+    rmtree(ignore_errors=True) silently leaves the folder behind; clear the flag and retry instead."""
+    import stat
+
+    def retry(func, target, _error):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(str(path), onexc=retry)
+    else:
+        shutil.rmtree(str(path), onerror=retry)
+
+
+PLUGIN_BASE = ('{\n  "name": "x",\n  "version": "0.10.0",\n  "description": "d",\n'
+               '  "versionNote": "n",\n  "other": 1\n}\n')
+
+
+class TestP7VersionFieldConflicts(LandCase):
+
+    CONFIG = {"versionRaise": True, "unionPaths": [], "regenerators": []}
+
+    def conflict(self, parent_text, default_text, path="plugin.json", base=PLUGIN_BASE):
+        """A parent branch and a default branch that both changed ``path``; returns the P7 outcome."""
+        tmp = Path(tempfile.mkdtemp(prefix="landtest-p7v-"))
+        self.addCleanup(force_rmtree, tmp)
+        repo = tmp / "repo"
+        _g(tmp, "init", "-q", "--initial-branch=master", str(repo))
+        for key, value in (("user.name", "t"), ("user.email", "t@example.test")):
+            _g(repo, "config", key, value)
+        write_files(repo, {path: base, "README.txt": "r\n"})
+        _g(repo, "add", "-A")
+        _g(repo, "commit", "-q", "-m", "base")
+        _g(repo, "checkout", "-q", "-b", "parent")
+        write_files(repo, {path: parent_text})
+        _g(repo, "commit", "-q", "-am", "parent edits")
+        _g(repo, "checkout", "-q", "master")
+        write_files(repo, {path: default_text})
+        _g(repo, "commit", "-q", "-am", "default edits")
+        mark_m, mark_p = _g(repo, "rev-parse", "master"), _g(repo, "rev-parse", "parent")
+        _g(repo, "checkout", "-q", "--detach", "parent")
+        logs = tmp / "logs"
+        logs.mkdir()
+        facts, details, notes = {}, {}, []
+        out = self.fn("_p7_merge")({}, repo, "master", mark_m, mark_p, dict(self.CONFIG), logs, "parent",
+                                   "demo", facts, details, notes)
+        return {"repo": repo, "facts": facts, "details": details, "resolved": out[2],
+                "merging": _g(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False),
+                "parents": _g(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()}
+
+    def test_regions_that_differ_only_in_version_lines_take_the_default_branchs_side(self):
+        result = self.conflict(PLUGIN_BASE.replace('"0.10.0"', '"0.10.1"'), PLUGIN_BASE.replace('"0.10.0"', '"0.11.0"'))
+        self.assertFalse(result["facts"].get("p7_unresolvable_conflict"),
+                         "a stale parent bump against a moved default branch is a version-only region: %r"
+                         % (result["details"],))
+        self.assertIn("plugin.json", result["resolved"], "the file is listed among the resolved paths")
+        text = (result["repo"] / "plugin.json").read_text(encoding="utf-8")
+        self.assertIn('"version": "0.11.0"', text, "the default branch's side is taken")
+        self.assertEqual(len(result["parents"]), 3, "and the merge is committed (two parents)")
+
+    def test_a_region_that_also_differs_in_another_line_halts_unresolvable_conflict(self):
+        result = self.conflict(
+            PLUGIN_BASE.replace('"0.10.0",\n  "description": "d"', '"0.10.1",\n  "description": "parent words"'),
+            PLUGIN_BASE.replace('"0.10.0",\n  "description": "d"', '"0.11.0",\n  "description": "default words"'))
+        self.assertTrue(result["facts"].get("p7_unresolvable_conflict"),
+                        "the description line differs in the same region, so nobody may pick a side blindly")
+        self.assertIn("plugin.json", str(result["details"].get("unresolvable-conflict")), "the detail names the file")
+        self.assertEqual(result["merging"], "", "and the merge was aborted, not left half done")
+
+    def test_a_line_that_only_looks_like_version_is_not_a_version_line(self):
+        result = self.conflict(PLUGIN_BASE.replace('"versionNote": "n"', '"versionNote": "parent"'),
+                               PLUGIN_BASE.replace('"versionNote": "n"', '"versionNote": "default"'))
+        self.assertTrue(result["facts"].get("p7_unresolvable_conflict"),
+                        '"versionNote" does not carry "version": the merge halts')
+
+    def test_two_separate_version_only_regions_are_both_resolved(self):
+        base = ('{\n  "version": "0.10.0",\n  "name": "m",\n  "plugins": [\n    {\n      "name": "x",\n'
+                '      "version": "0.10.0"\n    }\n  ]\n}\n')
+        tmp_path = ".claude-plugin/marketplace.json"
+        result = self.conflict(base.replace("0.10.0", "0.10.1"), base.replace("0.10.0", "0.11.0"), path=tmp_path,
+                               base=base)
+        self.assertFalse(result["facts"].get("p7_unresolvable_conflict"), repr(result["details"]))
+        text = (result["repo"] / tmp_path).read_text(encoding="utf-8")
+        self.assertEqual(text.count('"0.11.0"'), 2, "both entries come from the default branch")
+
+    def test_positive_control_a_non_manifest_conflict_still_halts(self):
+        result = self.conflict(PLUGIN_BASE.replace('"0.10.0"', '"0.10.1"'), PLUGIN_BASE.replace('"0.10.0"', '"0.11.0"'),
+                               path="notes.json")
+        self.assertTrue(result["facts"].get("p7_unresolvable_conflict"),
+                        "only MANIFESTS paths get the version-fields rule")
+
+
 if __name__ == "__main__":
     unittest.main()
