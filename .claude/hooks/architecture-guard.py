@@ -22,8 +22,9 @@ Hook contract (Claude Code):
 Bypass:
     CLAUDE_ARCH_GUARD=off -- disable the hook for a session
 
-Exception list:
-    architecture-guard.exceptions.json, found by hook_file: the project copy, then the template beside the hook, then ~/.claude/hooks
+Exception list and rules file:
+    architecture-guard.exceptions.json and architecture-guard.rules.json (both)
+    hook_file finds each: project copy, template beside the hook, working folder's .claude/hooks, then ~/.claude/hooks
 
 Post-edit view (G-4):
     For an Edit or MultiEdit the guard builds the file as it will be after the
@@ -43,7 +44,8 @@ Known limits (accepted; each is pinned by a test):
     W11  An edit that completes a violation started on disk passes.
     G-2  `*.component.html`, `*.component.ts`, `*.component.scss` are always scanned; any other
          `.html`, `.scss`, `.css` or `.ts` file only when its `.ts` sibling (for a `.ts`, its own
-         post-edit text) already carries `@Component(`.
+         post-edit text) already carries `@Component(`. A `.spec.ts` or `.d.ts` is never scanned.
+         With no post-edit view the written text is used instead.
     G-5  A 3- or 6-character token with no digit that stands alone after
          whitespace (such as `  #fff`) is read as a template reference variable.
          Quotes are counted per kind, so an apostrophe inside a double-quoted value
@@ -115,11 +117,13 @@ def load_project_settings() -> dict:
             log(f"failed to read project settings: {e}")
     root = data.get("frontend_projects_root")
     docs = data.get("reference_documents")
+    # G-1: padding, backslashes, doubled and surrounding slashes do not change the root.
+    root_segments = [
+        s.strip() for s in (root.replace("\\", "/").lower().split("/") if isinstance(root, str) else [])
+        if s.strip()
+    ]
     _PROJECT_SETTINGS = {
-        "frontend_projects_root": (
-            str(root).strip("/").lower() if isinstance(root, str) and root.strip()
-            else _DEFAULT_FRONTEND_PROJECTS_ROOT
-        ),
+        "frontend_projects_root": "/".join(root_segments) or _DEFAULT_FRONTEND_PROJECTS_ROOT,
         "reference_documents": (
             [str(d) for d in docs] if isinstance(docs, list) else list(_DEFAULT_REFERENCE_DOCUMENTS)
         ),
@@ -257,12 +261,26 @@ def load_app_rules(file_path: Path) -> dict | None:
         return _APP_RULES_CACHE.get(app)
     _APP_RULES_LOADED.add(app)
 
-    # Walk up to find <frontend_projects_root>/<app>/.app-rules.json (V-2: the default root when the root is unreadable).
+    # V-2: a raise in the root lookup or in the walk retries with the default root; a second raise means no rules.
+    default_root = [_DEFAULT_FRONTEND_PROJECTS_ROOT]
     try:
         root_parts = app_root_segments()
     except Exception as e:  # noqa: BLE001
         log(f"app root lookup failed (using '{_DEFAULT_FRONTEND_PROJECTS_ROOT}'): {e}")
-        root_parts = [_DEFAULT_FRONTEND_PROJECTS_ROOT]
+        root_parts = default_root
+    try:
+        return read_app_rules_file(file_path, app, root_parts)
+    except Exception as e:  # noqa: BLE001
+        log(f"app rules walk failed (retrying with '{_DEFAULT_FRONTEND_PROJECTS_ROOT}'): {e}")
+    try:
+        return read_app_rules_file(file_path, app, default_root)
+    except Exception as e:  # noqa: BLE001
+        log(f"app rules walk failed again (no app rules): {e}")
+        return None
+
+
+def read_app_rules_file(file_path: Path, app: str, root_parts: list[str]) -> dict | None:
+    """Walk up to <frontend_projects_root>/<app>/.app-rules.json and read it; None when absent or unreadable."""
     depth = len(root_parts)
     parts = list(file_path.resolve().parts) if file_path.is_absolute() else list(Path.cwd().joinpath(file_path).resolve().parts)
     for i in range(len(parts) - 1, depth, -1):
@@ -272,7 +290,7 @@ def load_app_rules(file_path: Path) -> dict | None:
             if rules_file.exists():
                 try:
                     data = json.loads(rules_file.read_text(encoding="utf-8"))
-                    _APP_RULES_CACHE[app] = data
+                    _APP_RULES_CACHE[app] = data  # shared with load_app_rules' per-app cache
                     return data
                 except (OSError, json.JSONDecodeError) as e:
                     log(f"failed to read {rules_file}: {e}")
@@ -721,7 +739,7 @@ def scan_whole_file_rules(
     if is_template_html(path):
         for text in ([view.text] if view.text is not None else fragments):
             warnings.extend(scan_height_chain_invariant(text, path, exemptions))
-    elif view.text is not None and view.disk is not None and is_component_ts(path, view.text):
+    elif view.text is not None and view.disk is not None and is_component_ts(path, lambda: view.text):
         blocking.extend(scan_inline_component_rules(view.text, path, exemptions, view.disk))
     return blocking, warnings
 
@@ -1144,10 +1162,16 @@ def extract_contents(payload: dict) -> list[tuple[str, str]]:
 RX_COMPONENT_DECORATOR = re.compile(r"@Component\s*\(")
 
 
+_SIBLING_DECORATOR: dict[Path, bool] = {}  # one read per sibling per call
+
+
 def sibling_has_decorator(path: Path) -> bool:
     """G-2: True when the ``<stem>.ts`` beside ``path`` is on disk and carries ``@Component(``."""
     ts_path = path.with_name(path.name[: -len(path.suffix)] + ".ts")
-    return ts_path.is_file() and RX_COMPONENT_DECORATOR.search(ts_path.read_text(encoding="utf-8")) is not None
+    if ts_path not in _SIBLING_DECORATOR:
+        _SIBLING_DECORATOR[ts_path] = (
+            ts_path.is_file() and RX_COMPONENT_DECORATOR.search(ts_path.read_text(encoding="utf-8")) is not None)
+    return _SIBLING_DECORATOR[ts_path]
 
 
 def text_has_decorator(text: str) -> bool:
@@ -1170,13 +1194,16 @@ def is_template_html(path: Path) -> bool:
     return path.suffix == ".html" and counts_as_found(sibling_has_decorator, path)
 
 
-def is_component_ts(path: Path, text: str) -> bool:
-    """``text`` is the file as it will be after the edit (the written text when no view exists)."""
+def is_component_ts(path: Path, get_text) -> bool:
+    """
+    The name decides first, so a ``.spec.ts`` or ``.d.ts`` is never read. Otherwise
+    ``get_text()`` gives the file as it will be after the edit (the written text when no view exists).
+    """
     if path.name.endswith(".component.ts"):
         return True
     if path.suffix != ".ts" or path.name.endswith((".spec.ts", ".d.ts")):
         return False
-    return counts_as_found(text_has_decorator, text)
+    return counts_as_found(lambda: text_has_decorator(get_text()))
 
 
 def is_component_scss(path: Path) -> bool:
@@ -1185,14 +1212,15 @@ def is_component_scss(path: Path) -> bool:
     return path.suffix in (".scss", ".css") and counts_as_found(sibling_has_decorator, path)
 
 
-def post_edit_text(payload: dict, file_path_str: str, written: str) -> str:
-    """G-2: the post-edit view's text, or the written text when the view is unavailable."""
-    try:
-        view = build_post_edit_view(payload, file_path_str)
-    except Exception as e:  # noqa: BLE001
-        log(f"post-edit view failed (using the written text): {e}")
-        return written
-    return written if view.text is None else view.text
+def post_edit_snapshot(payload: dict, file_path_str: str, snapshots: dict[str, PostEditView]) -> PostEditView:
+    """The post-edit view of a file, built once per file per call; a builder fault makes it unavailable (V-2)."""
+    if file_path_str not in snapshots:
+        try:
+            snapshots[file_path_str] = build_post_edit_view(payload, file_path_str)
+        except Exception as e:  # noqa: BLE001
+            log(f"post-edit view failed (judging fragments): {e}")
+            snapshots[file_path_str] = PostEditView(file_path_str, None, None, "disk-plus-edits", "builder-error")
+    return snapshots[file_path_str]
 
 
 # ---------------------------------------------------------------------------
@@ -1322,6 +1350,7 @@ def main() -> None:
     target_for_block = ""
     findings: dict[str, list[Violation]] = {}  # per file, in first-seen order
     fragments: dict[str, list[str]] = {}  # new text of each edit, for the whole-file pass
+    snapshots: dict[str, PostEditView] = {}  # the post-edit view of each file, built once per call
 
     for file_path_str, new_content in pairs:
         if not file_path_str:
@@ -1336,7 +1365,7 @@ def main() -> None:
                 scan_template_html(new_content, path, rule_exemptions))
             fragments.setdefault(file_path_str, []).append(new_content)
         elif path.suffix == ".ts" and is_component_ts(
-                path, post_edit_text(payload, file_path_str, new_content)):
+                path, lambda: post_edit_snapshot(payload, file_path_str, snapshots).text or new_content):
             findings.setdefault(file_path_str, []).extend(
                 scan_component_ts(new_content, path, rule_exemptions))
             fragments.setdefault(file_path_str, []).append(new_content)
@@ -1352,11 +1381,7 @@ def main() -> None:
     # step falls back to the stricter or the earlier outcome when it raises (V-2).
     for file_path_str, texts in fragments.items():
         path = Path(file_path_str)
-        try:
-            view = build_post_edit_view(payload, file_path_str)
-        except Exception as e:  # noqa: BLE001
-            log(f"post-edit view failed (judging fragments): {e}")
-            view = PostEditView(file_path_str, None, None, "disk-plus-edits", "builder-error")
+        view = post_edit_snapshot(payload, file_path_str, snapshots)
         try:
             extra, hw = scan_whole_file_rules(path, texts, view, rule_exemptions)
         except Exception as e:  # noqa: BLE001

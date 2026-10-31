@@ -26,7 +26,7 @@ This is a rule document of the `angular-tailwind` add-on of the agentic-auto-imp
 
 Templates (.component.html): ZERO static style="..." attributes allowed. Every static property must be a Tailwind utility from the @theme bridge. In short, a component template has no static `style="..."` attribute. Dynamic [style.prop]="expr()" bindings ARE allowed for runtime-computed values.
 
-- Enforced by: guard blocks (`inline-style`), on every line of a template: `*.component.html`, or a `.html` file beside a `.ts` file that carries `@Component(`.
+- Enforced by: guard blocks (`inline-style`), on every line of a template: `*.component.html`, or a `<name>.html` file whose `.ts` file with the same name (`<name>.ts`) carries `@Component(`.
 - Allowed exceptions: the closed list in `T-008`. There is no other.
 - Example: write `class="text-primary"`, not `style="color: var(--mat-sys-primary)"`.
 

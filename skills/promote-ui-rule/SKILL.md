@@ -70,10 +70,10 @@ Construct a one-line test snippet that should trigger the new rule. Find the gua
 ```bash
 GUARD=
 if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/.claude/hooks/architecture-guard.py" ]; then GUARD=$CLAUDE_PLUGIN_ROOT/.claude/hooks/architecture-guard.py
-elif [ -f .claude/hooks/architecture-guard.py ]; then GUARD=.claude/hooks/architecture-guard.py
+elif [ -f "${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/architecture-guard.py" ]; then GUARD=${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/architecture-guard.py
 fi
 [ -n "$GUARD" ] || { echo "architecture-guard.py not found: tried \$CLAUDE_PLUGIN_ROOT/.claude/hooks/architecture-guard.py and the project's .claude/hooks/architecture-guard.py"; exit 1; }
-py -3 "$GUARD" <<'EOF'
+CLAUDE_PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}" py -3 "$GUARD" <<'EOF'
 {"tool_name":"Write","tool_input":{"file_path":"<path-matching-scope>","content":"<test-snippet>"}}
 EOF
 ```
