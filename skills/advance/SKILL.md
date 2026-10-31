@@ -326,7 +326,7 @@ Route to architect re-entry. Concretely that means `/design-first` amending the 
 not start anything, and do not retry the sub-task from here — whether to retry is one of the
 decisions the architect makes.
 
-**One failure kind has another way out.** When every failed record carries `failure: single-branch-delivery` (a sub-task pull request merged into the default branch on the web), the script's `escalate` Next Command is `/pr-merged <pr> --record-delivery --accept-single-branch` for each, never `/design-first`. That flag is the owner's decision, not this skill's: show each command to the owner with the reason, and never run it yourself. Any other failure keeps `/design-first`.
+**One failure kind has another way out.** When every failed record carries `failure: single-branch-delivery` (a sub-task pull request merged into the default branch on the web), the script's `escalate` Next Command is `/pr-merged <pr> --record-delivery --accept-single-branch` for each, never `/design-first`. That flag is the owner's decision, not this skill's: show each command to the owner with the reason, and never run it yourself. The accept is printed only for a pull request that merged before the contract adopted the rule (`adoptedAt`), while no delivery is recorded; any other failure, and any later web merge, keeps `/design-first`.
 
 ### `delivery-unrecorded` — a pull request delivered the whole contract and nothing records it
 

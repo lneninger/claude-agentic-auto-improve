@@ -3051,7 +3051,8 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
             encoding="utf-8", errors="replace")
     except OSError as exc:
         # Zero blocks would make the layout check vanish: a landing that cannot read its contract cannot judge it.
-        return finish("unverifiable", "P0", "the contract file cannot be read: %s" % exc)
+        return finish("unverifiable", "P0", "the contract file cannot be read: %s" % exc,
+                      remedy="restore .claude/concepts/%s.md on the parent branch, then rerun" % slug)
     # R-6 and the reason vocabulary live once, in delivery_layout: a header brief that differs from the
     # children (ambiguous) or sits on a protected branch (parent-is-default) halts a judged contract only.
     layout = pr_merged.delivery_layout(
