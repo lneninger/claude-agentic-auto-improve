@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -314,6 +315,65 @@ class ProjectRulesTextTests(TextCase):
         both = self.flat("CLAUDE.md") + " " + self.flat("skills/advance/SKILL.md")
         self.assertIn("--raise", both, "R-4: under landing: manual the operator runs --raise")
         self.assertIn("--exact", both, "and --exact; CI enforces only 'raised'")
+
+
+class AcceptCommandSkillTextTests(TextCase):
+    """R-10 / Bypass row 6 (f): the skills show the accept command to the owner and never run it. The tokens are
+    read from the scripts, not from the authors' wording."""
+
+    SCRIPTS = Path(__file__).resolve().parent.parent
+    SKILL_FILES = ("skills/advance/SKILL.md", "skills/pr-merged/SKILL.md",
+                   "skills/pr-merged/references/contract-completion.md",
+                   "skills/pr-merged/references/undeliverable-sub-task.md")
+
+    def flag(self):
+        source = (self.SCRIPTS / "pr_merged.py").read_text(encoding="utf-8")
+        found = re.search(r'add_argument\(\s*"(--accept-[a-z-]+)"', source)
+        self.assertIsNotNone(found, "pr_merged.py declares the accept flag")
+        return found.group(1)
+
+    def failure_kind(self):
+        sys.path.insert(0, str(self.SCRIPTS))
+        try:
+            import pr_merged
+        finally:
+            sys.path.pop(0)
+        kind = "single-branch-delivery"
+        self.assertIn(kind, pr_merged.LAYOUT_DEFECT_REASONS, "the R-8 failure kind is a name the script owns")
+        return kind
+
+    def test_the_r8_reference_names_the_failure_kind_and_its_accept_in_one_paragraph(self):
+        flag, kind = self.flag(), self.failure_kind()
+        hit = [p for p in self.paragraphs("skills/pr-merged/references/undeliverable-sub-task.md")
+               if flag in p and kind in p]
+        self.assertTrue(hit, "undeliverable-sub-task.md: a failed record with failure %s is cleared by the owner "
+                             "running %s (R-10)" % (kind, flag))
+
+    def test_advance_and_the_completion_reference_tie_escalate_to_the_accept(self):
+        flag, kind = self.flag(), self.failure_kind()
+        for rel in ("skills/advance/SKILL.md", "skills/pr-merged/references/contract-completion.md"):
+            with self.subTest(file=rel):
+                hit = [p for p in self.paragraphs(rel) if flag in p and "escalate" in p.lower() and kind in p]
+                self.assertTrue(hit, "%s: the escalate move for a %s failure prints %s" % (rel, kind, flag))
+
+    def test_every_skill_that_names_the_accept_gives_it_to_the_owner(self):
+        flag = self.flag()
+        for rel in self.SKILL_FILES:
+            paras = [p for p in self.paragraphs(rel) if flag in p]
+            with self.subTest(file=rel):
+                self.assertTrue(paras, "%s shows the accept command" % rel)
+                self.assertTrue(all(re.search(r"owner|person|human", p, re.I) for p in paras),
+                                "and every paragraph that shows it says who runs it")
+
+    def test_no_skill_runs_the_accept_in_a_shell_block(self):
+        flag = self.flag()
+        for path in sorted((PLUGIN_ROOT / "skills").rglob("*.md")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for block in re.findall(r"```[a-z]*\n(.*?)```", text, re.S):
+                for line in block.splitlines():
+                    if flag in line:
+                        self.assertIsNone(re.match(r"\s*(py|python3?)\b", line),
+                                          "%s runs the accept itself: %s" % (path.relative_to(PLUGIN_ROOT), line.strip()))
 
 
 class VocabularyTextTests(TextCase):

@@ -1315,6 +1315,19 @@ class TestLandingP0JudgesOnlyJudgedContracts(LauncherCase):
                 self.assertEqual(self.outcome(report), "ambiguous-parent", report.get("detail"))
                 execm.assert_not_called()
 
+    def test_a_parent_branch_landing_whose_contract_cannot_be_read_halts_unverifiable(self):
+        # Final review N3: an unreadable contract must not make the header check vanish (zero blocks, no
+        # layout, nothing to compare). Here every brief agrees, so only the missing contract can stop it.
+        folder = Path(self._tmp.name) / "no-contract"
+        folder.mkdir()
+        kit = disagreeing_kit(folder, brief_base=PARENT)
+        (kit.main / ".claude" / "concepts" / ("%s.md" % SLUG)).unlink()
+        _, execm, report = self.launch(kit)
+        self.assertEqual(self.outcome(report), "unverifiable",
+                         "P0 cannot judge the layout of a contract it cannot read (got %s: %s)"
+                         % (report.get("outcome"), report.get("detail")))
+        execm.assert_not_called()
+
     def test_p0_delegates_the_check_to_the_one_layout_function(self):
         text = (Path(__file__).resolve().parent.parent / "land_contract.py").read_text(encoding="utf-8")
         start = text.index("def _launch_land(")

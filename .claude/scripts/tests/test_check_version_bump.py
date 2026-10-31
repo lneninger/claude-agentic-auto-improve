@@ -464,6 +464,24 @@ class EmptyDefaultBranchTests(unittest.TestCase):
                 self.assertEqual(code, 2, "got: %s" % out)
 
 
+class PaddedDefaultBranchTests(unittest.TestCase):
+    """Final review N5: a padded --default-branch is stripped for the ref AND for the check."""
+
+    def test_the_default_rules_still_apply_into_the_default_branch(self):
+        repo = VersionRepo(self)
+        repo.branch("feature/x")
+        repo.ship_change()  # shipped change, no raise, into master: exit 1
+        code, out = repo.run("--base", "origin/master", "--default-branch", " master", "--head-ref", "feature/x")
+        self.assertEqual(code, 1, "' master' is master: the check must not be skipped (exit 0). got: %s" % out)
+
+    def test_exact_reads_the_stripped_ref(self):
+        repo = VersionRepo(self, "0.11.3")
+        repo.branch("feature/p")
+        repo.ship_change("0.12.0")
+        code, out = repo.run("--exact", "--default-branch", " master ")
+        self.assertEqual(code, 0, "origin/master, not 'origin/ master '. got: %s" % out)
+
+
 class SpawnedScriptEnvironmentTests(unittest.TestCase):
     """Test review W-5: the script under test never reads the developer's own git configuration."""
 
