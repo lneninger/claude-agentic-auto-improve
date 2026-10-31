@@ -15,7 +15,7 @@ north_stars: none
 contract: .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
 pr: none
 issue_link: unknown
-status: implementing
+status: verifying
 created: 2026-10-30
 ---
 
@@ -121,3 +121,14 @@ Run of `/flow` on issue 113, 2026-10-30. Stopped at the review stage: the retry 
   - Nits: N1 local records read relative to the current folder while origin's are not (R-10 refuses for good from a subfolder, fail-closed); N2 `origin/HEAD` unset falls back to `master`; N3 the landing's `unverifiable` detail can name the wrong ref; N4 the text test still forbids the token `G-7`; N5 no test pins exit 10 for an unreadable origin on `--record-delivery`.
 - **Not run on the final code:** `test_land_contract.py`, `test_cleanup_delivered.py` (Claude Code stopped them for low memory earlier).
 - **State:** everything committed locally on `feature/113-parent-branch-delivery-rule`; nothing pushed; no pull request.
+
+## Verification report (2026-10-31, commit 94d0aee, branch feature/113-parent-branch-delivery-rule)
+
+- **Scope:** plugin repository (Python scripts, skills, agents, templates, registries, manifests, CI workflow). No backend, frontend or migration roots in `.claude/project-profile.md`, so the build, drift, migration and sidecar steps do not apply.
+- **Scripted runner (`--verify-here`):** not launched, by the user's decision, because the full run includes the two memory-heavy suites.
+- **Tests, run by the main session one at a time, each in its own process, exit code 0:** `test_check_version_bump` 46, `test_parent_branch_rule_text` 33, `test_land_contract_identity` 50, `test_pr_merged_dispatch` 52 (2 expected failures, as before), `test_land_contract_conflicts` 14, `test_land_contract_reuse` 58, `test_skill_script_lookup` 23, `test_plugin_manifests` 167 checks, `test_plugin_doctor` 87 (1 skipped), `test_merge_direction` 50, `test_auto_improve_finish_install` 304, `test_flat_worktree` 22, `test_verify_parent_link` 71 checks, `test_compose_subissue_title` 627 checks, `test_cleanup_delivered_trials` 8 (1 skipped), `test_plugin_text_scans` 8.
+- **`test_pr_merged.py`:** 651 tests OK, run by the user in their own terminal on this commit (twice, 325 s and 333 s).
+- **Skipped by the user's decision, not run on the final code:** `test_land_contract.py` (last known on an earlier commit: 305 tests, 1 old unrelated failure, the `gh pr merge` text in `skills/ship/SKILL.md`) and `test_cleanup_delivered.py` (last known: 126 passed, 1 skipped).
+- **Safety-critical review gate:** PASS, no safety-critical, auth or migration roots in the profile. Independent fresh reviewers (code reviewer, seven passes; test critic, one pass) examined the work; the last code review had 0 blockers.
+- **Handoff and commit hygiene:** the diff against `master` holds no secrets, keys, build output or scratch files; the tree is clean.
+- **Verdict:** READY, with the two skipped suites stated above.
