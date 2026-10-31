@@ -299,6 +299,75 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.12.0 (follow-ups to the `angular-tailwind` rule documents, issue #86):** this
+release closes the items the 0.10.0 work left open. The manifests read 0.12.0. It has eight
+parts.
+
+- **Guard fixes.** `architecture-guard.py` is the default hook that checks Angular and Tailwind
+  edits before they are written. It now judges the whole file once per call, using the **post-edit
+  view**: the text the file will hold after the Write, Edit or MultiEdit. Before, a rule that
+  needs the whole file (the height chain, and the inline `template:` and `styles:` checks) saw
+  only the edited fragment. Other fixes:
+  - a template reference variable such as `<input #add>` is no longer read as the colour `#add`;
+  - the guard finds `.app-rules.json` under whatever folder holds the apps, not only `projects`;
+  - the guard recognises Angular 20 file names: a `.html`, `.scss`, `.css` or `.ts` file counts as
+    a component file when its `.ts` sibling holds `@Component(`;
+  - no code path in the guard builds a path into your home folder;
+  - the `promote-ui-rule` skill runs the guard through a lookup block, and the "Enforced by"
+    lines of the rule documents that these fixes made false are corrected.
+- **Known limits.** Some gaps are accepted, listed in a "Known limits" block in the guard's
+  docstring, and each is pinned by a test. Two edits that together form `text-gray-500` pass,
+  because each edit is judged on its own new text. An edit that completes a violation already on
+  disk passes. Stylesheet rules only warn. `relative` and `absolute` are never checked. A
+  3- or 6-character token with no digit, such as `  #fff` alone after whitespace, is read as a
+  template reference variable. A file with no recognised name is scanned only when its `.ts`
+  sibling already holds `@Component(`.
+- **Removed switches.** No add-on has a kill switch now. `CLAUDE_SKIP_CG` (codegraph) and
+  `CLAUDE_BASH_GATE` (strict-shell-gate) are no longer read, and neither shipped `addon.json`
+  declares `kill_switches`. The install plan still lists `kill-switches`, as an empty list.
+  **`CLAUDE_CONCEPT_GATE=off` no longer turns off the strict-shell-gate add-on.** It still turns
+  off the concept gate and the Changed-file check, which are default hooks.
+- **Ways out (the K-4 routes).** The uninstall skill is the normal way out of an add-on. When a
+  hook cannot run, remove its row from `.claude/settings.json` by hand. The table under "Ways out
+  when a hook cannot run" gives the route for each hook. The codegraph block message is now plain
+  text that names `/auto-improve-codegraph-uninstall`. The uninstall skills no longer say "never
+  edit `settings.json` by hand"; they say the skill never does, and that you do only when a hook
+  cannot run.
+- **Three lines of your global `~/.claude/CLAUDE.md` that only you can change.** The plugin
+  never edits that file. Three lines are now false or only partly true:
+  - the CodeGraph bypass "set `CLAUDE_SKIP_CG=1`", which does nothing now;
+  - "Disable the gate entirely: `CLAUDE_CONCEPT_GATE=off`", which no longer covers the shell gate;
+  - the claim that the gate "auto-bypasses until the index exists", which the hook does not do.
+    With no `mcp__codegraph__*` tool in the session, every source Read is blocked; read through
+    the shell, or uninstall the add-on and start a new session.
+- **Doctor.** `plugin_doctor.py --drift` reports a new kind of finding,
+  `disabled-hook-installed`. A **disabled hook** is one an add-on still ships but no longer
+  installs (the advisor is one). The doctor reports its file in `.claude/hooks/`, and its row in
+  `.claude/settings.json` or `.claude/settings.local.json`, under the current name or a former
+  name. It also compares add-on **documents** in pairs: the project copy under
+  `.claude/references/<add-on>/` against the plugin's copy under
+  `.claude/addons/<add-on>/documents/`. A pair is `content-differs` or `one-sided`. `--drift`
+  never writes. The doctor does not read the user-level settings layer, so a disabled hook row
+  there is refused by the install but not reported by the doctor.
+- **Removed preload.** `python-ai-developer` no longer preloads a skill that was never shipped.
+  A new test checks that every skill named in an agent's `skills:` list exists under `skills/`.
+- **Patterns.** `UI-UX-PATTERNS.md` ships one new plugin pattern, **P-002, Table column
+  alignment**: numeric columns and their headers right-aligned, text columns left-aligned. It is
+  not enforced by the guard. Three candidates were rejected and are listed under "Patterns this
+  plugin does not ship": the status badge and the card surface (product data and product look),
+  and the constrained panel (a project class name; `T-014` already bounds height).
+  The advisor's `DISABLED.md` now names both defects to fix before turning it back on: the dead
+  `ui` keyword, and a fallback that reads the home folder.
+- **Rules route trial.** `.claude/references/claude-rules-route-trial.md` records a live try of
+  a `.claude/rules/` file with a `paths:` filter, on Claude Code 2.1.316. It did not load at
+  session start. It loaded once the session opened a matching file, and again inside a subagent
+  that opened one. So it gives no guidance before a matching file is read. The trial was three
+  headless runs only.
+- **Registry promotions.** `VOCABULARY.md` gains Add-on, Add-on manifest, Add-on document,
+  Disabled add-on hook, Rule ID, Post-edit view and Accepted guard limit, plus amendments to
+  Placeholder slot and Vendored-asset drift. `MECHANISMS.md` gains Disabled add-on hook and an
+  amendment to CodeGraph that replaces its bypass clause. Existing entries are not edited.
+
 ### Retired hooks, and how to restore one
 
 Version 0.7.0 retired six hooks. Version 0.9.8 brought `plan-question-advisor.py` back as a
