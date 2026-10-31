@@ -127,6 +127,16 @@ class AngularTailwindAddonTests(AddonCase):
         self.assertNotIn(af.KEY_KILL_SWITCHES, af.manifest(self.ADD_ON),
                          msg="the add-on declares no kill switch (decision 3 of issue #84)")
 
+    def test_disabled_note_names_both_defects_to_fix_before_turning_it_back_on(self):
+        note = (Path(af.__file__).resolve().parents[2] / "addons" / self.ADD_ON / "DISABLED.md").read_text(
+            encoding="utf-8")
+        self.assertIn('"ui"', note, msg="defect 1: the keyword pattern can never match 'ui'")
+        self.assertIn("_project_paths", note, msg="defect 2: the rules file falls back to the home folder")
+        self.assertIn("home folder", note)
+        self.assertIn("released_sha256", note, msg="the new hash must be added")
+        self.assertIn("add-ons declare no kill switch", note.lower(), msg="step 2 no longer offers a kill switch")
+        self.assertNotIn("Decide on a kill switch", note)
+
     def test_the_kept_script_no_longer_reads_the_arch_advisor_switch(self):
         text = self.hooks[self.HOOK].read_text(encoding="utf-8")
         self.assertNotIn("CLAUDE_ARCH_ADVISOR", text, msg="the switch and its docstring lines are gone")
