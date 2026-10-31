@@ -507,15 +507,36 @@ class PromoteUiRuleSkillTests(unittest.TestCase):
     def test_step_four_runs_the_guard_through_a_lookup_block(self):
         block = self._lookup_block()
         self.assertTrue(block, "W9 (:72): no fenced block runs architecture-guard.py")
+        # (a) the plugin root and its guard path come first
         plugin = block.find("CLAUDE_PLUGIN_ROOT")
-        project = block.find(".claude/hooks/architecture-guard.py")
-        self.assertGreaterEqual(plugin, 0, "the lookup tries the plugin root first (CLAUDE_PLUGIN_ROOT)")
-        self.assertGreater(project, plugin, "then the project's .claude/hooks/architecture-guard.py")
-        self.assertIn("agentic-auto-improve/*/", block, "the lookup also searches the plugin cache")
-        self.assertRegex(block, r"\bexit\b", "the lookup halts when neither path exists")
-        self.assertRegex(block, r"(?m)^.*\b(echo|printf)\b.*architecture-guard\.py.*$",
-                         "the halt message names the guard's paths")
-        self.assertNotIn("$HOME", block, "no home-folder path in the block")
+        self.assertGreaterEqual(plugin, 0, "(a) the lookup tries $CLAUDE_PLUGIN_ROOT first")
+        plugin_guard = re.search(r"CLAUDE_PLUGIN_ROOT[^\n]*\.claude/hooks/architecture-guard\.py", block)
+        self.assertIsNotNone(plugin_guard, "(a) ... and the guard path under it")
+        # (b) then the project's own copy
+        project = block.find(".claude/hooks/architecture-guard.py", plugin_guard.end() if plugin_guard else 0)
+        self.assertGreater(project, plugin, "(b) then the project's .claude/hooks/architecture-guard.py")
+        # (c) halt, with a message naming both paths, when neither exists
+        self.assertRegex(block, r"\bexit\b", "(c) the lookup halts when neither path exists")
+        halt = re.search(r"(?m)^.*\b(echo|printf)\b.*$", block[project:]) or re.search(
+            r"(?m)^.*\b(echo|printf)\b.*$", block)
+        self.assertIsNotNone(halt, "(c) a halt message is printed")
+        message = " ".join(m.group(0) for m in re.finditer(r"(?m)^.*\b(?:echo|printf)\b.*$", block))
+        self.assertRegex(message, r"architecture-guard\.py",
+                         "(c) the halt message names the guard path")
+        self.assertRegex(message, r"CLAUDE_PLUGIN_ROOT|PLUGIN|plugin",
+                         "(c) the halt message names the plugin path")
+        self.assertRegex(message, r"\.claude/hooks|PROJECT|project",
+                         "(c) the halt message names the project path")
+        # (d) then the guard runs with py -3
+        self.assertRegex(block, r'(?m)^\s*.*\bpy\s+-3\s+"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"?',
+                         "(d) the guard is run with py -3 on the found path")
+        # (e) no home-folder path
+        self.assertNotIn("$HOME", block, "(e) no home-folder path in the block")
+        self.assertNotIn("~/.claude", block, "(e) no home-folder path in the block")
+        # The contract has no plugin-cache search. This pattern is also what test_skill_script_lookup.py
+        # scans for: a block holding it must run a .claude/scripts/<x>.py script, which a hook lookup cannot.
+        self.assertNotIn("agentic-auto-improve/*/", block,
+                         "no plugin-cache search: it would make test_skill_script_lookup.py scan this block")
 
 
 class AlreadyResolvedTests(unittest.TestCase):
