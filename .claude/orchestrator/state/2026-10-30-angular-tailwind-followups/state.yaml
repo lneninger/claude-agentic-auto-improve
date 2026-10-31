@@ -1,0 +1,73 @@
+contract: 2026-10-30-angular-tailwind-followups
+started_at: '2026-10-31T14:08:49.828973+00:00'
+sub_tasks:
+  t1-guard-post-edit-view-and-matching-precision:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 117
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-117-t1-guard-post-edit-view-and-matching-precision.md
+  t2-guard-paths-and-file-recognition:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 118
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-118-t2-guard-paths-and-file-recognition.md
+  t3-remove-the-add-on-kill-switches:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 119
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-119-t3-remove-the-add-on-kill-switches.md
+  t4-advisor-keyword-note:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 120
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-120-t4-advisor-keyword-note.md
+  t5-doctor-drift-and-agent-preload:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 121
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-121-t5-doctor-drift-and-agent-preload.md
+  t6-candidate-patterns:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 122
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-122-t6-candidate-patterns.md
+  t7-rules-route-trial:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 123
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-123-t7-rules-route-trial.md
+  t8-registry-appends:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 124
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-124-t8-registry-appends.md
+  t9-release-notes:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 125
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-125-t9-release-notes.md
+  t10-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 126
+    base: feature/86-angular-tailwind-followups
+    brief: .claude/work-items/2026-10-31-126-t10-review.md
