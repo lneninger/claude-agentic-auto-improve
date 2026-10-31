@@ -9,8 +9,9 @@ WHAT IS PINNED DOWN
 -------------------
 The rule is carried by prose as well as by scripts: a contract whose handoff has two or more mergeable blocks
 (an implementation block plus a review block counts) is always delivered through a parent branch, the version
-is raised once at landing, a Jira or Azure DevOps item can only have a single block, and the owner alone runs
-`--accept-single-branch`. Each place that states the rule has one or more checks here:
+is raised once at landing, a Jira or Azure DevOps item can only have a single block, and work merged outside the
+parent branch is recorded plainly and reported as the layout warning `single-branch-delivery` (R-7, R-8). Each
+place that states the rule has one or more checks here:
 
     template (header line, rule paragraph, the implementation-plus-review sentence)
     agents/data-architect.md, agents/contract-critic.md (a BLOCKER item)
@@ -18,13 +19,13 @@ is raised once at landing, a Jira or Azure DevOps item can only have a single bl
         Step 4 routing for two or more blocks)
     skills/flow (Step 2.7, the "no parent branch" sentence)
     skills/advance (exit 7 with two refusals, needs-issue before the cut, R-9)
-    skills/pr-merged/references (contract-completion.md: R-7 and R-9; undeliverable-sub-task.md: R-8)
+    skills/pr-merged/references (contract-completion.md and undeliverable-sub-task.md: R-7 and R-8)
     skills/task (Step 4 one-liner for trackers without a GitHub parent issue)
     skills/task/references/parent-aware-mode.md, CLAUDE.md, VOCABULARY.md, the five version entries
 
 How the checks read: each file is read whole, its whitespace is squashed to single spaces (the skills wrap
 lines), and the check is a phrase or a short regular expression built from identifiers the contract names
-(`layout_defects`, `needs-issue`, `--accept-single-branch`, `single-branch-delivery`, ...). A file that is
+(`layout_defects`, `layout_warnings`, `needs-issue`, `single-branch-delivery`, ...). A file that is
 missing fails the check with a message, never with an exception. Tests named positive_control pass today by
 design: they pin text that must stay.
 
@@ -243,45 +244,6 @@ class AdvanceTextTests(TextCase):
         self.assertMatches(r"contract-defect[^.]{0,300}layout|layout[^.]{0,300}contract-defect", flat,
                            "a layout defect makes the move contract-defect in place of dispatch")
 
-    def test_the_accept_command_is_shown_to_the_owner_and_never_run(self):
-        paras = [p for p in self.paragraphs(self.REL) if "--accept-single-branch" in p]
-        self.assertTrue(paras, "/advance names --accept-single-branch (R-9)")
-        self.assertMatches(r"never run|does not run|do not run|shows? it to the owner|show it to the owner|owner runs",
-                           " ".join(paras), "and says the skill shows it to the owner and never runs it itself")
-
-
-# ---------------------------------------------------------------------------
-# /pr-merged references
-# ---------------------------------------------------------------------------
-class PrMergedReferenceTextTests(TextCase):
-
-    def test_contract_completion_states_guard_g7_and_the_two_remedies(self):
-        flat = self.flat("skills/pr-merged/references/contract-completion.md")
-        self.assertIn("G-7", flat, "the guard list gains G-7")
-        self.assertIn("single-branch-delivery", flat)
-        self.assertIn("--accept-single-branch", flat, "the remedy for work already merged on the default branch")
-        self.assertMatches(r"/flow[^.]{0,200}/advance|Step 2\.7", flat,
-                           "and the remedy for work not yet merged: /flow (Step 2.7), then /advance")
-
-    def test_contract_completion_makes_the_accept_flag_human_only(self):
-        paras = [p for p in self.paragraphs("skills/pr-merged/references/contract-completion.md")
-                 if "--accept-single-branch" in p]
-        self.assertTrue(paras, "the reference documents --accept-single-branch")
-        self.assertMatches(r"owner|human|person", " ".join(paras), "who runs it: the owner")
-        self.assertMatches(r"never (runs?|run) it|does not run it|never runs", " ".join(paras),
-                           "the skill never runs it itself")
-
-    def test_contract_completion_documents_the_delivery_record_marker(self):
-        self.assertIn("single-branch-accepted", self.flat("skills/pr-merged/references/contract-completion.md"),
-                      "the delivery record marks an accepted single-branch delivery: layout: single-branch-accepted")
-
-    def test_undeliverable_sub_task_documents_the_web_merge_into_the_default_branch(self):
-        flat = self.flat("skills/pr-merged/references/undeliverable-sub-task.md")
-        self.assertIn("single-branch-delivery", flat, "R-8: a sub-task pull request merged into the default branch")
-        self.assertMatches(r"failure:?\s*`?single-branch-delivery", flat, "is recorded as a failed record with that failure")
-        self.assertIn("escalate", flat, "and the existing escalate move names it")
-
-
 # ---------------------------------------------------------------------------
 # /task and the parent-aware reference
 # ---------------------------------------------------------------------------
@@ -317,63 +279,50 @@ class ProjectRulesTextTests(TextCase):
         self.assertIn("--exact", both, "and --exact; CI enforces only 'raised'")
 
 
-class AcceptCommandSkillTextTests(TextCase):
-    """R-10 / Bypass row 6 (f): the skills show the accept command to the owner and never run it. The tokens are
-    read from the scripts, not from the authors' wording."""
+class LayoutWarningSkillTextTests(TextCase):
+    """R-7 / R-8 (amended 2026-10-30): the skills and references describe the layout warning that `--status`
+    lists in `layout_warnings`, and no longer mention the removed accept exit, guard G-7, the failed record or
+    adoption time. The warning's reason is read from the script, not from the authors' wording."""
 
     SCRIPTS = Path(__file__).resolve().parent.parent
-    SKILL_FILES = ("skills/advance/SKILL.md", "skills/pr-merged/SKILL.md",
-                   "skills/pr-merged/references/contract-completion.md",
-                   "skills/pr-merged/references/undeliverable-sub-task.md")
+    REMOVED = ("--accept-single-branch", "G-7", "single-branch-accepted", "merged-after-rule", "adoptedAt",
+               "rule-adoption", "accepted_blocks")
 
-    def flag(self):
+    def warning_reason(self):
+        lines = (self.SCRIPTS / "pr_merged.py").read_text(encoding="utf-8").splitlines()
+        hits = [i for i, ln in enumerate(lines) if "layout_warnings" in ln]
+        self.assertTrue(hits, "pr_merged.py builds a layout_warnings list (R-8)")
+        for i in hits:
+            found = re.search(r'"reason":\s*"([a-z-]+)"', "\n".join(lines[max(0, i - 3):i + 12]))
+            if found:
+                return found.group(1)
+        self.fail("pr_merged.py: no warning reason found beside layout_warnings")
+
+    def test_the_script_has_no_accept_flag_any_more(self):
         source = (self.SCRIPTS / "pr_merged.py").read_text(encoding="utf-8")
-        found = re.search(r'add_argument\(\s*"(--accept-[a-z-]+)"', source)
-        self.assertIsNotNone(found, "pr_merged.py declares the accept flag")
-        return found.group(1)
+        self.assertIsNone(re.search(r'add_argument\(\s*"--accept-', source), "the accept exit is removed")
 
-    def failure_kind(self):
-        sys.path.insert(0, str(self.SCRIPTS))
-        try:
-            import pr_merged
-        finally:
-            sys.path.pop(0)
-        kind = "single-branch-delivery"
-        self.assertIn(kind, pr_merged.LAYOUT_DEFECT_REASONS, "the R-8 failure kind is a name the script owns")
-        return kind
-
-    def test_the_r8_reference_names_the_failure_kind_and_its_accept_in_one_paragraph(self):
-        flag, kind = self.flag(), self.failure_kind()
-        hit = [p for p in self.paragraphs("skills/pr-merged/references/undeliverable-sub-task.md")
-               if flag in p and kind in p]
-        self.assertTrue(hit, "undeliverable-sub-task.md: a failed record with failure %s is cleared by the owner "
-                             "running %s (R-10)" % (kind, flag))
-
-    def test_advance_and_the_completion_reference_tie_escalate_to_the_accept(self):
-        flag, kind = self.flag(), self.failure_kind()
-        for rel in ("skills/advance/SKILL.md", "skills/pr-merged/references/contract-completion.md"):
+    def test_the_references_describe_the_warning_under_its_reason(self):
+        reason = self.warning_reason()
+        for rel in ("skills/pr-merged/references/contract-completion.md",
+                    "skills/pr-merged/references/undeliverable-sub-task.md"):
             with self.subTest(file=rel):
-                hit = [p for p in self.paragraphs(rel) if flag in p and "escalate" in p.lower() and kind in p]
-                self.assertTrue(hit, "%s: the escalate move for a %s failure prints %s" % (rel, kind, flag))
+                hit = [p for p in self.paragraphs(rel) if reason in p and "warning" in p.lower()]
+                self.assertTrue(hit, "%s: a paragraph describes the layout warning %s" % (rel, reason))
 
-    def test_every_skill_that_names_the_accept_gives_it_to_the_owner(self):
-        flag = self.flag()
-        for rel in self.SKILL_FILES:
-            paras = [p for p in self.paragraphs(rel) if flag in p]
+    def test_advance_and_pr_merged_say_the_status_lists_warnings_and_blocks_nothing(self):
+        for rel in ("skills/advance/SKILL.md", "skills/pr-merged/SKILL.md"):
             with self.subTest(file=rel):
-                self.assertTrue(paras, "%s shows the accept command" % rel)
-                self.assertTrue(all(re.search(r"owner|person|human", p, re.I) for p in paras),
-                                "and every paragraph that shows it says who runs it")
+                hit = [p for p in self.paragraphs(rel) if "layout_warnings" in p]
+                self.assertTrue(hit, "%s reads layout_warnings from the status report" % rel)
+                self.assertMatches(r"block(s)? nothing|does not block|never block", " ".join(hit),
+                                   "and says a warning blocks nothing")
 
-    def test_no_skill_runs_the_accept_in_a_shell_block(self):
-        flag = self.flag()
+    def test_no_skill_or_reference_mentions_a_removed_exit(self):
         for path in sorted((PLUGIN_ROOT / "skills").rglob("*.md")):
             text = path.read_text(encoding="utf-8", errors="replace")
-            for block in re.findall(r"```[a-z]*\n(.*?)```", text, re.S):
-                for line in block.splitlines():
-                    if flag in line:
-                        self.assertIsNone(re.match(r"\s*(py|python3?)\b", line),
-                                          "%s runs the accept itself: %s" % (path.relative_to(PLUGIN_ROOT), line.strip()))
+            for token in self.REMOVED:
+                self.assertNotIn(token, text, "%s still mentions %s" % (path.relative_to(PLUGIN_ROOT), token))
 
 
 class VocabularyTextTests(TextCase):
@@ -383,15 +332,19 @@ class VocabularyTextTests(TextCase):
         line = next((ln for ln in self.read(self.REL).splitlines() if ln.startswith("- **Contract Delivery**")), None)
         self.assertIsNotNone(line, "fixture sanity: the Contract Delivery entry exists")
         flat = squash(line)
-        self.assertIn("single-branch-accepted", flat, "the amendment names the delivery record marker")
-        self.assertMatches(r"two or more[^.]{0,100}blocks[^.]{0,200}parent branch", flat,
-                           "for a contract with two or more mergeable blocks only the parent branch's landing "
-                           "pull request, or an owner-accepted single-branch delivery, is a Contract Delivery")
+        self.assertNotIn("single-branch-accepted", flat, "no accepted-delivery marker exists any more")
+        self.assertMatches(r"two or more[^.]{0,100}blocks[^.]{0,200}parent branch's landing pull request", flat,
+                           "for a contract with two or more mergeable blocks the delivery is the parent branch's "
+                           "landing pull request")
+        self.assertMatches(r"still recorded as it is[^.]{0,200}layout warning[^.]{0,40}single-branch-delivery", flat,
+                           "a delivery made any other way is still recorded as it is, and --status reports the "
+                           "layout warning single-branch-delivery")
 
     def test_the_four_new_terms_are_defined(self):
         text = self.read(self.REL)
-        for term in ("Parent Branch Delivery Rule", "Layout defect", "Landing version raise",
-                     "Accepted single-branch delivery"):
+        self.assertFalse(re.search(r"^- \*\*Accepted single-branch delivery\*\*", text, re.M),
+                         "the accepted-delivery term is removed with the accept exit")
+        for term in ("Parent Branch Delivery Rule", "Layout defect", "Landing version raise", "Layout warning"):
             with self.subTest(term=term):
                 self.assertTrue(re.search(r"^- \*\*%s\*\*" % re.escape(term), text, re.M),
                                 "VOCABULARY.md needs an entry for %r" % term)

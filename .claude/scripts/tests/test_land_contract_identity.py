@@ -1252,13 +1252,14 @@ _DISAGREE_BRIEF = BRIEF_DIR + "2026-10-05-394-demo.md"
 
 
 def disagreeing_kit(tmp, status="approved", header_branch=None, header_contract=None, brief_base="feature/q",
-                    config=None):
+                    config=None, parent_extra=None):
     """Two mergeable blocks; the header brief is on PARENT (or ``header_branch``) while the Sub-Task briefs
     say ``base: brief_base``. ``header_contract`` rewrites the header brief's contract: value."""
     contract = ("# Demo contract\n\n**Status:** %s\n**Work Item Brief:** %s\n" % (status, _DISAGREE_BRIEF)
                 + CONTRACT_TEXT.split("\n", 1)[1])
     kit = Kit(tmp, config=config or landing_config(steps=[STEP_CLEAN]), brief_base=brief_base,
-              base_files={".claude/concepts/%s.md" % SLUG: contract}, parent_files=dict(SRC_CHANGE))
+              base_files={".claude/concepts/%s.md" % SLUG: contract},
+              parent_files={**SRC_CHANGE, **(parent_extra or {})})
     if header_branch is not None or header_contract is not None:
         text = brief_md(394, branch=header_branch or PARENT, parent_issue=None)
         if header_contract is not None:
@@ -1361,6 +1362,47 @@ class TestLandingP0JudgesOnlyJudgedContracts(LauncherCase):
         self.assertNotEqual(self.outcome(report), "parent-is-default",
                             "'e' is not a protected branch: the string is not a list of characters (got %s: %s)"
                             % (report.get("outcome"), report.get("detail")))
+
+
+class TestLandingNeverReadsARecordVerdict(StageCase):
+    """R-9 (amended 2026-10-30): the landing relies on its own checks and never on a record's verdict, because a
+    record has none. It repeats R-8's layout warning in the Landing Report and does not halt on it."""
+
+    WARNING = "single-branch-delivery"
+
+    def land(self, name, **record):
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        extra = {REC_DIR + "t1-backend.yaml": record_yaml(**record)} if record else None
+        st = Stage(self, disagreeing_kit(folder, brief_base=PARENT, parent_extra=extra))
+        return st.run()
+
+    def reasons(self, report):
+        return [w.get("reason") if isinstance(w, dict) else w for w in report.get("layout_warnings") or []]
+
+    def test_a_record_merged_into_the_default_branch_is_landed_and_the_report_repeats_the_warning(self):
+        report = self.land("on-default", base_ref="master", base_is_default=True)
+        self.assertEqual(report["outcome"], "landed", "the landing does not halt on it: %s: %s"
+                         % (report["outcome"], report["detail"]))
+        self.assertIn(self.WARNING, self.reasons(report), "the Landing Report repeats the warning (R-9)")
+
+    def test_records_on_the_parent_branch_give_an_empty_warning_list(self):
+        report = self.land("on-parent", base_ref=PARENT, base_is_default=False)
+        self.assertEqual(report["outcome"], "landed", report["detail"])
+        self.assertEqual(report.get("layout_warnings"), [], "the key is present and empty")
+
+    def test_a_hand_made_layout_or_failure_field_is_never_read(self):
+        report = self.land("verdict-fields", base_ref=PARENT, base_is_default=False,
+                           layout="single-branch-accepted", failure="single-branch-delivery")
+        self.assertEqual(report["outcome"], "landed", "no record carries a verdict, so none is read: %s"
+                         % report["detail"])
+
+    def test_the_landing_script_reads_no_accepted_blocks_and_no_record_layout(self):
+        text = (Path(__file__).resolve().parent.parent / "land_contract.py").read_text(encoding="utf-8")
+        for token in ("accepted_blocks", "single-branch-accepted"):
+            self.assertFalse(token in text, "land_contract.py must not mention %s" % token)
+        self.assertIsNone(re.search(r"""\.get\(\s*["']layout["']|\[\s*["']layout["']\s*\]""", text),
+                          "and reads no `layout` field of a record")
 
 
 class TestStageHeaderBriefDisagreement(StageCase):
