@@ -1405,6 +1405,49 @@ class TestLandingNeverReadsARecordVerdict(StageCase):
                           "and reads no `layout` field of a record")
 
 
+class TestLandingReportWarningForms(StageCase):
+    """R-9 (amended): the Landing Report repeats layout_warnings in the same forms as --status: absent for an
+    unjudged contract, [] when judged and every read succeeded, `unverifiable` when the listing failed. The
+    landing never halts on a warning."""
+
+    def run_landing(self, name, kit_factory, **run_kwargs):
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        st = Stage(self, kit_factory(folder))
+        return st, st.run(**run_kwargs)
+
+    def test_the_key_is_absent_for_an_unjudged_contract(self):
+        # The default Kit contract has no Status, so it is not judged (R-6).
+        _st, report = self.run_landing(
+            "unjudged", lambda folder: Kit(folder, config=landing_config(steps=[STEP_CLEAN]),
+                                           parent_files=dict(SRC_CHANGE)))
+        self.assertEqual(report["outcome"], "landed", report["detail"])
+        self.assertNotIn("layout_warnings", report, "absent, never [] (W1)")
+
+    def test_the_key_is_absent_for_an_implemented_contract(self):
+        _st, report = self.run_landing("implemented",
+                                       lambda folder: disagreeing_kit(folder, status="implemented", brief_base=PARENT))
+        self.assertEqual(report["outcome"], "landed", report["detail"])
+        self.assertNotIn("layout_warnings", report)
+
+    def test_a_failed_origin_listing_is_unverifiable_and_the_landing_still_lands(self):
+        import land_contract as lc_module
+        real = lc_module._git
+
+        def failing(cwd, *args, **kwargs):
+            if args and args[0] == "ls-tree" and "origin/master" in args:
+                return 128, "fatal: unable to read tree"
+            return real(cwd, *args, **kwargs)
+
+        _st, report = self.run_landing(
+            "listing-fails", lambda folder: disagreeing_kit(folder, brief_base=PARENT),
+            extra_patches=[mock.patch.object(lc_module, "_git", failing)])
+        self.assertEqual(report["outcome"], "landed", "the landing does not halt on it: %s" % report["detail"])
+        reasons = [w.get("reason") if isinstance(w, dict) else w for w in report.get("layout_warnings") or []]
+        self.assertEqual(reasons, ["unverifiable"],
+                         "a failed listing is unverifiable, not []. got %r" % (report.get("layout_warnings"),))
+
+
 class TestStageHeaderBriefDisagreement(StageCase):
 
     def test_p1_never_lands_whichever_parent_the_launcher_passes(self):

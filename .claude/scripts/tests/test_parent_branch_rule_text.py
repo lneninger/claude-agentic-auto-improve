@@ -318,6 +318,25 @@ class LayoutWarningSkillTextTests(TextCase):
                 self.assertMatches(r"block(s)? nothing|does not block|never block", " ".join(hit),
                                    "and says a warning blocks nothing")
 
+    def test_the_script_produces_exactly_the_three_warning_reasons(self):
+        source = (self.SCRIPTS / "pr_merged.py").read_text(encoding="utf-8")
+        found = set(re.findall(r'"reason":\s*"(single-branch-delivery|held|unverifiable)"', source))
+        self.assertEqual(found, {"single-branch-delivery", "held", "unverifiable"},
+                         "R-8: the closed set of layout_warnings reasons, as the script spells them")
+
+    def test_advance_prints_layout_warnings_on_every_move(self):
+        # W4: one preamble line, whatever the move, so a warning is never hidden behind a contract-defect or
+        # an escalate. The key is the script's; the skill must say it is shown on every move.
+        hit = [p for p in self.paragraphs("skills/advance/SKILL.md")
+               if "layout_warnings" in p and re.search(r"every move|each move|whatever the move|any move", p, re.I)]
+        self.assertTrue(hit, "skills/advance/SKILL.md: a preamble line prints layout_warnings on every move")
+
+    def test_pr_merged_skill_names_the_three_forms_with_the_script_reasons(self):
+        paras = [p for p in self.paragraphs("skills/pr-merged/SKILL.md") if "layout_warnings" in p]
+        joined = " ".join(paras)
+        for reason in ("single-branch-delivery", "held", "unverifiable"):
+            self.assertIn(reason, joined, "/pr-merged SKILL.md describes the %s form of layout_warnings" % reason)
+
     def test_no_skill_or_reference_mentions_a_removed_exit(self):
         for path in sorted((PLUGIN_ROOT / "skills").rglob("*.md")):
             text = path.read_text(encoding="utf-8", errors="replace")

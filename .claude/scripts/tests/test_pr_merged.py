@@ -13901,9 +13901,9 @@ class TestLayoutWarningInStatus(unittest.TestCase):
                 world = _pb_world(self, contract=contract, brief=_pb_brief(pr="none"))
                 world.record("t1-backend", 61, base_is_default=True)
                 res = self._status(world)
-                self.assertFalse(res.report.get("layout_warnings"), res.describe())
-                if label == "one block":
-                    self.assertNotIn("layout_warnings", res.report, "L-1: a single block carries no new key")
+                # Amended R-8: the key is ABSENT for an unjudged contract, never [] (was: absent or empty).
+                self.assertNotIn("layout_warnings", res.report,
+                                 "%s: an unjudged contract carries no layout_warnings key. %s" % (label, res.describe()))
 
 
 class TestRecordsArePlain(unittest.TestCase):
@@ -13960,15 +13960,19 @@ class TestRecordsArePlain(unittest.TestCase):
         self.assertEqual(res.exit_code, 2, "an unknown flag: argparse refuses it. %s" % res.describe())
         self.assertEqual(world.snapshot(), before)
 
-    def test_an_unreadable_origin_never_refuses_a_recording(self):
+    def test_an_unreadable_origin_exits_10_unverifiable_and_writes_nothing(self):
+        # Amended (R-10, B1): the freshness check needs origin, so an unreadable one is unverifiable, exit 10.
+        # (Was: "an unreadable origin never refuses a recording"; that held before R-10 read origin at recording.)
         for mode in _UNREADABLE_ORIGIN_MODES:
             for extra in ([], ["--dry-run"]):
                 with self.subTest(origin=mode, extra=extra):
                     world, kwargs = _unreadable_origin(self, mode)
+                    before = world.snapshot()
                     res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)] + extra,
                                  prs=_merged_parent_pr(), **kwargs)
-                    self.assertEqual(res.exit_code, 0, "%s: records are plain. %s" % (mode, res.describe()))
-                    self.assertNotIn("--accept-single-branch", res.out)
+                    self.assertEqual(res.exit_code, 10, "%s. %s" % (mode, res.describe()))
+                    self.assertEqual((res.report or {}).get("error"), "github-unverifiable", res.describe())
+                    self.assertEqual(world.snapshot(), before)
 
 
 class TestLegacySingleBranchDeliveries(unittest.TestCase):
@@ -13987,6 +13991,7 @@ class TestLegacySingleBranchDeliveries(unittest.TestCase):
                 first = _pb_status(self, world, prs=prs)
                 self.assertEqual(first.commands(), ["/pr-merged %d --record-delivery" % number],
                                  "the plain command, never an accept form. %s" % first.describe())
+                self.assertIn(_WARNING, _pbw_reasons(first.report), "while sub-tasks remain --status shows the warning")
                 res = _drive(world, ["--record-delivery", "--pr", str(number)], prs=prs)
                 self.assertEqual(res.exit_code, 0, "nothing refuses it. %s" % res.describe())
                 _assert_plain(self, world)
@@ -13995,7 +14000,9 @@ class TestLegacySingleBranchDeliveries(unittest.TestCase):
                     self.assertEqual((again.report.get("next_move") or {}).get("action"), "complete",
                                      "round %d: %s" % (round_no, again.describe()))
                     self.assertNotIn("--record-delivery", " ".join(again.commands()), "no loop")
-                self.assertIn(_WARNING, _pbw_reasons(again.report), "and --status shows the warning")
+                # Amended R-8 (N2): the warning clears once nothing remains to deliver; the key is [] (judged,
+                # every read succeeded), no longer the warning. (Was: the warning still showed after complete.)
+                self.assertEqual(again.report.get("layout_warnings"), [], "and clears once the contract is complete")
 
     def test_positive_control_the_real_files_shape_with_a_scope_note_is_one_block_and_unchanged(self):
         spec = _PB_LEGACY["pr58"]
@@ -14056,12 +14063,161 @@ class TestAnOpenRecordsPullRequestComesFirst(unittest.TestCase):
         self.assertNotIn("GitHub could not be asked", res.out, res.describe())
         self.assertNotIn("unverifiable", _pbw_reasons(res.report), "origin was not read, so nothing is unverifiable")
         self.assertTrue(all(c.get("known") for c in (res.report or {}).get("delivery_candidates") or []))
+        held = _pbw_entry(res.report, "held") or {}
+        self.assertEqual(held.get("detail"), "records pull request open: %s" % self.RECORDS_URL,
+                         "R-8: held, never read as clean. layout_warnings=%r" % (res.report.get("layout_warnings"),))
 
     def test_without_one_an_unreadable_origin_is_blamed_not_github(self):
         res = _drive(_pb_world(self), ["--status"], prs=_merged_parent_pr(), records_prs=[], origin="ref-missing")
         reason = json.dumps((res.report or {}).get("next_command"))
         self.assertNotIn("GitHub could not be asked", reason, res.describe())
         self.assertIn("unverifiable", _pbw_reasons(res.report), res.describe())
+
+
+# ==========================================================================
+# Final cycle (issue 113), plain-records review W1 to W5, N1, N2 and the freshness refusal. Contract R-8 (the
+# fixed forms of layout_warnings), R-9 (the same forms in the Landing Report) and R-10 (G-7 records-not-local).
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/plain-records-review-fullstack-code-reviewer.md
+# ==========================================================================
+_CLOSED_WARNING_REASONS = {"single-branch-delivery", "held", "unverifiable"}
+
+
+class TestLayoutWarningForms(unittest.TestCase):
+    """R-8 forms: absent / [] / held / unverifiable / single-branch-delivery, and when each applies."""
+
+    def _status(self, world, **kwargs):
+        kwargs.setdefault("prs", {})
+        return _pb_status(self, world, **kwargs)
+
+    def test_the_key_is_an_empty_list_only_when_judged_every_read_succeeded_and_nothing_remains_to_report(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=False, base_ref=_PB_PARENT)  # t2 remains, record is clean
+        res = self._status(world, records_prs=[])
+        self.assertEqual(res.report.get("layout_warnings"), [], res.describe())
+
+    def test_a_failed_open_records_lookup_is_unverifiable_with_a_re_read_remedy_never_an_empty_list(self):
+        res = self._status(_pb_world(self), prs=_merged_parent_pr(), records_prs=None)
+        entry = _pbw_entry(res.report, "unverifiable")
+        self.assertTrue(entry and "rerun" in str(entry.get("remedy")),
+                        "the lookup returned None: an 'unverifiable' entry with a re-read remedy. got %r"
+                        % (res.report.get("layout_warnings"),))
+
+    def test_an_open_records_pull_request_is_held_never_read_as_clean(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world, records_prs=[{"url": _pr_url(77)}])
+        entry = _pbw_entry(res.report, "held") or {}
+        self.assertEqual(entry.get("detail"), "records pull request open: %s" % _pr_url(77),
+                         "layout_warnings=%r" % (res.report.get("layout_warnings"),))
+        self.assertNotIn(_WARNING, _pbw_reasons(res.report), "and the warning itself is held back")
+
+    def test_origin_is_read_for_every_judged_status_even_with_no_candidate(self):
+        res = self._status(_pb_world(self, brief=_pb_brief(pr="none")), records_prs=[])
+        events = res.spies.events
+        self.assertTrue({"fetch", "ref-probe", "ls-tree"} <= set(events),
+                        "W2: a judged contract with no candidate still fetches, probes and lists origin. events=%r"
+                        % (events,))
+
+    def test_a_parent_branch_checkout_sees_a_web_merge_whose_record_is_only_on_origin(self):
+        # t1 was merged into master on the web, its Records pull request merged; this checkout (on the parent
+        # branch) never saw the record and no candidate exists.
+        world = _pb_world(self, brief=_pb_brief(pr="none"))
+        _origin_only(world, "t1-backend", 61, "2026-10-01T09:00:00Z", base_is_default=True)
+        res = self._status(world, records_prs=[])
+        self.assertIn(_WARNING, _pbw_reasons(res.report), "W2. %s" % res.describe())
+
+    def test_an_unresolved_parent_branch_raises_no_warning_the_layout_defect_explains_it(self):
+        world = _pb_world(self, contract=_pb_contract(header="absent"), with_brief=False)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world, records_prs=[])
+        self.assertIn("no-parent-branch", _pb_reasons(res.report), "fixture sanity")
+        self.assertNotIn(_WARNING, _pbw_reasons(res.report), "N1. %s" % res.describe())
+
+    def test_the_warning_clears_once_the_contract_is_complete(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        world.record("t2-frontend", 62, base_is_default=True)
+        res = self._status(world, records_prs=[])
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "complete", "fixture sanity")
+        self.assertEqual(res.report.get("layout_warnings"), [], "N2: nothing remains to deliver. %s" % res.describe())
+
+    def test_a_complete_exempt_contract_has_no_key(self):
+        world = _pb_world(self, contract=_pb_contract(status="implemented"), brief=_pb_brief(pr="none"))
+        world.record("t1-backend", 61, base_is_default=True)
+        world.record("t2-frontend", 62, base_is_default=True)
+        res = self._status(world, records_prs=[])
+        self.assertNotIn("layout_warnings", res.report, res.describe())
+
+    def test_while_sub_tasks_remain_the_remedy_keeps_the_deliver_the_remaining_sub_tasks_sentence(self):
+        world = _parent_world(self)
+        world.record("t1-backend", 61, base_is_default=True)
+        res = self._status(world, records_prs=[])
+        remedy = " ".join(str((_pbw_entry(res.report, _WARNING) or {}).get("remedy") or "").split())
+        self.assertIn("Deliver the remaining sub-tasks through the parent branch", remedy, repr(remedy))
+
+    def test_the_reasons_are_the_closed_set_of_three(self):
+        seen = set()
+        cases = [
+            dict(world=_pb_world(self), kw=dict(prs=_merged_parent_pr(), records_prs=[])),
+            dict(world=_pb_world(self), kw=dict(prs=_merged_parent_pr(), records_prs=[{"url": _pr_url(77)}])),
+            dict(world=_pb_world(self), kw=dict(prs=_merged_parent_pr(), records_prs=None)),
+            dict(world=_pb_world(self), kw=dict(prs=_merged_parent_pr(), records_prs=[], origin="ref-missing")),
+        ]
+        for case in cases:
+            seen |= set(_pbw_reasons(self._status(case["world"], **case["kw"]).report))
+        self.assertEqual(seen, _CLOSED_WARNING_REASONS, "every form is produced, and nothing else")
+
+
+class TestRecordingRefusesStaleLocalRecords(unittest.TestCase):
+    """R-10: G-7 records-not-local, for EVERY contract; stale data, not layout; writes nothing."""
+
+    FLAGS = ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)]
+
+    def _world(self, blocks):
+        contract = _pb_contract(blocks=blocks)
+        brief = _pb_brief(ident="none", pr=_pr_url(_BRIEF_PR_NUMBER)) if blocks == "one" else None
+        return _pb_world(self, contract=contract, brief=brief)
+
+    def _assert_refused(self, world, extra=()):
+        before = world.snapshot()
+        res = _drive(world, self.FLAGS + list(extra), prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 9, res.describe())
+        self.assertEqual(((res.report or {}).get("guard"), (res.report or {}).get("reason")),
+                         ("G-7", "records-not-local"), res.describe())
+        said = json.dumps({k: (res.report or {}).get(k) for k in ("detail", "remedy")})
+        self.assertIn("flat worktree cut fresh from origin/master", said, "the G-6 wording")
+        self.assertNotIn("layout", said.lower(), "stale data, not a layout check")
+        self.assertEqual(world.snapshot(), before, "it writes nothing")
+
+    def test_a_two_block_contract_is_refused_when_origin_holds_records_the_local_folder_lacks(self):
+        self._assert_refused(_origin_landing(self._world("two")))
+
+    def test_a_single_block_contract_is_refused_too(self):
+        world = self._world("one")
+        _origin_only(world, "t1-backend", 61, "2026-10-01T09:00:00Z", base_is_default=True)
+        self._assert_refused(world)
+
+    def test_a_partly_stale_folder_is_refused(self):
+        world = self._world("two")
+        world.record("t1-backend", 61, base_is_default=False, base_ref=_PB_PARENT, merged_at="2026-10-01T09:00:00Z")
+        _origin_only(world, "t2-frontend", 62, "2026-10-02T09:00:00Z", base_is_default=False, base_ref=_PB_PARENT)
+        self._assert_refused(world)
+
+    def test_a_dry_run_is_refused_like_the_real_run(self):
+        self._assert_refused(_origin_landing(self._world("two")), ["--dry-run"])
+
+    def test_positive_control_with_the_records_local_the_recording_works(self):
+        world = self._world("two")
+        for tid, number, merged in (("t1-backend", 61, "2026-10-01T09:00:00Z"), ("t2-frontend", 62, "2026-10-02T09:00:00Z")):
+            rel = world.record(tid, number, base_is_default=False, base_ref=_PB_PARENT, merged_at=merged)
+            world.publish(rel)
+        res = _drive(world, self.FLAGS, prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
+
+    def test_a_layout_defect_alone_still_never_refuses_a_recording(self):
+        world = _pb_world(self, brief=_pb_brief(ident="none", pr=_pr_url(_BRIEF_PR_NUMBER)))
+        res = _drive(world, self.FLAGS, prs=_merged_parent_pr())
+        self.assertEqual(res.exit_code, 0, res.describe())
 
 
 class TestProtectedBranchesReaderIgnoresAMalformedValue(unittest.TestCase):
