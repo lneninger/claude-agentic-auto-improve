@@ -8757,8 +8757,15 @@ class _Result(object):
 
 def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_text=None,
            sub_issues=(), records_prs=(), implementers=("acme-dev",), gates=("acme-reviewer",),
-           json_out=True, replace_hook=None, fetch_ok=True, listing_ok=True, origin="ok", real_fetch=False):
+           json_out=True, replace_hook=None, fetch_ok=True, listing_ok=True, origin="ok", real_fetch=False,
+           close_log=None, git_cwd=""):
     """Run pr_merged.main() inside ``world`` with GitHub and git stubbed, files real.
+
+    Final cycle (issue 113): ``close_log`` (a list) collects every issue number close_sub_issue was asked to
+    close, across runs, and ``sub_issues`` may be a callable ``number -> open sub-issue numbers`` so a test can
+    model GitHub keeping state. ``git_cwd`` (a path inside the repository, e.g. ``tools/sub``) makes the
+    ls-tree stand-in behave like git run from that folder: without ``--full-tree`` the pathspec is read
+    relative to it, so the records folder matches nothing (exit 0, empty output). ``-z`` output is NUL separated.
 
     Last cycle (issue 113): ``origin`` has more modes -- ``"ls-tree-fails"`` (the ref probe passes and the
     listing of the records folder exits non-zero), ``"blob-missing"`` and ``"blob-unparseable"`` (the listing
@@ -8842,10 +8849,12 @@ def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_te
                 return 1, ""
             if "--" in cmd:
                 folder = cmd[cmd.index("--") + 1]
+                if git_cwd and "--full-tree" not in cmd:
+                    folder = git_cwd.rstrip("/") + "/" + folder  # git reads the pathspec from the current folder
                 prefix = folder.rstrip("/") + "/"
                 paths = sorted(p for p in world.origin if p.startswith(prefix) and "/" not in p[len(prefix):])
                 lines = paths if "--name-only" in cmd else ["100644 blob %s\t%s" % ("0" * 40, p) for p in paths]
-                return 0, "\n".join(lines)
+                return 0, ("\0" if "-z" in cmd else "\n").join(lines)
             _ref, _, folder = cmd[-1].partition(":")
             prefix = folder.rstrip("/") + "/"
             names = sorted(p[len(prefix):] for p in world.origin
@@ -8857,13 +8866,21 @@ def _drive(world, flags=(), *, prs=None, authenticated=True, repo=None, issue_te
     spies.fetch_default_branch = mock.MagicMock(side_effect=fake_fetch)
     spies.list_review_files = mock.MagicMock(side_effect=fake_list_review_files)
     spies.gh_issue_text = mock.MagicMock(side_effect=fake_issue_text)
-    spies.gh_open_sub_issues = mock.MagicMock(
-        return_value=None if sub_issues is None else list(sub_issues))
+    if callable(sub_issues):  # a stateful GitHub: the open sub-issues NOW (see close_log)
+        spies.gh_open_sub_issues = mock.MagicMock(side_effect=lambda number: list(sub_issues(number)))
+    else:
+        spies.gh_open_sub_issues = mock.MagicMock(
+            return_value=None if sub_issues is None else list(sub_issues))
     spies.open_records_pull_requests = mock.MagicMock(
         return_value=None if records_prs is None else list(records_prs))
     spies.repo_view = mock.MagicMock(side_effect=fake_repo_view)
     spies.create_branch = mock.MagicMock(return_value=(True, "created"))
-    spies.close_sub_issue = mock.MagicMock(return_value="closed")
+    def fake_close(issue, comment=""):
+        if close_log is not None:
+            close_log.append(issue)
+        return "closed"
+
+    spies.close_sub_issue = mock.MagicMock(side_effect=fake_close)
     spies.file_at_commit = mock.MagicMock(side_effect=fake_file_at_commit)
 
     argv = ["pr_merged.py", "--contract", world.contract_rel] + list(flags) + (["--json"] if json_out else [])
@@ -14423,6 +14440,360 @@ class TestAnR8FailureIsAcceptedByTheOwner(unittest.TestCase):
                 self.assertEqual(res.exit_code, 10, res.describe())
                 self.assertEqual((res.report or {}).get("error"), "github-unverifiable", res.describe())
                 self.assertEqual(world.snapshot(), before)
+
+
+# ==========================================================================
+# Final cycle (issue 113): R-10 limited by rule-adoption.yaml (adoptedAt), the sub-issue and sticky rules (B-1),
+# narrowed landing evidence with accepted_blocks and `replaces` (W-3), accept_prs gating (N-1), the origin
+# listing form (W-1) and the open Records pull request (W-2). Review:
+#   .claude/reviews/2026-10-30-parent-branch-delivery-rule/last-review-fullstack-code-reviewer.md
+# ==========================================================================
+from datetime import datetime as _datetime, timezone as _timezone  # noqa: E402
+
+_ADOPTION = "rule-adoption"
+_ADOPTED = "2026-10-30T12:00:00+00:00"
+_ACCEPT_61 = ["--record-delivery", "--pr", "61", "--accept-single-branch"]
+
+
+def _adopt(world, instant=_ADOPTED):
+    world.put("%s/%s.yaml" % (world.results_rel, _ADOPTION), "adoptedAt: '%s'\n" % instant)
+    return world
+
+
+def _adopted_at(world):
+    text = world.get("%s/%s.yaml" % (world.results_rel, _ADOPTION)).decode("utf-8")
+    return pr_merged._instant((yaml.safe_load(text) or {}).get("adoptedAt"))
+
+
+def _real_parent_world(case, *, failures=(("t1-backend", 61, "single-branch-delivery"),), pr_link="none",
+                       merged_at="2026-10-04T12:00:00Z", adopted=None):
+    """A judged contract with a REAL parent issue (100) whose sub-tasks have sub-issues 101 and 102, and the
+    given failed records."""
+    world = _parent_state(_pb_world(case, brief=_pb_brief(pr=pr_link)))
+    for tid, number, failure in failures:
+        world.record(tid, number, status="failed", failure=failure, base_is_default=True, merged_at=merged_at,
+                     recorded_at="2026-10-04T13:00:00Z")
+    if adopted:
+        _adopt(world, adopted)
+    return world
+
+
+def _sub_task_pr(tid, number, *, base="master", merged_at="2026-10-04T12:00:00Z", state="MERGED"):
+    return {number: _pr(number, "task/%s/%s" % (_PB_SLUG, tid), base=base, merged_at=merged_at, state=state)}
+
+
+class TestRuleAdoptionFile(unittest.TestCase):
+    """R-10 / row 6 (a) and (g): adoptedAt is written once, with the first R-8 failed record."""
+
+    def test_the_first_r8_failure_writes_adoptedat_in_the_same_write(self):
+        world = _real_parent_world(self, failures=())
+        start = _datetime.now(_timezone.utc)
+        res = _drive(world, ["--pr", "61"], prs=_sub_task_pr("t1-backend", 61))
+        stop = _datetime.now(_timezone.utc)
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(_yaml(world, _results(world, "t1-backend.yaml")).get("failure"), "single-branch-delivery",
+                         "fixture sanity: the web merge is an R-8 failed record")
+        rel = _results(world, _ADOPTION + ".yaml")
+        self.assertTrue(world.exists(rel), "rule-adoption.yaml is written beside the records")
+        self.assertIn(rel, (res.report or {}).get("written_files") or [], "and reported as written by this run")
+        adopted = _adopted_at(world)
+        self.assertTrue(adopted is not None and start.timestamp() - 2 <= adopted.timestamp() <= stop.timestamp() + 2,
+                        "adoptedAt is the instant of this run: %r" % adopted)
+
+    def test_a_second_r8_failure_never_rewrites_it(self):
+        world = _real_parent_world(self, failures=())
+        self.assertEqual(_drive(world, ["--pr", "61"], prs=_sub_task_pr("t1-backend", 61)).exit_code, 0)
+        self.assertTrue(world.exists(_results(world, _ADOPTION + ".yaml")),
+                        "fixture sanity: the first R-8 failure wrote rule-adoption.yaml")
+        first = world.get(_results(world, _ADOPTION + ".yaml"))
+        res = _drive(world, ["--pr", "62"], prs=_sub_task_pr("t2-frontend", 62))
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(_yaml(world, _results(world, "t2-frontend.yaml")).get("failure"), "single-branch-delivery")
+        self.assertEqual(world.get(_results(world, _ADOPTION + ".yaml")), first, "written once, never rewritten")
+
+    def test_load_records_skips_the_file(self):
+        world = _adopt(_real_parent_world(self, failures=(("t1-backend", 61, "single-branch-delivery"),)))
+        with _chdir(world.root):
+            records = pr_merged.load_records(world.slug)
+        self.assertEqual(sorted(records), ["t1-backend"], "the adoption file is not a sub-task's record")
+
+    def test_a_pre_amendment_failed_record_gets_adoptedat_from_the_first_recording_run(self):
+        world = _real_parent_world(self)  # a failed record from before the amendment, no adoption file
+        self.assertFalse(world.exists(_results(world, _ADOPTION + ".yaml")), "fixture sanity")
+        start = _datetime.now(_timezone.utc)
+        res = _drive(world, _ACCEPT_61, prs=_sub_task_pr("t1-backend", 61))
+        self.assertEqual(res.exit_code, 0, "such a failure can still be accepted. %s" % res.describe())
+        adopted = _adopted_at(world) if world.exists(_results(world, _ADOPTION + ".yaml")) else None
+        self.assertTrue(adopted is not None and adopted.timestamp() >= start.timestamp() - 2,
+                        "the first recording run of the amended code is the adoption instant: %r" % adopted)
+
+    def test_read_only_modes_write_nothing_and_still_print_the_accept_for_an_old_failure(self):
+        for flags in (["--status"], ["--resume"], _ACCEPT_61 + ["--dry-run"]):
+            with self.subTest(flags=flags):
+                world = _real_parent_world(self)
+                before = world.snapshot()
+                res = _drive(world, flags, prs=_sub_task_pr("t1-backend", 61))
+                self.assertEqual(res.exit_code, 0, res.describe())
+                self.assertEqual(world.snapshot(), before, "nothing written, and no adoption file")
+                self.assertFalse(world.exists(_results(world, _ADOPTION + ".yaml")))
+        status = _drive(_real_parent_world(self), ["--status"], prs=_sub_task_pr("t1-backend", 61))
+        self.assertEqual(status.commands(), ["/pr-merged 61 --record-delivery --accept-single-branch"],
+                         "'now' is after the old merge, so the accept is still printed. %s" % status.describe())
+
+
+class TestTheAcceptIsLimitedToMergesBeforeAdoption(unittest.TestCase):
+
+    def test_a_merge_strictly_before_adoptedat_is_accepted(self):
+        world = _real_parent_world(self, adopted=_ADOPTED, merged_at="2026-10-30T11:59:59Z")
+        res = _drive(world, _ACCEPT_61, prs=_sub_task_pr("t1-backend", 61, merged_at="2026-10-30T11:59:59Z"))
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(_yaml(world, _results(world, "t1-backend.yaml")).get("layout"), "single-branch-accepted")
+
+    def test_a_merge_on_or_after_adoptedat_is_refused_merged_after_rule(self):
+        for label, merged in (("on", "2026-10-30T12:00:00Z"), ("after", "2026-10-31T08:00:00Z")):
+            with self.subTest(merged=label):
+                world = _real_parent_world(self, adopted=_ADOPTED, merged_at=merged)
+                before = world.snapshot()
+                res = _drive(world, _ACCEPT_61, prs=_sub_task_pr("t1-backend", 61, merged_at=merged))
+                self.assertEqual(res.exit_code, 9, res.describe())
+                self.assertEqual(((res.report or {}).get("guard"), (res.report or {}).get("reason")),
+                                 ("G-3", "merged-after-rule"), res.describe())
+                self.assertEqual(world.snapshot(), before, "the failed record stays")
+
+    def test_next_command_prints_design_first_for_a_merge_after_adoption(self):
+        world = _real_parent_world(self, adopted=_ADOPTED, merged_at="2026-10-31T08:00:00Z")
+        res = _drive(world, ["--status"], prs=_sub_task_pr("t1-backend", 61, merged_at="2026-10-31T08:00:00Z"))
+        self.assertEqual((res.report.get("next_move") or {}).get("action"), "escalate", res.describe())
+        self.assertEqual(res.commands(), ["/design-first %s" % _PB_SLUG], res.describe())
+
+    def test_one_failure_before_and_one_after_keeps_design_first(self):
+        world = _real_parent_world(self, adopted=_ADOPTED, merged_at="2026-10-04T12:00:00Z")
+        world.record("t2-frontend", 62, status="failed", failure="single-branch-delivery", base_is_default=True,
+                     merged_at="2026-10-31T08:00:00Z")
+        res = _drive(world, ["--status"], prs={})
+        self.assertEqual(res.commands(), ["/design-first %s" % _PB_SLUG], "every failure must be acceptable")
+
+    def test_positive_control_a_merge_before_adoption_prints_the_accept(self):
+        world = _real_parent_world(self, adopted=_ADOPTED, merged_at="2026-10-04T12:00:00Z")
+        res = _drive(world, ["--status"], prs={})
+        self.assertEqual(res.commands(), ["/pr-merged 61 --record-delivery --accept-single-branch"], res.describe())
+
+    def test_the_accept_is_not_printed_when_it_would_be_refused(self):
+        # N-1: a delivery already recorded (G-5), and a reference that is not a pull request number.
+        recorded = _real_parent_world(self)
+        recorded.delivery(_BRIEF_PR_NUMBER)
+        odd = _real_parent_world(self, failures=())
+        odd.record("t1-backend", 61, status="failed", failure="single-branch-delivery", base_is_default=True,
+                   pull_request="https://example.test/not-a-pull-request")
+        for label, world in (("delivery recorded", recorded), ("unparseable reference", odd)):
+            with self.subTest(case=label):
+                res = _drive(world, ["--status"], prs={})
+                self.assertEqual(res.commands(), ["/design-first %s" % _PB_SLUG], res.describe())
+
+    def test_a_recorded_delivery_refuses_the_accept_at_g5(self):
+        world = _real_parent_world(self)
+        world.delivery(_BRIEF_PR_NUMBER)
+        before = world.snapshot()
+        res = _drive(world, _ACCEPT_61, prs=_sub_task_pr("t1-backend", 61))
+        self.assertEqual(res.exit_code, 9, res.describe())
+        self.assertEqual((res.report or {}).get("guard"), "G-5", res.describe())
+        self.assertEqual(world.snapshot(), before)
+
+
+class TestTheAcceptRecordsWhatItReplaced(unittest.TestCase):
+    """W-3 and B-1 (the sub-issue)."""
+
+    def _accept(self, world, **kwargs):
+        return _drive(world, _ACCEPT_61, prs=_sub_task_pr("t1-backend", 61), **kwargs)
+
+    def test_the_accepted_record_carries_the_structured_replaces_and_the_note(self):
+        world = _real_parent_world(self)
+        old = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual(self._accept(world).exit_code, 0)
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        replaces = rec.get("replaces") or {}
+        self.assertEqual(replaces.get("failure"), "single-branch-delivery", repr(rec))
+        self.assertEqual(replaces.get("pull_request"), _pr_url(61))
+        self.assertEqual(pr_merged._instant(replaces.get("merged_at")), pr_merged._instant(old.get("merged_at")))
+        self.assertEqual(pr_merged._instant(replaces.get("recorded_at")), pr_merged._instant(old.get("recorded_at")),
+                         "the replaced record's own recorded_at is kept")
+        self.assertEqual(rec.get("note"), "replaces failed record (failure: single-branch-delivery)")
+
+    def test_the_accept_closes_the_open_sub_issue_and_stamps_it(self):
+        world = _real_parent_world(self)
+        closed = []
+        res = self._accept(world, sub_issues=[101], close_log=closed)
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertEqual(closed, [101], "sub-issue 101 of t1-backend is closed by the accept")
+        self.assertEqual(_yaml(world, _results(world, "t1-backend.yaml")).get("sub_issue_closed"), "closed")
+
+    def test_a_dry_run_closes_nothing(self):
+        world = _real_parent_world(self)
+        closed = []
+        res = _drive(world, _ACCEPT_61 + ["--dry-run"], prs=_sub_task_pr("t1-backend", 61), sub_issues=[101],
+                     close_log=closed)
+        self.assertEqual((res.exit_code, closed), (0, []), res.describe())
+
+
+class TestAnAcceptedRecordIsSticky(unittest.TestCase):
+    """B-1: nothing the next guard prints undoes the accept."""
+
+    def _accepted(self, **kwargs):
+        world = _real_parent_world(self, pr_link=_pr_url(_BRIEF_PR_NUMBER))
+        res = _drive(world, _ACCEPT_61, prs=_sub_task_pr("t1-backend", 61), **kwargs)
+        self.assertEqual(res.exit_code, 0, "fixture sanity: %s" % res.describe())
+        return world
+
+    def test_a_later_plain_run_for_the_same_pull_request_keeps_the_accepted_record(self):
+        closed = []
+        world = self._accepted(sub_issues=[101], close_log=closed)
+        res = _drive(world, ["--pr", "61"], prs=_sub_task_pr("t1-backend", 61), sub_issues=[101], close_log=closed)
+        self.assertEqual(res.exit_code, 0, res.describe())
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual((rec.get("status"), rec.get("layout"), rec.get("note")),
+                         ("completed", "single-branch-accepted", "replaces failed record (failure: single-branch-delivery)"),
+                         repr(rec))
+        self.assertTrue(rec.get("replaces"), "replaces is kept")
+        self.assertNotEqual(rec.get("failure"), "single-branch-delivery", "web_merged is false for an accepted record")
+        self.assertEqual((res.report or {}).get("failed"), [], "and the run reports no failure")
+
+    def test_the_later_landing_records_with_accepted_blocks_and_is_not_refused_by_g4(self):
+        closed = []
+
+        def open_subs(_number):
+            return [i for i in (101, 102) if i not in closed]
+
+        world = self._accepted(sub_issues=open_subs, close_log=closed)
+        self.assertIn(101, closed, "fixture sanity: the accept closed t1's sub-issue")
+        t2 = _drive(world, ["--pr", "62"], prs=_sub_task_pr("t2-frontend", 62, base=_PB_PARENT, merged_at="2026-10-04T15:00:00Z"),
+                    sub_issues=open_subs, close_log=closed)
+        self.assertEqual(t2.exit_code, 0, "fixture sanity: %s" % t2.describe())
+        land = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)],
+                      prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT, merged_at="2026-10-05T12:00:00Z")},
+                      sub_issues=open_subs, close_log=closed)
+        self.assertEqual(land.exit_code, 0, "no G-4 refusal: every sub-issue is closed. %s" % land.describe())
+        delivery = _yaml(world, _results(world, "contract-delivery.yaml"))
+        self.assertEqual(delivery.get("accepted_blocks"), ["t1-backend"],
+                         "the Contract Delivery Record keeps the bypass visible: %r" % (delivery,))
+
+    def test_running_the_remedy_g4_prints_keeps_the_accept(self):
+        world = self._accepted(sub_issues=[101])
+        _drive(world, ["--pr", "62"], prs=_sub_task_pr("t2-frontend", 62, base=_PB_PARENT, merged_at="2026-10-04T15:00:00Z"))
+        land = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)],
+                      prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT, merged_at="2026-10-05T12:00:00Z")},
+                      sub_issues=[101])
+        self.assertEqual(((land.report or {}).get("guard"), (land.report or {}).get("reason")),
+                         ("G-4", "open-sub-issue"), "fixture sanity: GitHub still says 101 is open. %s" % land.describe())
+        # the remedy G-4 prints: "record its own pull request"
+        _drive(world, ["--pr", "61"], prs=_sub_task_pr("t1-backend", 61), sub_issues=[101])
+        rec = _yaml(world, _results(world, "t1-backend.yaml"))
+        self.assertEqual((rec.get("status"), rec.get("layout")), ("completed", "single-branch-accepted"), repr(rec))
+        res = _drive(world, ["--status"], prs={})
+        self.assertNotEqual((res.report.get("next_move") or {}).get("action"), "escalate",
+                            "no way back to the failed record: %s" % res.describe())
+
+
+def _accepted_record(world, tid, number, **over):
+    rec = {"status": "completed", "commit": "sha-%d" % number, "tests_passed": "unknown", "tests_verified_by": "none",
+           "completed_by": "pr-merged", "pull_request": _pr_url(number), "merged_at": "2026-10-04T12:00:00Z",
+           "verified": "github", "base_ref": "master", "base_is_default": True, "layout": "single-branch-accepted",
+           "note": "replaces failed record (failure: single-branch-delivery)",
+           "replaces": {"failure": "single-branch-delivery", "pull_request": _pr_url(number),
+                        "merged_at": "2026-10-04T12:00:00Z", "recorded_at": "2026-10-04T13:00:00Z"}}
+    rec.update(over)
+    rec = {k: v for k, v in rec.items() if v is not None}
+    world.put("%s/%s.yaml" % (world.results_rel, tid), yaml.dump(rec, default_flow_style=False, sort_keys=False))
+    return rec
+
+
+class TestAcceptedRecordsAreNarrowLandingEvidence(unittest.TestCase):
+    """Landing evidence (narrowed): only a genuine accepted record counts."""
+
+    def _landing(self, **over):
+        world = _pb_world(self)
+        _accepted_record(world, "t1-backend", 61, **over)
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_PB_PARENT, merged_at="2026-10-04T15:00:00Z")
+        return world, _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)],
+                             prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT, merged_at="2026-10-05T12:00:00Z")})
+
+    def test_a_genuine_accepted_record_counts_and_the_delivery_names_it(self):
+        world, res = self._landing()
+        self.assertEqual(res.exit_code, 0, res.describe())
+        delivery = _yaml(world, _results(world, "contract-delivery.yaml"))
+        self.assertEqual(delivery.get("accepted_blocks"), ["t1-backend"], repr(delivery))
+
+    def test_a_record_that_misses_one_clause_does_not_count(self):
+        for label, over in (("no replaces", {"replaces": None}),
+                            ("replaces another failure", {"replaces": {"failure": "x", "pull_request": _pr_url(61)}}),
+                            ("not verified by github", {"verified": "none"}),
+                            ("base_is_default false", {"base_is_default": False})):
+            with self.subTest(case=label):
+                world, res = self._landing(**over)
+                self.assertEqual(res.exit_code, 9, "%s: %s" % (label, res.describe()))
+                self.assertEqual(((res.report or {}).get("guard"), (res.report or {}).get("reason")),
+                                 ("G-7", "single-branch-delivery"), res.describe())
+                self.assertFalse(world.exists(_results(world, "contract-delivery.yaml")))
+
+    def test_a_landing_without_an_accepted_record_has_no_accepted_blocks(self):
+        world = _pb_world(self)
+        world.record("t1-backend", 61, base_is_default=False, base_ref=_PB_PARENT, merged_at="2026-10-01T09:00:00Z")
+        world.record("t2-frontend", 62, base_is_default=False, base_ref=_PB_PARENT, merged_at="2026-10-02T09:00:00Z")
+        res = _drive(world, ["--record-delivery", "--pr", str(_BRIEF_PR_NUMBER)],
+                     prs={_BRIEF_PR_NUMBER: _pr(_BRIEF_PR_NUMBER, _PB_PARENT, merged_at="2026-10-05T12:00:00Z")})
+        self.assertEqual(res.exit_code, 0, res.describe())
+        self.assertFalse(_yaml(world, _results(world, "contract-delivery.yaml")).get("accepted_blocks"))
+
+
+class TestTheOriginListingForm(unittest.TestCase):
+    """W-1: the listing does not depend on the folder the script runs from."""
+
+    def test_the_argv_is_exactly_ls_tree_full_tree_name_only_z_ref_dash_dash_folder(self):
+        world = _pb_world(self)
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        listings = [c for c, _env in res.spies.run_calls if c[:2] == ["git", "ls-tree"]]
+        self.assertTrue(listings, "fixture sanity: origin's records are listed")
+        for command in listings:
+            self.assertEqual(command, ["git", "ls-tree", "--full-tree", "--name-only", "-z", "origin/master", "--",
+                                       world.results_rel + "/"], "saw %r" % (command,))
+
+    def test_run_from_a_subfolder_it_still_finds_the_records(self):
+        world = _origin_landing(_pb_world(self))
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[], git_cwd="tools/sub")
+        self.assertFalse(any(c.get("needs_accept") for c in (res.report or {}).get("delivery_candidates") or []),
+                         "an empty listing from the wrong folder is not 'origin holds no records'. %s" % res.describe())
+        self.assertFalse(any("--accept-single-branch" in c for c in res.commands()), res.describe())
+        self.assertNotIn("single-branch-delivery", _pb_reasons(res.report), res.describe())
+
+    def test_a_listing_that_names_the_adoption_file_does_not_make_it_a_record(self):
+        world = _origin_landing(_pb_world(self))
+        _adopt(world)
+        world.publish("%s/%s.yaml" % (world.results_rel, _ADOPTION))
+        res = _drive(world, ["--status"], prs=_merged_parent_pr(), records_prs=[])
+        self.assertFalse(any("--accept-single-branch" in c for c in res.commands()), res.describe())
+        self.assertNotIn("could not be read", res.out, "the adoption file is not an unreadable record")
+
+
+class TestAnOpenRecordsPullRequestComesFirst(unittest.TestCase):
+    """W-2."""
+
+    RECORDS_URL = _pr_url(77)
+
+    def test_origin_is_not_read_while_a_records_pull_request_is_open(self):
+        res = _drive(_pb_world(self), ["--status"], prs=_merged_parent_pr(), records_prs=[{"url": self.RECORDS_URL}],
+                     origin="ref-missing")
+        self.assertEqual(res.commands(), ["/pr-merged %s" % self.RECORDS_URL], res.describe())
+        self.assertFalse(set(res.spies.events) & {"fetch", "ref-probe", "ls-tree"},
+                         "the open Records pull request already holds the report back, so origin is not read: %r"
+                         % res.spies.events)
+        self.assertNotIn("GitHub could not be asked", res.out, res.describe())
+        self.assertTrue(all(c.get("known") for c in (res.report or {}).get("delivery_candidates") or []),
+                        "the candidates are not rewritten to unknown")
+
+    def test_without_one_an_unreadable_origin_is_blamed_not_github(self):
+        res = _drive(_pb_world(self), ["--status"], prs=_merged_parent_pr(), records_prs=[], origin="ref-missing")
+        reason = json.dumps((res.report or {}).get("next_command"))
+        self.assertIn("origin/master could not be read", reason, res.describe())
+        self.assertNotIn("GitHub could not be asked", reason, res.describe())
 
 
 class TestProtectedBranchesReaderIgnoresAMalformedValue(unittest.TestCase):

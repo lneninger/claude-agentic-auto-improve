@@ -1328,6 +1328,21 @@ class TestLandingP0JudgesOnlyJudgedContracts(LauncherCase):
                          % (report.get("outcome"), report.get("detail")))
         execm.assert_not_called()
 
+    def test_the_remedy_for_a_missing_contract_is_to_restore_it_not_to_retry(self):
+        # Final review N-4 / contract note: the default `unverifiable` remedy ("make the read succeed ... and
+        # rerun") reads as a retry, and a retry cannot bring a missing file back.
+        folder = Path(self._tmp.name) / "no-contract-remedy"
+        folder.mkdir()
+        kit = disagreeing_kit(folder, brief_base=PARENT)
+        (kit.main / ".claude" / "concepts" / ("%s.md" % SLUG)).unlink()
+        _, _execm, report = self.launch(kit)
+        self.assertEqual(self.outcome(report), "unverifiable", report.get("detail"))
+        remedy = report.get("remedy") or ""
+        self.assertTrue("restore" in remedy and (".claude/concepts/%s.md" % SLUG) in remedy
+                        and "parent branch" in remedy,
+                        "the remedy: restore .claude/concepts/<slug>.md on the parent branch, then rerun. got %r" % remedy)
+        self.assertNotIn("network", remedy)
+
     def test_p0_delegates_the_check_to_the_one_layout_function(self):
         text = (Path(__file__).resolve().parent.parent / "land_contract.py").read_text(encoding="utf-8")
         start = text.index("def _launch_land(")
