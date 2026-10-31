@@ -1639,9 +1639,11 @@ def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
 
 
 def layout_warnings_for(parent_branch: Optional[str], records: Dict[str, Dict[str, Any]],
-                        candidates: Sequence[Dict[str, Any]], origin_base: Optional[str]) -> List[Dict[str, str]]:
+                        candidates: Sequence[Dict[str, Any]], origin_base: Optional[str],
+                        remaining: bool = True) -> List[Dict[str, str]]:
     """R-8: the warnings of a judged contract, derived from facts (never stored), blocking nothing.
-    ``origin_base`` is the default branch when origin/<default> could not be read, else None."""
+    ``origin_base`` is the default branch when origin/<default> could not be read, else None; ``remaining``
+    says a sub-task is still to deliver (the warning clears when none is); no parent branch, no warning (N1)."""
     warning = {"reason": "single-branch-delivery",
                "detail": "work of this contract is on the default branch, or on a branch that is not the parent "
                          "branch (a completion record's base, or a merged one-branch delivery)",
@@ -1652,6 +1654,8 @@ def layout_warnings_for(parent_branch: Optional[str], records: Dict[str, Dict[st
         return [{"reason": "unverifiable",
                  "detail": "origin/%s could not be read, so the layout cannot be judged" % origin_base,
                  "remedy": "run git fetch origin %s and rerun" % origin_base}]
+    if not remaining or parent_branch is None:
+        return []
     off_parent = any(r.get("status") == "completed"
                      and (r.get("base_is_default") is True
                           or bool(r.get("base_ref") and r.get("base_ref") != parent_branch))
@@ -4226,6 +4230,22 @@ def main() -> int:
                                "a delivery is already recorded for %s; this contract has one delivery"
                                % (delivery.get("pull_request") or "another pull request"))
         if not same_delivery:
+            # R-10 (G-7, stale data, not layout; every contract): origin/<default> holds records for this
+            # contract that this checkout lacks, so writing delivery-filled records from here would overwrite
+            # the real ones. Asked first, because a stale folder also skews the guards below. An unreadable
+            # origin is unverifiable (B1). Either way nothing is written, also under --dry-run.
+            held = _origin()
+            if held is None:
+                print(json.dumps({
+                    "error": "github-unverifiable",
+                    "detail": "origin/%s could not be read, so the records cannot be compared; nothing was "
+                              "written. Run git fetch origin %s and run again." % (base, base)}))
+                return 10
+            if any(tid not in records for tid in held):
+                return _refuse("G-7", "records-not-local",
+                               "origin/%s holds records of this contract that this checkout lacks (%s); run "
+                               "again in a flat worktree cut fresh from origin/%s"
+                               % (base, ", ".join(sorted(t for t in held if t not in records)), base))
             cand = _candidate_from(ref, pr, verdict, cross_repository)
             found = delivery_candidates([cand] if cand else [], tasks, records)
             if not found or not found[0].get("known") or found[0].get("kind") == "early":
@@ -4651,24 +4671,6 @@ def main() -> int:
     if move["action"] == "delivery-unrecorded" and records_pr_url:
         move["records_pull_request"] = records_pr_url
 
-    # R-8: the layout warnings, derived from facts and blocking nothing -- local records merged with
-    # origin/<default>'s, only while no Records pull request of the contract is open. Origin is read only when
-    # a known Delivery Candidate asks about it (the stale-checkout case); an origin that could not be read is
-    # reported `unverifiable`, never the warning and never its absence.
-    if layout is not None:
-        report["layout_warnings"] = []
-        if _open_records() == []:
-            evidence = records
-            held = _origin() if any(c.get("known") for c in candidates) else records
-            if held is None:
-                report["layout_warnings"] = layout_warnings_for(None, {}, [], base)
-            else:
-                if held is not records:
-                    evidence = merge_evidence(held, records, stored_records)
-                report["layout_warnings"] = layout_warnings_for(
-                    layout.get("parent_branch"), evidence,
-                    delivery_candidates(raw_candidates, tasks, evidence), None)
-
     if args.preconditions:
         # The reading /advance decides on, answered before the Completion Verdict. Read-only:
         # nothing is cut, marked or written, and no lock is taken. args.status is already True.
@@ -4700,6 +4702,37 @@ def main() -> int:
                                                        item["state"], item["detail"]))
             print("next command: none - %s" % reading["next_command"]["reason"])
         return 0
+
+    # R-8: the layout warnings of a judged contract (the key is ABSENT otherwise), in the read-only modes
+    # (--status, --resume). Derived from facts and blocking nothing: `[]` only when every read succeeded and
+    # nothing is to be reported; `held` while a Records pull request is open; `unverifiable` when a read
+    # failed (the open-Records lookup, or origin/<default>); the warning itself only while a sub-task remains,
+    # from the local records merged with origin's. Origin is read whenever a sub-task remains, not only
+    # when a candidate exists, so a parent-branch checkout still sees a web merge recorded on origin.
+    if layout is not None and read_only:
+        open_now = _open_records()
+        if open_now is None:
+            report["layout_warnings"] = [{
+                "reason": "unverifiable",
+                "detail": "GitHub could not be asked whether a Records pull request of this contract is open",
+                "remedy": "check gh auth status and rerun"}]
+        elif open_now:
+            report["layout_warnings"] = [{
+                "reason": "held",
+                "detail": "records pull request open: %s" % open_now[0].get("url"),
+                "remedy": "merge the open Records pull request, then run --status again"}]
+        elif all(t.id in records for t in tasks):
+            report["layout_warnings"] = []  # nothing remains to deliver: the warning clears
+        else:
+            origin_held = _origin()
+            if origin_held is None:
+                report["layout_warnings"] = layout_warnings_for(None, {}, [], base)
+            else:
+                evidence = merge_evidence(origin_held, records, stored_records)
+                report["layout_warnings"] = layout_warnings_for(
+                    layout.get("parent_branch"), evidence,
+                    delivery_candidates(raw_candidates, tasks, evidence), None,
+                    remaining=any(t.id not in evidence for t in tasks))
 
     # D-1: the base each block would be cut from. --status reports it and never refuses.
     topology_now = declared_topology(None, briefs, base, [base])

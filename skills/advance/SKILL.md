@@ -120,6 +120,8 @@ The answer carries `next_move.action`, plus `dispatch` packets when there is som
 
 The action set is closed. Each one has exactly one response.
 
+**On every move, show the layout warnings first.** When the status answer carries `layout_warnings` and it is not empty, show each entry's `remedy` to the owner before taking the move, whatever the move is (a `contract-defect` or an `escalate` included). A warning blocks nothing. The key is absent for a contract that is not judged, `[]` when there is nothing to report, and otherwise holds `single-branch-delivery`, `held` (a Records pull request is open: merge it first) or `unverifiable` (an input could not be read: give its re-read remedy).
+
 ### `contract-defect` — a block cannot be delivered as written
 
 **Checked before every other action, including `dispatch` and `nothing-planned`.** Report each
