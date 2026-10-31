@@ -1222,5 +1222,295 @@ class TestDriftAddonsPresence(DriftCase):
         self.assertKinds(data, [], "so the finding above came from the presence rule")
 
 
+# =====================================================================================================
+# D-3 and D-4 (angular-tailwind followups, t5)
+#
+# D-3: a disabled add-on hook that is still installed. Every plugin add-on is checked, listed in the sync
+#   config or not. Names are each `disabled[].hook` and its `former_names`, compared case-insensitively.
+#   A file `.claude/hooks/<name>` is the finding `.claude/hooks/<name>`; a row in settings.json or
+#   settings.local.json is `<layer>:<event>:<name>`, kind `disabled-hook-installed`, owner `plugin`.
+#   The parity fixtures below run the doctor and the install's `_disabled_hook_refusal` on the same project.
+# D-4: add-on documents are compared when the sync config lists the add-on or any document exists.
+# D-5: --drift never writes.
+# =====================================================================================================
+import auto_improve_finish_install as install  # noqa: E402
+
+KIND_DISABLED = "disabled-hook-installed"
+ADDON = "demo-addon"
+RETIRED = "retired-advisor.py"
+FORMER = "old-advisor.py"
+DOCS_REL = ".claude/references"
+
+
+def add_disabled_addon(world, hook=RETIRED, former=(), documents=(), name=ADDON, doc_text="# doc\n"):
+    """A plugin add-on whose manifest declares one disabled hook and, optionally, documents."""
+    base = world.plugin / ".claude" / "addons" / name
+    (base / "documents").mkdir(parents=True, exist_ok=True)
+    manifest = {af.KEY_HOOKS: [], af.KEY_HELPERS: [], af.KEY_ROWS: [], af.KEY_PREREQUISITES: [],
+                af.KEY_KILL_SWITCHES: [], af.KEY_INSTALL_SKILL: "auto-improve-%s-install" % name,
+                af.KEY_DISABLED: [{"hook": hook, "former_names": list(former)}] if hook else []}
+    if documents:
+        manifest[af.KEY_DOCUMENTS] = list(documents)
+        for doc in documents:
+            (base / "documents" / doc).write_text(doc_text, encoding="utf-8")
+    (base / "addon.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def run_raw(world, mutate=None, *flags):
+    """The real command line after write_all(), with `mutate()` free to corrupt what was written."""
+    world.write_all()
+    if mutate:
+        mutate()
+    argv = [sys.executable, "-B", str(DOCTOR), "--drift", "--project", str(world.project), "--plugin",
+            str(world.plugin), "--json"] + list(flags)
+    out = subprocess.run(argv, capture_output=True, text=True, env=world.env(), cwd=str(world.tmp), timeout=120)
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        data = None
+    return out.returncode, data
+
+
+def install_refusal(world, manifest):
+    """The install's verdict on the same project: the refusal code, or None."""
+    result = install._disabled_hook_refusal(world.project, world.home, ADDON, manifest)
+    return None if result is None else result.get("code")
+
+
+def _paths(data, kind=KIND_DISABLED):
+    return sorted(_norm_path(f["path"]) for f in _findings(data) if f.get("kind") == kind)
+
+
+class TestDriftDisabledHook(DriftCase):
+    FILE = ".claude/hooks/" + RETIRED
+
+    def setUp(self):
+        super().setUp()
+        self.manifest = add_disabled_addon(self.w, former=[FORMER])
+
+    # ---- the parity fixtures: both readers agree
+    def test_parity_a_file_only(self):
+        self.w.project_put(self.FILE, "# retired\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data), [self.FILE])
+        self.assertEqual([f["owner"] for f in _findings(data) if f["kind"] == KIND_DISABLED], ["plugin"])
+        self.assertEqual(install_refusal(self.w, self.manifest), "disabled-hook-present")
+
+    def test_parity_a_settings_json_row(self):
+        self.w.project_register("PreToolUse", RETIRED)
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data), ["settings.json:PreToolUse:" + RETIRED])
+        self.assertEqual(install_refusal(self.w, self.manifest), "disabled-hook-present")
+
+    def test_parity_a_row_only_in_settings_local(self):
+        self.w.project_register("PreToolUse", RETIRED, local=True)
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data), ["settings.local.json:PreToolUse:" + RETIRED])
+        self.assertEqual(install_refusal(self.w, self.manifest), "disabled-hook-present")
+
+    def test_parity_both_layers(self):
+        self.w.project_register("PreToolUse", RETIRED)
+        self.w.project_register("PostToolUse", RETIRED, local=True)
+        rc, data = run_raw(self.w)
+        self.assertEqual(_paths(data), ["settings.json:PreToolUse:" + RETIRED,
+                                        "settings.local.json:PostToolUse:" + RETIRED])
+        self.assertEqual(install_refusal(self.w, self.manifest), "disabled-hook-present")
+
+    def test_parity_a_former_name_file_and_row(self):
+        self.w.project_put(".claude/hooks/" + FORMER, "# former\n")
+        self.w.project_register("PreToolUse", FORMER)
+        rc, data = run_raw(self.w)
+        self.assertEqual(_paths(data), [".claude/hooks/" + FORMER, "settings.json:PreToolUse:" + FORMER])
+        self.assertEqual(install_refusal(self.w, self.manifest), "disabled-hook-present")
+
+    def test_parity_an_unrelated_hook_is_silent_in_both(self):
+        self.w.project_put(".claude/hooks/other.py", "# other\n")
+        self.w.project_register("PreToolUse", "other.py")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0)
+        self.assertEqual(_paths(data), [])
+        self.assertIsNone(install_refusal(self.w, self.manifest))
+
+    def test_parity_an_unreadable_layer_is_exit_4_and_an_install_problem(self):
+        self.w.project_register("PreToolUse", RETIRED, local=True)
+
+        def corrupt():
+            (self.w.project / ".claude" / "settings.local.json").write_text("{not json", encoding="utf-8")
+
+        rc, data = run_raw(self.w, corrupt)
+        self.assertEqual(rc, 4)
+        self.assertTrue(data.get("error"))
+        self.assertIsNotNone(install_refusal(self.w, self.manifest))
+
+    # ---- the three pinned divergences
+    def test_a_user_layer_row_is_silent_in_both_readers_contrary_to_the_contract(self):
+        user = self.w.home   # the install is handed the Claude home itself: its user layer is home/settings.json
+        row = DriftWorld.exec_row("${CLAUDE_PROJECT_DIR}", RETIRED)
+        (user / "settings.json").write_text(json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [row]}]}}), encoding="utf-8")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0, "the user layer is not project drift")
+        self.assertEqual(_paths(data), [])
+        # The contract pins this as a divergence (the install refuses). The code does not: the install keeps only
+        # the project and local layers (_disabled_hook_refusal filters on row["layer"]). Pinned as it is.
+        self.assertIsNone(install_refusal(self.w, self.manifest))
+
+    def test_divergence_a_non_object_layer_reads_as_no_rows_in_the_doctor_and_is_refused_by_the_install(self):
+        self.w.project_settings = []
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0, "the doctor reads a non-object layer as no rows, as it does today")
+        self.assertEqual(_paths(data), [])
+        self.assertIsNotNone(install_refusal(self.w, self.manifest))
+
+    def test_divergence_a_gate_launch_row_is_found_by_the_doctor_and_not_by_the_install(self):
+        self.w.project_register("PreToolUse", "gate-launch.py", gate=RETIRED)
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data), ["settings.json:PreToolUse:" + RETIRED])
+        self.assertIsNone(install_refusal(self.w, self.manifest))
+
+    # ---- controls
+    def test_the_names_are_compared_case_insensitively(self):
+        self.w.project_put(".claude/hooks/Retired-Advisor.PY", "# retired\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data), [".claude/hooks/Retired-Advisor.PY"])
+
+    def test_a_clean_project_has_no_finding(self):
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0)
+        self.assertEqual(_kinds(data), [])
+
+    def test_an_add_on_with_no_disabled_hook_flags_nothing(self):
+        add_disabled_addon(self.w, hook=None, name="plain-addon")
+        self.w.project_put(".claude/hooks/plain.py", "# plain\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0)
+        self.assertEqual(_paths(data), [])
+
+    def test_the_add_on_need_not_be_listed_in_the_sync_config(self):
+        self.assertNotIn(ADDON, self.w.config["addons"])
+        self.w.project_put(self.FILE, "# retired\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(_paths(data), [self.FILE])
+
+    def test_the_kind_is_a_known_finding_kind(self):
+        import plugin_doctor
+        self.assertIn(KIND_DISABLED, plugin_doctor.FINDING_KINDS)
+
+
+class TestDriftDocuments(DriftCase):
+    DOC = "RULES.md"
+    REL = "%s/%s/%s" % (DOCS_REL, ADDON, DOC)
+
+    def setUp(self):
+        super().setUp()
+        add_disabled_addon(self.w, hook=None, documents=[self.DOC, "OTHER.md"])
+
+    def listed(self):
+        self.w.config["addons"][ADDON] = []
+
+    def test_the_destination_constant_equals_the_installs(self):
+        import plugin_doctor
+        self.assertEqual(plugin_doctor.ADDON_DOCUMENTS_REL, install.ADDON_DOCUMENTS_REL)
+
+    def test_a_listed_add_on_with_identical_documents_is_counted_and_clean(self):
+        self.listed()
+        for doc in (self.DOC, "OTHER.md"):
+            self.w.project_put("%s/%s/%s" % (DOCS_REL, ADDON, doc), "# doc\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["compared_addons"], 2)
+        self.assertEqual(data["compared"], 3)
+
+    def test_a_document_that_differs_is_content_differs(self):
+        self.listed()
+        self.w.project_put(self.REL, "# edited\n")
+        self.w.project_put("%s/%s/OTHER.md" % (DOCS_REL, ADDON), "# doc\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data, "content-differs"), [self.REL])
+        self.assertEqual(data["compared_addons"], 2)
+
+    def test_line_endings_and_a_bom_alone_are_not_drift(self):
+        self.listed()
+        self.w.project_put(self.REL, "# doc\n", eol="\r\n", bom=True)
+        self.w.project_put("%s/%s/OTHER.md" % (DOCS_REL, ADDON), "# doc\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0)
+
+    def test_a_listed_add_on_with_a_document_missing_in_the_project_is_one_sided(self):
+        self.listed()
+        self.w.project_put(self.REL, "# doc\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data, "one-sided"), ["%s/%s/OTHER.md" % (DOCS_REL, ADDON)])
+        self.assertEqual(data["compared_addons"], 1)
+
+    def test_a_document_only_in_the_project_is_one_sided(self):
+        self.listed()
+        (self.w.plugin / ".claude" / "addons" / ADDON / "documents" / self.DOC).unlink()
+        self.w.project_put(self.REL, "# doc\n")
+        self.w.project_put("%s/%s/OTHER.md" % (DOCS_REL, ADDON), "# doc\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(_paths(data, "one-sided"), [self.REL])
+
+    def test_an_unlisted_add_on_with_no_document_in_the_project_is_not_compared(self):
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0)
+        self.assertEqual(_kinds(data), [])
+        self.assertEqual(data["compared_addons"], 0)
+
+    def test_an_unlisted_add_on_is_compared_when_any_document_exists(self):
+        self.w.project_put(self.REL, "# doc\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data, "one-sided"), ["%s/%s/OTHER.md" % (DOCS_REL, ADDON)])
+        self.assertEqual(data["compared_addons"], 1)
+
+    def test_an_add_on_that_declares_no_documents_is_not_compared(self):
+        add_disabled_addon(self.w, hook=None, name="no-docs")
+        self.w.config["addons"]["no-docs"] = []
+        self.w.project_put("%s/no-docs/X.md" % DOCS_REL, "# stray\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 0)
+
+    def test_the_findings_are_owned_by_the_plugin(self):
+        self.listed()
+        rc, data = run_raw(self.w)
+        self.assertTrue(_findings(data))
+        self.assertEqual({f["owner"] for f in _findings(data)}, {"plugin"})
+
+
+class TestDriftNeverWrites(DriftCase):
+    @staticmethod
+    def _snapshot(root: Path):
+        return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+    def test_a_run_with_disabled_hooks_and_documents_changes_no_file(self):
+        add_disabled_addon(self.w, former=[FORMER], documents=["RULES.md"])
+        self.w.config["addons"][ADDON] = []
+        self.w.project_put(".claude/hooks/" + RETIRED, "# retired\n")
+        self.w.project_register("PreToolUse", FORMER)
+        self.w.write_all()
+        before = (self._snapshot(self.w.project), self._snapshot(self.w.plugin))
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(before, (self._snapshot(self.w.project), self._snapshot(self.w.plugin)))
+
+    def test_a_run_that_compares_nothing_still_exits_4(self):
+        for tree in self.w.config["synced_trees"]:
+            tree["files"] = []
+        add_disabled_addon(self.w, documents=["RULES.md"])
+        self.w.config["addons"][ADDON] = []
+        self.w.project_put("%s/%s/RULES.md" % (DOCS_REL, ADDON), "# doc\n")
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 4, "documents count in compared_addons, never in compared")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
