@@ -479,12 +479,6 @@ def map_pr_to_subtask(head_branch: str, title: str, tasks: List[SubTask],
 _PR_URL_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/\d+/?$")
 
 
-def _pr_reference(url: Any) -> Optional[str]:
-    """The number of a pull request's own link (what ``--pr`` takes), or None when the link holds no number."""
-    found = re.search(r"/pull/(\d+)/?$", str(url or "").strip())
-    return found.group(1) if found else None
-
-
 def _owner_and_name_from_url(url: Optional[str]) -> Optional[Tuple[str, str]]:
     """``owner`` and ``name`` out of a pull request's own GitHub URL, or ``None``.
 
@@ -508,8 +502,7 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
                  hand_resolved: Optional[Dict[str, Any]] = None,
                  base_ref: Optional[str] = None,
                  base_is_default: Optional[bool] = None,
-                 delivered_by: Optional[str] = None,
-                 failure: Optional[str] = None) -> Dict[str, Any]:
+                 delivered_by: Optional[str] = None) -> Dict[str, Any]:
     """A record states what was observed. It never asserts what was not.
 
     A merge is not a test run, so ``tests_passed`` is ``unknown`` unless a
@@ -544,9 +537,8 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
     ``None`` means unknown, the key is OMITTED, and a record that predates the
     key reads as "base unknown", never as the default branch (Data Shapes).
 
-    ``failure`` names why a merged pull request still failed its sub-task (R-8:
-    ``single-branch-delivery``, a sub-task merged into the default branch on the web); the record is
-    ``failed`` and carries the key. Omitted otherwise.
+    A record is plain (R-7): it never judges the delivery layout, so a merge into the default branch is an
+    ordinary completion and the layout is reported by ``--status`` as a warning (R-8).
     """
     if checks == "SUCCESS":
         tests_passed, verified_by = True, "ci"
@@ -555,12 +547,9 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
     else:
         tests_passed, verified_by = "unknown", "none"
 
-    failed = verdict == "closed-unmerged" or failure is not None
+    failed = verdict == "closed-unmerged"
     description = ("Pull request closed without merging; the sub-task could not be "
                    "delivered as specified.")
-    if failure == "single-branch-delivery":
-        description = ("Pull request merged into the default branch; a contract with two or more "
-                       "mergeable blocks is delivered through its parent branch.")
     record = {
         "status": "failed" if failed else "completed",
         "commit": commit,
@@ -588,8 +577,6 @@ def build_record(verdict: str, commit: Optional[str], pr_url: str,
         record["base_is_default"] = base_is_default
     if delivered_by is not None:
         record["delivered_by"] = delivered_by
-    if failure is not None:
-        record["failure"] = failure
     return record
 
 
@@ -1548,11 +1535,7 @@ def parent_brief_of(contract_id: Optional[str], briefs: List[Dict[str, Any]],
 #: The closed set of Layout defect reasons (Parent Branch Delivery Rule). They block dispatch and
 #: approval; they never enter ``is_delivered``, G-2 or the completion evaluation.
 LAYOUT_DEFECT_REASONS = ("no-parent-branch", "parent-is-default", "ambiguous", "no-parent-issue",
-                         "sub-task-raises-version", "single-branch-delivery")
-#: The ``layout`` an owner's accept stamps on a delivery or on a record it replaces (R-7, R-10).
-SINGLE_BRANCH_ACCEPTED = "single-branch-accepted"
-#: The failure kind of an R-8 record, the one kind the accept clears (R-10).
-R8_FAILURE = "single-branch-delivery"
+                         "sub-task-raises-version")
 #: L-1: only a contract in one of these Statuses is judged (R-6); everything else is exempt.
 JUDGED_STATUSES = ("draft", "approved")
 _CONVENTIONS_REL = ".claude/work-item-conventions.json"
@@ -1655,33 +1638,26 @@ def delivery_layout(contract_text: str, slug: str, blocks: List[HandoffBlock],
             "parent_issue": parent_issue, "defects": defects}
 
 
-def landing_evidence_holds(layout: Dict[str, Any], tasks: List[SubTask],
-                           records: Dict[str, Dict[str, Any]], head_ref: Optional[str]) -> bool:
-    """R-7: a pull request from the parent branch is a landing only when stored records prove it.
-
-    Every sub-task needs a record verified by GitHub whose ``base_ref`` is the pull request's
-    ``headRefName`` (which is the layout's parent branch) and whose ``base_is_default`` is not
-    true; a missing flag reads as "not the default", as ``candidate_kind`` reads it. A record the owner
-    accepted (R-10) counts too, but only a genuine one (``accepted_record``).
-    """
-    if not tasks or not head_ref or head_ref != layout.get("parent_branch"):
-        return False
-    return all((records.get(t.id) or {}).get("verified") == "github"
-               and (accepted_record(records.get(t.id))
-                    or ((records.get(t.id) or {}).get("base_ref") == head_ref
-                        and (records.get(t.id) or {}).get("base_is_default") is not True))
-               for t in tasks)
-
-
-def accepted_record(rec: Optional[Dict[str, Any]]) -> bool:
-    """R-10: a record the owner's accept wrote -- completed, GitHub-verified, ``layout: single-branch-accepted``,
-    ``base_is_default: true`` and carrying ``replaces.failure: single-branch-delivery``."""
-    if not isinstance(rec, dict):
-        return False
-    replaces = rec.get("replaces")
-    return (rec.get("status") == "completed" and rec.get("verified") == "github"
-            and rec.get("layout") == SINGLE_BRANCH_ACCEPTED and rec.get("base_is_default") is True
-            and isinstance(replaces, dict) and replaces.get("failure") == R8_FAILURE)
+def layout_warnings_for(parent_branch: Optional[str], records: Dict[str, Dict[str, Any]],
+                        candidates: Sequence[Dict[str, Any]], origin_base: Optional[str]) -> List[Dict[str, str]]:
+    """R-8: the warnings of a judged contract, derived from facts (never stored), blocking nothing.
+    ``origin_base`` is the default branch when origin/<default> could not be read, else None."""
+    warning = {"reason": "single-branch-delivery",
+               "detail": "work of this contract is on the default branch, or on a branch that is not the parent "
+                         "branch (a completion record's base, or a merged one-branch delivery)",
+               "remedy": "This work is already on the default branch and is recorded as done; nothing needs "
+                         "undoing. Deliver the remaining sub-tasks through the parent branch (/flow Step 2.7, "
+                         "then /advance)."}
+    if origin_base is not None:
+        return [{"reason": "unverifiable",
+                 "detail": "origin/%s could not be read, so the layout cannot be judged" % origin_base,
+                 "remedy": "run git fetch origin %s and rerun" % origin_base}]
+    off_parent = any(r.get("status") == "completed"
+                     and (r.get("base_is_default") is True
+                          or bool(r.get("base_ref") and r.get("base_ref") != parent_branch))
+                     for r in records.values())
+    one_branch = any(c.get("known") and c.get("kind") == "single-branch" for c in candidates)
+    return [warning] if off_parent or one_branch else []
 
 
 def effective_base(state: Dict[str, Any], subtask_id: str, topology: Dict[str, Any],
@@ -1767,13 +1743,8 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
             briefs: Optional[List[Dict[str, Any]]] = None,
             default_branch: Optional[str] = None,
             candidates: Optional[List[Dict[str, Any]]] = None,
-            layout_defects: Optional[List[Dict[str, Any]]] = None,
-            delivery: Optional[Dict[str, Any]] = None,
-            adopted_at: Optional[datetime] = None) -> Dict[str, Any]:
+            layout_defects: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Decide the contract's next single move. This never iterates.
-
-    ``delivery`` and ``adopted_at`` (R-10) gate the accept an ``escalate`` move prints: no delivery recorded
-    (G-5) and every R-8 failure merged strictly before ``adopted_at`` (``None`` means now).
 
     A merge-gated loop does not spin. It makes one move, then suspends until a
     person merges something and the closing phase wakes it.
@@ -1817,19 +1788,8 @@ def advance(tasks: List[SubTask], records: Dict[str, Dict[str, Any]],
 
     failed = [tid for tid, rec in records.items() if rec.get("status") == "failed"]
     if failed:
-        move: Dict[str, Any] = {"action": "escalate", "failed": failed,
-                                "detail": "a sub-task could not be delivered; the contract needs amending"}
-        # R-10: when EVERY failed record is an R-8 failure, the owner's accept clears each one.
-        cutoff = adopted_at or datetime.now(timezone.utc)
-        accepts = []
-        for tid in failed:
-            merged = _instant(records[tid].get("merged_at"))
-            acceptable = (records[tid].get("failure") == R8_FAILURE and delivery is None
-                          and merged is not None and merged < cutoff)
-            accepts.append(_pr_reference(records[tid].get("pull_request")) if acceptable else None)
-        if all(accepts):
-            move["accept_prs"] = list(dict.fromkeys(accepts))
-        return move
+        return {"action": "escalate", "failed": failed,
+                "detail": "a sub-task could not be delivered; the contract needs amending"}
 
     # I-14 / I-19: an unknown candidate (GitHub could not be asked) fires whatever its
     # kind, because its merge time is unknown and ordering cannot be decided.
@@ -1923,15 +1883,6 @@ def next_command_for(
         if records_pr:
             commands = ["/pr-merged %s" % records_pr]
             why = "records are waiting in an open pull request; merge it, then record the delivery from a fresh worktree"
-        elif move.get("origin_unreadable"):
-            # B1 / last-review W-2: origin, not GitHub, did not answer. A re-read; never the refused or the accept.
-            commands = ["/pr-merged %s" % (cands[0].get("pr") if cands else "<pr>")]
-            why = move["origin_unreadable"]
-        elif known and known[-1].get("needs_accept"):
-            # R-9: G-7 would refuse the plain command, so show the owner the accept form instead.
-            commands = ["/pr-merged %s --record-delivery --accept-single-branch" % known[-1].get("pr")]
-            why = ("it went to the default branch on one branch, so --record-delivery is refused (G-7); "
-                   "only the owner may accept it as a single-branch delivery")
         elif known:
             commands = ["/pr-merged %s --record-delivery" % known[-1].get("pr")]
             why = "record the delivery so the loop agrees with GitHub"
@@ -1950,15 +1901,6 @@ def next_command_for(
             "commands": ["/pr-merged <pr-number>"],
             "reason": ("waiting on a pull request to merge for " + "; ".join(parts))
                       if parts else "a sub-task is out for merge",
-        }
-
-    if action == "escalate" and move.get("accept_prs"):
-        # R-10: every failure is an R-8 one, so the amendment the other failures need is not the way out.
-        return {
-            "commands": ["/pr-merged %s --record-delivery --accept-single-branch" % pr
-                         for pr in move["accept_prs"]],
-            "reason": "a sub-task pull request merged into the default branch on one branch (failure: %s); "
-                      "only the owner may accept it, and the work is not dispatched again" % R8_FAILURE,
         }
 
     if action in ("escalate", "nothing-planned", "contract-defect"):
@@ -2630,8 +2572,8 @@ def load_records(contract_slug: str) -> Dict[str, Dict[str, Any]]:
         return {}
     out = {}
     for f in d.glob("*.yaml"):
-        if f.stem in (DELIVERY_RECORD_NAME, ADOPTION_RECORD_NAME):
-            continue  # the reserved Contract Delivery and Rule Adoption records are never a sub-task's record
+        if f.stem == DELIVERY_RECORD_NAME:
+            continue  # the reserved Contract Delivery Record is never a sub-task's record
         try:
             import yaml
             out[f.stem] = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
@@ -2658,8 +2600,8 @@ def load_records_at(ref: str, contract_slug: str) -> Dict[str, Dict[str, Any]]:
         if not name.endswith(".yaml"):
             continue
         stem = name[:-len(".yaml")]
-        if stem in (DELIVERY_RECORD_NAME, ADOPTION_RECORD_NAME):
-            continue  # the reserved Contract Delivery and Rule Adoption records are never a sub-task's record
+        if stem == DELIVERY_RECORD_NAME:
+            continue  # the reserved Contract Delivery Record is never a sub-task's record
         text = file_at_commit(ref, "%s/%s" % (folder, name))
         if text is None:
             continue
@@ -2934,8 +2876,8 @@ def origin_records(base: str, slug: str) -> Optional[Dict[str, Dict[str, Any]]]:
     found: Dict[str, Dict[str, Any]] = {}
     for path in (p for p in out.split("\0") if p):
         name = path.rsplit("/", 1)[-1]
-        if not name.endswith(".yaml") or name[:-len(".yaml")] in (DELIVERY_RECORD_NAME, ADOPTION_RECORD_NAME):
-            continue  # the reserved Contract Delivery and Rule Adoption records are never a sub-task's record
+        if not name.endswith(".yaml") or name[:-len(".yaml")] == DELIVERY_RECORD_NAME:
+            continue  # the reserved Contract Delivery Record is never a sub-task's record
         text = file_at_commit(ref, path)
         if text is None:
             return None
@@ -2986,8 +2928,6 @@ FOLLOWUPS_DIR = Path(".claude/concepts/followups")
 #: The reserved file name (stem) of the Contract Delivery Record. Every
 #: completion record stem starts ``t<n>-``, so the two never collide.
 DELIVERY_RECORD_NAME = "contract-delivery"
-#: The reserved file name (stem) of the Rule Adoption Record (R-10): ``adoptedAt``, written once.
-ADOPTION_RECORD_NAME = "rule-adoption"
 #: The closed set of outcomes a Gate Output may give a Review checklist item.
 GATE_OUTCOMES = ("met", "partly-met", "not-met", "not-applicable")
 
@@ -3571,24 +3511,6 @@ def write_delivery(contract_slug: str, record: Dict[str, Any]) -> Path:
     return write_record(contract_slug, DELIVERY_RECORD_NAME, record)
 
 
-def read_adoption(contract_slug: str) -> Optional[datetime]:
-    """``adoptedAt`` of the contract's Rule Adoption Record, or None when it is absent or unreadable (R-10)."""
-    f = RESULTS_DIR / contract_slug / (ADOPTION_RECORD_NAME + ".yaml")
-    if not f.is_file():
-        return None
-    try:
-        import yaml
-        data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return None
-    return _instant(data.get("adoptedAt")) if isinstance(data, dict) else None
-
-
-def write_adoption(contract_slug: str, instant: datetime) -> Path:
-    """Write the Rule Adoption Record, once: the first recording run that holds an R-8 failure (R-10)."""
-    return write_record(contract_slug, ADOPTION_RECORD_NAME, {"adoptedAt": instant.isoformat()})
-
-
 def _hand_resolved_summary(pr: Dict[str, Any], cross_repository: bool) -> Dict[str, Any]:
     """The Hand-Resolved Summary of one pull request, measured once (Extension Points 1 and 4)."""
     shas = [c.get("oid") for c in (pr.get("commits") or []) if c.get("oid")]
@@ -3945,8 +3867,6 @@ def _usage_refusal(args: argparse.Namespace) -> Optional[str]:
                             ("--skipped", bool(args.skipped))):
             if given:
                 return "--preconditions cannot be combined with %s" % flag
-    if getattr(args, "accept_single_branch", False) and not args.record_delivery:
-        return "--accept-single-branch rides only with --record-delivery"
     if args.record_delivery:
         if len(args.pr) != 1:
             return "--record-delivery needs exactly one --pr"
@@ -3988,9 +3908,6 @@ def main() -> int:
                     help="report where the contract's parent branch lives (reads and fetches, writes nothing)")
     ap.add_argument("--record-delivery", action="store_true",
                     help="record that the one --pr delivered every block of the contract (GitHub-verified)")
-    ap.add_argument("--accept-single-branch", action="store_true",
-                    help="with --record-delivery: the owner accepts a one-branch delivery of a "
-                         "multi-sub-task contract that already merged (human-only; never run by a skill)")
     ap.add_argument("--owner-resolved", action="append", default=[], metavar="REPORT",
                     help="the owner confirms this blocked review report was fixed (repeatable)")
     ap.add_argument("--skipped", action="append", default=[], metavar="TEXT",
@@ -4052,11 +3969,6 @@ def main() -> int:
     #: What was on disk when the run began: the brief-link read of I-14 asks about
     #: the stored records, so a run that records the last sub-task still checks the link.
     stored_records = dict(records)
-    #: R-10: the instant this contract adopted the rule; with no Rule Adoption Record yet, "now" -- and only a
-    #: recording run writes it (``_ensure_adoption``), so a read-only mode never does.
-    run_now = datetime.now(timezone.utc)
-    adopted_at = read_adoption(slug)
-    adoption_instant = adopted_at or run_now
     base = default_branch()
     briefs = read_work_item_briefs(slug)
     #: The Delivery Layout of a judged multi-sub-task contract (L-1), or None. Recomputed every call.
@@ -4284,16 +4196,6 @@ def main() -> int:
     def _list_record(rel_path: Path) -> str:
         return rel_path.as_posix()
 
-    _adoption_written: List[bool] = []
-
-    def _ensure_adoption(r8_seen: bool) -> None:
-        """R-10: write ``adoptedAt`` once, in the recording run that writes (or first sees) an R-8 failure."""
-        if writing and adopted_at is None and not _adoption_written and (r8_seen or any(
-                r.get("status") == "failed" and r.get("failure") == R8_FAILURE for r in records.values())):
-            write_adoption(slug, run_now)
-            written_files.append(_list_record(RESULTS_DIR / slug / (ADOPTION_RECORD_NAME + ".yaml")))
-            _adoption_written.append(True)
-
     pr_refs = [] if args.record_delivery else args.pr
 
     # ------------------------------------------------------------------
@@ -4323,70 +4225,7 @@ def main() -> int:
                 return _refuse("G-5", "delivery-recorded-for-another-pull-request",
                                "a delivery is already recorded for %s; this contract has one delivery"
                                % (delivery.get("pull_request") or "another pull request"))
-        # R-10: the owner's accept also clears an R-8 failed record of THIS pull request, replacing it with a
-        # completed one; any other failed record is still G-3's. GitHub must confirm the merge, and origin
-        # must be readable, before anything is written.
-        r8_ids: List[str] = []
-        if args.accept_single_branch and not same_delivery:
-            pr_url = _norm(str(pr.get("url") or "")).rstrip("/")
-            r8_ids = [tid for tid, rec in records.items()
-                      if rec.get("status") == "failed" and rec.get("failure") == R8_FAILURE
-                      and _norm(str(rec.get("pull_request") or "")).rstrip("/") == pr_url]
-        if r8_ids:
-            other = sorted((tid, rec.get("failure")) for tid, rec in records.items()
-                           if rec.get("status") == "failed" and rec.get("failure") != R8_FAILURE)
-            if other:
-                return _refuse("G-3", "failed-record",
-                               "only a single-branch-delivery failure can be accepted; %s failed with %s"
-                               % other[0])
-            if verdict != "merged":
-                return _refuse("G-3", "not-merged",
-                               "pull request %s is not reported merged by GitHub (%s); a failed record is "
-                               "replaced only by a merged pull request" % (ref, verdict))
-            merged_instant = _instant(pr.get("mergedAt"))
-            if merged_instant is None or merged_instant >= adoption_instant:
-                # R-10: the accept clears only what merged strictly before the contract adopted the rule.
-                return _refuse("G-3", "merged-after-rule",
-                               "pull request %s merged on or after the rule was adopted for this contract "
-                               "(%s); a web merge into the default branch now is amended with /design-first, "
-                               "not accepted" % (ref, adoption_instant.isoformat()))
-            if _origin() is None:
-                print(json.dumps({
-                    "error": "github-unverifiable",
-                    "detail": "origin/%s could not be read; nothing was written. Run git fetch origin %s "
-                              "and run again." % (base, base)}))
-                return 10
-            accept_sha = (pr.get("mergeCommit") or {}).get("oid")
-            accept_rollup = pr.get("statusCheckRollup")
-            accept_checks = (accept_rollup[0].get("conclusion")
-                             if isinstance(accept_rollup, list) and accept_rollup else None)
-            accept_summary = _hand_resolved_summary(pr, False)
-            for task in tasks:
-                if task.id not in r8_ids:
-                    continue
-                base_ref = pr.get("baseRefName")
-                rec = build_record(
-                    "merged", accept_sha, pr.get("url", ""), pr.get("mergedAt"), accept_checks,
-                    review_verdict=_review_verdict_for(task, pr, accept_sha, False, base),
-                    hand_resolved=accept_summary, base_ref=base_ref,
-                    base_is_default=(base_ref == base) if base_ref else None)
-                rec["layout"] = SINGLE_BRANCH_ACCEPTED
-                old = records[task.id]
-                rec["replaces"] = {"failure": R8_FAILURE, "pull_request": old.get("pull_request"),
-                                   "merged_at": old.get("merged_at"), "recorded_at": old.get("recorded_at")}
-                rec["note"] = "replaces failed record (failure: %s)" % R8_FAILURE
-                # B1 (last review): the accept closes the sub-issue as a normal completion does, or the later
-                # landing meets G-4 and its remedy would record this pull request again.
-                accept_issue = (state.get("sub_tasks", {}).get(task.id) or {}).get("issue")
-                if writing and accept_issue is not None:
-                    rec["sub_issue_closed"] = close_sub_issue(accept_issue, pr.get("url", ""))
-                if writing:
-                    write_record(slug, task.id, rec)
-                    written_files.append(_list_record(RESULTS_DIR / slug / (task.id + ".yaml")))
-                records[task.id] = rec
-                report["closed"].append({"pr": ref, "sub_task": task.id, "record": rec})
-            _ensure_adoption(True)
-        if not same_delivery and not r8_ids:
+        if not same_delivery:
             cand = _candidate_from(ref, pr, verdict, cross_repository)
             found = delivery_candidates([cand] if cand else [], tasks, records)
             if not found or not found[0].get("known") or found[0].get("kind") == "early":
@@ -4405,10 +4244,6 @@ def main() -> int:
                                "the contract has defects or no sub-task; amend it before recording a delivery")
             failed_ids = [tid for tid, rec in records.items() if rec.get("status") == "failed"]
             if failed_ids:
-                if args.accept_single_branch:
-                    return _refuse("G-3", "failed-record",
-                                   "only a single-branch-delivery failure can be accepted; %s failed with %s"
-                                   % (sorted(failed_ids)[0], records[sorted(failed_ids)[0]].get("failure")))
                 return _refuse("G-3", "failed-record", "a failed record exists: %s" % ", ".join(sorted(failed_ids)))
             parent_id = str((brief_fields or {}).get("id") or "").strip()
             if parent_id.lower() not in ("", "none"):
@@ -4435,40 +4270,7 @@ def main() -> int:
                                "%s carries records not yet merged; merge %s, then run again in a flat "
                                "worktree cut fresh from origin/%s" % (url, url, base),
                                records_pull_requests=[r.get("url") for r in open_records])
-            if layout is not None and not landing_evidence_holds(layout, tasks, records, pr.get("headRefName")):
-                # The Records pull request merged on the web and this checkout was never refreshed: origin
-                # holds the landing, the local folder does not. Writing now would put delivery records over
-                # the real ones, and the accept would misname a real landing as a single-branch delivery.
-                held = _origin()
-                if held is None:
-                    # R-7: a read that fails is unverifiable, never a layout defect and never the accept.
-                    print(json.dumps({
-                        "error": "github-unverifiable",
-                        "detail": "origin/%s could not be read, so the landing evidence cannot be checked; "
-                                  "nothing was written. Run git fetch origin %s and run again."
-                                  % (base, base)}))
-                    return 10
-                if landing_evidence_holds(
-                        layout, tasks, merge_evidence(held, records, stored_records), pr.get("headRefName")):
-                    return _refuse("G-7", "records-not-local",
-                                   "origin/%s holds the completion records of this landing but this checkout "
-                                   "does not; run again in a flat worktree cut fresh from origin/%s"
-                                   % (base, base))
-            if args.accept_single_branch:
-                awaiting = awaiting_merge(reconcile_state(state, records))
-                if awaiting:
-                    return _refuse("G-7", "sub-task-awaiting-merge",
-                                   "a sub-task is still out for merge (%s); a one-branch delivery cannot "
-                                   "be accepted while work is unmerged" % ", ".join(awaiting))
-            elif layout is not None and not landing_evidence_holds(layout, tasks, records, pr.get("headRefName")):
-                return _refuse("G-7", "single-branch-delivery",
-                               "pull request %s is not the landing of this contract: the sub-tasks have no "
-                               "stored completion records proving they merged into its parent branch" % ref,
-                               remedy="if the work is not yet merged, deliver it through the parent branch "
-                                      "(/flow Step 2.7, then /advance); if it is already merged on the "
-                                      "default branch, the owner runs /pr-merged <pr> --record-delivery "
-                                      "--accept-single-branch")
-
+            # R-7: records are plain. No layout check refuses a recording; R-8 reports the layout as a warning.
             merge_sha = (pr.get("mergeCommit") or {}).get("oid")
             rollup = pr.get("statusCheckRollup")
             checks = rollup[0].get("conclusion") if isinstance(rollup, list) and rollup else None
@@ -4503,11 +4305,6 @@ def main() -> int:
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
                 "blocks_recorded": new_ids, "blocks_already_recorded": already,
             }
-            accepted_ids = [t.id for t in tasks if accepted_record(records.get(t.id))]
-            if accepted_ids:
-                planned["accepted_blocks"] = accepted_ids  # R-10: the bypass stays visible in the audit trail
-            if args.accept_single_branch:
-                planned["layout"] = "single-branch-accepted"
             if writing:
                 write_delivery(slug, planned)
                 written_files.append(_list_record(RESULTS_DIR / slug / (DELIVERY_RECORD_NAME + ".yaml")))
@@ -4601,17 +4398,10 @@ def main() -> int:
         sub_issue_closed = None
         task_state_entry = state.get("sub_tasks", {}).get(task.id, {})
         task_issue = task_state_entry.get("issue")
-        # R-8: a sub-task's own pull request merged into the default branch on the web. It cannot be
-        # stopped before the merge, so it is recorded after it as a failed record, and nothing closes.
-        # An owner's accept of THIS pull request is never re-judged (R-10, sticky): the rewrite keeps it.
-        prior = records.get(task.id) or {}
-        accepted_here = (accepted_record(prior) and _norm(str(prior.get("pull_request") or "")).rstrip("/")
-                         == _norm(str(pr.get("url") or "")).rstrip("/"))
-        web_merged = (not accepted_here and layout is not None and verdict == "merged" and not cross_repository
-                      and pr.get("baseRefName") == base and bool(pr.get("headRefName"))
-                      and pr.get("headRefName") in (branch_for(slug, task.id), recorded_branches.get(task.id)))
+        # R-7: a record is plain. A sub-task's pull request merged into the default branch on the web is a
+        # completion like any other and closes its sub-issue; R-8 reports the layout as a warning.
         if (verdict == "merged" and task_issue is not None and not args.dry_run
-                and not web_merged and not args.status and not args.resume):
+                and not args.status and not args.resume):
             # The close comment never carries the other repository's link or
             # name (X-7): a cross-repository pull request's own url points
             # at a different repository, and naming it here would be the
@@ -4629,10 +4419,7 @@ def main() -> int:
         rec = build_record(verdict, merge_sha, pr.get("url", ""), pr.get("mergedAt"), checks,
                            review_verdict=review_verdict, sub_issue_closed=sub_issue_closed,
                            hand_resolved=hand_resolved_summary, base_ref=base_ref,
-                           base_is_default=base_is_default,
-                           failure="single-branch-delivery" if web_merged else None)
-        if accepted_here:
-            rec.update({k: prior[k] for k in ("layout", "replaces", "note") if k in prior})
+                           base_is_default=base_is_default)
         if writing:
             write_record(slug, task.id, rec)
             written_files.append(_list_record(RESULTS_DIR / slug / (task.id + ".yaml")))
@@ -4645,8 +4432,6 @@ def main() -> int:
                                           pr.get("url"), pr.get("baseRefName"))
         (report["failed"] if rec["status"] == "failed" else report["closed"]).append(
             {"pr": ref, "sub_task": task.id, "record": rec})
-
-    _ensure_adoption(False)  # R-10: the first recording run that holds an R-8 failure writes adoptedAt, once
 
     # I-14: the brief's own pull request, read in EVERY run mode from tracked files
     # plus GitHub, never from one run's memory. ONE bare-number gh_pr call; the
@@ -4695,24 +4480,6 @@ def main() -> int:
             _open_records_cache.append(open_records_pull_requests(slug))
         return _open_records_cache[0]
 
-    # W4: a judged contract's candidate kind and landing evidence come from what origin/<default> holds
-    # plus this run's records, never from a local results folder a stale checkout left empty. Read only
-    # when a known candidate exists and no Records pull request is open (an open one already holds the report
-    # back, and its pointer stays). An origin that could not be read proves nothing either way, so it sets no
-    # needs_accept and offers no accept (it is not "no records"): the move offers the re-read instead.
-    evidence = records
-    origin_unreadable = False
-    if layout is not None and any(c.get("known") for c in candidates) and _open_records() == []:
-        held = _origin()
-        if held is None:
-            origin_unreadable = True
-            report["origin_read"] = ("origin/%s could not be read; run git fetch origin %s and rerun"
-                                     % (base, base))
-        else:
-            evidence = merge_evidence(held, records, stored_records)
-            candidates = delivery_candidates(raw_candidates, tasks, evidence)
-            report["delivery_candidates"] = candidates
-
     records_pr_url: Optional[str] = None
     if any(c.get("known") and c.get("kind") != "early" for c in candidates) \
             and not is_delivered(tasks, records, delivery, defects)[0]:
@@ -4721,25 +4488,6 @@ def main() -> int:
             records_pr_url = found_open[0].get("url")
 
     if layout is not None:
-        # R-7 / R-9: a known merged candidate that G-7 would refuse needs the owner's accept, and the
-        # live report names it -- but only while no Records pull request is open (the records are
-        # then still on the records branch) and only when GitHub answered both questions. The printed
-        # accept command would exit 10 on an unreadable open-records read, so it is not offered then.
-        for cand in candidates:
-            if cand.get("known") and cand.get("kind") != "early" \
-                    and not landing_evidence_holds(layout, tasks, evidence, cand.get("branch")) \
-                    and _open_records() is not None and not origin_unreadable:
-                cand["needs_accept"] = True
-        records_read_failed = bool(_open_records_cache) and _open_records_cache[0] is None
-        if not records_pr_url and not records_read_failed and not origin_unreadable and not is_delivered(tasks, records, delivery, defects)[0] \
-                and any(c.get("known") and c.get("kind") == "single-branch" for c in candidates):
-            layout_defects.append({
-                "reason": "single-branch-delivery",
-                "detail": "the work merged into the default branch on one branch, with no completion "
-                          "evidence of a parent-branch landing",
-                "remedy": "not yet merged: deliver it through the parent branch (/flow Step 2.7); already "
-                          "merged on the default branch: the owner runs /pr-merged <pr> --record-delivery "
-                          "--accept-single-branch"})
         report["layout_defects"] = layout_defects
 
     if args.dispatch:
@@ -4751,7 +4499,7 @@ def main() -> int:
             return 2
         move_now = advance(tasks, records, state, defects=defects,
                            briefs=briefs, default_branch=base, candidates=candidates,
-                           layout_defects=layout_defects, delivery=delivery, adopted_at=adoption_instant)
+                           layout_defects=layout_defects)
         if move_now["action"] == "delivery-unrecorded":
             print(json.dumps({"error": "delivery-unrecorded", "sub_task": task.id,
                               "candidates": move_now.get("candidates", []),
@@ -4899,11 +4647,27 @@ def main() -> int:
 
     move = advance(tasks, records, state, defects=defects,
                    briefs=briefs, default_branch=base, candidates=candidates,
-                   layout_defects=layout_defects, delivery=delivery, adopted_at=adoption_instant)
+                   layout_defects=layout_defects)
     if move["action"] == "delivery-unrecorded" and records_pr_url:
         move["records_pull_request"] = records_pr_url
-    if move["action"] == "delivery-unrecorded" and origin_unreadable:
-        move["origin_unreadable"] = report["origin_read"]
+
+    # R-8: the layout warnings, derived from facts and blocking nothing -- local records merged with
+    # origin/<default>'s, only while no Records pull request of the contract is open. Origin is read only when
+    # a known Delivery Candidate asks about it (the stale-checkout case); an origin that could not be read is
+    # reported `unverifiable`, never the warning and never its absence.
+    if layout is not None:
+        report["layout_warnings"] = []
+        if _open_records() == []:
+            evidence = records
+            held = _origin() if any(c.get("known") for c in candidates) else records
+            if held is None:
+                report["layout_warnings"] = layout_warnings_for(None, {}, [], base)
+            else:
+                if held is not records:
+                    evidence = merge_evidence(held, records, stored_records)
+                report["layout_warnings"] = layout_warnings_for(
+                    layout.get("parent_branch"), evidence,
+                    delivery_candidates(raw_candidates, tasks, evidence), None)
 
     if args.preconditions:
         # The reading /advance decides on, answered before the Completion Verdict. Read-only:
@@ -4980,8 +4744,6 @@ def main() -> int:
                 parts += ["--pr", str(ref)]
             if args.record_delivery:
                 parts.append("--record-delivery")
-                if args.accept_single_branch:
-                    parts.append("--accept-single-branch")
         for name in owner:
             parts += ["--owner-resolved", name]
         for text in args.skipped:

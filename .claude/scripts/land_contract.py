@@ -2045,6 +2045,13 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     parent_brief_path = parent_brief["_path"]
     child_ids = [c for c in topology["child_ids"]]
     base_report = {"parent_branch": parent, "parent_issue": parent_issue}
+    # R-9: the landing never reads a record's verdict (a record has none); it repeats R-8's layout warning in
+    # its report for a judged contract and does not halt on it.
+    judged = pr_merged.delivery_layout(
+        contract_text, slug, classification.blocks, briefs,
+        [b for b in briefs if pr_merged.brief_names_contract(b, slug)], default,
+        config if isinstance(config, dict) else {}) is not None
+    base_report["layout_warnings"] = pr_merged.layout_warnings_for(parent, records, [], None) if judged else []
     # L-18: `landing: manual` in the parent brief means the operator merges the parent pull request.
     # A real run ends here; a dry run changes nothing anyway, so it records the fact and goes on to P5.
     if (parent_brief.get("landing") or "").strip().lower() == "manual":

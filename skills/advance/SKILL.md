@@ -326,7 +326,7 @@ Route to architect re-entry. Concretely that means `/design-first` amending the 
 not start anything, and do not retry the sub-task from here — whether to retry is one of the
 decisions the architect makes.
 
-**One failure kind has another way out.** When every failed record carries `failure: single-branch-delivery` (a sub-task pull request merged into the default branch on the web), the script's `escalate` Next Command is `/pr-merged <pr> --record-delivery --accept-single-branch` for each, never `/design-first`. That flag is the owner's decision, not this skill's: show each command to the owner with the reason, and never run it yourself. The accept is printed only for a pull request that merged before the contract adopted the rule (`adoptedAt`), while no delivery is recorded; any other failure, and any later web merge, keeps `/design-first`.
+A sub-task pull request merged into the default branch on the web is not a failure: it is recorded as an ordinary completion, so it never reaches `escalate`.
 
 ### `delivery-unrecorded` — a pull request delivered the whole contract and nothing records it
 
@@ -334,7 +334,7 @@ A merged pull request that is the brief's own, but whose branch maps to no sub-t
 
 **Start nothing.** Name each candidate from the script's answer and print the Next Command verbatim. It is `/pr-merged <ref> --record-delivery` for the most recent candidate GitHub confirmed, `/pr-merged <url>` when the records are waiting in an open records pull request (merge it first, then run again in a fresh worktree cut from the default branch), or a plain `/pr-merged <ref>` when GitHub could not be asked. This move never offers `/advance`: recording the delivery is `/pr-merged`'s work, not this skill's.
 
-**For a contract with two or more mergeable blocks, a delivery on one branch is refused by guard G-7.** When the candidate is merged and G-7 would refuse the plain command, the Next Command is `/pr-merged <ref> --record-delivery --accept-single-branch` instead, never the refused command. That flag is the owner's decision, not this skill's: show it to the owner with the reason, and never run it yourself. Once the owner has recorded it the delivery exists and the move is `complete`, so the loop cannot return to the refused command.
+**A delivery on one branch is recorded like any other.** For a contract with two or more mergeable blocks nothing refuses the plain `--record-delivery`: once it is recorded the delivery exists and the move is `complete`. The layout is reported, not enforced here: read `layout_warnings` in the status report, and when it lists `single-branch-delivery`, show its `remedy` to the owner (the work is already on the default branch and is recorded as done; nothing needs undoing; deliver the remaining sub-tasks through the parent branch, `/flow` Step 2.7, then `/advance`). A warning blocks nothing: not recording, not completion, not dispatch. An `unverifiable` entry means `origin/<default>` could not be read; give its re-read remedy (`git fetch origin <default>`, then run again).
 
 ### `complete` — every sub-task has a record
 
