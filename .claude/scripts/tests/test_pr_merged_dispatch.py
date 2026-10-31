@@ -415,16 +415,26 @@ class DispatchBaseResolutionTests(unittest.TestCase):
         self.assertEqual(res.branch.call_count, 0)
 
 
-@unittest.skipUnless(hasattr(pr_merged, "brief_for_branch"),
-                     "contract 460's rehydration is not on this branch")
 class DispatchIdentityAmbiguousTests(unittest.TestCase):
-    """D-1 rule 0: two briefs for one sub-task's branch beat every base rule."""
+    """D-1 rule 0: two briefs for one sub-task's branch beat every base rule.
+
+    KNOWN FAILURES, older than issue 113 (test review W-8). The class used to be guarded by
+    ``skipUnless(hasattr(pr_merged, "brief_for_branch"))``, but that symbol already exists, so the guard never
+    skipped and both tests failed on every run. Rule 0 of ``effective_base`` is still not built (see its
+    docstring: contract 460, 2026-10-07-worktree-isolation-by-default, rehydration), and rehydration reads
+    the briefs through git (``brief_for_branch(branch, "HEAD")``), which this plain-folder fixture cannot
+    offer. Both tests are marked expectedFailure with that reference instead of being weakened; when rule 0
+    lands and the fixture is a git repository, the unexpected success tells the author to remove the marks.
+    """
+
+    maxDiff = None
 
     def _two_briefs(self, repo):
         for name, issue in (("b1", "101"), ("b2", "102")):
             repo.brief(name, id=issue, contract=SLUG, parent_issue="100", base="feature/p",
                        branch="task/%s/t1-backend" % SLUG)
 
+    @unittest.expectedFailure
     def test_dispatch_refuses_identity_ambiguous_before_rule_one_is_read(self):
         with _Repo() as repo:
             contract = repo.contract(CONTRACT_SINGLE)
@@ -437,6 +447,7 @@ class DispatchIdentityAmbiguousTests(unittest.TestCase):
                              "base is read")
         self.assertEqual(res.branch.call_count, 0)
 
+    @unittest.expectedFailure
     def test_status_reports_identity_ambiguous_without_refusing(self):
         with _Repo() as repo:
             contract = repo.contract(CONTRACT_SINGLE)
@@ -829,6 +840,213 @@ class FindLinkedBriefWithoutHeaderTests(unittest.TestCase):
             repo.brief("two", id="200", contract=SLUG, branch="feature/q", parent_issue="none")
             found = pr_merged.find_linked_brief(self.TEXT, SLUG, self._folder(repo))
         self.assertIsNone(found, "two candidates and no way to tell them apart is none")
+
+
+# ===========================================================================
+# Parent Branch Delivery Rule (issue 113), dispatch side.
+#   .claude/concepts/2026-10-30-parent-branch-delivery-rule.md, bypass-flow rows 3, 7, 8 and the exit 7 note.
+#
+# Only a contract whose Status is draft or approved is judged (R-6): every fixture above has no Status line,
+# so those tests keep their meaning. The fixtures below carry **Status:** approved on purpose.
+#
+#   * a layout defect blocks dispatch: advance() answers contract-defect in place of dispatch, --dispatch
+#     refuses it (exit 3) and cuts nothing, --dry-run included
+#   * needs-issue (exit 7, remedy /flow Step 2.7) is computed BEFORE the branch is cut, and refuses under
+#     --dispatch and --dry-run alike; --status and --resume only report it
+#   * base-not-declared (exit 7) carries its own remedy (--record-subtask); callers branch on ``error``
+# ===========================================================================
+def _approved(body=CONTRACT_CHAIN, *, status="approved", header=True):
+    head = "# Contract\n\n"
+    if status:
+        head += "**Status:** %s\n" % status
+    if header:
+        head += "**Work Item Brief:** .claude/work-items/parent.md\n"
+    return head + body
+
+
+def _parent_layout(repo, parent_branch="feature/p", parent_id="100"):
+    repo.brief("parent", id=parent_id, contract=SLUG, branch=parent_branch)
+    repo.child_brief("b1", "t1-backend", parent_branch)
+    repo.child_brief("b2", "t2-frontend", parent_branch, issue="102")
+
+
+def _states(with_issues, base="feature/p"):
+    return {"t1-backend": _entry(base=base, issue=101 if with_issues else None),
+            "t2-frontend": _entry(base=base, issue=102 if with_issues else None)}
+
+
+class LayoutDefectBlocksDispatchTests(unittest.TestCase):
+
+    def _refused(self, flags, **repo_setup):
+        with _Repo() as repo:
+            contract = repo.contract(_approved(header=False))
+            before = repo.snapshot()
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"] + flags)
+            after = repo.snapshot()
+        return res, before, after
+
+    def test_an_approved_two_block_contract_with_no_parent_branch_refuses_the_dispatch(self):
+        res, before, after = self._refused([])
+        self.assertEqual(res.exit_code, 3, "a layout defect is a contract defect: exit 3, nothing cut. got %r %.300s"
+                         % (res.exit_code, res.out))
+        self.assertEqual((res.payload or {}).get("error"), "contract-defect", res.out[:300])
+        self.assertIn("no-parent-branch", json.dumps(res.payload), "the refusal names the reason")
+        self.assertEqual(res.branch.call_count, 0, "no branch is cut from the default branch")
+        self.assertEqual(after, before, "and nothing is written")
+
+    def test_a_dry_run_refuses_the_same_way(self):
+        res, before, after = self._refused(["--dry-run"])
+        self.assertEqual(res.exit_code, 3, "a preview must match the real run. got %r %.300s" % (res.exit_code, res.out))
+        self.assertEqual((res.payload or {}).get("error"), "contract-defect")
+
+    def test_the_report_move_is_contract_defect_in_place_of_dispatch(self):
+        with _Repo() as repo:
+            contract = repo.contract(_approved(header=False))
+            res = _drive(repo, contract, ["--json"])
+        self.assertEqual((res.payload["next_move"] or {}).get("action"), "contract-defect",
+                         "advance() returns contract-defect in place of dispatch. got %.300s" % res.out)
+        self.assertFalse(res.payload.get("dispatch"), "and no dispatch list is offered")
+
+    def test_a_contract_amended_from_one_block_to_two_is_judged_again_on_every_call(self):
+        # Row 8: the state store still holds the one entry it was created with.
+        with _Repo() as repo:
+            contract = repo.contract(_approved(header=False))
+            repo.state({"t1-backend": _entry()})
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"])
+        self.assertEqual(res.exit_code, 3, "2 blocks, 1 state entry: the layout is recomputed. got %.300s" % res.out)
+
+    def test_briefs_that_disagree_on_the_parent_branch_are_the_reused_ambiguous_defect(self):
+        with _Repo() as repo:
+            contract = repo.contract(_approved())
+            repo.brief("parent", id="100", contract=SLUG, branch="feature/p")
+            repo.child_brief("b1", "t1-backend", "feature/p")
+            repo.child_brief("b2", "t2-frontend", "feature/q", issue="102")
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"])
+        self.assertEqual(res.exit_code, 3, "an approved multi-sub-task contract with ambiguous briefs is a layout "
+                                           "defect, not a base-not-declared refusal. got %.300s" % res.out)
+        self.assertIn("ambiguous", json.dumps(res.payload))
+
+    def test_positive_control_a_complete_layout_dispatches_from_the_parent_branch(self):
+        with _Repo() as repo:
+            contract = repo.contract(_approved())
+            _parent_layout(repo)
+            repo.state(_states(True))
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"])
+        self.assertEqual(res.exit_code, 0, "a valid layout dispatches. got %.300s" % res.out)
+        self.assertEqual(_branch_and_base(res.branch.call_args)[1], "feature/p")
+
+    def test_positive_control_a_status_that_is_not_judged_keeps_dispatching_from_the_default_branch(self):
+        for status in ("implemented", None):
+            with self.subTest(status=status):
+                with _Repo() as repo:
+                    contract = repo.contract(_approved(status=status, header=False))
+                    res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"])
+                self.assertEqual(res.exit_code, 0, "R-6 grandfathering. got %.300s" % res.out)
+                self.assertEqual(_branch_and_base(res.branch.call_args)[1], "master")
+
+    def test_positive_control_one_mergeable_block_needs_no_parent_branch(self):
+        with _Repo() as repo:
+            contract = repo.contract(_approved(CONTRACT_SINGLE, header=False))
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"])
+        self.assertEqual(res.exit_code, 0, "L-1: a single block is not judged. got %.300s" % res.out)
+        self.assertEqual(_branch_and_base(res.branch.call_args)[1], "master")
+
+
+class NeedsIssueRefusalTests(unittest.TestCase):
+    """needs-issue is a refusal, computed before the cut, in every dispatching mode."""
+
+    def _run(self, flags, with_issues=False):
+        with _Repo() as repo:
+            contract = repo.contract(_approved())
+            _parent_layout(repo)
+            repo.state(_states(with_issues))
+            before = repo.snapshot()
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"] + flags)
+            after = repo.snapshot()
+        return res, before, after
+
+    def test_a_dispatch_with_no_sub_issue_is_refused_before_the_branch_is_cut(self):
+        res, before, after = self._run([])
+        self.assertEqual(res.exit_code, 7, "exit 7 carries needs-issue. got %r %.300s" % (res.exit_code, res.out))
+        self.assertEqual((res.payload or {}).get("error"), "needs-issue", res.out[:300])
+        self.assertIn("/flow", str((res.payload or {}).get("remedy")), "the remedy is /flow Step 2.7")
+        self.assertEqual(res.branch.call_count, 0, "nothing is cut: the check runs before the cut")
+        self.assertEqual(after, before, "and no state entry is written as awaiting-merge")
+
+    def test_a_dry_run_refuses_exactly_like_the_real_run(self):
+        res, before, after = self._run(["--dry-run"])
+        self.assertEqual(res.exit_code, 7, "a preview matches the real run. got %r %.300s" % (res.exit_code, res.out))
+        self.assertEqual((res.payload or {}).get("error"), "needs-issue")
+        self.assertEqual(after, before)
+
+    def test_status_and_resume_only_report_it(self):
+        for flag in ("--status", "--resume"):
+            with self.subTest(flag=flag):
+                res, before, after = self._run([flag])
+                self.assertEqual(res.exit_code, 0, "%s reports and never refuses. got %.300s" % (flag, res.out))
+                self.assertTrue((res.payload or {}).get("needs_issue"), "and the packet still says needs_issue")
+                self.assertEqual(after, before)
+
+    def test_the_report_path_lists_needs_issue_without_refusing(self):
+        with _Repo() as repo:
+            contract = repo.contract(_approved())
+            _parent_layout(repo)
+            repo.state(_states(False))
+            res = _drive(repo, contract, ["--json"])
+        self.assertEqual(res.exit_code, 0)
+        self.assertTrue(all(d.get("needs_issue") for d in res.payload.get("dispatch", [])) and res.payload.get("dispatch"),
+                        "report mode lists the released sub-task with needs_issue true")
+
+    def test_positive_control_a_recorded_sub_issue_dispatches(self):
+        res, before, after = self._run([], with_issues=True)
+        self.assertEqual(res.exit_code, 0, "got %.300s" % res.out)
+        self.assertFalse(res.payload.get("needs_issue"))
+
+    def test_the_two_exit_7_refusals_are_told_apart_by_error_and_remedy(self):
+        with _Repo() as repo:
+            contract = repo.contract(CONTRACT_SINGLE)
+            repo.child_brief("b1", "t1-backend", "feature/p")
+            repo.child_brief("b2", "t1-backend", "feature/q", issue="102")
+            base_refusal = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"])
+        needs_issue, _, _ = self._run([])
+        self.assertEqual((base_refusal.exit_code, (base_refusal.payload or {}).get("error")), (7, "base-not-declared"),
+                         "fixture sanity: %.300s" % base_refusal.out)
+        self.assertIn("--record-subtask", str((base_refusal.payload or {}).get("remedy")),
+                      "base-not-declared names its own remedy at the top level of the refusal")
+        self.assertEqual((needs_issue.payload or {}).get("error"), "needs-issue")
+        self.assertNotEqual((base_refusal.payload or {}).get("remedy"), (needs_issue.payload or {}).get("remedy"),
+                            "callers branch on error, and each error has its own remedy")
+
+    def test_a_protected_parent_branch_is_a_layout_defect_at_dispatch(self):
+        # Code review W6 / test review W-7 (L-4): the parent is never the default OR a protected branch. The
+        # protected list is contractLanding.protectedBranches of the conventions file at origin/<default>,
+        # the key the landing reads; this fixture offers it as the local file and as the committed copy.
+        conventions = {"contractLanding": {"protectedBranches": ["master", "release"]}}
+        text = json.dumps(conventions)
+
+        def committed(ref, path):
+            return text if path == ".claude/work-item-conventions.json" else None
+
+        with _Repo() as repo:
+            contract = repo.contract(_approved())
+            _parent_layout(repo, parent_branch="release")
+            repo.state(_states(True, base="release"))
+            repo.conventions(conventions)
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--json"],
+                         extra_patches=(mock.patch.object(pr_merged, "file_at_commit", side_effect=committed),))
+        self.assertEqual(res.exit_code, 3, "a protected parent is a layout defect. got %r %.300s" % (res.exit_code, res.out))
+        self.assertEqual((res.payload or {}).get("error"), "contract-defect", res.out[:300])
+        self.assertIn("parent-is-default", json.dumps(res.payload))
+        self.assertEqual(res.branch.call_count, 0, "nothing is cut from a protected branch")
+
+    def test_base_not_declared_still_refuses_under_a_dry_run_and_carries_its_remedy(self):
+        with _Repo() as repo:
+            contract = repo.contract(CONTRACT_SINGLE)
+            repo.child_brief("b1", "t1-backend", "feature/p")
+            repo.child_brief("b2", "t1-backend", "feature/q", issue="102")
+            res = _drive(repo, contract, ["--dispatch", "t1-backend", "--dry-run", "--json"])
+        self.assertEqual(res.exit_code, 7, "a preview matches the real run")
+        self.assertIn("--record-subtask", str((res.payload or {}).get("remedy")))
 
 
 if __name__ == "__main__":

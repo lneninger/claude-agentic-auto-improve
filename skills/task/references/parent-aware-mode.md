@@ -297,7 +297,9 @@ the brief parser reads any colon-bearing line as a new key:
   supplied `BASE_BRANCH`.
 
 `parent_issue: none` if and only if `base:` names the repository default branch, in both
-directions. A brief carrying exactly one of the two keys without the other is a defect, not a
+directions. Under the Parent Branch Delivery Rule that case does not arise for a contract with two
+or more mergeable blocks: the `base:` of each of its sub-tasks is the parent branch, never the
+default branch, and `parent_issue:` is the parent issue's number. A brief carrying exactly one of the two keys without the other is a defect, not a
 shorthand, and halts. An ordinary brief written outside this mode carries neither key, and that
 absence is not a violation of the rule above — the rule binds a brief that carries at least one
 of the two keys, not every brief that has ever existed.

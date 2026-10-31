@@ -174,6 +174,8 @@ For each critic finding the user **agrees with and addresses** (or agrees with a
 - **Tags:** <2-5 grep-friendly keywords>
 ```
 
+A registry append is a shipped change: batch it into a change that already raises the plugin version, or raise at least a patch version (see CLAUDE.md, "Every change to shipped plugin files bumps the plugin version").
+
 Findings the user **rejects** are NOT logged — the user's rejection is recorded inline in the contract (under the relevant Open Question or as a one-line note appended to the relevant `## Critique` finding bullet) so future readers see the decision trail. The `/journal-add` skill is the manual escape hatch if the user later changes their mind.
 
 ### Contract-level rejection (accuracy-skip bad-plan signal)
@@ -196,7 +198,37 @@ Do NOT auto-trigger on isolated words ("wrong", "bad", "no") — false positives
 Once all Open Questions are answered AND all critique findings have explicit user responses (addressed / deferred / rejected), edit the contract file to:
 - Append the user's answers under each Open Question
 - Append `→ Addressed by: <one line>` / `→ Deferred: <reason>` / `→ Rejected: <reason>` directly under each `[BLOCKER]` and `[WARN]` finding in the `## Critique` section
-- Flip `Status: draft` → `Status: approved`
+- Flip `Status: draft` → `Status: approved`, but only after the approval gate below passes
+
+### The approval gate (Parent Branch Delivery Rule)
+
+A contract whose handoff has two or more mergeable blocks is always delivered through a parent branch, so the `**Work Item Brief:**` header is mandatory for it: the brief it names is the parent brief, and its `branch:` is the parent branch. Count a review gate as a mergeable block, so an implementation block plus a review block is a multi-sub-task contract. Before the flip, ask the script what it reads. Resolve it with the standard lookup block (the same text every skill carries, pinned by `test_skill_script_lookup.py`, class `TestDesignFirstApprovalGateLookup`), then run the status for this contract:
+
+```bash
+PRM=
+S=.claude/scripts/pr_merged.py
+if [ -f "$S" ]; then PRM=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then PRM=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  PRM=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$PRM" --contract <slug> --status --json
+```
+
+**If `PRM` comes back empty, stop and say so.** Read `layout_defects` from the report, and when it is not empty, show each entry's `reason` and `remedy` to the user and do not flip Status to approved while any layout defect stands, because the dispatch would refuse the contract too. The reasons are `no-parent-branch`, `parent-is-default`, `ambiguous`, `no-parent-issue`, `sub-task-raises-version` and `single-branch-delivery`. When the key is absent the contract has at most one mergeable block and nothing is judged. A Jira or Azure DevOps item has no GitHub parent issue (`no-parent-issue`), so its contract must be a single block.
+
+When the gate passes and the linked brief's `contract:` field is unset (`none`, `none - <text>`, `UNKNOWN`, empty or a placeholder), the approval step writes this contract's repository-relative path into that field of the existing linked brief. This creates nothing: it edits the one brief the header already names, so that every reader finds the same parent brief. Step 3.6 still runs after the approval, and was not moved.
 
 ## Step 3.4: Open one GitHub issue for the follow-ups
 
@@ -268,7 +300,7 @@ Do not ask a question for the facts this step records: they are already known (t
 
 ## Step 4: Hand off to implementer agents
 
-Read the `Implementation Handoff` section of the approved contract. For each handoff block, launch the named agent (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`) with the pre-written TASK block from the contract.
+Read the `Implementation Handoff` section of the approved contract. The direct hand-off below is for a contract with a single mergeable block only. When the handoff has two or more mergeable blocks (more than one implementation block, or an implementation block plus a review block), do not launch one-session implementers: route to `/flow` (Step 2.7 opens the parent issue and the sub-issues), then `/advance`, because the Parent Branch Delivery Rule delivers such a contract through a parent branch. For a single block, launch the named agent (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`) with the pre-written TASK block from the contract.
 
 The implementer agents are configured to refuse if `PRIOR_FINDINGS.contract_path` is missing or the contract's `Status` is not `approved`. Always pass these fields.
 

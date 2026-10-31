@@ -99,6 +99,10 @@ If the user said `manual` but the lesson clearly came from a contract review (e.
 
 If the user picked `post-approval` or `post-impl divergence` but Source contract is `N/A` or unresolvable, prompt once: `Trigger '<value>' requires a Source contract path so the accuracy-skip system can reset the area's clean streak. Provide the contract path or change Trigger to 'manual'.` Use `AskUserQuestion`. Don't auto-correct.
 
+## Version raise
+
+A registry append is a shipped change: batch it into a change that already raises the plugin version, or raise at least a patch version (see CLAUDE.md, "Every change to shipped plugin files bumps the plugin version").
+
 ## What this skill does NOT do
 
 - Does NOT write to any file other than `.claude/registries/JOURNAL.md`.

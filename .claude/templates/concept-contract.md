@@ -5,7 +5,7 @@
 **Requested by:** user
 **Status:** draft
 **Supersedes:** <optional — path to a prior contract this replaces>
-**Work Item Brief:** <optional — path to the brief under .claude/work-items/ this contract serves; pr_merged.py links the contract to it>
+**Work Item Brief:** <path to the brief under .claude/work-items/ this contract serves; required (mandatory) for a contract with two or more mergeable blocks, where it is the parent brief; pr_merged.py links the contract to it>
 **Tracking issue:** <optional — #<n>, the one issue that tracks this contract's follow-ups and its Not-performed disclosures>
 **Budget:** 12,000 tokens
 
@@ -371,6 +371,8 @@ Two further rows are defects even though the block is mergeable: files present w
 **Sub-task identity is derived, never written twice.** The identity is `t<ordinal>-<slug of the name>`, so `### 2. Backend (…)` is `t2-backend`. That one identity names three things: the branch `task/<contract-slug>/<id>`, the completion record `.claude/orchestrator/results/<contract-slug>/<id>.yaml`, and the sub-task named in its pull request title.
 
 **One branch and one pull request per sub-task.** That is what lets a merge release the sub-tasks waiting on it. A pull request spanning two sub-tasks means the decomposition or the execution was wrong, and it is reported rather than guessed at.
+
+**The Parent Branch Delivery Rule.** A contract whose handoff has two or more mergeable blocks is always delivered through a parent branch: the `branch:` of the contract's own Work Item Brief, named in the `**Work Item Brief:**` header. Every sub-task branch is cut from the parent branch, every sub-task pull request targets it, and one landing pull request moves it to the default branch. Nobody chooses this layout. The plugin version is never raised in a sub-task pull request; the landing raises it once. A review gate is a mergeable block, so one implementation block plus one review block is a multi-sub-task contract, and it needs a parent issue, sub-issues and a landing. A Jira or Azure DevOps item has no GitHub parent issue, so its contract has a single block. A contract with exactly one mergeable block is unchanged.
 
 **`Depends on:` is required on every sub-task.** Write `none`, or the ordinals it waits for. State it, never leave it to be inferred — file lists do not carry it. Backend and frontend touch entirely different files and the frontend still needs the endpoint first. A sub-task is released only when every ordinal it names has a completion record.
 

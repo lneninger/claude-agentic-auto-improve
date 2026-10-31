@@ -127,6 +127,8 @@ whole design exists to prevent.
 Runs once the contract is approved, between the design gate above and implementation below —
 it cannot run any earlier, because the sub-task list exists only once the contract does.
 
+**The Parent Branch Delivery Rule.** A contract with two or more mergeable blocks (a review gate counts as one) always gets a parent issue, one sub-issue per sub-task and a landing; nobody chooses that layout. Its parent brief is the one the contract's `**Work Item Brief:**` header names, and its `branch:` is the parent branch that every sub-task is cut from and merged into. This step is also the remedy for `needs-issue`: `/advance` and `pr_merged.py --dispatch` refuse a sub-task that has no sub-issue (exit 7, `error: needs-issue`) before any branch is cut, and the sub-issues this step opens, recorded with `--record-subtask`, are what clears it.
+
 Ask the contract's own script whether it decomposes into more than one deliverable. Never answer
 that by re-reading the contract's handoff section — the same rule `/advance` follows for the same
 reason: two implementations of one rule will disagree.
@@ -339,8 +341,8 @@ step and stops; `/pr-merged` records the merge and wakes it. `/flow` keeps the o
 record, `/pr-merged` hands straight to `/advance`, which starts a background landing script. The
 script verifies the parent branch, opens the parent pull request and merges it, with no question
 asked. `/flow` then waits for the Landing Report and does not run Steps 5 to 7 for the parent
-branch. A contract with no parent branch resumes at verification once every sub-task has a
-completion record.
+branch. A single-block contract, the only kind with no parent branch, resumes at verification once
+its sub-task has a completion record.
 
 For a contract with a single implementation block there is nothing to iterate, so run it
 directly as below.
@@ -403,8 +405,8 @@ fine does not satisfy this stage.
 
 **A contract with a parent branch is not verified here.** Its landing script runs the scripted
 verification on the merged head (see the landing section of `/verify-before-done`), and `/advance`
-starts that script. This step still applies to each sub-task's own branch and to any contract with
-no parent branch.
+starts that script. This step still applies to each sub-task's own branch and to any single-block
+contract, which has no parent branch.
 
 Invoke `/verify-before-done`. It runs the builds, the test suites, the generated-model
 drift check, the migration safety check, the safety-critical review gate, the handoff
@@ -448,8 +450,8 @@ If the target was `--to-commit`, report and stop here.
 **A contract with a parent branch is landed by the loop, not shipped from here.** `/advance` starts
 the background landing script, which opens the parent pull request and merges it after its own
 children-closed check. Do not invoke `/ship` for that parent branch. The rest of this step covers a
-branch that is not landed that way: a sub-task's own branch, a contract with no parent branch, and a
-parent pull request somebody opens by hand.
+branch that is not landed that way: a sub-task's own branch, a single-block contract (which has no
+parent branch), and a parent pull request somebody opens by hand.
 
 **Before invoking `/ship`, check whether this run is the parent of any sub-tasks.** Step 2.7
 already answered this once, but ask again here: the run may have taken hours or days to reach

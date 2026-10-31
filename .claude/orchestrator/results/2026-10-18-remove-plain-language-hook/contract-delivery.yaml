@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/82
+number: 82
+head_ref: infra/remove-plain-language-hook
+base_ref: master
+base_is_default: true
+commit: 41f5bbcc714f169fc130f547ddae9b91863b41ca
+merged_at: '2026-10-28T00:07:56Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-10-30T22:14:12.942479+00:00'
+blocks_recorded:
+- t1-remove-the-guard-its-registrations-tests-and-docs
+blocks_already_recorded: []

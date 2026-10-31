@@ -586,6 +586,13 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
   Record what was observed, and `unknown` when nothing was.
 - **Treating a closed pull request as delivered.** Closed without merging is the opposite.
 - **Treating a closed pull request as a skip.** It is a failed sub-task and it escalates.
+- **Treating a layout warning as a blocker, or as a failure to record.** `--status --json` carries
+  `layout_warnings` in three forms plus two key states: absent for a contract that is not judged, `[]`
+  when judged and nothing is to be reported (it clears once no sub-task remains), and entries
+  `single-branch-delivery` (work already on the default branch, while sub-tasks remain), `held` (a Records
+  pull request is open: merge it first) and `unverifiable` (an input could not be read: give its re-read
+  remedy, for example `git fetch origin <default>`). A warning blocks nothing, and a record is written as
+  GitHub reports it. Show the warning's remedy to the owner, and keep recording.
 - **Releasing dependents of a failed sub-task.** They would build on work that does not exist.
 - **Deleting a failure record when the architect supersedes it.** A second failure on the same
   sub-task should be visible as a pattern.
