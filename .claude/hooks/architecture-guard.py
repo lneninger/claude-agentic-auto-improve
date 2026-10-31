@@ -41,7 +41,7 @@ Known limits (accepted; each is pinned by a test):
          `text-gray-500` pass.
     W8   Stylesheet rules only warn; the nesting check works one line at a time.
     W11  An edit that completes a violation started on disk passes.
-    G-2  File recognition is by file name (`*.component.html`, `.ts`, `.scss`).
+    G-2  Only `*.component.html`, `*.component.ts` and `*.component.scss` files are scanned.
     G-5  A 3- or 6-character token with no digit that stands alone after
          whitespace (such as `  #fff`) is read as a template reference variable.
 """
@@ -680,7 +680,7 @@ def build_post_edit_view(payload: dict, file_path_str: str) -> PostEditView:
     for edit in edits:
         old = str(edit.get("old_string", "")).replace("\r\n", "\n")
         new = str(edit.get("new_string", "")).replace("\r\n", "\n")
-        found = text.count(old)
+        found = text.count(old) if old else 0  # an empty old_string would match everywhere
         if found == 0:
             return unavailable("old-string-missing")
         if found > 1 and not edit.get("replace_all"):
@@ -1298,9 +1298,15 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001
             log(f"whole-file pass failed (judging fragments): {e}")
             extra = []
-            hw = [w for t in texts for w in scan_height_chain_invariant(t, path, rule_exemptions)
-                  ] if is_template_html(path) else []
-        findings.setdefault(file_path_str, []).extend(extra)
+            hw = []
+            try:
+                if is_template_html(path):
+                    hw = [w for t in texts for w in scan_height_chain_invariant(t, path, rule_exemptions)]
+            except Exception as e2:  # noqa: BLE001 -- a failed warning means no warning
+                log(f"height-chain fallback failed (no warning): {e2}")
+        # One finding per inline rule is enough: the fragments' finding wins over the view's.
+        reported = {v.rule for v in findings.get(file_path_str, [])}
+        findings.setdefault(file_path_str, []).extend(v for v in extra if v.rule not in reported)
         # WARN-level: scroll-edge height-chain invariant. Trial window —
         # not added to `blocking`, only emitted via stderr. Promote to BLOCK
         # by moving inside scan_template_html after two regression-free weeks.
