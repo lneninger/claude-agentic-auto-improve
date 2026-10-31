@@ -10325,7 +10325,7 @@ class TestBriefLinkReadIsOneBareNumberCall(unittest.TestCase):
                 self.assertTrue(cands and cands[0].get("known") is True and cands[0].get("pr") in (50, "50"),
                                 "I-14 / M-7: the brief's merged pr is a candidate in every mode. %s" % res.describe())
                 self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded")
-                self.assertNotIn("/advance", res.out, "I-19: /advance is withheld")
+                _assert_no_advance_command(self, res, "I-19: /advance is withheld")
 
     def test_an_answer_whose_url_is_not_the_link_is_no_candidate(self):
         world = _World(self)
@@ -10344,7 +10344,7 @@ class TestBriefLinkReadIsOneBareNumberCall(unittest.TestCase):
         commands = res.commands()
         self.assertTrue(commands and commands[0].startswith("/pr-merged") and "--record-delivery" not in commands[0],
                         "I-19: an unknown candidate asks for a plain /pr-merged run. Got %r" % (commands,))
-        self.assertNotIn("/advance", res.out)
+        _assert_no_advance_command(self, res)
 
     def test_an_open_records_pull_request_redirects_the_command_after_exactly_one_read(self):
         world = _World(self)
@@ -10672,7 +10672,7 @@ class TestFormatterChainReplay(unittest.TestCase):
         # Issue 113, R-7: records are plain, so the one command is the plain record-delivery line (no accept form).
         self.assertEqual(res.commands(), ["/pr-merged 383 --record-delivery"],
                          "I-19: exactly the record-delivery line for 383. %s" % res.describe())
-        self.assertNotIn("/advance", res.out, "criterion 7: /advance is no longer offered")
+        _assert_no_advance_command(self, res, "criterion 7: /advance is no longer offered")
 
     def test_run_2_status_sees_the_same_candidate_through_one_bare_number_read(self):
         world = _fc_world(self)
@@ -10681,7 +10681,7 @@ class TestFormatterChainReplay(unittest.TestCase):
                          "I-14: one gh_pr(383), a bare number. %s" % res.describe())
         self.assertFalse(res.spies.repo_view.called, "X-1: no repo_view call")
         self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded", res.describe())
-        self.assertNotIn("/advance", res.out)
+        _assert_no_advance_command(self, res)
 
     def test_run_3_dispatch_is_refused_with_exit_3_and_cuts_no_branch(self):
         world = _fc_world(self)
@@ -10709,7 +10709,7 @@ class TestFormatterChainReplay(unittest.TestCase):
         states = list(_checklist_states(res).values())
         self.assertEqual(states.count("no-evidence"), 8, "eight lines with no structured evidence. Got %r" % states)
         self.assertEqual(comp.get("disclosure_lines_missing"), [])
-        self.assertNotIn("/advance", res.out)
+        _assert_no_advance_command(self, res)
 
     def test_run_5_status_after_the_delivery_is_recorded_is_complete(self):
         world = _fc_world(self, recorded=True)
@@ -10717,7 +10717,7 @@ class TestFormatterChainReplay(unittest.TestCase):
         self.assertTrue((res.report or {}).get("complete"), res.describe())
         self.assertEqual((res.report or {}).get("delivery_candidates"), [],
                          "I-14: nothing is a candidate once a delivery record exists. %s" % res.describe())
-        self.assertNotIn("/advance", res.out)
+        _assert_no_advance_command(self, res)
 
     def test_run_6_the_owner_confirmation_and_two_declared_skips_flip_the_contract(self):
         world = _fc_world(self, recorded=True)
@@ -10741,7 +10741,7 @@ class TestFormatterChainReplay(unittest.TestCase):
         implemented = next(l for l in text.splitlines() if l.startswith("**Implemented:**"))
         for piece in (_FC_T4, _MANUAL_LINE, "full-suite rerun"):
             self.assertIn(piece, implemented, "I-10: the Implemented line names %r" % piece)
-        self.assertNotIn("/advance", flipped.out)
+        _assert_no_advance_command(self, flipped)
 
 
 class TestNoCommandOfAnyDeliveryRunContainsAdvanceWhileDeliveryIsUnrecorded(unittest.TestCase):
@@ -10754,7 +10754,7 @@ class TestNoCommandOfAnyDeliveryRunContainsAdvanceWhileDeliveryIsUnrecorded(unit
                 res = _fc_drive(world, flags, prs=_fc_prs())
                 self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded",
                                  res.describe())
-                self.assertNotIn("/advance", res.out)
+                _assert_no_advance_command(self, res)
 
 
 class TestLoadRecordsSkipsTheReservedDeliveryFile(unittest.TestCase):
@@ -11052,7 +11052,7 @@ class TestAFailedBriefLinkReadWithholdsInEveryMode(unittest.TestCase):
             "candidate (known: false). %s" % res.describe())
         self.assertEqual(((res.report or {}).get("next_move") or {}).get("action"), "delivery-unrecorded",
                          "I-19: an unknown candidate withholds the move. %s" % res.describe())
-        self.assertNotIn("/advance", res.out, "I-19: /advance is withheld")
+        _assert_no_advance_command(self, res, "I-19: /advance is withheld")
 
     def test_a_pr_run_on_an_unrelated_pull_request_whose_link_read_fails_withholds(self):
         world = _World(self)
@@ -11236,6 +11236,22 @@ class TestTheMergedCopyRuleAndTheOpenRecordsPullRequestHoldTheFlip(unittest.Test
 #         command does not clear the reason the dry run previewed (W-3).
 #   M-28: the `writing run:` label on a dry run's completion.next is deleted.
 # --------------------------------------------------------------------------
+def _assert_no_advance_command(case, res, message=""):
+    """Criterion 7 / I-19: no PRINTED COMMAND is /advance while the delivery is unrecorded.
+
+    The check is on the commands the run prints (the report's next_command and the completion's next), not on
+    the whole output: the layout warning's remedy (R-8) legitimately reads "... /flow Step 2.7, then /advance",
+    and --status --json prints the whole report.
+    """
+    report = res.report or {}
+    printed = list((report.get("next_command") or {}).get("commands") or [])
+    printed += list(((report.get("completion") or {}).get("next") or {}).get("commands") or [])
+    printed += [c for entry in (report.get("dispatch") or []) if isinstance(entry, dict)
+                for c in (entry.get("commands") or [])]
+    case.assertFalse(any(str(c).strip().startswith("/advance") for c in printed),
+                     "%s printed commands: %r" % (message or "no command is /advance", printed))
+
+
 def _printed_flags(res):
     """The flags after `pr_merged.py` in the single command printed in completion.next, as a list.
 
