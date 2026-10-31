@@ -32,7 +32,7 @@ respecifying and the rest stand. Low means the approach was wrong but the specif
 
 ### A sub-task merged into the default branch on the web
 
-In a contract with two or more mergeable blocks, a sub-task pull request must target the parent branch. The merge-direction check cannot stop one that is merged into the default branch on the web, so this phase records it after the merge as a failed record with `failure: single-branch-delivery` (status `failed`, `contract_impact.requires_architect: true`). The existing `escalate` move names it, and the contract is amended before anything else is dispatched. A contract with a single mergeable block is unchanged: that merge completes the sub-task.
+In a contract with two or more mergeable blocks, a sub-task pull request must target the parent branch. The merge-direction check cannot stop one that is merged into the default branch on the web, so this phase records it after the merge as a failed record with `failure: single-branch-delivery` (status `failed`, `contract_impact.requires_architect: true`). The existing `escalate` move names it. When the work is already merged on the default branch, the owner clears the record with `/pr-merged <pr> --record-delivery --accept-single-branch`, which replaces it with a completed record carrying `layout: single-branch-accepted` once GitHub confirms the merge; this skill shows that command and never runs it, and any other failure kind keeps the amendment path. A contract with a single mergeable block is unchanged: that merge completes the sub-task.
 
 ### Release nothing
 

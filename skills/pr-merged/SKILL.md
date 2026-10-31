@@ -586,6 +586,8 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
   Record what was observed, and `unknown` when nothing was.
 - **Treating a closed pull request as delivered.** Closed without merging is the opposite.
 - **Treating a closed pull request as a skip.** It is a failed sub-task and it escalates.
+- **Running `--accept-single-branch` yourself.** It is the owner's decision (a delivery on one branch, or a
+  failure of kind `single-branch-delivery`): show the command with the reason and let a person type it.
 - **Releasing dependents of a failed sub-task.** They would build on work that does not exist.
 - **Deleting a failure record when the architect supersedes it.** A second failure on the same
   sub-task should be visible as a pattern.

@@ -326,6 +326,8 @@ Route to architect re-entry. Concretely that means `/design-first` amending the 
 not start anything, and do not retry the sub-task from here — whether to retry is one of the
 decisions the architect makes.
 
+**One failure kind has another way out.** When every failed record carries `failure: single-branch-delivery` (a sub-task pull request merged into the default branch on the web), the script's `escalate` Next Command is `/pr-merged <pr> --record-delivery --accept-single-branch` for each, never `/design-first`. That flag is the owner's decision, not this skill's: show each command to the owner with the reason, and never run it yourself. Any other failure keeps `/design-first`.
+
 ### `delivery-unrecorded` — a pull request delivered the whole contract and nothing records it
 
 A merged pull request that is the brief's own, but whose branch maps to no sub-task, delivered the contract on one branch. Until that delivery is recorded the script reports every sub-task as pending, and dispatching one would redo finished work. The script asks this after `escalate` and before `awaiting-merge`.

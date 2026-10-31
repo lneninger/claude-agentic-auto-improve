@@ -8968,7 +8968,7 @@ class TestTheNewEdgesAssertArgvAndAnswer(unittest.TestCase):
     def _call(self, fn, args, answer):
         calls = []
 
-        def fake_run(cmd):
+        def fake_run(cmd, **_kwargs):  # issue 113 W2: fetch_default_branch passes env=
             calls.append(list(cmd))
             return answer
 
@@ -9120,7 +9120,8 @@ class TestTheNewEdgesAssertArgvAndAnswer(unittest.TestCase):
     def test_fetch_default_branch_is_one_git_fetch(self):
         fn = self._edge("fetch_default_branch")
         value, calls = self._call(fn, ("master",), (0, ""))
-        self.assertEqual(calls, [["git", "fetch", "origin", "master"]])
+        # Issue 113 W2: the explicit refspec (the environment is pinned by TestTheOriginCommandsAreExact).
+        self.assertEqual(calls, [["git", "fetch", "origin", "+refs/heads/master:refs/remotes/origin/master"]])
         self.assertIs(value, True)
         self.assertIs(self._call(fn, ("master",), (1, ""))[0], False,
                       "a failed fetch is False; the run reports unverifiable")
