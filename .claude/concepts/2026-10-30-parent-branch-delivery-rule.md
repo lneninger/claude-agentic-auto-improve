@@ -4,7 +4,7 @@
 **Date:** 2026-10-30
 **Requested by:** user
 **Status:** approved
-**Amended:** Amended 2026-10-30 by user approval: W7 (R-10; the implementation notes record final-review B1, W1 and W2). Amended 2026-10-30 by user approval ("fix cycle with option (a)"): R-10 limited to merges before `adoptedAt`; narrowed landing evidence and `accepted_blocks`; last-review B-1, W-1, W-2, W-3, N-1, N-3 and N-4. Amended 2026-10-30 on the user's design direction, "the record cannot have that kind of rule. Its only responsibility is to close the already done work.": the old R-7 to R-10 are replaced by R-7 (Records are plain) and R-8 (Layout warning). The failed R-8 record, G-7, `--accept-single-branch`, `adoptedAt` and everything built only on them are removed.
+**Amended:** Amended 2026-10-30 by user approval: W7 (R-10; the implementation notes record final-review B1, W1 and W2). Amended 2026-10-30 by user approval ("fix cycle with option (a)"): R-10 limited to merges before `adoptedAt`; narrowed landing evidence and `accepted_blocks`; last-review B-1, W-1, W-2, W-3, N-1, N-3 and N-4. Amended 2026-10-30 on the user's design direction, "the record cannot have that kind of rule. Its only responsibility is to close the already done work.": the old R-7 to R-10 are replaced by R-7 (Records are plain) and R-8 (Layout warning). The failed R-8 record, G-7, `--accept-single-branch`, `adoptedAt` and everything built only on them are removed. Amended 2026-10-30 by user approval ("approve option 1 with W3 freshness refusal and N2 clearing"): new rule R-10, the freshness refusal G-7 `records-not-local` (stale data, every contract); the R-8 warning clears on completion; fixed `layout_warnings` forms (absent, `[]`, `held`, `unverifiable`); origin always read when judged; plain-records review W1, W2, W4, W5, W6 and N1.
 **Work Item Brief:** .claude/work-items/2026-10-30-113-parent-branch-delivery-rule.md
 **Tracking issue:** #113
 **Budget:** 12,000 tokens
@@ -27,7 +27,7 @@
 - **New terms proposed for VOCABULARY.md (Universal):**
   - **Parent Branch Delivery Rule**: the rule above.
   - **Layout defect**: a contract-level reason, from a closed set, why a multi-sub-task contract cannot be dispatched or approved under the rule.
-  - **Layout warning**: a contract-level report that work already merged outside the parent branch. It blocks nothing, and it is never written into a record.
+  - **Layout warning**: a contract-level report that work already merged outside the parent branch while sub-tasks remain. It blocks nothing, it is never written into a record, and it clears once the contract is complete.
   - **Landing version raise**: the single raise the landing commits on the parent branch after merging the default branch: minor + 1, patch reset to 0, relative to the default branch's version. Under `landing: manual` the operator makes it (R-4).
 
 ---
@@ -52,7 +52,7 @@ Not applicable. Reason: no Angular UI surface is touched.
 |------|--------|---------|
 | Header value | the text after `**Work Item Brief:**` | Absent when empty, `none`, or starting with `<`. `data-architect` always writes it. The gate requires it only for two or more mergeable blocks. |
 | Layout defect reason (closed) | `no-parent-branch`; `parent-is-default`, `ambiguous` (reused); `no-parent-issue`; `sub-task-raises-version` (a block's `Files to touch` lists a path equal, after slash normalisation, to an entry of `check_version_bump.MANIFESTS`, while `versionRaise` is on) | `layout_defects` in `--status --json`, each with a `remedy`. They block dispatch (`advance()` returns `contract-defect` in place of `dispatch`) and approval (the gate). They never enter `is_delivered`, G-2, recording or the completion evaluation. |
-| Layout warning reason (closed) | `single-branch-delivery` (R-8) | `layout_warnings` in `--status --json`, each with a `remedy`. Blocks nothing. |
+| Layout warning reason (closed) | `single-branch-delivery`; `held` (a Records pull request is open); `unverifiable` (an input read failed) | `layout_warnings` in `--status --json` and in the Landing Report, each with a `remedy`. Blocks nothing. The key is absent for an unjudged contract (R-8). |
 | Version raise switch | `contractLanding.versionRaise: true` in the conventions file at `origin/<default>` | Turns on P7b and `sub-task-raises-version`. The paths come only from `check_version_bump.MANIFESTS`, imported by both scripts. |
 | Version check mode | `default` (today's check); `parent` (only for a `task/<slug>/<id>` head into a non-default base: the head version must equal the base's version or the version at `merge-base(origin/<default>, HEAD)`); `exact` (minor + 1, patch 0, relative to `origin/<default>`, all entries agree) | `check_version_bump.py`. Stacked pull requests of single-block work are not `task/*` heads, so they are unaffected. |
 
@@ -61,6 +61,7 @@ Not applicable. Reason: no Angular UI surface is touched.
 | Name | Handler | Possible rejections |
 |------|---------|---------------------|
 | Raise version at landing (P7b) | `land_contract.py` runs `check_version_bump.py --raise`, then `--exact` | `version-raise-failed` (a new halt; 26 halts) |
+| Record delivery / delivery-filled records (every contract) | `pr_merged.py --record-delivery`, and the per-PR recording | G-7 `records-not-local` (R-10, stale data); `github-unverifiable`, exit 10 |
 
 ### Rules
 
@@ -71,9 +72,15 @@ Not applicable. Reason: no Angular UI surface is touched.
 - **R-5** If the default branch moves, P12 halts `master-moved`. The rerun merges again (R-3) and recomputes (R-2).
 - **R-6 Grandfathering.** Status decides who is judged: `draft` and `approved` are judged, everything else is exempt. `is_delivered` is unchanged.
 - **R-7 Records are plain (user, 2026-10-30).** A completion record, and a Contract Delivery Record, only record that work is done, as GitHub reports it: `status: completed`, `verified: github`, and `base_ref` and `base_is_default` as GitHub reports them. A record never judges the delivery layout, never carries a layout verdict or marker, and no layout check refuses or fails a recording. A sub-task pull request merged into the default branch is recorded like any other completion, and it closes its sub-issue like any other completion. `--record-delivery` records a merged one-branch delivery like any other delivery. `merge_direction.py` and the dispatch and approval gates are where the layout is prevented. Records are where done work is closed.
-- **R-8 Layout warning `single-branch-delivery`.** For a judged multi-sub-task contract, `--status` derives the warning from facts, never from a stored verdict. It fires when a completion record has `base_is_default: true` or a `base_ref` other than the layout's parent branch, or when a `known` Delivery Candidate is of kind `single-branch`. It is computed from the local records merged with `origin/<default>`'s records, and only while no Records pull request of the contract is open. An unreadable origin reports `unverifiable` with a re-read remedy, never the warning and never its absence (B1). The warning blocks nothing: not recording, not completion, not dispatch. Remedy text: "This work is already on the default branch and is recorded as done; nothing needs undoing. Deliver the remaining sub-tasks through the parent branch (`/flow` Step 2.7, then `/advance`)."
-- **R-9 The landing's own safety.** The landing never reads a record's verdict, because there is none. It relies on its own checks: the parent from `select_linked_brief` and `declared_topology` (P0 and P1), the completion move (P1), the merge of the default branch and P8's verification of the merged head on the parent branch, and the children-closed and review gates. A sub-task whose record shows it merged into the default branch is already in the default branch, so P7 brings it into the parent branch and P8 verifies it with the rest. The Landing Report repeats R-8's warning. The landing does not halt on it.
-- **Removed:** the delivery-by-evidence refusal (G-7), the `--accept-single-branch` exit, the failed `single-branch-delivery` record, adoption time (`adoptedAt`, `rule-adoption.yaml`), `merged-after-rule`, sticky accepted records, `accepted_blocks`, `replaces`, accepted-record landing evidence, and the `escalate` arm that printed the accept. **The legacy-shape exit is no longer needed:** the legacy one-branch deliveries (PR #58, PR #82) record with the plain `/pr-merged <pr> --record-delivery`, because nothing refuses them, and R-8 reports the warning.
+- **R-8 Layout warnings (`layout_warnings`).** They are advisory and block nothing: not recording, not completion, not dispatch. They are derived from facts, never from a stored verdict. The key's presence and value are fixed:
+  - **The key is absent** for an unjudged contract (exempt Status, or a single mergeable block). It is never `[]`.
+  - **The key is `[]`** only when the contract is judged and every input read succeeded with nothing to report. That includes a contract that is complete, meaning no sub-task remains to deliver: the warning clears then (N2).
+  - **`held`**, with the detail `records pull request open: <url>`: a Records pull request of the contract is open, so the warning is held back. It is never read as clean.
+  - **`unverifiable`**, with a re-read remedy: an input read failed. That is a failed open-Records-pull-request lookup (None), or an unreadable `origin/<default>` (B1).
+  - **`single-branch-delivery`**: only while sub-tasks remain to deliver, and only when the parent branch is resolved. With no parent branch, the layout defect already explains it (N1). It fires when a completion record has `base_is_default: true` or a `base_ref` other than the parent branch, or when a `known` Delivery Candidate is of kind `single-branch`. The records are always the local ones merged with `origin/<default>`'s. Origin is read whenever the contract is judged and no Records pull request is open, not only when a candidate exists (W2). Remedy: "This work is already on the default branch and is recorded as done; nothing needs undoing. Deliver the remaining sub-tasks through the parent branch (`/flow` Step 2.7, then `/advance`)."
+- **R-10 Freshness refusal G-7 `records-not-local` (stale data, not layout).** This applies to every contract, single-block included. `--record-delivery`, and the per-pull-request recording that writes records filled in from a delivery, refuse with G-7 `records-not-local` when `origin/<default>` holds records for the contract that the local results folder does not, because writing from a stale checkout would overwrite the real records. The refusal writes nothing. Remedy (G-6 wording): "run again in a flat worktree cut fresh from origin/<base>". An unreadable origin exits 10 with `github-unverifiable` (B1).
+- **R-9 The landing's own safety.** The landing never reads a record's verdict, because there is none. It relies on its own checks: the parent from `select_linked_brief` and `declared_topology` (P0 and P1), the completion move (P1), the merge of the default branch and P8's verification of the merged head on the parent branch, and the children-closed and review gates. A sub-task whose record shows it merged into the default branch is already in the default branch, so P7 brings it into the parent branch and P8 verifies it with the rest. The Landing Report repeats R-8's `layout_warnings`, using the same absent, `[]`, `held` and `unverifiable` forms. A failed listing gives `unverifiable`. The landing does not halt on any of them.
+- **Removed:** the delivery-by-evidence refusal (the old G-7 `single-branch-delivery`; G-7 now names only R-10's `records-not-local`), the `--accept-single-branch` exit, the failed `single-branch-delivery` record, adoption time (`adoptedAt`, `rule-adoption.yaml`), `merged-after-rule`, sticky accepted records, `accepted_blocks`, `replaces`, accepted-record landing evidence, and the `escalate` arm that printed the accept. **The legacy-shape exit is no longer needed:** the legacy one-branch deliveries (PR #58, PR #82) record with the plain `/pr-merged <pr> --record-delivery`, because nothing refuses them, and R-8 reports the warning.
 
 
 ---
@@ -88,8 +95,8 @@ Choke point: `pr_merged.py`. Second enforcement point: the `/design-first` appro
 | 2 | `/task` → `/design-first`, with or without `/flow` | `data-architect` writes the header. The approval step writes `contract:` into the existing linked brief when it is unset; this creates nothing. | Parity: all four readers return the same brief for one fixture set that includes a header-linked brief with `contract:` set to `none`, to `none - <text>`, to the placeholder, and missing |
 | 3 | Issue offer declined, or free text | `no-parent-issue`. Remedy: open the issue and write its number into `id:`. | `id: none` |
 | 4 | Jira or Azure DevOps item | `/task` Step 4 says in one line: "This item has no GitHub issue, so its contract must be a single block." `data-architect` writes no review block for it. | `id: PROJ-12`; text test |
-| 5 | `/design-first` Step 4 with one-session implementers, then `/ship` | Step 4 hands blocks over only for a single block, and otherwise routes to `/flow`. If the delivery happens anyway: R-7 records it and R-8 warns. | Two legacy fixtures shaped like 2026-10-16 (PR #58) and 2026-10-18 (PR #82): the plain `--record-delivery` records them, the move reaches `complete`, `--status` shows the R-8 warning, and no record carries a layout field |
-| 6 | A sub-task pull request merged into the default branch on the web | `merge_direction.py` cannot stop it before it merges. After the merge, R-7 records it and R-8 warns. | With a real parent issue and an OPEN sub-issue: the record is `completed`, carries no `failure` and no layout field, and closes the sub-issue. `--status` lists the warning with its remedy and blocks nothing. The later landing records, and its report repeats the warning (R-9). An unreadable origin reports `unverifiable`, not the warning |
+| 5 | `/design-first` Step 4 with one-session implementers, then `/ship` | Step 4 hands blocks over only for a single block, and otherwise routes to `/flow`. If the delivery happens anyway: R-7 records it and R-8 warns. | Two legacy fixtures shaped like 2026-10-16 (PR #58) and 2026-10-18 (PR #82): the plain `--record-delivery` records them, the move reaches `complete`, no record carries a layout field, and the warning clears once complete (N2). R-10: a stale checkout is refused with `records-not-local` and writes nothing, for a single-block contract too |
+| 6 | A sub-task pull request merged into the default branch on the web | `merge_direction.py` cannot stop it before it merges. After the merge, R-7 records it and R-8 warns. | With a real parent issue and an OPEN sub-issue: the record is `completed`, carries no `failure` and no layout field, and closes the sub-issue. `--status` lists the warning with its remedy and blocks nothing. The warning shows from a parent-branch checkout with no candidate (W2), and the later landing's report repeats it (R-9). Warning forms are covered: absent for an unjudged contract; `held` while a Records pull request is open; `unverifiable` for a failed lookup, origin read or landing listing; no warning with an unresolved parent (N1); `/advance` prints `layout_warnings` on every move (W4) |
 | 7 | `/advance` or `/pr-merged` typed by hand, with no Step 2.7 | Layout defects block dispatch. `effective_base` never returns `default` here. `needs_issue` is computed before the branch cut. | No issue: nothing is cut |
 | 8 | One block amended to several | Recomputed on every call, so row 7 applies | 2 blocks, 1 state entry |
 | 9 | A consumer upgrades mid-flight | R-6. Named defects block only dispatch and approval (rows 3 and 7). Work already merged elsewhere records normally and gets the R-8 warning. Nothing is skipped silently. | Approved legacy fixture |
@@ -126,7 +133,8 @@ None.
   - `contract-critic` (a BLOCKER item)
   - `/design-first` (gate with the lookup block, the `contract:` write, Step 4 routing)
   - `/flow` (Step 2.7, line 342)
-  - `/advance` (lines 171-190 and 272-290, exit 7)
+  - `/advance` (lines 171-190 and 272-290, exit 7; one preamble line that prints `layout_warnings` on every move, W4)
+  - `/pr-merged` SKILL.md (R-8 forms, R-10)
   - `/pr-merged` references: `contract-completion.md` and `undeliverable-sub-task.md` (R-7 and R-8; the accept, G-7 and failed-record text removed)
   - `/task` Step 4
   - `parent-aware-mode.md:299`
@@ -287,8 +295,8 @@ Condensed only. The full text of the earlier rounds was not kept.
 - **B1:** an unreadable origin (a fetch failure, a missing ref, or a failed listing or blob read) is `unverifiable` wherever origin's records are read (R-8). The live report offers a re-read (`git fetch origin <base>`, then rerun). It never reports the warning, and never its absence, on a failed read.
 - **W1 (amended by last-review W-1):** the origin listing runs `git ls-tree --full-tree --name-only -z <ref> -- <folder>/`, splits on NUL, and returns None on any failure. That form works from any subfolder. A test pins the argv, and another runs it from a subfolder. None means unreadable (B1), never "no records".
 - **W2:** the fetch uses the explicit refspec `+refs/heads/<base>:refs/remotes/origin/<base>` and sets `GIT_TERMINAL_PROMPT=0`.
-- **N-3:** documented in the docstring and in `/pr-merged`: read-only modes (`--status`, `--dry-run`, `--resume`) also run that fetch. They refresh the shared `refs/remotes/origin/<base>`, which every worktree sees, and they write `FETCH_HEAD`.
-- **Last-review W-2:** origin is read only when no Records pull request is open. When origin cannot be read while one is open, the report keeps the pointer to that pull request, and the reason names origin, not GitHub: "origin/<default> could not be read; run git fetch origin <default> and rerun". The candidate list is not rewritten to unknown.
+- **N-3:** documented in the docstring and in `/pr-merged`: every judged `--status` reads origin (R-8, W2), and the read-only modes (`--status`, `--dry-run`, `--resume`) also run that fetch. They refresh the shared `refs/remotes/origin/<base>`, which every worktree sees, and they write `FETCH_HEAD`.
+- **Last-review W-2:** while a Records pull request is open, the warning is `held`, and the move keeps the pointer to that pull request. Any origin-read failure names origin, not GitHub: "origin/<default> could not be read; run git fetch origin <default> and rerun". The candidate list is never rewritten to unknown.
 - **N-4:** a contract file missing at landing P0 halts `unverifiable` with the remedy "restore .claude/concepts/<slug>.md on the parent branch, then rerun".
 
 ### 1. Parent branch delivery rule (`python-ai-developer`)
@@ -318,6 +326,7 @@ Condensed only. The full text of the earlier rounds was not kept.
 - `skills/design-first/SKILL.md`
 - `skills/flow/SKILL.md`
 - `skills/advance/SKILL.md`
+- `skills/pr-merged/SKILL.md`
 - `skills/pr-merged/references/contract-completion.md`
 - `skills/pr-merged/references/undeliverable-sub-task.md`
 - `skills/task/SKILL.md`
@@ -331,7 +340,7 @@ Condensed only. The full text of the earlier rounds was not kept.
 **Pre-written TASK block:**
 ```
 TASK: Implement the Parent Branch Delivery Rule and the Landing version raise exactly as the
-contract's Data Shapes, Rules R-1..R-9, Bypass flows, Extension Points, Registry text and the
+contract's Data Shapes, Rules R-1..R-10, Bypass flows, Extension Points, Registry text and the
 Implementation notes declare.
 CONTEXT: concept contract at .claude/concepts/2026-10-30-parent-branch-delivery-rule.md
 FILES: <the Files to touch list above>
@@ -341,8 +350,10 @@ CONSTRAINTS:
     select_linked_brief. Parity fixtures per row 2.
   - Layout defects block dispatch and approval only. Records are plain (R-7): no layout
     field, no layout failure, no layout refusal of any recording.
-  - R-8 warning: derived from facts, blocks nothing; known candidates only, no open Records
-    pull request; unreadable origin = unverifiable. Legacy #58/#82 shapes record plainly.
+  - R-8 layout_warnings: absent when unjudged, [] only when every read succeeded, held while
+    a Records PR is open, unverifiable on any failed read; clears on completion; none when the
+    parent is unresolved; origin read whenever judged. Legacy #58/#82 shapes record plainly.
+  - R-10 G-7 records-not-local for EVERY contract (stale data, not layout); writes nothing.
   - Exit 7: distinct error/remedy; both refuse under --dry-run; report-only under --status/--resume.
   - check_version_bump.MANIFESTS is the only path list. P7b per R-1..R-5.
   - Single-block output byte-identical (test it). Follow the Review order.
