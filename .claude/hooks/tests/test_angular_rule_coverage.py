@@ -84,8 +84,8 @@ BOUNDARY = {
     ),
     PATTERNS: (
         "**What it holds, and what it does not.** This document holds the generic patterns that need markup: the "
-        "loading, error and empty states of a view (`A-025`), and the error banner (`P-001`). It does not hold "
-        "the Angular code rules; those are in `ANGULAR_CODE_RULES.md`. It does not hold the rules for Angular "
+        "loading, error and empty states of a view (`A-025`), the error banner (`P-001`), and the table column "
+        "alignment (`P-002`). It does not hold the Angular code rules; those are in `ANGULAR_CODE_RULES.md`. It does not hold the rules for Angular "
         "Material components; those are in `ANGULAR_MATERIAL_RULES.md`. It does not hold the rules for Tailwind "
         "CSS and styling, or the scroll container pattern; those are in `TAILWINDCSS_RULES.md`. Its name differs "
         "from a project's own design document on purpose, so the two never collide."
