@@ -23,6 +23,12 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# These tests assume a clean environment: no CLAUDE_PROJECT_DIR. The contract landing exports it,
+# pointing at its own checkout, and then pr_merged.py reads that checkout's briefs instead of the
+# fixture's, which failed 33 tests under the landing and none by hand. Tests that need the
+# variable set it themselves and restore it.
+os.environ.pop("CLAUDE_PROJECT_DIR", None)
+
 from pr_merged import (  # noqa: E402
     load_slot,
     load_review_gates,
