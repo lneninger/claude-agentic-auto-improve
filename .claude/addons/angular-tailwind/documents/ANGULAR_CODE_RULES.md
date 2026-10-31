@@ -34,7 +34,7 @@ Every component uses `ChangeDetectionStrategy.OnPush`.
 
 Banned: inline template: / styles: in @Component() decorators. Always use templateUrl + styleUrl pointing at .component.html / .component.scss.
 
-- Enforced by: guard blocks (`inline-component-template` and `inline-component-styles`). The guard reads only files named `*.component.ts`.
+- Enforced by: guard blocks (`inline-component-template` and `inline-component-styles`). The guard reads `*.component.ts` and any other `.ts` file (never `.spec.ts` or `.d.ts`) whose text carries `@Component(`.
 - Allowed exceptions: none.
 - Example: `@Component({ selector: 'app-thing', templateUrl: './thing.component.html', styleUrl: './thing.component.scss' })`.
 

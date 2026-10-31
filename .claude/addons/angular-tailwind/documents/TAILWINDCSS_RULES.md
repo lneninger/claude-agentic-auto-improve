@@ -26,7 +26,7 @@ This is a rule document of the `angular-tailwind` add-on of the agentic-auto-imp
 
 Templates (.component.html): ZERO static style="..." attributes allowed. Every static property must be a Tailwind utility from the @theme bridge. In short, a component template has no static `style="..."` attribute. Dynamic [style.prop]="expr()" bindings ARE allowed for runtime-computed values.
 
-- Enforced by: guard blocks (`inline-style`), on every line of `*.component.html`.
+- Enforced by: guard blocks (`inline-style`), on every line of a template: `*.component.html`, or a `<name>.html` file whose `.ts` file with the same name (`<name>.ts`) carries `@Component(`.
 - Allowed exceptions: the closed list in `T-008`. There is no other.
 - Example: write `class="text-primary"`, not `style="color: var(--mat-sys-primary)"`.
 
@@ -51,7 +51,7 @@ Use token utilities (`text-primary`, `bg-surface-container`, `border-outline-var
 
 Banned: text-gray-*, bg-gray-*, border-gray-* -> use text-on-surface-variant, bg-surface-variant, border-outline-variant (from the Material @theme bridge). They change with the theme; gray does not.
 
-- Enforced by: guard blocks (`gray-utility:<label>`), in `*.component.html` and `*.component.ts`.
+- Enforced by: guard blocks (`gray-utility:<label>`), in templates and in component code: `*.component.ts`, or a `.ts` file whose text carries `@Component(` (never `.spec.ts` or `.d.ts`).
 - Allowed exceptions: none.
 
 ### T-004 — No hard-coded hex colours in templates
