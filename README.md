@@ -341,7 +341,7 @@ shipped; an edited file is kept and reported. Helper files and the stylesheet sn
 deleted. A second run finds nothing to do. Removing an add-on does not touch its kill switches.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
-`post-edit-dispatcher.py` rather than as four registrations.
+`post-edit-dispatcher.py` rather than as four separate hook entries.
 
 ### Local development workflow
 
@@ -503,7 +503,7 @@ agents/          14 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    6 shipped working agreements, delivered at session start
   addons/        3 opt-in add-ons (addon.json + hook files), never registered by hooks.json
-  hooks/         12 generic hooks, 4 shared helper modules, 6 generic data files
+  hooks/         13 generic hooks, a gate launcher, 7 shared helper modules, 6 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
     tests/       9 hook test suites
   scripts/       15 workflow scripts, 3 shared helper modules
@@ -599,7 +599,7 @@ contract-status-watcher, journal-post-approval-tracker. Since 0.9.8 also plan-qu
 and stop-dispatcher. That is thirteen hook files. The Changed-file check the Stop dispatcher runs
 is not a hook file: it is the script
 `.claude/scripts/concept_changed_check.py`. Beside the hook files
-sit the gate launcher `gate-launch.py` and the shared helpers `_error_log.py`,
+sit the gate launcher `gate-launch.py` and the shared helpers `_error_log.py`, `_gate_launch.py`,
 `_memory_common.py`, `_project_paths.py`, `_main_checkout_guard.py`, `_shell_write_targets.py`
 (the shell parser the guard reads write targets with) and
 `_inprocess_hook.py` (the dispatchers' in-process runner), and the generic data files

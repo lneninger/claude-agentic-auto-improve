@@ -13,3 +13,14 @@ jobs:
           fetch-depth: 0
       - name: Plugin version is raised when shipped files change
         run: python3 .claude/scripts/check_version_bump.py --base origin/${{ github.base_ref }}
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A fast subset only: the skill-script lookup suite alone takes three to four minutes, so it is left out.
+      # test_check_version_bump.py holds the guard that every file the plugin doctor copies counts as shipped.
+      - name: Version-bump check tests, including the registries guard
+        run: python3 .claude/scripts/tests/test_check_version_bump.py
+      - name: Repository consistency tests (CI wiring, version-raise wording, README hook count)
+        run: python3 .claude/scripts/tests/test_repo_consistency.py
