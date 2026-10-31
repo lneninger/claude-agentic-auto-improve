@@ -97,6 +97,9 @@ STEPS = {
     "view-against-disk comparison": (r"introduc|compar", "a function whose name contains 'introduc' or 'compar'"),
     "de-duplication": (r"dedup|unique|duplicate", "a function whose name contains 'dedup', 'unique' or 'duplicate'"),
     "G-5 reference test": (r"reference|ref_?var", "a function whose name contains 'reference' or 'ref_var'"),
+    "whole-file pass and its height-chain fallback": (
+        r"whole_?file|^scan_height_chain_invariant$",
+        "a function whose name contains 'whole_file', plus scan_height_chain_invariant"),
 }
 
 
@@ -225,6 +228,18 @@ class PostEditViewTests(unittest.TestCase):
         self.assertIn(WARN_HEADER, r.stderr,
                       "old-string-ambiguous: no view, so the fragment is judged as today (warns)")
 
+    def test_empty_old_string_with_replace_all_makes_the_view_unavailable(self):
+        import time
+        disk = '<div class="h-full">\n  <p>x</p>\n' + ("  <i></i>\n" * 5000) + '</div>\n'
+        started = time.monotonic()
+        r = edit(HTML, "", FRAGMENT + " " * 2000, disk, replace_all=True)
+        elapsed = time.monotonic() - started
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(WARN_HEADER, r.stderr,
+                      "N-2: an empty old_string is old-string-missing, so no view is built and "
+                      "the fragment is judged as today (warns despite the h-full root)")
+        self.assertLess(elapsed, 20, "the guard must return quickly, without building a huge string")
+
     def test_missing_file_makes_the_view_unavailable(self):
         r = edit(HTML, "PLACEHOLDER", FRAGMENT, disk=None)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -326,9 +341,12 @@ class PostEditViewTests(unittest.TestCase):
 
     def test_new_string_carrying_the_whole_decorator_still_blocks(self):
         r = edit(TS, "export class X {}",
-                 "@Component({ template: '<p></p>' })\nexport class Y {}", TS_PLAIN)
+                 "export class X {}\n@Component({ selector: 'b', template: '<p></p>' })\nexport class Y {}",
+                 TS_PLAIN)
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("[inline-component-template]", r.stderr)
+        self.assertEqual(blocked_rules(r.stderr).count("inline-component-template"), 1,
+                         "W-1: the same inline rule on the same physical line is reported once, "
+                         "not once from the fragment and once from the view:\n" + r.stderr)
 
     def test_adding_template_to_a_missing_file_gives_todays_result(self):
         r = edit(TS, "x", "  template: '<p></p>',", disk=None)
@@ -445,6 +463,15 @@ class FailClosedTests(unittest.TestCase):
         self.forced("view-against-disk comparison", r)
         self.assertIn("[inline-component-template]", r.stderr)
 
+    def test_whole_file_pass_and_its_height_chain_fallback_raising_still_fails_closed(self):
+        step = "whole-file pass and its height-chain fallback"
+        r = edit(HTML, "PLACEHOLDER", '<p class="text-gray-500"></p>', DISK_H_FULL, step=step)
+        self.forced(step, r)
+        self.assertIn("[gray-utility:text-gray]", r.stderr,
+                      "W-3: findings already collected must be reported, not discarded")
+        self.assertNotIn("internal error", r.stderr,
+                         "W-3: no new code path may reach the outer catch")
+
     def test_deduplication_raising_prints_every_finding(self):
         disk = '<div class="h-full">\n  AAA\n  BBB\n</div>\n'
         r = multi(HTML, [("AAA", '<p class="text-gray-500"></p>'),
@@ -472,6 +499,9 @@ class KnownLimitsDocstringTests(unittest.TestCase):
         for token in ("W5", "W6b", "W8", "W11", "G-2", "G-5"):
             self.assertIn(token, block,
                           f"the 'Known limits' block must record the accepted limit {token}")
+        g2 = next((ln for ln in block.splitlines() if "G-2" in ln), "")
+        self.assertIn("*.component.ts", g2, "N-3: the G-2 line must name the real file patterns")
+        self.assertIn("*.component.scss", g2, "N-3: the G-2 line must name the real file patterns")
 
 
 if __name__ == "__main__":
