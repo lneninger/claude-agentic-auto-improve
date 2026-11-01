@@ -22,8 +22,35 @@ Hook contract (Claude Code):
 Bypass:
     CLAUDE_ARCH_GUARD=off -- disable the hook for a session
 
-Exception list:
-    ~/.claude/hooks/architecture-guard.exceptions.json
+Exception list and rules file:
+    architecture-guard.exceptions.json and architecture-guard.rules.json (both)
+    hook_file finds each: project copy, template beside the hook, working folder's .claude/hooks, then ~/.claude/hooks
+
+Post-edit view (G-4):
+    For an Edit or MultiEdit the guard builds the file as it will be after the
+    edit (disk text as UTF-8, CRLF folded to LF, old_string found exactly once
+    unless replace_all). Line rules judge each edit's new text. The whole-file
+    rules (height chain, inline template, inline styles) run once per file per
+    call: the height chain on the view; the two inline rules when any edit's new
+    text holds the pattern, or when the view holds it and the disk text did not.
+    When the view cannot be built, every rule judges the new text alone.
+    Each new step falls back to the stricter outcome when it raises (V-2).
+
+Known limits (accepted; each is pinned by a test):
+    W5   `relative` and `absolute` are never checked.
+    W6b  Line rules judge each edit's new text, so two edits that together form
+         `text-gray-500` pass.
+    W8   Stylesheet rules only warn; the nesting check works one line at a time.
+    W11  An edit that completes a violation started on disk passes.
+    G-2  `*.component.html`, `*.component.ts`, `*.component.scss` are always scanned; any other
+         `.html`, `.scss`, `.css` or `.ts` file only when its `.ts` sibling (for a `.ts`, its own
+         post-edit text) already carries `@Component(`. A `.spec.ts` or `.d.ts` is never scanned.
+         With no post-edit view the written text is used instead.
+    G-5  A 3- or 6-character token with no digit that stands alone after
+         whitespace (such as `  #fff`) is read as a template reference variable.
+         Quotes are counted per kind, so an apostrophe inside a double-quoted value
+         (`aria-label="Don't save" #add`) makes the count odd and that reference
+         variable is still read as a colour (accepted, not fixed).
 """
 
 from __future__ import annotations
@@ -43,19 +70,20 @@ except Exception:
     def log_event(*args, **kwargs):  # type: ignore[no-redef]
         return
 
-HOME = Path.home()
+HOOK_DIR = Path(__file__).resolve().parent
 try:  # project-local .claude first, global second
     import _project_paths as _pp
 except Exception:  # pragma: no cover - hooks must never crash a tool call
     _pp = None
 
+# Without _project_paths the fallback is the hook's own folder (G-3).
 EXCEPTIONS_FILE = (
     _pp.hook_file("architecture-guard.exceptions.json") if _pp
-    else HOME / ".claude" / "hooks" / "architecture-guard.exceptions.json"
+    else HOOK_DIR / "architecture-guard.exceptions.json"
 )
 EXTERNAL_RULES_FILE = (
     _pp.hook_file("architecture-guard.rules.json") if _pp
-    else HOME / ".claude" / "hooks" / "architecture-guard.rules.json"
+    else HOOK_DIR / "architecture-guard.rules.json"
 )
 
 # External rules loaded once per process; populated by /promote-ui-rule skill.
@@ -89,11 +117,13 @@ def load_project_settings() -> dict:
             log(f"failed to read project settings: {e}")
     root = data.get("frontend_projects_root")
     docs = data.get("reference_documents")
+    # G-1: padding, backslashes, doubled and surrounding slashes do not change the root.
+    root_segments = [
+        s.strip() for s in (root.replace("\\", "/").lower().split("/") if isinstance(root, str) else [])
+        if s.strip()
+    ]
     _PROJECT_SETTINGS = {
-        "frontend_projects_root": (
-            str(root).strip("/").lower() if isinstance(root, str) and root.strip()
-            else _DEFAULT_FRONTEND_PROJECTS_ROOT
-        ),
+        "frontend_projects_root": "/".join(root_segments) or _DEFAULT_FRONTEND_PROJECTS_ROOT,
         "reference_documents": (
             [str(d) for d in docs] if isinstance(docs, list) else list(_DEFAULT_REFERENCE_DOCUMENTS)
         ),
@@ -213,6 +243,11 @@ def detect_app(file_path: Path) -> str | None:
     return None
 
 
+def app_root_segments() -> list[str]:
+    """G-1: the configured root of the front-end applications, one lower-case entry per path segment."""
+    return load_project_settings()["frontend_projects_root"].split("/")
+
+
 def load_app_rules(file_path: Path) -> dict | None:
     """
     Load the .app-rules.json that sits at the Angular project root above the
@@ -226,16 +261,36 @@ def load_app_rules(file_path: Path) -> dict | None:
         return _APP_RULES_CACHE.get(app)
     _APP_RULES_LOADED.add(app)
 
-    # Walk up to find <frontend_projects_root>/<app>/.app-rules.json.
+    # V-2: a raise in the root lookup or in the walk retries with the default root; a second raise means no rules.
+    default_root = [_DEFAULT_FRONTEND_PROJECTS_ROOT]
+    try:
+        root_parts = app_root_segments()
+    except Exception as e:  # noqa: BLE001
+        log(f"app root lookup failed (using '{_DEFAULT_FRONTEND_PROJECTS_ROOT}'): {e}")
+        root_parts = default_root
+    try:
+        return read_app_rules_file(file_path, app, root_parts)
+    except Exception as e:  # noqa: BLE001
+        log(f"app rules walk failed (retrying with '{_DEFAULT_FRONTEND_PROJECTS_ROOT}'): {e}")
+    try:
+        return read_app_rules_file(file_path, app, default_root)
+    except Exception as e:  # noqa: BLE001
+        log(f"app rules walk failed again (no app rules): {e}")
+        return None
+
+
+def read_app_rules_file(file_path: Path, app: str, root_parts: list[str]) -> dict | None:
+    """Walk up to <frontend_projects_root>/<app>/.app-rules.json and read it; None when absent or unreadable."""
+    depth = len(root_parts)
     parts = list(file_path.resolve().parts) if file_path.is_absolute() else list(Path.cwd().joinpath(file_path).resolve().parts)
-    for i in range(len(parts) - 1, 0, -1):
-        if parts[i].lower() == app and i >= 2 and parts[i - 1].lower() == "projects":
+    for i in range(len(parts) - 1, depth, -1):
+        if parts[i].lower() == app and [p.lower() for p in parts[i - depth:i]] == root_parts:
             project_root = Path(*parts[: i + 1])
             rules_file = project_root / ".app-rules.json"
             if rules_file.exists():
                 try:
                     data = json.loads(rules_file.read_text(encoding="utf-8"))
-                    _APP_RULES_CACHE[app] = data
+                    _APP_RULES_CACHE[app] = data  # shared with load_app_rules' per-app cache
                     return data
                 except (OSError, json.JSONDecodeError) as e:
                     log(f"failed to read {rules_file}: {e}")
@@ -292,6 +347,15 @@ class Violation(NamedTuple):
     suggestion: str
     rule_id: str = ""
     document: str | None = None
+
+
+class PostEditView(NamedTuple):
+    """The file as it will be after the edit. ``reason`` is set exactly when ``text`` is None."""
+    path: str
+    text: str | None
+    disk: str | None  # the disk text before the edit; None for a Write or when unavailable
+    source: str  # 'write-content' | 'disk-plus-edits'
+    reason: str = ""
 
 
 # Guard rule map (contract 2026-10-28-angular-tailwind-rule-documents, t6).
@@ -550,6 +614,148 @@ def scan_height_chain_invariant(content: str, path: Path, exemptions: dict) -> l
     )]
 
 
+def is_template_reference_variable(line: str, match: re.Match) -> bool:
+    """
+    G-5: True when the `#` token at ``match`` is a template reference variable, not a colour.
+
+    All four hold: whitespace or the line start comes before it; the quotes
+    between the last `<` and the token are balanced (even `"` and even `'`);
+    whitespace, `>`, `/`, `=` or the line end comes after it; the hex run has no digit.
+    """
+    start, end = match.start(), match.end()
+    if start > 0 and not line[start - 1].isspace():
+        return False
+    segment = line[line.rfind("<", 0, start) + 1: start]
+    if segment.count('"') % 2 or segment.count("'") % 2:
+        return False
+    if end < len(line) and not (line[end].isspace() or line[end] in ">/="):
+        return False
+    return not any(ch.isdigit() for ch in match.group(0))
+
+
+def line_has_hex_color(line: str) -> bool:
+    """True when the line holds a hex colour; a template reference variable does not count."""
+    for m in RX_HEX_COLOR.finditer(line):
+        try:
+            if is_template_reference_variable(line, m):
+                continue
+        except Exception as e:  # noqa: BLE001 -- V-2: when the test fails, the token is a colour
+            log(f"reference-variable test failed (treating as colour): {e}")
+        return True
+    return False
+
+
+# (rule, decorator pattern, line pattern, suggestion) for the whole-file inline rules.
+INLINE_COMPONENT_RULES = (
+    ("inline-component-template", RX_INLINE_TEMPLATE, r"\btemplate\s*:",
+     "Use templateUrl: './xxx.component.html' -- never inline template:."),
+    ("inline-component-styles", RX_INLINE_STYLES, r"\bstyles\s*:",
+     "Use styleUrl: './xxx.component.scss' -- never inline styles:."),
+)
+
+
+def inline_pattern_is_introduced(rx: re.Pattern, disk_text: str) -> bool:
+    """True when the disk text did not already hold the inline pattern."""
+    return not rx.search(disk_text)
+
+
+def scan_inline_component_rules(
+    content: str, path: Path, exemptions: dict, disk_text: str | None = None,
+) -> list[Violation]:
+    """
+    Inline `template:` / `styles:` in @Component({}). With ``disk_text`` the pattern
+    must be introduced by the edit (G-4); a failed comparison counts as introduced (V-2).
+    """
+    out: list[Violation] = []
+    for rule, rx, line_pattern, suggestion in INLINE_COMPONENT_RULES:
+        if file_rule_exempted(path, rule, exemptions) or not rx.search(content):
+            continue
+        if disk_text is not None:
+            try:
+                if not inline_pattern_is_introduced(rx, disk_text):
+                    continue
+            except Exception as e:  # noqa: BLE001
+                log(f"view-against-disk comparison failed (counting as introduced): {e}")
+        for i, line in enumerate(content.splitlines(), start=1):
+            if re.search(line_pattern, line):
+                out.append(Violation(rule=rule, line_no=i, line_text=line.strip(), suggestion=suggestion))
+                break
+    return out
+
+
+def build_post_edit_view(payload: dict, file_path_str: str) -> PostEditView:
+    """
+    G-4: the file as it will be after this call's edits. A Write is its own content.
+    Otherwise the disk text (strict UTF-8, CRLF folded to LF) with each edit applied in
+    order; ``old_string`` must occur once unless ``replace_all``. The reason names why
+    the view is unavailable: file-unreadable, not-utf8, old-string-missing, old-string-ambiguous.
+    """
+    tool_input = payload.get("tool_input") or {}
+    if isinstance(tool_input.get("content"), str):
+        return PostEditView(file_path_str, tool_input["content"], None, "write-content")
+
+    def unavailable(reason: str) -> PostEditView:
+        return PostEditView(file_path_str, None, None, "disk-plus-edits", reason)
+
+    edits: list[dict] = []
+    if isinstance(tool_input.get("new_string"), str):
+        edits.append(tool_input)
+    for edit in tool_input.get("edits") or []:
+        if isinstance(edit, dict) and (edit.get("file_path") or file_path_str) == file_path_str:
+            edits.append(edit)
+
+    try:
+        disk = Path(file_path_str).read_bytes().decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        return unavailable("not-utf8")
+    except OSError:
+        return unavailable("file-unreadable")
+
+    text = disk
+    for edit in edits:
+        old = str(edit.get("old_string", "")).replace("\r\n", "\n")
+        new = str(edit.get("new_string", "")).replace("\r\n", "\n")
+        found = text.count(old) if old else 0  # an empty old_string would match everywhere
+        if found == 0:
+            return unavailable("old-string-missing")
+        if found > 1 and not edit.get("replace_all"):
+            return unavailable("old-string-ambiguous")
+        text = text.replace(old, new) if edit.get("replace_all") else text.replace(old, new, 1)
+    return PostEditView(file_path_str, text, disk, "disk-plus-edits")
+
+
+def scan_whole_file_rules(
+    path: Path, fragments: list[str], view: PostEditView, exemptions: dict,
+) -> tuple[list[Violation], list[Violation]]:
+    """
+    G-4: the whole-file rules, once per file per call. Returns (blocking, warnings).
+
+    The height chain judges the view, or each fragment when there is no view. The two
+    inline rules block on a view that holds the pattern when the disk text did not; the
+    fragments were already judged by scan_component_ts. A Write has no disk text.
+    """
+    blocking: list[Violation] = []
+    warnings: list[Violation] = []
+    if is_template_html(path):
+        for text in ([view.text] if view.text is not None else fragments):
+            warnings.extend(scan_height_chain_invariant(text, path, exemptions))
+    elif view.text is not None and view.disk is not None and is_component_ts(path, lambda: view.text):
+        blocking.extend(scan_inline_component_rules(view.text, path, exemptions, view.disk))
+    return blocking, warnings
+
+
+def dedupe_violations(violations: list[Violation]) -> list[Violation]:
+    """Drop a finding repeated with the same rule, line and text; first occurrence wins."""
+    seen: set[tuple[str, int, str]] = set()
+    unique: list[Violation] = []
+    for v in violations:
+        key = (v.rule, v.line_no, v.line_text)
+        if key not in seen:
+            seen.add(key)
+            unique.append(v)
+    return unique
+
+
 def scan_template_html(content: str, path: Path, exemptions: dict) -> list[Violation]:
     violations: list[Violation] = []
     app_rules = load_app_rules(path)
@@ -597,7 +803,7 @@ def scan_template_html(content: str, path: Path, exemptions: dict) -> list[Viola
 
         # Rule: hex colors in templates (except SVG chart exception list).
         if not file_rule_exempted(path, "hex-color", exemptions):
-            if RX_HEX_COLOR.search(line):
+            if line_has_hex_color(line):
                 violations.append(Violation(
                     rule="hex-color",
                     line_no=i,
@@ -639,31 +845,8 @@ def scan_component_ts(content: str, path: Path, exemptions: dict) -> list[Violat
                 continue
             violations.extend(scan_extra_banned_classes(line, path, app_rules, exemptions, i))
 
-    # Rule: inline @Component({ template: ... }) — separate exemption.
-    if not file_rule_exempted(path, "inline-component-template", exemptions):
-        if RX_INLINE_TEMPLATE.search(content):
-            for i, line in enumerate(content.splitlines(), start=1):
-                if re.search(r"\btemplate\s*:", line):
-                    violations.append(Violation(
-                        rule="inline-component-template",
-                        line_no=i,
-                        line_text=line.strip(),
-                        suggestion="Use templateUrl: './xxx.component.html' -- never inline template:.",
-                    ))
-                    break
-
-    # Rule: inline @Component({ styles: ... }) — separate exemption.
-    if not file_rule_exempted(path, "inline-component-styles", exemptions):
-        if RX_INLINE_STYLES.search(content):
-            for i, line in enumerate(content.splitlines(), start=1):
-                if re.search(r"\bstyles\s*:", line):
-                    violations.append(Violation(
-                        rule="inline-component-styles",
-                        line_no=i,
-                        line_text=line.strip(),
-                        suggestion="Use styleUrl: './xxx.component.scss' -- never inline styles:.",
-                    ))
-                    break
+    # Rules: inline @Component({ template: ... }) and ({ styles: ... }).
+    violations.extend(scan_inline_component_rules(content, path, exemptions))
 
     # Rule: gray-utility class strings inside TS string literals.
     # Catches STATE_BADGE-style maps and getStatusClass()-style helpers that
@@ -753,14 +936,18 @@ def classify_sibling_component(scss_path: Path) -> tuple[str, str]:
     """
     Return (mode, element_scope) for the component that owns ``scss_path``.
 
-    Reads ``<stem>.component.ts`` next to the stylesheet as strict UTF-8. Mode is
+    Reads ``<stem>.component.ts``, else ``<stem>.ts``, next to the stylesheet (the stem
+    is the name without its ``.component``, ``.scss`` or ``.css``) as strict UTF-8. Mode is
     'none' only for a recognised ViewEncapsulation.None spelling (any identifier
     ending in .None, or the number 2); every other outcome -- missing or
     undecodable file, other encapsulation, no recognised value -- is
     'unclassified' or 'default', which keep today's warnings. Never raises.
     """
     try:
-        ts_path = scss_path.with_name(scss_path.name[: -len(".scss")] + ".ts")
+        stem = scss_path.name[: -len(scss_path.suffix)].removesuffix(".component")
+        ts_path = scss_path.with_name(stem + ".component.ts")
+        if not ts_path.is_file():
+            ts_path = scss_path.with_name(stem + ".ts")
         source = strip_ts_comments(ts_path.read_text(encoding="utf-8"))
         key = RX_ENCAPSULATION_KEY.search(source)
         if key is None:
@@ -972,16 +1159,68 @@ def extract_contents(payload: dict) -> list[tuple[str, str]]:
     return pairs
 
 
+RX_COMPONENT_DECORATOR = re.compile(r"@Component\s*\(")
+
+
+_SIBLING_DECORATOR: dict[Path, bool] = {}  # one read per sibling per call
+
+
+def sibling_has_decorator(path: Path) -> bool:
+    """G-2: True when the ``<stem>.ts`` beside ``path`` is on disk and carries ``@Component(``."""
+    ts_path = path.with_name(path.name[: -len(path.suffix)] + ".ts")
+    if ts_path not in _SIBLING_DECORATOR:
+        _SIBLING_DECORATOR[ts_path] = (
+            ts_path.is_file() and RX_COMPONENT_DECORATOR.search(ts_path.read_text(encoding="utf-8")) is not None)
+    return _SIBLING_DECORATOR[ts_path]
+
+
+def text_has_decorator(text: str) -> bool:
+    """G-2: True when ``text`` carries ``@Component(``."""
+    return RX_COMPONENT_DECORATOR.search(text) is not None
+
+
+def counts_as_found(check, *args) -> bool:
+    """V-2: a check that raises counts as found, so the file is scanned (the stricter outcome)."""
+    try:
+        return check(*args)
+    except Exception as e:  # noqa: BLE001
+        log(f"file check failed (scanning the file): {e}")
+        return True
+
+
 def is_template_html(path: Path) -> bool:
-    return path.name.endswith(".component.html")
+    if path.name.endswith(".component.html"):
+        return True
+    return path.suffix == ".html" and counts_as_found(sibling_has_decorator, path)
 
 
-def is_component_ts(path: Path) -> bool:
-    return path.name.endswith(".component.ts")
+def is_component_ts(path: Path, get_text) -> bool:
+    """
+    The name decides first, so a ``.spec.ts`` or ``.d.ts`` is never read. Otherwise
+    ``get_text()`` gives the file as it will be after the edit (the written text when no view exists).
+    """
+    if path.name.endswith(".component.ts"):
+        return True
+    if path.suffix != ".ts" or path.name.endswith((".spec.ts", ".d.ts")):
+        return False
+    return counts_as_found(lambda: text_has_decorator(get_text()))
 
 
 def is_component_scss(path: Path) -> bool:
-    return path.name.endswith(".component.scss")
+    if path.name.endswith(".component.scss"):
+        return True
+    return path.suffix in (".scss", ".css") and counts_as_found(sibling_has_decorator, path)
+
+
+def post_edit_snapshot(payload: dict, file_path_str: str, snapshots: dict[str, PostEditView]) -> PostEditView:
+    """The post-edit view of a file, built once per file per call; a builder fault makes it unavailable (V-2)."""
+    if file_path_str not in snapshots:
+        try:
+            snapshots[file_path_str] = build_post_edit_view(payload, file_path_str)
+        except Exception as e:  # noqa: BLE001
+            log(f"post-edit view failed (judging fragments): {e}")
+            snapshots[file_path_str] = PostEditView(file_path_str, None, None, "disk-plus-edits", "builder-error")
+    return snapshots[file_path_str]
 
 
 # ---------------------------------------------------------------------------
@@ -1109,6 +1348,9 @@ def main() -> None:
     blocking: list[Violation] = []
     warnings: list[Violation] = []
     target_for_block = ""
+    findings: dict[str, list[Violation]] = {}  # per file, in first-seen order
+    fragments: dict[str, list[str]] = {}  # new text of each edit, for the whole-file pass
+    snapshots: dict[str, PostEditView] = {}  # the post-edit view of each file, built once per call
 
     for file_path_str, new_content in pairs:
         if not file_path_str:
@@ -1119,21 +1361,14 @@ def main() -> None:
             continue
 
         if is_template_html(path):
-            vs = scan_template_html(new_content, path, rule_exemptions)
-            if vs:
-                blocking.extend(vs)
-                target_for_block = target_for_block or file_path_str
-            # WARN-level: scroll-edge height-chain invariant. Trial window —
-            # not added to `blocking`, only emitted via stderr. Promote to BLOCK
-            # by moving inside scan_template_html after two regression-free weeks.
-            hw = scan_height_chain_invariant(new_content, path, rule_exemptions)
-            if hw:
-                emit_warnings(file_path_str, hw)
-        elif is_component_ts(path):
-            vs = scan_component_ts(new_content, path, rule_exemptions)
-            if vs:
-                blocking.extend(vs)
-                target_for_block = target_for_block or file_path_str
+            findings.setdefault(file_path_str, []).extend(
+                scan_template_html(new_content, path, rule_exemptions))
+            fragments.setdefault(file_path_str, []).append(new_content)
+        elif path.suffix == ".ts" and is_component_ts(
+                path, lambda: post_edit_snapshot(payload, file_path_str, snapshots).text or new_content):
+            findings.setdefault(file_path_str, []).extend(
+                scan_component_ts(new_content, path, rule_exemptions))
+            fragments.setdefault(file_path_str, []).append(new_content)
         elif is_component_scss(path):
             vs = scan_component_scss(new_content, path, {
                 **rule_exemptions,
@@ -1141,6 +1376,40 @@ def main() -> None:
             # SCSS violations are WARN only.
             if vs:
                 emit_scss_warnings(file_path_str, vs)
+
+    # Whole-file rules: once per file per call, on the post-edit view (G-4). Each
+    # step falls back to the stricter or the earlier outcome when it raises (V-2).
+    for file_path_str, texts in fragments.items():
+        path = Path(file_path_str)
+        view = post_edit_snapshot(payload, file_path_str, snapshots)
+        try:
+            extra, hw = scan_whole_file_rules(path, texts, view, rule_exemptions)
+        except Exception as e:  # noqa: BLE001
+            log(f"whole-file pass failed (judging fragments): {e}")
+            extra = []
+            hw = []
+            try:
+                if is_template_html(path):
+                    hw = [w for t in texts for w in scan_height_chain_invariant(t, path, rule_exemptions)]
+            except Exception as e2:  # noqa: BLE001 -- a failed warning means no warning
+                log(f"height-chain fallback failed (no warning): {e2}")
+        # One finding per inline rule is enough: the fragments' finding wins over the view's.
+        reported = {v.rule for v in findings.get(file_path_str, [])}
+        findings.setdefault(file_path_str, []).extend(v for v in extra if v.rule not in reported)
+        # WARN-level: scroll-edge height-chain invariant. Trial window —
+        # not added to `blocking`, only emitted via stderr. Promote to BLOCK
+        # by moving inside scan_template_html after two regression-free weeks.
+        if hw:
+            emit_warnings(file_path_str, hw)
+
+    for file_path_str, vs in findings.items():
+        try:
+            vs = dedupe_violations(vs)
+        except Exception as e:  # noqa: BLE001
+            log(f"de-duplication failed (printing every finding): {e}")
+        if vs:
+            blocking.extend(vs)
+            target_for_block = target_for_block or file_path_str
 
     if blocking:
         print(format_block_message(target_for_block, blocking), file=sys.stderr)

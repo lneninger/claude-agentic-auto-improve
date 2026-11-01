@@ -282,7 +282,7 @@ def apply_fixes(project_root: Path, missing: List[Requirement],
 EXIT_FINDINGS = 1
 EXIT_CANNOT_COMPARE = 4
 FINDING_KINDS = ("content-differs", "one-sided", "listed-twice", "registered-twice",
-                 "unreadable-registration")
+                 "unreadable-registration", "disabled-hook-installed")
 OWNER_PLUGIN = "plugin"
 OWNER_REPO = "repo"
 SYNC_CONFIG = ".claude/.sync-config.json"
@@ -294,6 +294,10 @@ DEFAULT_PLUGIN_DELIVERED = ({"path": ".claude/agents", "plugin_path": "agents"},
                             {"path": ".claude/skills", "plugin_path": "skills"})
 DEFAULT_PRESENCE_TREES = (".claude/hooks", ".claude/scripts")
 GATE_LAUNCHER = "gate-launch.py"
+#: Where an add-on's documents land in the project. Equals ``auto_improve_finish_install.ADDON_DOCUMENTS_REL``
+#: (a test checks it); the doctor does not import the installer.
+ADDON_DOCUMENTS_REL = ".claude/references"
+PROJECT_SETTINGS_LAYERS = ("settings.json", "settings.local.json")
 SKIPPED_DIRS = frozenset({"__pycache__", ".git", "node_modules"})
 
 
@@ -513,9 +517,24 @@ def _plugin_addon(plugin: Path, name: str) -> Dict[str, Any]:
     data = _read_json(manifest, "the add-on manifest of '%s'" % name)
     if not isinstance(data, dict):
         raise DriftError("the add-on manifest of '%s' (%s) does not hold a JSON object" % (name, manifest))
+    disabled: List[Tuple[str, List[str]]] = []
+    for entry in data.get("disabled") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("hook"), str) and _plain_file_name(entry["hook"]):
+            disabled.append((entry["hook"], [n for n in _string_list(entry.get("former_names"))
+                                             if _plain_file_name(n)]))
     return {"folder": folder,
             "hooks": [h for h in _string_list(data.get("hooks")) if _plain_file_name(h)],
-            "helpers": [_rel(h) for h in _string_list(data.get("helpers"))]}
+            "helpers": [_rel(h) for h in _string_list(data.get("helpers"))],
+            "documents": [d for d in _string_list(data.get("documents")) if _plain_file_name(d)],
+            "disabled": disabled}
+
+
+def _all_plugin_addons(plugin: Path) -> List[Tuple[str, Dict[str, Any]]]:
+    """Every add-on folder of the plugin that has a manifest, as ``(name, info)``, sorted by name."""
+    base = plugin / ".claude" / "addons"
+    names = sorted(p.name for p in base.iterdir() if p.is_dir() and (p / "addon.json").is_file()) \
+        if base.is_dir() else []
+    return [(name, _plugin_addon(plugin, name)) for name in names]
 
 
 def _addon_jobs(config: DriftConfig, project: Path, plugin: Path) -> List[Tuple[str, List[str], Dict[str, Any]]]:
@@ -554,11 +573,13 @@ def _compute_drift(project: Path, plugin: Path) -> Dict[str, Any]:
     config = load_drift_config(project)
 
     settings_bodies: List[dict] = []
-    for name in ("settings.json", "settings.local.json"):
+    settings_layers: List[Tuple[str, dict]] = []
+    for name in PROJECT_SETTINGS_LAYERS:
         path = project / ".claude" / name
         if path.is_file():
             body = _read_json(path, "the project's " + name)
             settings_bodies.append(body if isinstance(body, dict) else {})
+            settings_layers.append((name, body if isinstance(body, dict) else {}))
     plugin_hooks_json = plugin / ".claude" / "hooks" / "hooks.json"
     plugin_bodies: List[dict] = []
     if plugin_hooks_json.is_file():
@@ -668,6 +689,40 @@ def _compute_drift(project: Path, plugin: Path) -> Dict[str, Any]:
                 compared_addons += 1
                 if _folded_bytes(here) != _folded_bytes(there):
                     add("content-differs", helper)
+
+    # D-3: a disabled add-on hook that is still installed, for every add-on the plugin ships.
+    plugin_addons = _all_plugin_addons(plugin)
+    hooks_dir = project / ".claude" / "hooks"
+    for _addon_name, info in plugin_addons:
+        names = {n.casefold() for hook, former in info["disabled"] for n in [hook] + former}
+        if not names:
+            continue
+        if hooks_dir.is_dir():
+            for candidate in sorted(os.listdir(hooks_dir)):
+                if candidate.casefold() in names and (hooks_dir / candidate).is_file():
+                    add("disabled-hook-installed", ".claude/hooks/" + candidate, OWNER_PLUGIN)
+        for layer, body in settings_layers:   # one layer at a time, so the finding names its layer
+            rows, _unreadable = _effective_hooks([body], hooks_dir)
+            for event, hook in sorted(rows):
+                if hook.casefold() in names:
+                    add("disabled-hook-installed", "%s:%s:%s" % (layer, event, hook), OWNER_PLUGIN)
+
+    # D-4: add-on documents, compared when the config lists the add-on or any document is in the project.
+    for name, info in plugin_addons:
+        if not info["documents"]:
+            continue
+        project_docs = {d: project / ADDON_DOCUMENTS_REL / name / d for d in info["documents"]}
+        if not (config.from_file and name in config.addons) and not any(p.is_file() for p in project_docs.values()):
+            continue
+        for doc, here in project_docs.items():
+            project_rel = "%s/%s/%s" % (ADDON_DOCUMENTS_REL, name, doc)
+            there = info["folder"] / "documents" / doc
+            if here.is_file() and there.is_file():
+                compared_addons += 1
+                if _folded_bytes(here) != _folded_bytes(there):
+                    add("content-differs", project_rel, OWNER_PLUGIN)
+            elif here.is_file() != there.is_file():
+                add("one-sided", project_rel, OWNER_PLUGIN)
 
     if compared == 0:
         raise DriftError("the comparison covered zero file pairs; a run that compared nothing "

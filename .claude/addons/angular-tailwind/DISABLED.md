@@ -18,18 +18,22 @@ Before the 0.7.0 release the same script was called `architecture-advisor.py`. P
 
 The rules now live where they cost nothing until they are needed: four rule documents copied into the project and listed in `review.documents`, a plugin skill (`angular-ui-rules`) that the Angular developer agent preloads, and a Rule ID on every line the guard prints. No program starts on any prompt for Angular rules.
 
-## A defect for anyone who turns it back on
+## Two defects for anyone who turns it back on
 
-The keyword `"ui"` can never match. The script finds words with the pattern `[a-zA-Z][a-zA-Z-]{2,}`, which needs at least three characters, and `ui` has two. A prompt that says only "ui" gets no reminder. The script also no longer reads `CLAUDE_ARCH_ADVISOR`: the add-on declares no kill switch.
+1. The keyword `"ui"` can never match. The script finds words with the pattern `[a-zA-Z][a-zA-Z-]{2,}`, which needs at least three characters, and `ui` has two. A prompt that says only "ui" gets no reminder.
+2. When `_project_paths` cannot be imported, the script falls back (line 43) to `architecture-guard.rules.json` in the user's home folder (`~/.claude/hooks/`). It then reads a file outside the project, which can name another project's documents. It should read the rules file through `_project_paths` only.
+
+The script also no longer reads `CLAUDE_ARCH_ADVISOR`: the add-on declares no kill switch.
 
 ## How to turn it back on
 
 This is a change to the plugin, not to a project:
 
 1. In `addon.json`, move `angular-tailwind-advisor.py` from `disabled` into `hooks`, and add its row (`{"event": "UserPromptSubmit", "hook": "angular-tailwind-advisor.py", "args": []}`) to `registrations`. Keep `architecture-advisor.py` somewhere the checks still see it, because projects that installed the old file still carry it.
-2. Decide on a kill switch. The add-on declares none today. If you want one, add it to `kill_switches` and put the check back in the script.
-3. Raise the plugin version in the five places the project rule names, and run `py -3 .claude/scripts/check_version_bump.py`.
-4. Run the manifest and install suites: `.claude/scripts/tests/test_plugin_manifests.py` and `.claude/scripts/tests/test_auto_improve_finish_install.py`.
+2. Add-ons declare no kill switch. Do not add a `kill_switches` key or an environment check to the script.
+3. Fix both defects above: fix the keyword pattern, or drop `"ui"` from the keywords; and read the rules file through `_project_paths`, with no home-folder fallback. Then add the new hash of the script to `released_sha256`.
+4. Raise the plugin version in the five places the project rule names, and run `py -3 .claude/scripts/check_version_bump.py`.
+5. Run the manifest and install suites: `.claude/scripts/tests/test_plugin_manifests.py` and `.claude/scripts/tests/test_auto_improve_finish_install.py`.
 
 Projects that want it then run the install skill again; they start a new session for the row to take effect.
 

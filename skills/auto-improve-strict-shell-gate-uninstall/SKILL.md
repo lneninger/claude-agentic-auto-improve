@@ -1,6 +1,6 @@
 ---
 name: auto-improve-strict-shell-gate-uninstall
-description: "Remove the strict-shell-gate add-on of the agentic-auto-improve plugin from this project: the settings.json row of the bash-gate hook (PreToolUse on Bash), then the file .claude/hooks/bash-gate.py. Previews the row and the file, asks for one confirmation, then writes: the row first with a backup, then the file. Keeps the file when you edited it, and keeps the shared helpers. Leaves the CLAUDE_BASH_GATE and CLAUDE_CONCEPT_GATE kill switches as they are. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-strict-shell-gate-uninstall, 'remove the strict shell gate', 'turn off bash-gate', or 'uninstall the shell write gate'. Never deletes a helper."
+description: "Remove the strict-shell-gate add-on of the agentic-auto-improve plugin from this project: the settings.json row of the bash-gate hook (PreToolUse on Bash), then the file .claude/hooks/bash-gate.py. Previews the row and the file, asks for one confirmation, then writes: the row first with a backup, then the file. Keeps the file when you edited it, and keeps the shared helpers. The add-on has no kill switch, so this skill is the way out. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-strict-shell-gate-uninstall, 'remove the strict shell gate', 'turn off bash-gate', or 'uninstall the shell write gate'. Never deletes a helper."
 user_invocable: true
 ---
 
@@ -14,14 +14,16 @@ This skill proposes first. It writes only after one yes, and it reads and touche
 
 **The skill carries the conversation. The script carries every rule.**
 
-Which rows match, which files are deleted, which are kept and in which order everything is written all live in `auto_improve_finish_install.py addon-remove`, which has its own test suite. Read its answer. Do not work any of it out yourself, and never delete the hook file or edit `settings.json` by hand to remove this add-on: a hook row that points at a missing script exits 2 and blocks every shell command. The script writes `settings.json` first, with a backup, and deletes the file last.
+Which rows match, which files are deleted, which are kept and in which order everything is written all live in `auto_improve_finish_install.py addon-remove`, which has its own test suite. Read its answer. Do not work any of it out yourself. The skill never deletes the hook file and never edits `settings.json` by hand to remove this add-on: a hook row that points at a missing script exits 2 and blocks every shell command. The script writes `settings.json` first, with a backup, and deletes the file last. Only when a hook cannot run (the table in the README, section "Ways out when a hook cannot run") does the user remove its row by hand.
+
+This add-on has no kill switch. `CLAUDE_BASH_GATE` is not read, and `CLAUDE_CONCEPT_GATE=off` no longer turns this gate off: it still turns off the concept gate and the Changed-file check, and nothing else. This skill is the way out.
 
 What the script will not do:
 
 - It deletes `bash-gate.py` only when it is identical to the plugin's copy (line endings and a leading byte order mark are ignored). A file you edited is kept and reported as `kept-differs`; its row is still removed.
 - It keeps a hook file that a `settings.local.json` or user settings row still names (`kept-referenced`).
 - It never deletes a helper. `_project_paths.py`, `_shell_write_targets.py` and `.claude/scripts/_contract_index.py` stay: the default main-checkout guard and the concept gate use them.
-- It does not touch the `CLAUDE_BASH_GATE` or `CLAUDE_CONCEPT_GATE` kill switches. The Changed-file check stays on whatever you decide here.
+- It does not touch the concept gate or the Changed-file check, which stay on whatever you decide here.
 
 ## Step 0: Find the script
 
@@ -76,7 +78,7 @@ The answer carries:
 - `rows`: every `settings.json` row it would remove, with its `event`, `matcher`, `file` and the `command` as written. A row matches by the hook file name, under any event and in any form.
 - `files`: `bash-gate.py` with its action: `delete`, `kept-differs`, `kept-referenced` or `absent`.
 - `kept`: what it leaves, each with the reason: the three helpers, and every file it kept.
-- `kill-switches`: `CLAUDE_BASH_GATE` and `CLAUDE_CONCEPT_GATE`. They are named only; the script never changes them.
+- `kill-switches`: an empty list. The add-on has none.
 - `profile` (`null` for this add-on), `uninstall-skill`, `target`, `plugin-root` and `plan-sha256`.
 
 **Keep `plan-sha256`.** The apply needs it as `--expect-sha256`. It covers the `settings.json` bytes and the project's bytes of every file to delete, so anything that moves between the preview and the write is refused as `changed-since-preview`.
@@ -89,7 +91,7 @@ Show the user, in plain words:
 
 - the row it would remove from `.claude/settings.json`, and that a backup is taken first.
 - the file it would delete, or keep, with the reason.
-- what it leaves: the helpers, and the two kill switches.
+- what it leaves: the helpers.
 - that after the removal a shell command that writes into a source file is no longer checked against an approved contract.
 
 State your recommendation first, in one or two sentences. Then ask **once**: remove this add-on?
@@ -125,9 +127,9 @@ End with a short summary: which row was removed, whether the file was deleted or
 ## Anti-patterns
 
 - **Deleting `bash-gate.py` yourself before its row is gone.** A row that points at a missing script blocks every shell command. The script removes the row first.
-- **Hand-editing `settings.json` instead of using the script.**
+- **Hand-editing `settings.json` instead of using the script.** Only a hook that cannot run (the README table) is removed by hand, by the user.
 - **Writing without the preview's `plan-sha256`**, or with an old one. The hash is what proves the user saw the change as it is now.
-- **Unsetting `CLAUDE_BASH_GATE` or `CLAUDE_CONCEPT_GATE`, or setting them for the user.** The script leaves them as they are.
+- **Telling the user to set `CLAUDE_BASH_GATE` or `CLAUDE_CONCEPT_GATE=off` to get past the gate.** Neither does. The way out is this skill.
 - **Deleting a kept file because the script kept it.** A `kept-differs` file may hold the team's edits.
 - **Skipping the new-session note.** The user will otherwise test in this session and conclude the gate is still on.
 

@@ -17,10 +17,6 @@
     }
   ],
   "prerequisites": [],
-  "kill_switches": [
-    "CLAUDE_BASH_GATE",
-    "CLAUDE_CONCEPT_GATE"
-  ],
   "install_skill": "auto-improve-strict-shell-gate-install",
   "uninstall_skill": "auto-improve-strict-shell-gate-uninstall"
 }

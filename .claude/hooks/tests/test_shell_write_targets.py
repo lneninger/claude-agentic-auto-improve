@@ -308,5 +308,81 @@ class GuardWithoutBashGateTests(unittest.TestCase):
                              + allowed.stderr.decode("utf-8", errors="replace")[:400])
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _addon_fixture as af  # noqa: E402
+
+UNINSTALL_SKILL = HOOKS_DIR.parent.parent / "skills" / "auto-improve-strict-shell-gate-uninstall" / "SKILL.md"
+
+
+def _bash_blocks(skill: Path) -> list:
+    """Every fenced bash block of a skill, in order."""
+    text = skill.read_text(encoding="utf-8")
+    blocks = []
+    inside = False
+    current: list = []
+    for line in text.splitlines():
+        if not inside and line.strip() == "```bash":
+            inside, current = True, []
+        elif inside and line.strip() == "```":
+            inside = False
+            blocks.append("\n".join(current))
+        elif inside:
+            current.append(line)
+    return blocks
+
+
+class BashGateWayOutTests(unittest.TestCase):
+    """K-4: the strict-shell-gate add-on has no kill switch, so the ways out must be reachable. The uninstall
+    skill's own commands pass through bash-gate.py in a project with no contract, and a gate that cannot
+    import its parser says how to remove its row."""
+
+    def setUp(self) -> None:
+        self.project = af.new_project("swt_wayout_")
+        installed = {p.name: p for p in af.install("strict-shell-gate", self.project)}
+        self.gate = installed["bash-gate.py"]
+
+    def run_gate(self, command: str):
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+        return subprocess.run([sys.executable, "-B", str(self.gate)], input=json.dumps(payload).encode("utf-8"),
+                              capture_output=True, cwd=str(self.project),
+                              env=_clean_env({"CLAUDE_PROJECT_DIR": str(self.project)}), timeout=90)
+
+    def test_the_uninstall_skills_commands_are_allowed_with_no_contract(self):
+        blocks = [b for b in _bash_blocks(UNINSTALL_SKILL) if "FI=" in b or "addon-remove" in b]
+        lookup = [b for b in blocks if "FI=" in b]
+        preview = [b for b in blocks if "addon-remove" in b and "--apply" not in b and "FI=" not in b]
+        apply_ = [b for b in blocks if "--apply" in b]
+        self.assertTrue(lookup and preview and apply_,
+                        msg="the skill must show a lookup block, a preview and an --apply command; found %d, %d, %d"
+                            % (len(lookup), len(preview), len(apply_)))
+        for label, group in (("lookup block", lookup), ("preview", preview), ("--apply", apply_)):
+            for command in group:
+                done = self.run_gate(command)
+                self.assertEqual(done.returncode, 0,
+                                 msg="the %s is blocked by bash-gate.py with no contract: %s"
+                                     % (label, done.stderr.decode("utf-8", errors="replace")[:400]))
+
+    def test_a_write_to_a_source_file_is_still_blocked_control(self):
+        done = self.run_gate("echo x > src/Thing.cs")
+        self.assertEqual(done.returncode, 2, msg="the gate must still be able to block: "
+                         + done.stderr.decode("utf-8", errors="replace")[:400])
+
+    def test_the_import_failure_message_names_removing_the_row(self):
+        (self.project / ".claude" / "hooks" / "_shell_write_targets.py").unlink()
+        done = self.run_gate("echo hello")
+        err = done.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(done.returncode, 2, msg=err[:400])
+        self.assertIn("_shell_write_targets.py", err)
+        self.assertIn("remove the bash-gate row from .claude/settings.json", err)
+        self.assertIn("Edit tool", err, msg="the message names the route that works while the gate is down")
+        self.assertNotIn("CLAUDE_BASH_GATE", err)
+        self.assertNotIn("CLAUDE_CONCEPT_GATE", err)
+
+    def test_a_missing_gate_file_is_python_s_own_error(self):
+        self.gate.unlink()
+        done = self.run_gate("echo hello")
+        self.assertNotEqual(done.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

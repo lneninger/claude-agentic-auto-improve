@@ -206,7 +206,7 @@ approval and `CLAUDE_CONFIG_DIR` names a folder. This table lists exactly the va
 
 | Variable | Effect |
 |---|---|
-| `CLAUDE_CONCEPT_GATE=off` | disable the concept gate and the Changed-file check |
+| `CLAUDE_CONCEPT_GATE=off` | disable the concept gate and the Changed-file check (not the strict-shell-gate add-on) |
 | `CLAUDE_PLAN_QUESTION_ADVISOR=off` | disable the plan-question advisor |
 | `CLAUDE_ARCH_GUARD=off` | disable the architecture guard |
 | `CLAUDE_INTEGRATION_CHECK=off` | disable the integration check (one piece of the dispatcher) |
@@ -265,9 +265,12 @@ as 0.9.22, and the version moved on while its sub-tasks were merged.
   but no install copies it or writes its row. `.claude/addons/angular-tailwind/DISABLED.md` says
   what it did, what it cost, why it is off and how to turn it back on.
 
-The kill switches of `codegraph` (`CLAUDE_SKIP_CG`) and `strict-shell-gate` (`CLAUDE_BASH_GATE`
-and `CLAUDE_CONCEPT_GATE`) are unchanged. `angular-tailwind` declares none, and the retired
-`CLAUDE_ARCH_ADVISOR` is no longer read.
+**No add-on has a kill switch.** `CLAUDE_SKIP_CG` (codegraph) and `CLAUDE_BASH_GATE`
+(strict-shell-gate) are no longer read, and **`CLAUDE_CONCEPT_GATE=off` no longer turns off the
+strict-shell-gate add-on**: it still turns off the concept gate and the Changed-file check, and
+nothing else. The way out of an add-on is its uninstall skill. The retired `CLAUDE_ARCH_ADVISOR`
+is no longer read either. If your own `CLAUDE.md` or shell profile tells you to set one of these
+variables, take the line out: it does nothing now.
 
 **Upgrading a project that has the old advisor.** Which rows the project carries depends on
 when it installed. Every one is a `UserPromptSubmit` row with no matcher:
@@ -295,6 +298,75 @@ measured once, on one Windows workstation, for issue #84, and was not measured a
 the add-on registers no row on any event that runs per prompt, so no program starts for Angular
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
+
+**Changed in 0.12.0 (follow-ups to the `angular-tailwind` rule documents, issue #86):** this
+release closes the items the 0.10.0 work left open. The manifests read 0.12.0. It has eight
+parts.
+
+- **Guard fixes.** `architecture-guard.py` is the default hook that checks Angular and Tailwind
+  edits before they are written. It now judges the whole file once per call, using the **post-edit
+  view**: the text the file will hold after the Write, Edit or MultiEdit. Before, a rule that
+  needs the whole file (the height chain, and the inline `template:` and `styles:` checks) saw
+  only the edited fragment. Other fixes:
+  - a template reference variable such as `<input #add>` is no longer read as the colour `#add`;
+  - the guard finds `.app-rules.json` under whatever folder holds the apps, not only `projects`;
+  - the guard recognises Angular 20 file names: a `.html`, `.scss`, `.css` or `.ts` file counts as
+    a component file when its `.ts` sibling holds `@Component(`;
+  - no code path in the guard builds a path into your home folder;
+  - the `promote-ui-rule` skill runs the guard through a lookup block, and the "Enforced by"
+    lines of the rule documents that these fixes made false are corrected.
+- **Known limits.** Some gaps are accepted, listed in a "Known limits" block in the guard's
+  docstring, and each is pinned by a test. Two edits that together form `text-gray-500` pass,
+  because each edit is judged on its own new text. An edit that completes a violation already on
+  disk passes. Stylesheet rules only warn. `relative` and `absolute` are never checked. A
+  3- or 6-character token with no digit, such as `  #fff` alone after whitespace, is read as a
+  template reference variable. A file with no recognised name is scanned only when its `.ts`
+  sibling already holds `@Component(`.
+- **Removed switches.** No add-on has a kill switch now. `CLAUDE_SKIP_CG` (codegraph) and
+  `CLAUDE_BASH_GATE` (strict-shell-gate) are no longer read, and neither shipped `addon.json`
+  declares `kill_switches`. The install plan still lists `kill-switches`, as an empty list.
+  **`CLAUDE_CONCEPT_GATE=off` no longer turns off the strict-shell-gate add-on.** It still turns
+  off the concept gate and the Changed-file check, which are default hooks.
+- **Ways out (the K-4 routes).** The uninstall skill is the normal way out of an add-on. When a
+  hook cannot run, remove its row from `.claude/settings.json` by hand. The table under "Ways out
+  when a hook cannot run" gives the route for each hook. The codegraph block message is now plain
+  text that names `/auto-improve-codegraph-uninstall`. The uninstall skills no longer say "never
+  edit `settings.json` by hand"; they say the skill never does, and that you do only when a hook
+  cannot run.
+- **Three lines of your global `~/.claude/CLAUDE.md` that only you can change.** The plugin
+  never edits that file. Three lines are now false or only partly true:
+  - the CodeGraph bypass "set `CLAUDE_SKIP_CG=1`", which does nothing now;
+  - "Disable the gate entirely: `CLAUDE_CONCEPT_GATE=off`", which no longer covers the shell gate;
+  - the claim that the gate "auto-bypasses until the index exists", which the hook does not do.
+    With no `mcp__codegraph__*` tool in the session, every source Read is blocked; read through
+    the shell, or uninstall the add-on and start a new session.
+- **Doctor.** `plugin_doctor.py --drift` reports a new kind of finding,
+  `disabled-hook-installed`. A **disabled hook** is one an add-on still ships but no longer
+  installs (the advisor is one). The doctor reports its file in `.claude/hooks/`, and its row in
+  `.claude/settings.json` or `.claude/settings.local.json`, under the current name or a former
+  name. It also compares add-on **documents** in pairs: the project copy under
+  `.claude/references/<add-on>/` against the plugin's copy under
+  `.claude/addons/<add-on>/documents/`. A pair is `content-differs` or `one-sided`. `--drift`
+  never writes. The doctor does not read the user-level settings layer, so a disabled hook row
+  there is refused by the install but not reported by the doctor.
+- **Removed preload.** `python-ai-developer` no longer preloads a skill that was never shipped.
+  A new test checks that every skill named in an agent's `skills:` list exists under `skills/`.
+- **Patterns.** `UI-UX-PATTERNS.md` ships one new plugin pattern, **P-002, Table column
+  alignment**: numeric columns and their headers right-aligned, text columns left-aligned. It is
+  not enforced by the guard. Three candidates were rejected and are listed under "Patterns this
+  plugin does not ship": the status badge and the card surface (product data and product look),
+  and the constrained panel (a project class name; `T-014` already bounds height).
+  The advisor's `DISABLED.md` now names both defects to fix before turning it back on: the dead
+  `ui` keyword, and a fallback that reads the home folder.
+- **Rules route trial.** `.claude/references/claude-rules-route-trial.md` records a live try of
+  a `.claude/rules/` file with a `paths:` filter, on Claude Code 2.1.316. It did not load at
+  session start. It loaded once the session opened a matching file, and again inside a subagent
+  that opened one. So it gives no guidance before a matching file is read. The trial was three
+  headless runs only.
+- **Registry promotions.** `VOCABULARY.md` gains Add-on, Add-on manifest, Add-on document,
+  Disabled add-on hook, Rule ID, Post-edit view and Accepted guard limit, plus amendments to
+  Placeholder slot and Vendored-asset drift. `MECHANISMS.md` gains Disabled add-on hook and an
+  amendment to CodeGraph that replaces its bypass clause. Existing entries are not edited.
 
 ### Retired hooks, and how to restore one
 
@@ -338,7 +410,26 @@ delete a hook file by hand before its row is gone: a row that points at a missin
 with code 2 and blocks every prompt. It deletes a file only when it is identical to the plugin's
 copy (line endings and a leading byte order mark ignored) or matches a copy an earlier release
 shipped; an edited file is kept and reported. Helper files and the stylesheet snippet are never
-deleted. A second run finds nothing to do. Removing an add-on does not touch its kill switches.
+deleted. A second run finds nothing to do. The skill never edits `settings.json` by hand; only when a
+hook cannot run, as in the table below, do you remove its row by hand.
+
+#### Ways out when a hook cannot run
+
+In normal operation the uninstall skill is the way out. When an add-on's hook cannot run, its row
+has to come out of `.claude/settings.json` by hand. Which route works depends on which hook fails:
+
+| Failure | What you see | Route |
+|---|---|---|
+| `bash-gate.py` cannot import its parser | the hook's own message, which names `_shell_write_targets.py` | remove the row with the Edit tool. `bash-gate.py` judges only Bash, and the concept gate allows `.claude/` files |
+| `bash-gate.py` is missing | Python's own error, exit 2, on every Bash call | the same Edit-tool route |
+| `codegraph-first-guard.py` is missing | Python's error on every Read, Grep and Glob, including the read of `settings.json` that Edit needs first | edit the row through the shell, or edit the file outside the session |
+| `codegraph-turn-reset.py` is missing | Python's error on `UserPromptSubmit`, so every prompt is blocked | edit `.claude/settings.json` outside the session, in an editor |
+| `codegraph-turn-tracker.py` is missing | an error after each CodeGraph call; the marker is never set, so reads stay blocked | as for a missing `codegraph-first-guard.py` |
+
+A session with no `mcp__codegraph__*` tool is not a failure of the hook, but every source Read
+is blocked, because the guard never checks for an index. Reading through the shell works, as does
+running `/auto-improve-codegraph-uninstall` and then starting a new session. If the CodeGraph index
+is stale, run `codegraph sync` or `codegraph init -i`.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
 `post-edit-dispatcher.py` rather than as four separate hook entries.

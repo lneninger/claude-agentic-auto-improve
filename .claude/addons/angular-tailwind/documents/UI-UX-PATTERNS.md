@@ -2,7 +2,7 @@
 
 This is a rule document of the `angular-tailwind` add-on of the agentic-auto-improve plugin. The install skill copied it into your project. Do not edit it. The plugin replaces it when you update the add-on.
 
-**What it holds, and what it does not.** This document holds the generic patterns that need markup: the loading, error and empty states of a view (`A-025`), and the error banner (`P-001`). It does not hold the Angular code rules; those are in `ANGULAR_CODE_RULES.md`. It does not hold the rules for Angular Material components; those are in `ANGULAR_MATERIAL_RULES.md`. It does not hold the rules for Tailwind CSS and styling, or the scroll container pattern; those are in `TAILWINDCSS_RULES.md`. Its name differs from a project's own design document on purpose, so the two never collide.
+**What it holds, and what it does not.** This document holds the generic patterns that need markup: the loading, error and empty states of a view (`A-025`), the error banner (`P-001`), and the table column alignment (`P-002`). It does not hold the Angular code rules; those are in `ANGULAR_CODE_RULES.md`. It does not hold the rules for Angular Material components; those are in `ANGULAR_MATERIAL_RULES.md`. It does not hold the rules for Tailwind CSS and styling, or the scroll container pattern; those are in `TAILWINDCSS_RULES.md`. Its name differs from a project's own design document on purpose, so the two never collide.
 
 **Which rule wins.** The project's own instructions win over every rule document. A document the project wrote and lists in `review.documents` wins over this plugin document where they disagree. For what it checks, the guard's verdict is final.
 
@@ -71,3 +71,37 @@ An error that affects a whole page, or a whole section, shows as a banner at the
   <button mat-button (click)="dismiss()">Dismiss</button>
 </div>
 ```
+
+### P-002 — Table column alignment
+
+In a table, numeric columns and their headers are right-aligned, and text columns are left-aligned. Each header aligns the same way as the cells below it. Right-aligned numbers put the digits in line, so a reader can compare them by size. The `font-mono tabular-nums` rule in `TAILWINDCSS_RULES.md` sets the digit width; this rule sets the side.
+
+- Enforced by: not enforced.
+- Example:
+
+```html
+<table class="w-full">
+  <thead>
+    <tr>
+      <th class="text-left">Name</th>
+      <th class="text-right">Amount</th>
+    </tr>
+  </thead>
+  <tbody>
+    @for (row of rows(); track row.id) {
+      <tr>
+        <td class="text-left">{{ row.name }}</td>
+        <td class="text-right font-mono tabular-nums">{{ row.amount }}</td>
+      </tr>
+    }
+  </tbody>
+</table>
+```
+
+## Patterns this plugin does not ship
+
+These candidates were considered and rejected. A project that wants one writes its own.
+
+- **Status badge**: its states and colours are product data, and the `agentic-auto-improve:application-design` skill has an advisory one.
+- **Card surface**: it is the product's look and feel.
+- **Constrained panel**: it is a project class name; `T-014` and the scroll container already bound height.

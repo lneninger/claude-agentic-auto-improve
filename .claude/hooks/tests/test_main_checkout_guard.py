@@ -886,9 +886,10 @@ class OffSwitchTests(GuardTestCase):
         ])
 
     def test_a_bash_gate_switch_the_default_shell_row_never_reads_does_not_unblock_a_main_commit(self):
-        # The default shell row launches concept-gate.py, which does not read CLAUDE_BASH_GATE (that switch
-        # belongs to the strict add-on's bash-gate.py). So this row proves only that setting it has no effect
-        # on the launcher or the guard; the BLOCK row keeps it able to fail if the switch ever reached them.
+        # The default shell row launches concept-gate.py, which does not read CLAUDE_BASH_GATE. The strict
+        # add-on's bash-gate.py no longer reads it either (K-1 to K-3 removed the switch). So this row proves
+        # only that setting it has no effect on the launcher or the guard; the BLOCK row keeps it able to fail
+        # if the variable ever reached them.
         env = {"CLAUDE_BASH_GATE": "off"}
         self.run_cases([
             sh("git commit in main with CLAUDE_BASH_GATE=off", "Bash", "git commit -m x", FX.main, FX.main, "block", extra_env=env),
