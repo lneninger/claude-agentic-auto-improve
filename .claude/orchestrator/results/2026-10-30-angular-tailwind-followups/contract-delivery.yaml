@@ -1,0 +1,23 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/144
+number: 144
+head_ref: feature/86-angular-tailwind-followups
+base_ref: master
+base_is_default: true
+commit: 7d7d214ace206d37e7358ed18669680027bb0cb5
+merged_at: '2026-11-01T00:17:54Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-01T00:36:05.449236+00:00'
+blocks_recorded: []
+blocks_already_recorded:
+- t1-guard-post-edit-view-and-matching-precision
+- t2-guard-paths-and-file-recognition
+- t3-remove-the-add-on-kill-switches
+- t4-advisor-keyword-note
+- t5-doctor-drift-and-agent-preload
+- t6-candidate-patterns
+- t7-rules-route-trial
+- t8-registry-appends
+- t9-release-notes
+- t10-review
