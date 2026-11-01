@@ -51,7 +51,7 @@ Not applicable. Reason: the scan is read-only. It persists nothing and owns no a
 
 | Name | Fields | Used as |
 |------|--------|---------|
-| Launched path | `raw`: string, the token as written in the row, quotes stripped.<br>`role`: enum `launched` \| `launcher-body` \| `gate-argument`. | The paths one row depends on.<br>`launched` is the token the existing reader `_launched_and_first_argument` selects. In exec form that is the first `args` element not starting with `-`; in shell form it is the first token after the command that ends in `.py`.<br>When the launched file name is `gate-launch.py`, the row has two more paths. `launcher-body` is `_gate_launch.py` in the same folder as the launched token, written `<folder of raw>/_gate_launch.py`. `gate-argument` is the token after the launched one.<br>Only `.py` paths, in any case, are checked. |
+| Launched path | `raw`: string, the token as written in the row, quotes stripped.<br>`role`: enum `launched` \| `launcher-body` \| `gate-argument`. | The paths one row depends on.<br>`launched` is the token the existing reader `_launched_and_first_argument` selects. In exec form that is the first `args` element not starting with `-`; in shell form it is the first token after the command that ends in `.py`.<br>When the launched file name is `gate-launch.py`, the row has two more paths. `launcher-body` is `_gate_launch.py` in the same folder as the launched token, written `<folder of raw>/_gate_launch.py`. `gate-argument` is the token after the launched one.<br>Only `.py` paths, in any case, are checked.<br>Rows are checked only when they plainly launch a Python script through a bare Python interpreter with simple flags, in both shell and exec form; all other shapes are skipped. The accepted cost is missed findings. |
 | Resolved hook path | `absolute` (a path) or `unresolvable` | The Launched path made absolute, by the first rule that applies:<br>1. A leading `${CLAUDE_PROJECT_DIR}`, `$CLAUDE_PROJECT_DIR` or `%CLAUDE_PROJECT_DIR%` is replaced by the project root.<br>2. Any other relative path is joined to the project root.<br>3. An absolute path is used as is.<br>4. Anything else is `unresolvable`, and is skipped: `${CLAUDE_PLUGIN_ROOT}`, any other `$` or `%` variable, or a leading `~`.<br>Backslashes are folded to forward slashes first. |
 | Dangling hook row finding | `kind` = `dangling-hook-row`<br>`path` = `<layer>:<event>:<matcher>:<role>:<raw>`<br>`owner` = `plugin`<br>`remedy` = the fixed text "restore the file if the plugin still ships it, otherwise remove the row" | One finding in the existing `DriftFinding` shape, plus `remedy`.<br>`layer` is `settings.json` or `settings.local.json`. `matcher` is the group's matcher, or `*` when it has none or an empty one.<br>`raw` is everything after the fourth colon, so a Windows drive colon inside `raw` stays readable.<br>Example: `settings.json:UserPromptSubmit:*:launched:${CLAUDE_PROJECT_DIR}/.claude/hooks/plain-language-guard.py`.<br>In the `--json` output, `remedy` is a key on findings of this kind only; every other kind keeps its exact shape. In the text output, the remedy is printed after each such finding. |
 
@@ -145,6 +145,7 @@ Not applicable. Reason: the contract adds no REST endpoint and no SignalR event.
 - The user settings layer.
 - Any change to `auto_improve_finish_install.py`, including its readiness report.
 - Rows that launch a program other than a `.py` file. Also a shell-form row whose command is the `.py` file itself, with no interpreter in front: `_launch_tokens` drops `tokens[0]`, and the installer never writes this form.
+- Rows of any shape other than a bare Python interpreter with simple flags launching a `.py` script (shell or exec form): they are skipped, and the accepted cost is missed findings.
 - Splitting a finding path whose matcher contains a colon. The path is text for the operator to read, not a format for other tools to parse.
 
 ---
@@ -348,3 +349,7 @@ PRIOR_FINDINGS:
 - [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
 - [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
 - [ ] `Status` flipped to `implemented`
+
+---
+
+Amendment 2026-11-01: whitelist, per review passes 4-6. Rows are checked only when they plainly launch a Python script through a bare Python interpreter with simple flags (shell and exec form); paths with unresolvable characters or shell syntax are skipped; all other shapes are skipped.

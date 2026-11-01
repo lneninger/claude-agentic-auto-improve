@@ -417,22 +417,27 @@ def _launch_tokens(entry: dict) -> List[str]:
     command = entry.get("command")
     if not isinstance(command, str):
         return []
-    # Quote-aware words: a quoted span stays inside its word even when text follows the closing quote.
-    raw_tokens = re.findall(r"""(?:"[^"]*"|'[^']*'|[^\s"'])+""", command)
-    merged: List[str] = []
-    index = 0
-    while index < len(raw_tokens):
-        token = raw_tokens[index]
-        # A word ending in a backslash before whitespace is an escaped space: fuse the next word into it and
-        # mark it with "$" so the path resolver treats it as unresolvable (backslashes are also separators).
-        if token.endswith("\\") and index + 1 < len(raw_tokens):
-            token = token + "$ " + raw_tokens[index + 1]
-            index += 1
-        merged.append(token)
-        index += 1
-    # Strip only the quotes that wrap a span; an apostrophe inside a double-quoted span is kept.
-    span = re.compile(r"\"([^\"]*)\"|'([^']*)'")
-    return [span.sub(lambda m: m.group(1) if m.group(1) is not None else m.group(2), t) for t in merged[1:]]
+    return [_unquote(word) for word in _shell_words(command)[1:]]
+
+
+# The ONE shell word-splitter: a quoted span stays inside its word even when text follows the closing quote.
+_SHELL_WORD = re.compile(r"""(?:"[^"]*"|'[^']*'|[^\s"'])+""")
+_QUOTED_SPAN = re.compile(r"\"[^\"]*\"|'[^']*'")
+# Characters that make a path unresolvable (INV-3): variables, command substitution, home, NUL ...
+_PATH_UNRESOLVABLE = re.compile("[$%`~\x00]")
+# ... and shell syntax that is not a literal path when it sits outside quotes (glob, redirect, separators).
+_PATH_SHELL_SYNTAX = re.compile(r"[*?\[<>;&|]")
+_PYTHON_INTERPRETER = re.compile(r"python\d?(\.\d+)?|py|pythonw")
+_SIMPLE_PYTHON_FLAG = re.compile(r"-(3(\.\d+)?|2|B|u|E|I|s|S|O|OO)")
+
+
+def _shell_words(command: str) -> List[str]:
+    return _SHELL_WORD.findall(command)
+
+
+def _unquote(word: str) -> str:
+    """Strip only the quotes that wrap a span; an apostrophe inside a double-quoted span is kept."""
+    return _QUOTED_SPAN.sub(lambda m: m.group(0)[1:-1], word)
 
 
 def _launched_raw_tokens(entry: dict) -> Tuple[Optional[str], Optional[str]]:
@@ -476,7 +481,7 @@ def _dispatcher_members(path: Path) -> Optional[List[str]]:
     imported). ``None`` when the module declares no ``CHECKS``; ``DriftError`` when it cannot be read."""
     try:
         source = path.read_text(encoding="utf-8-sig")
-    except OSError:
+    except (OSError, ValueError):  # ValueError: a NUL character in the file name
         return None
     declares = re.search(r"^\s*CHECKS\s*[:=]", source, re.MULTILINE) is not None
     if not declares:
@@ -532,14 +537,48 @@ def _resolve_hook_path(raw: str, project: Path) -> Optional[Path]:
             if text and not text.startswith("/"):
                 return None
             text = text.lstrip("/")
-            return None if ("$" in text or "%" in text) else project / text
-    if "$" in text or "%" in text or text.startswith("~"):
+            return None if _PATH_UNRESOLVABLE.search(text) else project / text
+    if _PATH_UNRESOLVABLE.search(text):
         return None
     if os.name == "nt" and re.match(r"^/[A-Za-z]/", text):
         return None  # a Git Bash drive path (/c/...) is not resolvable by the doctor
     if text.startswith("/") or re.match(r"^[A-Za-z]:/", text):
         return Path(text)
     return project / text
+
+
+def _row_skipped(entry: dict) -> bool:
+    """True for a row the doctor does not check. Only a row that plainly launches a Python script through a
+    bare interpreter (python, python2, python3, python3.N, py, pythonw; ``.exe`` optional) with only simple
+    flags is checked, in shell form (no line break outside quotes) and in exec form (``command`` + ``args``)."""
+    command = entry.get("command")
+    if not isinstance(command, str):
+        return True
+    args = entry.get("args")
+    shell = not isinstance(args, list)
+    if shell:
+        if re.search(r"[\r\n]", _QUOTED_SPAN.sub("", command)):
+            return True
+        words = _shell_words(command)
+        if not words:
+            return True
+        interpreter, rest = words[0], words[1:]
+    else:
+        interpreter, rest = re.split(r"[\\/]", command)[-1], [a for a in args if isinstance(a, str)]
+    if not _PYTHON_INTERPRETER.fullmatch(re.sub(r"(?i)\.exe$", "", interpreter).lower()):
+        return True
+    for index, word in enumerate(rest):
+        if _SIMPLE_PYTHON_FLAG.fullmatch(word):
+            continue
+        script = _unquote(word) if shell else word
+        if not script.lower().endswith(".py"):
+            return True
+        if not shell:
+            return False
+        # Shell syntax outside quotes in the script word, or in the gate argument of a gate-launch row.
+        gate_argument = rest[index + 1] if posixpath.basename(_rel(script)) == GATE_LAUNCHER and index + 1 < len(rest) else ""
+        return any(_PATH_SHELL_SYNTAX.search(_QUOTED_SPAN.sub("", w)) for w in (word, gate_argument))
+    return True
 
 
 def dangling_hook_rows(project: Path) -> List[DriftFinding]:
@@ -560,7 +599,7 @@ def dangling_hook_rows(project: Path) -> List[DriftFinding]:
             continue
         for event, matcher, entry in _iter_rows(body):
             launched, following = _launched_raw_tokens(entry)
-            if launched is None:
+            if launched is None or _row_skipped(entry):
                 continue
             is_gate_launcher = posixpath.basename(_rel(launched)) == GATE_LAUNCHER
             checks = [("launched", launched)]
@@ -575,7 +614,7 @@ def dangling_hook_rows(project: Path) -> List[DriftFinding]:
                     continue
                 try:
                     exists = resolved.is_file()
-                except OSError:
+                except (OSError, ValueError):
                     continue  # cannot check this path: skip the row rather than guess
                 if exists:
                     launcher_exists = launcher_exists or role == "launched"
@@ -587,7 +626,7 @@ def dangling_hook_rows(project: Path) -> List[DriftFinding]:
                 resolved = _resolve_hook_path(body_raw, project)
                 try:
                     body_missing = resolved is not None and not resolved.is_file()
-                except OSError:
+                except (OSError, ValueError):
                     body_missing = False
                 if body_missing:
                     add(layer, event, matcher, "launcher-body", body_raw)

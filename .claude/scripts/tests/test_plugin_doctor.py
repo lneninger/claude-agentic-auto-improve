@@ -1982,6 +1982,267 @@ class TestDriftDanglingHookRow(DanglingCase):
         self.assertEqual(out.returncode, 4, "the comparison reports the parse error")
         self.assertEqual(len(_dang(data or {})), 1, "INV-8: the readable layer is still scanned; out=%r" % out.stdout[-300:])
 
+    # ---- third review round: anything before the launched word can change where it runs (INV-2, INV-3)
+    def _no_finding_for(self, commands, why):
+        """Each command launches g.py, which exists under the project's .claude/hooks; none may be reported."""
+        _dangling_function(self)
+        self.w.project_put(".claude/hooks/g.py", "# g\n")
+        for i, command in enumerate(commands):
+            self.add_row("PreToolUse", {"type": "command", "command": command}, matcher="m%d" % i)
+        rc, data = self.drift()
+        self.assertDangling(data, [], why + " -- findings: " + json.dumps(_findings(data))[:600])
+
+    def test_a_cd_into_the_hooks_folder_before_a_bare_script_name_is_no_finding(self):
+        self._no_finding_for(['cd "$CLAUDE_PROJECT_DIR/.claude/hooks" && python g.py'],
+                             "INV-2: cd moves the working folder, so the bare name is not under the project root")
+
+    def test_a_cd_with_a_semicolon_before_a_bare_script_name_is_no_finding(self):
+        self._no_finding_for(["cd .claude/hooks; python g.py"], "INV-2: a cd before the launched word")
+
+    def test_pushd_and_set_location_before_a_bare_script_name_are_no_finding(self):
+        self._no_finding_for(["pushd .claude\\hooks && python g.py", "Set-Location .claude/hooks; python g.py"],
+                             "INV-2: pushd and Set-Location also move the working folder")
+
+    def test_a_separator_before_the_launched_word_is_no_finding(self):
+        self._no_finding_for(["A=1 || python g.py", "echo hi | python g.py", "echo hi & python g.py"],
+                             "INV-2: the launched word follows a separator, so earlier words may change where it runs")
+
+    def test_a_nested_shell_command_string_is_no_finding(self):
+        self._no_finding_for(["bash -c 'python .claude/hooks/g.py'", 'cmd /c "py .claude\\hooks\\g.py"',
+                              'cmd /k "py .claude\\hooks\\g.py"',
+                              'powershell -Command "python .claude/hooks/g.py"',
+                              'pwsh -command "python .claude/hooks/g.py"'],
+                             "INV-3: a word after -c, /c, /k, -Command or -command is a nested shell string, not resolvable")
+
+    def test_a_cd_to_the_project_root_before_a_deleted_script_is_also_skipped(self):
+        """Pins the accepted cost: any row with a word before the launched word is skipped, so even this deleted
+        script (`cd` to the project root, then a path that does not exist) gives no finding. The doctor does not
+        try to evaluate what the earlier word does; a missed true positive is preferred to a false positive."""
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command",
+                                    "command": 'cd "$CLAUDE_PROJECT_DIR" && python .claude/hooks/missing.py'})
+        rc, data = self.drift()
+        self.assertDangling(data, [], "accepted cost: INV-3 skip wins over reporting a true positive")
+
+    # ---- regression guards: these pass today and must keep passing
+    def test_guard_a_quoted_path_with_a_space_that_is_deleted_is_still_one_finding(self):
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command", "command": 'python "my hooks/x.py"'})
+        rc, data = self.drift()
+        self.assertEqual(len(_dang(data)), 1, "guard: findings " + json.dumps(_findings(data))[:500])
+
+    def test_guard_a_project_variable_path_that_is_deleted_is_still_one_finding(self):
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command", "command": "python ${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"})
+        rc, data = self.drift()
+        self.assertEqual(len(_dang(data)), 1, "guard: findings " + json.dumps(_findings(data))[:500])
+
+    def test_guard_a_separator_after_the_launched_word_still_checks_the_script(self):
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command", "command": "python .claude/hooks/x.py 2>/dev/null || true"})
+        rc, data = self.drift()
+        found = _dang(data)
+        self.assertEqual(len(found), 1, "guard: findings " + json.dumps(_findings(data))[:500])
+        self.assertTrue(found[0]["path"].endswith("x.py"), "the launched script is the one checked: %r" % found[0]["path"])
+
+    # ---- fourth review round: the shell-form rule is a whitelist (INV-2, INV-3)
+    def _whitelist_no_finding(self, commands, why):
+        """x.py exists under the project's .claude/hooks. Each command is its own row (matcher w<i>) and its own
+        subTest, so one wrongly reported row does not hide the others."""
+        _dangling_function(self)
+        self.w.project_put(".claude/hooks/x.py", "# x\n")
+        for i, command in enumerate(commands):
+            self.add_row("PreToolUse", {"type": "command", "command": command}, matcher="w%d" % i)
+        rc, data = self.drift()
+        found = _dang(data)
+        for i, command in enumerate(commands):
+            with self.subTest(command=command):
+                mine = [f["path"] for f in found if ":PreToolUse:w%d:" % i in f["path"]]
+                self.assertEqual(mine, [], why + " -- reported: %r" % mine)
+
+    def test_c1_a_nested_shell_with_a_non_python_first_word_is_no_finding(self):
+        self._whitelist_no_finding([
+            'bash -lc "python3 .claude/hooks/x.py"',
+            'sh -ec "python3 .claude/hooks/x.py"',
+            'cmd /C "python .claude\\hooks\\x.py"',
+            'cmd.exe /d /C "python .claude\\hooks\\x.py"',
+            'powershell -C "python .claude/hooks/x.py"',
+        ], "whitelist: the first word is not a python interpreter, so the row is skipped")
+
+    def test_c2_a_multi_line_command_is_no_finding(self):
+        self._whitelist_no_finding([
+            "export A=1\ncd .claude/hooks\npython x.py",
+            "set -e\ncd .claude/hooks\npython x.py",
+        ], "whitelist: a newline outside quotes means earlier lines may change the working folder")
+
+    def test_c3_a_launcher_that_sets_the_working_folder_is_no_finding(self):
+        self._whitelist_no_finding([
+            "uv run --directory .claude/hooks x.py",
+            "uv --directory .claude/hooks run x.py",
+            "env -C .claude/hooks python x.py",
+            "env --chdir=.claude/hooks python x.py",
+            "Start-Process python -WorkingDirectory .claude/hooks -ArgumentList x.py",
+            "docker run -w /w python x.py",
+        ], "whitelist: the first word is not a python interpreter, so the row is skipped")
+
+    def test_w1_an_env_prefix_before_the_interpreter_is_no_finding(self):
+        self._whitelist_no_finding(["A=1 PYTHONSTARTUP=s.py python .claude/hooks/x.py"],
+                                   "whitelist: an env assignment is not a python word, so the row is skipped")
+
+    def _whitelist_one_finding(self, commands, why):
+        """x.py is deleted; each command must give exactly one finding (its own row and subTest)."""
+        _dangling_function(self)
+        for i, command in enumerate(commands):
+            self.add_row("PreToolUse", {"type": "command", "command": command}, matcher="w%d" % i)
+        rc, data = self.drift()
+        found = _dang(data)
+        for i, command in enumerate(commands):
+            with self.subTest(command=command):
+                mine = [f["path"] for f in found if ":PreToolUse:w%d:" % i in f["path"]]
+                self.assertEqual(len(mine), 1, why + " -- reported: %r" % mine)
+
+    def test_guard_whitelisted_shell_forms_that_are_deleted_are_each_one_finding(self):
+        self._whitelist_one_finding([
+            'python "my hooks/x.py"',
+            "python ${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py",
+            'python3 "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py',
+            'py -3 "%CLAUDE_PROJECT_DIR%"\\.claude\\hooks\\x.py',
+            "python -B -u .claude/hooks/x.py",
+            "PYTHON3.EXE .claude/hooks/x.py",
+        ], "guard: an allowed interpreter and simple flags keep the row checked")
+
+    def test_guard_a_gate_launcher_shell_row_with_the_gate_missing_is_one_gate_argument_finding(self):
+        _dangling_function(self)
+        self.gate_files(gate=False)
+        self.add_row("PreToolUse", {"type": "command",
+                                    "command": "python ${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py concept-gate.py"})
+        rc, data = self.drift()
+        found = _dang(data)
+        self.assertEqual(len(found), 1, "guard: findings " + json.dumps(_findings(data))[:500])
+        self.assertIn(":gate-argument:", found[0]["path"], "the missing gate is named by its role")
+
+    # ---- fifth review round: the whitelist also applies to exec form, backticks, metacharacters, NUL
+    def _rows_no_finding(self, rows, why):
+        """x.py and the gate files exist. Each row (a dict) is its own matcher r<i> and its own subTest."""
+        _dangling_function(self)
+        self.w.project_put(".claude/hooks/x.py", "# x\n")
+        self.gate_files()
+        for i, row in enumerate(rows):
+            self.add_row("PreToolUse", dict(row, type="command"), matcher="r%d" % i)
+        rc, data = self.drift()
+        found = _dang(data)
+        for i, row in enumerate(rows):
+            with self.subTest(row=json.dumps(row)):
+                mine = [f["path"] for f in found if ":PreToolUse:r%d:" % i in f["path"]]
+                self.assertEqual(mine, [], why + " -- reported: %r" % mine)
+
+    def _rows_one_finding(self, rows, why):
+        """Nothing exists. Each row is its own matcher r<i> and its own subTest and gives exactly one finding."""
+        _dangling_function(self)
+        for i, row in enumerate(rows):
+            self.add_row("PreToolUse", dict(row, type="command"), matcher="r%d" % i)
+        rc, data = self.drift()
+        found = _dang(data)
+        for i, row in enumerate(rows):
+            with self.subTest(row=json.dumps(row)):
+                mine = [f["path"] for f in found if ":PreToolUse:r%d:" % i in f["path"]]
+                self.assertEqual(len(mine), 1, why + " -- reported: %r" % mine)
+
+    def test_c1_exec_form_with_a_non_python_command_is_no_finding(self):
+        self._rows_no_finding([
+            {"command": "bash", "args": ["-lc", "python3 .claude/hooks/x.py"]},
+            {"command": "powershell", "args": ["-NoProfile", "-Command", "py -3 .claude/hooks/x.py"]},
+            {"command": "cmd", "args": ["/C", "python .claude\\hooks\\x.py"]},
+            {"command": "uv", "args": ["run", "x.py"]},
+            {"command": "uv", "args": ["run", ".claude/hooks/x.py"]},
+            {"command": "C:\\Tools\\BASH.EXE", "args": ["-c", "python3 .claude/hooks/x.py"]},
+        ], "whitelist: the exec-form command is not a python interpreter, so the row is skipped")
+
+    def test_c1_exec_form_with_a_python_command_and_a_non_simple_flag_is_no_finding(self):
+        self._rows_no_finding([
+            {"command": "python3", "args": ["-m", "pytest", ".claude/hooks/x.py"]},
+            {"command": "python", "args": ["-c", "import x", ".claude/hooks/x.py"]},
+            {"command": "python", "args": ["-X", "utf8", ".claude/hooks/x.py"]},
+        ], "whitelist: only -3, -3.N, -2, -B, -u, -E, -I, -s, -S, -O, -OO may precede the script")
+
+    def test_guard_exec_form_rows_with_an_allowed_interpreter_and_simple_flags_that_are_deleted_are_each_one_finding(self):
+        self._rows_one_finding([
+            {"command": "python3", "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]},
+            {"command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]},
+            {"command": "python", "args": ["-B", "-u", "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]},
+            {"command": "PYTHON3.EXE", "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]},
+            {"command": "python3.12", "args": ["-3.12", "-OO", "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]},
+            {"command": "pythonw", "args": ["-E", "-s", "-S", "-I", "-O", "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]},
+            {"command": "python2", "args": ["-2", "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.py"]},
+        ], "guard: an allowed interpreter with simple flags keeps the exec-form row checked")
+
+    def test_guard_the_installer_written_gate_launch_row_gives_one_finding_per_missing_file(self):
+        cases = ((False, True, True, "launched"), (True, False, True, "launcher-body"), (True, True, False, "gate-argument"))
+        for launcher, body, gate, role in cases:
+            with self.subTest(role=role):
+                for name in ("gate-launch.py", "_gate_launch.py", "concept-gate.py"):
+                    (self.w.project / ".claude" / "hooks" / name).unlink(missing_ok=True)
+                self.gate_files(launcher=launcher, body=body, gate=gate)
+                self.w.project_settings.get("hooks", {}).clear()
+                self.add_row("PreToolUse", self.gate_row())
+                rc, data = self.drift()
+                self.assertEqual([f["path"].split(":", 4)[3] for f in _dang(data)], [role],
+                                 "guard: findings " + json.dumps(_findings(data))[:500])
+
+    def test_c2_a_backtick_command_substitution_in_a_path_is_never_reported(self):
+        self._rows_no_finding([
+            {"command": 'python3 "`git rev-parse --show-toplevel`/.claude/hooks/x.py"'},
+            {"command": 'python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py '
+                        '"`pwd`/.claude/hooks/concept-gate.py"'},
+            {"command": 'python3 `pwd`/.claude/hooks/x.py'},
+        ], "INV-3: a backtick substitution cannot be resolved (launched and gate-argument positions)")
+
+    def test_m1_shell_metacharacters_in_a_path_are_never_reported(self):
+        self._rows_no_finding([
+            {"command": "python3 .claude/hooks/x*.py"},
+            {"command": "python3 .claude/hooks/[x].py"},
+            {"command": "python3 <.claude/hooks/x.py"},
+            {"command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py concept-gate.py;x.py"},
+            {"command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py <.claude/hooks/concept-gate.py"},
+        ], "INV-3: a glob, a bracket or a redirection is not a literal path, so the row is skipped")
+
+    def test_m4_a_nul_character_in_a_script_path_does_not_crash_and_is_skipped(self):
+        fn = _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command", "command": 'python3 ".claude/hooks/x\u0000.py"'}, matcher="shell")
+        self.add_row("PreToolUse", {"type": "command", "command": "python3", "args": [".claude/hooks/y\u0000.py"]},
+                     matcher="exec")
+        self.add_row("PreToolUse", {"type": "command", "command": "python3",
+                                    "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py", "c\u0000.py"]},
+                     matcher="gate")
+        self.w.write_all()
+        try:
+            found = list(fn(self.w.project))
+        except Exception as exc:  # noqa: BLE001 - any exception is the defect under test
+            self.fail("dangling_hook_rows crashed with %r on a NUL in a path instead of skipping the row" % exc)
+        self.assertEqual([f.path for f in found if "NUL" in f.path or "\u0000" in f.path], [],
+                         "the NUL rows are skipped, not reported")
+        rc, out, err, data = self.w.run()
+        self.assertNotIn("Traceback", err, "--drift must not print a traceback; stderr=%r" % err[-400:])
+        self.assertFalse([f for f in _dang(data or {}) if "\u0000" in f["path"]], "no NUL finding in the report")
+
+    def test_m2_quoted_spaces_and_a_quoted_variable_are_read_the_same_by_both_readers(self):
+        """Behavioural guard: the dangling scan and registered-twice tokenise these shell rows identically."""
+        self.w.project_register("PreToolUse", "p1.py", matcher="exec")
+        self.add_row("Stop", {"type": "command", "command": 'python3 "$CLAUDE_PROJECT_DIR"/.claude/hooks/p2.py'},
+                     matcher="shell")
+        self.w.plugin_register("PreToolUse", "p1.py", matcher="p")
+        self.w.plugin_register("Stop", "p2.py", matcher="p")
+        self.add_row("Stop", {"type": "command", "command": 'python3 "my hooks/p3 x.py"'}, matcher="spaces")
+        rc, data = self.drift()
+        twice = sorted(tuple(f["path"].split(":", 1)) for f in _findings(data) if f["kind"] == "registered-twice")
+        self.assertEqual(twice, [("PreToolUse", "p1.py"), ("Stop", "p2.py")],
+                         "fixture: a quoted-variable shell row is a double registration; got "
+                         + json.dumps(_findings(data))[:600])
+        import posixpath
+        names = sorted(posixpath.basename(f["path"].split(":", 4)[4].replace("\\", "/")) for f in _dang(data))
+        self.assertEqual(names, ["p1.py", "p2.py", "p3 x.py"],
+                         "dangling reads the same file names, and keeps the spaces of the quoted path whole")
+
 
 class TestDanglingHookRowsFunction(DanglingCase):
     def test_it_is_public_pure_and_needs_no_plugin(self):

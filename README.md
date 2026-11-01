@@ -940,7 +940,9 @@ plugin copy is compared. It reads the project alone, so it is listed even when t
 cannot run and the run exits `4`. The finding path is
 `<layer>:<event>:<matcher>:<role>:<path as written>`, and its remedy is: restore the file if the
 plugin still ships it, otherwise remove the row. The doctor never edits a settings file. Paths
-that use any variable other than the project folder, or a leading `~`, are never reported.
+that use any variable other than the project folder, or a leading `~`, are never reported. A row
+is checked only when it plainly launches a Python script, in shell form or in exec form alike; all
+other shapes are skipped.
 
 It creates the directories, copies the templates and registries out of the plugin, and
 scaffolds the configuration files. It is safe to re-run: a second pass finds nothing to do.
