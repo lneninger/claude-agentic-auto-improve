@@ -2,72 +2,72 @@ contract: 2026-10-30-angular-tailwind-followups
 started_at: '2026-10-31T14:08:49.828973+00:00'
 sub_tasks:
   t1-guard-post-edit-view-and-matching-precision:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t1-guard-post-edit-view-and-matching-precision
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/127
+    status: pending
+    branch: null
+    pull_request: null
     issue: 117
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-117-t1-guard-post-edit-view-and-matching-precision.md
   t2-guard-paths-and-file-recognition:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t2-guard-paths-and-file-recognition
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/129
+    status: pending
+    branch: null
+    pull_request: null
     issue: 118
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-118-t2-guard-paths-and-file-recognition.md
   t3-remove-the-add-on-kill-switches:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t3-remove-the-add-on-kill-switches
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/131
+    status: pending
+    branch: null
+    pull_request: null
     issue: 119
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-119-t3-remove-the-add-on-kill-switches.md
   t4-advisor-keyword-note:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t4-advisor-keyword-note
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/133
+    status: pending
+    branch: null
+    pull_request: null
     issue: 120
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-120-t4-advisor-keyword-note.md
   t5-doctor-drift-and-agent-preload:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t5-doctor-drift-and-agent-preload
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/135
+    status: pending
+    branch: null
+    pull_request: null
     issue: 121
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-121-t5-doctor-drift-and-agent-preload.md
   t6-candidate-patterns:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t6-candidate-patterns
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/137
+    status: pending
+    branch: null
+    pull_request: null
     issue: 122
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-122-t6-candidate-patterns.md
   t7-rules-route-trial:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t7-rules-route-trial
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/138
+    status: pending
+    branch: null
+    pull_request: null
     issue: 123
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-123-t7-rules-route-trial.md
   t8-registry-appends:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t8-registry-appends
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/139
+    status: pending
+    branch: null
+    pull_request: null
     issue: 124
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-124-t8-registry-appends.md
   t9-release-notes:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t9-release-notes
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/140
+    status: pending
+    branch: null
+    pull_request: null
     issue: 125
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-125-t9-release-notes.md
   t10-review:
-    status: completed
-    branch: task/2026-10-30-angular-tailwind-followups/t10-review
-    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/141
+    status: pending
+    branch: null
+    pull_request: null
     issue: 126
     base: feature/86-angular-tailwind-followups
     brief: .claude/work-items/2026-10-31-126-t10-review.md
