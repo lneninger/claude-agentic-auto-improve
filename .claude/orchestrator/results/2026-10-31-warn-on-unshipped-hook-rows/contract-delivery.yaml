@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/151
+number: 151
+head_ref: feature/71-warn-on-unshipped-hook-rows
+base_ref: master
+base_is_default: true
+commit: ce8d8155d00ac10817e7f3fb3f02785115c169b2
+merged_at: '2026-11-01T11:46:25Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-01T14:28:59.277622+00:00'
+blocks_recorded:
+- t1-dangling-hook-row-check
+blocks_already_recorded: []
