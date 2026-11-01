@@ -853,6 +853,162 @@ class TestDriftRegisteredTwice(DriftCase):
                          "the check must read CHECKS from the source text and never import or run a hook module")
 
 
+# ----------------------------------------------------------------------------------------------
+# Revision 9, block 28 (sections K and N, O): a Project hook launcher row's Effective hook.
+#
+# A launcher row is `py -3 -c <launcher source> <class> <script> [extra arguments]`. Its Effective hook
+# is <script>; when <script> is gate-launch.py it is the gate argument, as for any gate-launch row.
+# The fixtures below are built by the test itself (a stand-in project settings and a stand-in
+# hooks.json), the way the existing registered-twice tests are, and read nothing outside the fixture, so
+# this class runs unchanged when vendored into a repository that has no installed plugin.
+# ----------------------------------------------------------------------------------------------
+
+LAUNCHER_CONSTANT = "PROJECT_HOOK_LAUNCHER_SOURCE"
+#: Used only while the constant does not exist yet, so the rows below fail today for the behaviour they
+#: pin (the Effective hook), not at one lookup. test_the_launcher_source_constant_exists pins the constant.
+_STAND_IN_LAUNCHER_TEXT = ("# agentic-auto-improve project-hook-launch v1\nimport os, sys\n"
+                           "# stand-in text: the real constant does not exist yet\n")
+
+
+def _launcher_text() -> str:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_t28_doctor_project_paths", str(HOOKS_DIR / "_project_paths.py"))
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        return _STAND_IN_LAUNCHER_TEXT
+    value = getattr(module, LAUNCHER_CONSTANT, None)
+    return value if isinstance(value, str) and value.strip() else _STAND_IN_LAUNCHER_TEXT
+
+
+def launcher_row(script: str, hook_class: str = "warn", *extras: str, python3: bool = False) -> dict:
+    args = ["-c", _launcher_text(), hook_class, script, *extras]
+    if python3:
+        return {"type": "command", "command": "python3", "args": args}
+    return {"type": "command", "command": "py", "args": ["-3"] + args}
+
+
+#: The kept repository rows after Revision 16 (section M): (event, matcher, script, class, extras).
+#: 7 block rows, all PreToolUse, and 11 warn rows: 18 in all.
+_EDIT = "Edit|Write|MultiEdit|NotebookEdit"
+REPOSITORY_LAUNCHER_ROWS = [
+    ("PreToolUse", _EDIT, "db-destructive-guard.py", "block", ()),
+    ("PreToolUse", "Bash", "db-destructive-guard.py", "block", ()),
+    ("PreToolUse", "PowerShell", "db-destructive-guard.py", "block", ()),
+    ("PreToolUse", "Bash", "db-research-readonly-guard.py", "block", ()),
+    ("PreToolUse", "PowerShell", "db-research-readonly-guard.py", "block", ()),
+    ("PreToolUse", _EDIT, "angular-pattern-enforcer.py", "block", ()),
+    ("PreToolUse", "Read|Grep|Glob", "codegraph-first-guard.py", "block", ()),
+    ("UserPromptSubmit", ".*", "codegraph-turn-reset.py", "warn", ()),
+    ("UserPromptSubmit", ".*", "plain-language-guard.py", "warn", ("--carry-forward",)),
+    ("PostToolUse", "mcp__codegraph__.*", "codegraph-turn-tracker.py", "warn", ()),
+    ("PostToolUse", _EDIT, "mark-models-dirty.py", "warn", ()),
+    ("PostToolUse", _EDIT, "api-response-check.py", "warn", ()),
+    ("PostToolUse", _EDIT, "migration-reminder.py", "warn", ()),
+    ("PostToolUse", _EDIT, "sentinel-detector.py", "warn", ()),
+    ("PostToolUse", "Agent|Task", "auto-review.py", "warn", ()),
+    ("Stop", None, "regenerate-models-on-stop.py", "warn", ()),
+    ("Stop", None, "plain-language-guard.py", "warn", ()),
+    ("Stop", None, "build-validator.py", "warn", ()),
+]
+
+
+class TestDriftLauncherRows(DriftCase):
+    def launch_register(self, event, script, *, hook_class="warn", matcher="Edit|Write", extras=(), python3=False):
+        row = launcher_row(script, hook_class, *extras, python3=python3)
+        self.w.project_settings.setdefault("hooks", {}).setdefault(event, []).append(
+            {"matcher": matcher, "hooks": [row]})
+
+    def registered_twice(self, data):
+        return sorted(self.path_of(data, "registered-twice"))
+
+    def test_the_launcher_source_constant_exists(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_t28_doctor_exists", str(HOOKS_DIR / "_project_paths.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertIsInstance(getattr(module, LAUNCHER_CONSTANT, None), str,
+                              "_project_paths.py must define the launcher source constant %s (Revision 9, L3); "
+                              "it defines none today" % LAUNCHER_CONSTANT)
+
+    def test_a_launcher_rows_effective_hook_is_its_script(self):
+        for python3 in (False, True):
+            with self.subTest(python3=python3):
+                self.w.project_settings = {"hooks": {}}
+                self.w.plugin_hooks_json = {"hooks": {}}
+                self.launch_register("PreToolUse", "a.py", hook_class="block", python3=python3)
+                self.w.plugin_register("PreToolUse", "a.py")
+                rc, data = self.drift()
+                self.assertEqual(rc, 1, "a hook both sides register is a counted finding")
+                self.assertKinds(data, ["registered-twice"], "the launcher row launches a.py, as the plugin's row does")
+                self.assertEqual(self.registered_twice(data), ["PreToolUse:a.py"],
+                                 "the finding names the SCRIPT, never the launcher's program text")
+
+    def test_a_launcher_row_for_gate_launch_is_compared_by_its_gate_argument(self):
+        for label, gate_arg in (("bare name", "concept-gate.py"),
+                                ("project path", "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py")):
+            with self.subTest(gate_argument=label):
+                self.w.project_settings = {"hooks": {}}
+                self.w.plugin_hooks_json = {"hooks": {}}
+                self.launch_register("PreToolUse", "gate-launch.py", hook_class="block", extras=(gate_arg,))
+                self.w.plugin_register("PreToolUse", "gate-launch.py", gate="concept-gate.py")
+                rc, data = self.drift()
+                self.assertKinds(data, ["registered-twice"], "the same gate through gate-launch.py, registered twice")
+                self.assertEqual(self.registered_twice(data), ["PreToolUse:concept-gate.py"],
+                                 "the finding names the GATE, not gate-launch.py")
+
+    def test_two_launcher_rows_for_different_scripts_are_different_hooks(self):
+        # PASSES TODAY BY DESIGN (vacuously: today no Effective hook is read from a launcher row at all). It
+        # stays as the negative control for the rows above: a launcher row must not match another script.
+        self.launch_register("PreToolUse", "a.py", hook_class="block")
+        self.w.plugin_register("PreToolUse", "b.py")
+        rc, data = self.drift()
+        self.assertKinds(data, [], "a.py and b.py are different hooks")
+
+    def test_the_same_script_on_different_events_is_not_a_double_registration(self):
+        # PASSES TODAY BY DESIGN (see above): the Effective hook is the (event, script) pair.
+        self.launch_register("Stop", "a.py")
+        self.w.plugin_register("PostToolUse", "a.py")
+        rc, data = self.drift()
+        self.assertKinds(data, [], "the Effective hook is the (event, hook file) pair")
+
+    def test_a_launcher_row_for_a_database_guard_is_exempt_like_any_registration_of_it(self):
+        for guard in ("db-destructive-guard.py", "db-research-readonly-guard.py"):
+            self.launch_register("PreToolUse", guard, hook_class="block", matcher="Bash")
+            self.w.plugin_register("PreToolUse", guard, matcher="Bash")
+        self.launch_register("PreToolUse", "a.py", hook_class="block", matcher="Bash")
+        self.w.plugin_register("PreToolUse", "a.py", matcher="Bash")
+        rc, data = self.drift()
+        self.assertEqual(self.registered_twice(data), ["PreToolUse:a.py"],
+                         "only a.py is a double registration: the two guards are project_enforced_hooks "
+                         "and a.py is the positive control")
+
+    def test_the_repositorys_launcher_rows_against_a_stand_in_hooks_json_report_only_the_planted_double(self):
+        # The fixture project holds this repository's 18 launcher rows (Revision 9 section M, Revision 16).
+        # The stand-in hooks.json holds the plugin's rows for the two database guards (all their events and
+        # tools) and TWO hooks the fixture also registers: build-validator.py on Stop (the positive control)
+        # and mark-models-dirty.py on PostToolUse. Nothing is read from the installed plugin.
+        self.assertEqual(len(REPOSITORY_LAUNCHER_ROWS), 18, "fixture sanity: 7 block rows and 11 warn rows")
+        for event, matcher, script, hook_class, extras in REPOSITORY_LAUNCHER_ROWS:
+            self.launch_register(event, script, hook_class=hook_class, matcher=matcher, extras=extras)
+        for tool in (_EDIT, "Bash", "PowerShell"):
+            self.w.plugin_register("PreToolUse", "db-destructive-guard.py", matcher=tool)
+        for tool in ("Bash", "PowerShell"):
+            self.w.plugin_register("PreToolUse", "db-research-readonly-guard.py", matcher=tool)
+        self.w.plugin_register("Stop", "build-validator.py", matcher="")
+        self.w.plugin_register("PostToolUse", "mark-models-dirty.py", matcher=_EDIT)
+        rc, data = self.drift()
+        self.assertEqual(self.registered_twice(data), ["PostToolUse:mark-models-dirty.py", "Stop:build-validator.py"],
+                         "registered-twice must be reported for the two hooks both sides register, and for "
+                         "neither database guard (exempt)")
+        self.assertEqual(rc, 1, "two counted findings")
+        for guard in ("db-destructive-guard.py", "db-research-readonly-guard.py"):
+            self.assertEqual([p for p in self.registered_twice(data) if guard in p], [],
+                             "the exempt guard %s must not be reported" % guard)
+        self.assertEqual(_kinds(data), ["registered-twice", "registered-twice"], "and nothing else is reported")
+
+
 class TestDriftRepoOwned(DriftCase):
     GUARD = ".claude/hooks/db-destructive-guard.py"
 
