@@ -30,7 +30,6 @@ import json
 import os
 import posixpath
 import re
-import shlex
 import shutil
 import sys
 from dataclasses import dataclass
@@ -265,6 +264,10 @@ def apply_fixes(project_root: Path, missing: List[Requirement],
 #   listed-twice             a file under a plugin-delivered root that both sides carry
 #   registered-twice         an Effective hook registered by the project and by the plugin
 #   unreadable-registration  a dispatcher's member list that cannot be read as a literal
+#   disabled-hook-installed  a hook the plugin has disabled that the project still carries or registers
+#   dangling-hook-row        a project hook row that launches a .py file that is not on disk. Not drift: no
+#                            plugin copy is compared. Found from the project alone (``dangling_hook_rows``),
+#                            before the comparison, and reported even when the comparison exits 4.
 #
 # Add-on files (Revision 3): the sync config's ``addons`` object maps an add-on name to the add-on hook
 # files this project carries in ``.claude/hooks/``. Each is compared with
@@ -282,7 +285,7 @@ def apply_fixes(project_root: Path, missing: List[Requirement],
 EXIT_FINDINGS = 1
 EXIT_CANNOT_COMPARE = 4
 FINDING_KINDS = ("content-differs", "one-sided", "listed-twice", "registered-twice",
-                 "unreadable-registration", "disabled-hook-installed")
+                 "unreadable-registration", "disabled-hook-installed", "dangling-hook-row")
 OWNER_PLUGIN = "plugin"
 OWNER_REPO = "repo"
 SYNC_CONFIG = ".claude/.sync-config.json"
@@ -298,6 +301,11 @@ GATE_LAUNCHER = "gate-launch.py"
 #: (a test checks it); the doctor does not import the installer.
 ADDON_DOCUMENTS_REL = ".claude/references"
 PROJECT_SETTINGS_LAYERS = ("settings.json", "settings.local.json")
+#: The spellings of the project folder a hook row may start with (see ``_resolve_hook_path``).
+PROJECT_DIR_VARIABLES = ("${CLAUDE_PROJECT_DIR}", "$CLAUDE_PROJECT_DIR", "%CLAUDE_PROJECT_DIR%")
+GATE_BODY = "_gate_launch.py"
+KIND_DANGLING = "dangling-hook-row"
+DANGLING_REMEDY = "restore the file if the plugin still ships it, otherwise remove the row"
 SKIPPED_DIRS = frozenset({"__pycache__", ".git", "node_modules"})
 
 
@@ -409,11 +417,7 @@ def _launch_tokens(entry: dict) -> List[str]:
     command = entry.get("command")
     if not isinstance(command, str):
         return []
-    try:
-        tokens = shlex.split(command, posix=False)
-    except ValueError:
-        return []
-    return [t.strip("\"'") for t in tokens[1:]]
+    return [_unquote(word) for word in _shell_words(command)[1:]]
 
 
 def _launcher_row_parts(entry: dict) -> Optional[Tuple[str, str, List[str]]]:
@@ -427,22 +431,66 @@ def _launcher_row_parts(entry: dict) -> Optional[Tuple[str, str, List[str]]]:
     return project_hook_launcher_parts(entry)
 
 
-def _launched_and_first_argument(entry: dict) -> Tuple[Optional[str], Optional[str]]:
-    """The launched script file name and the argument that follows it. Exec form launches the first
-    ``args`` element that does not start with ``-``; shell form the first token ending in ``.py``.
-    A Project hook launcher row launches its script (the argument after the class), and the argument
-    after that is the first extra, so a ``gate-launch.py`` launcher row is the gate it names."""
-    launcher = _launcher_row_parts(entry)
-    if launcher is not None:
-        _hook_class, script, extras = launcher
-        return script, (posixpath.basename(_rel(extras[0])) if extras else None)
+# The ONE shell word-splitter: a quoted span stays inside its word even when text follows the closing quote.
+_SHELL_WORD = re.compile(r"""(?:"[^"]*"|'[^']*'|[^\s"'])+""")
+_QUOTED_SPAN = re.compile(r"\"[^\"]*\"|'[^']*'")
+# Characters that make a path unresolvable (INV-3): variables, command substitution, home, NUL ...
+_PATH_UNRESOLVABLE = re.compile("[$%`~\x00]")
+# ... and shell syntax that is not a literal path when it sits outside quotes (glob, redirect, separators).
+_PATH_SHELL_SYNTAX = re.compile(r"[*?\[<>;&|]")
+_PYTHON_INTERPRETER = re.compile(r"python\d?(\.\d+)?|py|pythonw")
+_SIMPLE_PYTHON_FLAG = re.compile(r"-(3(\.\d+)?|2|B|u|E|I|s|S|O|OO)")
+
+
+def _shell_words(command: str) -> List[str]:
+    return _SHELL_WORD.findall(command)
+
+
+def _unquote(word: str) -> str:
+    """Strip only the quotes that wrap a span; an apostrophe inside a double-quoted span is kept."""
+    return _QUOTED_SPAN.sub(lambda m: m.group(0)[1:-1], word)
+
+
+def _launched_raw_tokens(entry: dict) -> Tuple[Optional[str], Optional[str]]:
+    """The launched script token and the token that follows it, as written (quotes stripped). Exec form
+    launches the first ``args`` element that does not start with ``-``; shell form the first token ending in ``.py``."""
     tokens = _launch_tokens(entry)
     isolated = isinstance(entry.get("args"), list)
     for index, token in enumerate(tokens):
         if (isolated and token and not token.startswith("-")) or (not isolated and token.lower().endswith(".py")):
-            following = tokens[index + 1] if index + 1 < len(tokens) else None
-            return posixpath.basename(_rel(token)), (posixpath.basename(_rel(following)) if following else None)
+            return token, (tokens[index + 1] if index + 1 < len(tokens) else None)
     return None, None
+
+
+def _launched_and_first_argument(entry: dict) -> Tuple[Optional[str], Optional[str]]:
+    """The launched script file name and the argument that follows it. A Project hook launcher row launches
+    its script (the argument after the class) and the argument after that is the first extra, so a
+    ``gate-launch.py`` launcher row is the gate it names."""
+    launcher = _launcher_row_parts(entry)
+    if launcher is not None:
+        _hook_class, script, extras = launcher
+        return script, (posixpath.basename(_rel(extras[0])) if extras else None)
+    launched, following = _launched_raw_tokens(entry)
+    if launched is None:
+        return None, None
+    return posixpath.basename(_rel(launched)), (posixpath.basename(_rel(following)) if following else None)
+
+
+def _iter_rows(body: Any):
+    """Yield ``(event, matcher, entry)`` for every well-formed hook row of a settings body. ``matcher`` is
+    ``*`` when the group has none or an empty one."""
+    hooks = body.get("hooks") if isinstance(body, dict) else None
+    if not isinstance(hooks, dict):
+        return
+    for event, groups in hooks.items():
+        for group in groups if isinstance(groups, list) else []:
+            entries = group.get("hooks") if isinstance(group, dict) else None
+            matcher = group.get("matcher") if isinstance(group, dict) else None
+            if not isinstance(matcher, str) or not matcher:
+                matcher = "*"
+            for entry in entries if isinstance(entries, list) else []:
+                if isinstance(entry, dict):
+                    yield event, matcher, entry
 
 
 def _dispatcher_members(path: Path) -> Optional[List[str]]:
@@ -450,7 +498,7 @@ def _dispatcher_members(path: Path) -> Optional[List[str]]:
     imported). ``None`` when the module declares no ``CHECKS``; ``DriftError`` when it cannot be read."""
     try:
         source = path.read_text(encoding="utf-8-sig")
-    except OSError:
+    except (OSError, ValueError):  # ValueError: a NUL character in the file name
         return None
     declares = re.search(r"^\s*CHECKS\s*[:=]", source, re.MULTILINE) is not None
     if not declares:
@@ -477,30 +525,131 @@ def _effective_hooks(bodies: List[dict], hooks_dir: Path) -> Tuple[set, List[str
     found: set = set()
     unreadable: List[str] = []
     for body in bodies:
-        hooks = body.get("hooks") if isinstance(body, dict) else None
-        if not isinstance(hooks, dict):
-            continue
-        for event, groups in hooks.items():
-            for group in groups if isinstance(groups, list) else []:
-                entries = group.get("hooks") if isinstance(group, dict) else None
-                for entry in entries if isinstance(entries, list) else []:
-                    if not isinstance(entry, dict):
-                        continue
-                    launched, gate = _launched_and_first_argument(entry)
-                    if launched is None:
-                        continue
-                    if launched == GATE_LAUNCHER:
-                        if gate:
-                            found.add((event, gate))
-                        continue
-                    try:
-                        members = _dispatcher_members(hooks_dir / launched)
-                    except DriftError:
-                        unreadable.append("%s:%s" % (event, launched))
-                        continue
-                    for member in members if members is not None else [launched]:
-                        found.add((event, member))
+        for event, _matcher, entry in _iter_rows(body):
+            launched, gate = _launched_and_first_argument(entry)
+            if launched is None:
+                continue
+            if launched == GATE_LAUNCHER:
+                if gate:
+                    found.add((event, gate))
+                continue
+            try:
+                members = _dispatcher_members(hooks_dir / launched)
+            except DriftError:
+                unreadable.append("%s:%s" % (event, launched))
+                continue
+            for member in members if members is not None else [launched]:
+                found.add((event, member))
     return found, unreadable
+
+
+# ----------------------------------------------------------------------------- dangling hook rows
+def _resolve_hook_path(raw: str, project: Path) -> Optional[Path]:
+    """``raw`` made absolute: a project-folder variable becomes the project root, a relative path is joined
+    to it, an absolute path is kept. ``None`` (unresolvable) for any other variable or a leading ``~``."""
+    text = raw.replace("\\", "/")
+    for variable in PROJECT_DIR_VARIABLES:
+        if text.startswith(variable):
+            text = text[len(variable):]
+            if text and not text.startswith("/"):
+                return None
+            text = text.lstrip("/")
+            return None if _PATH_UNRESOLVABLE.search(text) else project / text
+    if _PATH_UNRESOLVABLE.search(text):
+        return None
+    if os.name == "nt" and re.match(r"^/[A-Za-z]/", text):
+        return None  # a Git Bash drive path (/c/...) is not resolvable by the doctor
+    if text.startswith("/") or re.match(r"^[A-Za-z]:/", text):
+        return Path(text)
+    return project / text
+
+
+def _row_skipped(entry: dict) -> bool:
+    """True for a row the doctor does not check. Only a row that plainly launches a Python script through a
+    bare interpreter (python, python2, python3, python3.N, py, pythonw; ``.exe`` optional) with only simple
+    flags is checked, in shell form (no line break outside quotes) and in exec form (``command`` + ``args``)."""
+    command = entry.get("command")
+    if not isinstance(command, str):
+        return True
+    args = entry.get("args")
+    shell = not isinstance(args, list)
+    if shell:
+        if re.search(r"[\r\n]", _QUOTED_SPAN.sub("", command)):
+            return True
+        words = _shell_words(command)
+        if not words:
+            return True
+        interpreter, rest = words[0], words[1:]
+    else:
+        interpreter, rest = re.split(r"[\\/]", command)[-1], [a for a in args if isinstance(a, str)]
+    if not _PYTHON_INTERPRETER.fullmatch(re.sub(r"(?i)\.exe$", "", interpreter).lower()):
+        return True
+    for index, word in enumerate(rest):
+        if _SIMPLE_PYTHON_FLAG.fullmatch(word):
+            continue
+        script = _unquote(word) if shell else word
+        if not script.lower().endswith(".py"):
+            return True
+        if not shell:
+            return False
+        # Shell syntax outside quotes in the script word, or in the gate argument of a gate-launch row.
+        gate_argument = rest[index + 1] if posixpath.basename(_rel(script)) == GATE_LAUNCHER and index + 1 < len(rest) else ""
+        return any(_PATH_SHELL_SYNTAX.search(_QUOTED_SPAN.sub("", w)) for w in (word, gate_argument))
+    return True
+
+
+def dangling_hook_rows(project: Path) -> List[DriftFinding]:
+    """Hook rows of the project's settings layers that launch a ``.py`` file that is not on disk. Reads the
+    project alone and never writes; a layer that does not parse is skipped."""
+    project = Path(project)
+    found: Dict[str, DriftFinding] = {}
+
+    def add(layer: str, event: str, matcher: str, role: str, raw: str) -> None:
+        key = "%s:%s:%s:%s:%s" % (layer, event, matcher, role, raw)
+        found.setdefault(key, DriftFinding(KIND_DANGLING, key, OWNER_PLUGIN))
+
+    for layer in PROJECT_SETTINGS_LAYERS:
+        path = project / ".claude" / layer
+        try:
+            body = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else None
+        except (OSError, ValueError):
+            continue
+        for event, matcher, entry in _iter_rows(body):
+            if _row_skipped(entry):
+                continue
+            launched, following = _launched_raw_tokens(entry)
+            if launched is None:
+                continue
+            is_gate_launcher = posixpath.basename(_rel(launched)) == GATE_LAUNCHER
+            checks = [("launched", launched)]
+            if is_gate_launcher and following:
+                checks.append(("gate-argument", following))
+            launcher_exists = False
+            for role, raw in checks:
+                if not raw.lower().endswith(".py"):
+                    continue
+                resolved = _resolve_hook_path(raw, project)
+                if resolved is None:
+                    continue
+                try:
+                    exists = resolved.is_file()
+                except (OSError, ValueError):
+                    continue  # cannot check this path: skip the row rather than guess
+                if exists:
+                    launcher_exists = launcher_exists or role == "launched"
+                else:
+                    add(layer, event, matcher, role, raw)
+            if is_gate_launcher and launcher_exists:
+                folder = posixpath.dirname(launched.replace("\\", "/"))
+                body_raw = (folder + "/" if folder else "") + GATE_BODY
+                resolved = _resolve_hook_path(body_raw, project)
+                try:
+                    body_missing = resolved is not None and not resolved.is_file()
+                except (OSError, ValueError):
+                    body_missing = False
+                if body_missing:
+                    add(layer, event, matcher, "launcher-body", body_raw)
+    return sorted(found.values(), key=lambda f: (f.kind, f.path))
 
 
 # ----------------------------------------------------------------------------- the comparison
@@ -748,10 +897,23 @@ def _compute_drift(project: Path, plugin: Path) -> Dict[str, Any]:
     return {"findings": findings, "compared": compared, "compared_addons": compared_addons}
 
 
+def _finding_json(f: DriftFinding) -> Dict[str, str]:
+    out = {"kind": f.kind, "path": f.path, "owner": f.owner}
+    if f.kind == KIND_DANGLING:
+        out["remedy"] = DANGLING_REMEDY
+    return out
+
+
+def _print_finding(f: DriftFinding, reported: bool) -> None:
+    print("  %s%-24s %s  [owner: %s]" % ("reported  " if reported else "", f.kind, f.path, f.owner))
+    if f.kind == KIND_DANGLING:
+        print("      %s" % DANGLING_REMEDY)
+
+
 def drift_report(result: Dict[str, Any], error: Optional[str] = None) -> Dict[str, Any]:
     """The ``--json`` document: ``findings``, ``compared``, ``compared_addons`` (plus ``error`` on a failed run)."""
     report: Dict[str, Any] = {
-        "findings": [{"kind": f.kind, "path": f.path, "owner": f.owner} for f in result["findings"]],
+        "findings": [_finding_json(f) for f in result["findings"]],
         "compared": result["compared"],
         "compared_addons": result["compared_addons"],
     }
@@ -764,6 +926,7 @@ def run_drift(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     result: Dict[str, Any] = {"findings": [], "compared": 0, "compared_addons": 0}
     plugin: Optional[Path] = None
+    dangling = dangling_hook_rows(project)   # first: it needs no plugin and survives exit 4
     try:
         if args.plugin:
             plugin = find_plugin_root(args.plugin)
@@ -774,16 +937,19 @@ def run_drift(args: argparse.Namespace) -> int:
             raise DriftError("no plugin found; pass --plugin or install the plugin")
         result = compute_drift(project, plugin)
     except DriftError as exc:
-        report = drift_report({"findings": [], "compared": 0, "compared_addons": 0}, str(exc))
+        report = drift_report({"findings": dangling, "compared": 0, "compared_addons": 0}, str(exc))
         if args.json:
             print(json.dumps(report, indent=2))
         else:
             print("project: %s" % project)
             print("plugin:  %s" % (plugin or "NOT FOUND"))
+            for f in dangling:
+                _print_finding(f, False)
             print("  cannot compare: %s" % exc)
         return EXIT_CANNOT_COMPARE
 
-    findings: List[DriftFinding] = result["findings"]
+    findings: List[DriftFinding] = sorted(list(result["findings"]) + dangling, key=lambda f: (f.kind, f.path))
+    result = dict(result, findings=findings)
     counted = [f for f in findings if not (args.ignore_repo_owned and f.owner == OWNER_REPO)]
     if args.json:
         print(json.dumps(drift_report(result), indent=2))
@@ -792,7 +958,7 @@ def run_drift(args: argparse.Namespace) -> int:
         print("plugin:  %s" % plugin)
         for f in findings:
             reported = args.ignore_repo_owned and f.owner == OWNER_REPO
-            print("  %s%-24s %s  [owner: %s]" % ("reported  " if reported else "", f.kind, f.path, f.owner))
+            _print_finding(f, reported)
         print("compared %d file pair(s) and %d add-on file(s); %d finding(s), %d counted"
               % (result["compared"], result["compared_addons"], len(findings), len(counted)))
     return EXIT_FINDINGS if counted else 0

@@ -5350,5 +5350,121 @@ class TestAddonStylesheet(AddonHarness):
         self.assertEqual(self.styles.read_bytes(), appended, msg="Q7: the removal never takes the snippet out")
 
 
+class TestDanglingRowsReadBackWriter(unittest.TestCase):
+    """Issue 71: the rows `_written_hook` writes are read back by the doctor's `dangling_hook_rows`.
+
+    The writer and the reader are two scripts; this pins that the reader understands every row form the
+    writer produces (win32 `py -3`, POSIX `python3`, the gate launcher with its gate) and reports exactly
+    the files that were deleted, without touching the settings file."""
+
+    HOOKS = ".claude/hooks/"
+    GUARD_FILE = "plain-language-guard.py"
+    PLUGIN_VAR = "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="dangling-writer-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        self.project = self.tmp / "proj"
+        (self.project / ".claude" / "hooks").mkdir(parents=True)
+
+    def reg(self, event, matcher, file, *extras):
+        return fi._Registration(event, matcher, file, tuple(self.PLUGIN_VAR + e for e in extras), "py",
+                                self.PLUGIN_VAR + file, "command", ())
+
+    def write_settings(self, platform):
+        regs = [self.reg("UserPromptSubmit", None, self.GUARD_FILE),
+                self.reg("PreToolUse", "Edit|Write", "gate-launch.py", "concept-gate.py")]
+        hooks = {}
+        for r in regs:
+            hooks.setdefault(r.event, []).append({"matcher": r.matcher or "", "hooks": [fi._written_hook(r, platform)]})
+        settings = self.project / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"hooks": hooks}, indent=2), encoding="utf-8")
+        return settings
+
+    def put(self, *names):
+        for n in names:
+            (self.project / ".claude" / "hooks" / n).write_text("# %s\n" % n, encoding="utf-8")
+
+    def scan(self):
+        import plugin_doctor
+        fn = getattr(plugin_doctor, "dangling_hook_rows", None)
+        if fn is None:
+            self.fail("plugin_doctor.dangling_hook_rows(project) does not exist yet: nothing reads the written rows back")
+        return [f for f in fn(self.project) if f.kind == "dangling-hook-row"]
+
+    def roles(self, found):
+        return sorted(f.path.replace("\\", "/").split(":", 4)[3] for f in found)
+
+    def test_rows_written_for_files_that_exist_give_no_finding(self):
+        for platform in ("win32", "linux"):
+            with self.subTest(platform=platform):
+                self.write_settings(platform)
+                self.put(self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
+                self.assertEqual(self.scan(), [], "launcher, body, gate and guard all exist")
+
+    def write_old_settings(self, platform):
+        """Rows in the exec form the installer wrote before the launcher (`_written_project_path_hook`),
+        built by hand so the test does not depend on the writer's current shape."""
+        base = "${CLAUDE_PROJECT_DIR}/.claude/hooks/"
+
+        def row(*names):
+            paths = [base + n for n in names]
+            if platform == "win32":
+                return {"type": "command", "command": "py", "args": ["-3"] + paths}
+            return {"type": "command", "command": "python3", "args": paths}
+        hooks = {"UserPromptSubmit": [{"matcher": "", "hooks": [row(self.GUARD_FILE)]}],
+                 "PreToolUse": [{"matcher": "Edit|Write", "hooks": [row("gate-launch.py", "concept-gate.py")]}]}
+        settings = self.project / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"hooks": hooks}, indent=2), encoding="utf-8")
+        return settings
+
+    def test_launcher_rows_written_today_give_no_finding_even_with_a_project_file_deleted(self):
+        """Documented skip: the rows `_written_hook` writes are Project hook launcher rows (`-c <source> <class>
+        <script>`). The launcher falls back when a project file is missing, so a missing file is not the
+        failure this finding is about, and a row form the doctor cannot judge is skipped, not guessed."""
+        names = (self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
+        for platform in ("win32", "linux"):
+            for deleted in (None,) + names:
+                with self.subTest(platform=platform, deleted=deleted):
+                    self.write_settings(platform)
+                    self.put(*names)
+                    if deleted:
+                        (self.project / ".claude" / "hooks" / deleted).unlink()
+                    self.assertEqual(self.scan(), [], "launcher rows are skipped: the launcher falls back")
+
+    def test_rows_the_old_installer_wrote_are_still_checked_and_give_one_finding_with_its_role(self):
+        """The vendored-install case: an install registered before the launcher change, whose hook file
+        the operator then deleted. Those exec-form rows name the file directly, so they are checked."""
+        cases = (
+            ("the guard", self.GUARD_FILE, ["launched"]),
+            ("the launcher", "gate-launch.py", ["launched"]),
+            ("the gate", "concept-gate.py", ["gate-argument"]),
+            ("the launcher body", "_gate_launch.py", ["launcher-body"]),
+        )
+        for platform in ("win32", "linux"):
+            for label, deleted, roles in cases:
+                with self.subTest(platform=platform, deleted=label):
+                    self.write_old_settings(platform)
+                    self.put(self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
+                    (self.project / ".claude" / "hooks" / deleted).unlink()
+                    found = self.scan()
+                    self.assertEqual(self.roles(found), roles, "one finding for %s; got %r" % (label, [f.path for f in found]))
+                    self.assertTrue(found[0].path.replace("\\", "/").endswith("/" + deleted),
+                                    "the path names the deleted file as written: %s" % found[0].path)
+
+    def test_old_rows_for_files_that_exist_give_no_finding(self):
+        for platform in ("win32", "linux"):
+            with self.subTest(platform=platform):
+                self.write_old_settings(platform)
+                self.put(self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
+                self.assertEqual(self.scan(), [], "launcher, body, gate and guard all exist")
+
+    def test_scanning_leaves_the_settings_bytes_identical(self):
+        settings = self.write_settings("win32")
+        before = settings.read_bytes()
+        self.scan()
+        self.assertEqual(settings.read_bytes(), before, "INV-1: the scan only reads")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
