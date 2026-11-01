@@ -1,0 +1,30 @@
+status: completed
+commit: ce8d8155d00ac10817e7f3fb3f02785115c169b2
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/151
+merged_at: '2026-11-01T11:46:25Z'
+verified: github
+hand_resolved:
+  files:
+  - .claude-plugin/marketplace.json
+  - .claude-plugin/plugin.json
+  - .claude/concepts/2026-10-31-warn-on-unshipped-hook-rows.md
+  - .claude/registries/JOURNAL.md
+  - .claude/scripts/plugin_doctor.py
+  - .claude/scripts/tests/test_auto_improve_finish_install.py
+  - .claude/scripts/tests/test_plugin_doctor.py
+  - .cursor-plugin/plugin.json
+  - README.md
+  - plugin.json
+  merge_commits: 1
+  commits_inspected: 4
+  commits_unread: 0
+base_ref: master
+base_is_default: true
+delivered_by: contract-delivery
