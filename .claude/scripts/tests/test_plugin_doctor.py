@@ -366,6 +366,8 @@ def _norm_path(p) -> str:
 class DriftWorld:
     """A throwaway project, a throwaway plugin and a throwaway Claude config directory."""
 
+    materialize_rows = False
+
     def __init__(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="drift-"))
         self.project = self.tmp / "proj"
@@ -439,7 +441,16 @@ class DriftWorld:
         return {"type": "command", "command": "py", "args": args}
 
     def project_register(self, event, hook, *, matcher="Edit|Write", gate=None, shell=False, local=False):
-        """Register `hook` in the project's settings (or settings.local.json). `gate` makes it a launcher row."""
+        """Register `hook` in the project's settings (or settings.local.json). `gate` makes it a launcher row.
+
+        When `materialize_rows` is set, the files the row launches are written too: a row to a missing file is a
+        dangling-hook-row finding, which the double-registration fixtures are not about. Off by default, because
+        the dangling and disabled-hook fixtures want rows whose files are absent.
+        """
+        if self.materialize_rows:
+            for name in ((hook, "_gate_launch.py", gate) if gate else (hook,)):
+                if not (self.project / ".claude" / "hooks" / name).exists():
+                    self.project_put(".claude/hooks/" + name, "# %s\n" % name)
         if gate:
             row = self.exec_row("${CLAUDE_PROJECT_DIR}", "gate-launch.py",
                                 "${CLAUDE_PROJECT_DIR}/.claude/hooks/%s" % gate)
@@ -725,6 +736,10 @@ class TestDriftListedTwice(DriftCase):
 
 
 class TestDriftRegisteredTwice(DriftCase):
+    def setUp(self):
+        super().setUp()
+        self.w.materialize_rows = True  # the project's rows launch files that exist
+
     def finding(self, data, hook, event):
         hits = [f for f in _findings(data) if f.get("kind") == "registered-twice"]
         return [f for f in hits if hook in _norm_path(f.get("path", "")) and event in _norm_path(f.get("path", ""))]
@@ -1502,6 +1517,16 @@ class TestDriftNeverWrites(DriftCase):
         self.assertEqual(rc, 1)
         self.assertEqual(before, (self._snapshot(self.w.project), self._snapshot(self.w.plugin)))
 
+    def test_a_run_with_a_dangling_row_changes_no_file(self):
+        _dangling_function(self)
+        self.w.project_register("UserPromptSubmit", "plain-language-guard.py")
+        self.w.write_all()
+        before = (self._snapshot(self.w.project), self._snapshot(self.w.plugin))
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1, "the dangling row is a counted finding")
+        self.assertEqual(before, (self._snapshot(self.w.project), self._snapshot(self.w.plugin)),
+                         "INV-1: the scan never writes, renames or deletes")
+
     def test_a_run_that_compares_nothing_still_exits_4(self):
         for tree in self.w.config["synced_trees"]:
             tree["files"] = []
@@ -1510,6 +1535,507 @@ class TestDriftNeverWrites(DriftCase):
         self.w.project_put("%s/%s/RULES.md" % (DOCS_REL, ADDON), "# doc\n")
         rc, data = run_raw(self.w)
         self.assertEqual(rc, 4, "documents count in compared_addons, never in compared")
+
+
+# =====================================================================================================
+# Dangling hook rows (issue 71, follow-up 1). Contract: .claude/concepts/2026-10-31-warn-on-unshipped-hook-rows.md
+#   A project hook row whose launched .py file is not on disk is the finding `dangling-hook-row`, path
+#   `<layer>:<event>:<matcher or *>:<role>:<raw>`, owner `plugin`, with a `remedy` key in --json. The scan reads
+#   the project alone (`dangling_hook_rows(project)`), runs before the plugin comparison and survives exit 4.
+# =====================================================================================================
+import plugin_doctor as _pd  # noqa: E402
+
+KIND_DANGLING = "dangling-hook-row"
+REMEDY = "restore the file if the plugin still ships it, otherwise remove the row"
+GUARD = "plain-language-guard.py"
+HOOKS_VAR = "${CLAUDE_PROJECT_DIR}/.claude/hooks/"
+
+
+def _dangling_function(test):
+    """The public scan, or a clear failure naming the function that does not exist yet (RED, not an import error)."""
+    fn = getattr(_pd, "dangling_hook_rows", None)
+    if fn is None:
+        test.fail("plugin_doctor.dangling_hook_rows(project) does not exist yet: the dangling-hook-row scan is not implemented")
+    return fn
+
+
+def _dang(data):
+    return [f for f in _findings(data) if f.get("kind") == KIND_DANGLING]
+
+
+def _dang_paths(data):
+    return sorted(_norm_path(f["path"]) for f in _dang(data))
+
+
+class DanglingCase(DriftCase):
+    def add_row(self, event, row, *, matcher="Edit|Write", local=False, drop_matcher=False):
+        target = self.w.project_settings
+        if local:
+            target = getattr(self.w, "project_local_settings", {"hooks": {}})
+            self.w.project_local_settings = target
+        group = {"hooks": [row]}
+        if not drop_matcher:
+            group["matcher"] = matcher
+        target.setdefault("hooks", {}).setdefault(event, []).append(group)
+
+    def exec_row(self, rel, *extra, var="${CLAUDE_PROJECT_DIR}"):
+        return DriftWorld.exec_row(var, rel, *extra)
+
+    def gate_files(self, *, launcher=True, body=True, gate=True):
+        for present, name in ((launcher, "gate-launch.py"), (body, "_gate_launch.py"), (gate, "concept-gate.py")):
+            if present:
+                self.w.project_put(".claude/hooks/" + name, "# %s\n" % name)
+
+    def gate_row(self):
+        return self.exec_row("gate-launch.py", HOOKS_VAR + "concept-gate.py")
+
+    def scan(self):
+        fn = _dangling_function(self)
+        self.w.write_all()
+        return fn(self.w.project)
+
+    def assertDangling(self, data, expected, why):
+        self.assertEqual(_dang_paths(data), sorted(expected), why + " -- findings: " + json.dumps(_findings(data))[:700])
+
+
+class TestDriftDanglingHookRow(DanglingCase):
+    # ---- the two shapes of install the parent contract found
+    def test_a_prompt_submit_row_to_a_deleted_guard_is_a_finding(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        rc, data = self.drift()
+        self.assertEqual(rc, 1, "a dangling row is a counted finding")
+        self.assertDangling(data, ["settings.json:UserPromptSubmit:*:launched:" + HOOKS_VAR + GUARD],
+                            "an empty matcher is written *")
+        self.assertEqual(_dang(data)[0].get("owner"), "plugin")
+
+    def test_a_pre_0_9_8_direct_stop_row_without_a_matcher_is_a_finding_naming_its_event(self):
+        self.add_row("Stop", self.exec_row(GUARD), drop_matcher=True)
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.json:Stop:*:launched:" + HOOKS_VAR + GUARD],
+                            "no matcher is written *, and the event is named")
+
+    def test_both_rows_give_two_findings_each_naming_its_event(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        self.add_row("Stop", self.exec_row(GUARD), drop_matcher=True)
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.json:Stop:*:launched:" + HOOKS_VAR + GUARD,
+                                   "settings.json:UserPromptSubmit:*:launched:" + HOOKS_VAR + GUARD],
+                            "two events, two findings")
+
+    def test_the_same_rows_with_the_file_present_give_no_finding(self):
+        _dangling_function(self)
+        self.w.project_put(".claude/hooks/" + GUARD, "# guard\n")
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        self.add_row("Stop", self.exec_row(GUARD), drop_matcher=True)
+        rc, data = self.drift()
+        self.assertDangling(data, [], "negative control: nothing is missing")
+
+    # ---- command forms and variable spellings
+    def test_shell_form_with_quotes_is_a_finding_with_the_quotes_stripped(self):
+        self.add_row("UserPromptSubmit", {"type": "command", "command": 'py -3 "$CLAUDE_PROJECT_DIR/.claude/hooks/%s"' % GUARD})
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.json:UserPromptSubmit:Edit|Write:launched:$CLAUDE_PROJECT_DIR/.claude/hooks/" + GUARD],
+                            "raw is the token as written, quotes stripped")
+
+    def test_the_percent_spelling_and_relative_spellings_resolve_to_the_project_root(self):
+        for i, prefix in enumerate(("%CLAUDE_PROJECT_DIR%/.claude/hooks/", ".claude/hooks/", "./.claude/hooks/")):
+            self.add_row("PreToolUse", {"type": "command", "command": "py", "args": ["-3", prefix + "gone.py"]},
+                         matcher="m%d" % i)
+        rc, data = self.drift()
+        self.assertEqual(len(_dang(data)), 3, "all three spellings resolve to <project>/.claude/hooks, where nothing exists")
+
+    def test_every_installer_folder_spelling_resolves_to_the_project_hooks_folder(self):
+        spellings = list(install._PROJECT_HOOK_DIRS)
+        self.assertTrue(spellings)
+        for i, folder in enumerate(spellings):
+            self.add_row("PreToolUse", {"type": "command", "command": "py", "args": ["-3", folder + "/missing%d.py" % i]},
+                         matcher="gone%d" % i)
+            self.w.project_put(".claude/hooks/present%d.py" % i, "# p\n")
+            self.add_row("PreToolUse", {"type": "command", "command": "py", "args": ["-3", folder + "/present%d.py" % i]},
+                         matcher="here%d" % i)
+        rc, data = self.drift()
+        self.assertEqual(len(_dang(data)), len(spellings),
+                         "INV-9: each spelling finds the existing file (no finding) and misses the absent one (one finding); "
+                         + json.dumps(_findings(data))[:600])
+
+    def test_a_windows_style_absolute_raw_path_keeps_its_colon_readable(self):
+        gone = str(self.w.tmp / "elsewhere" / "gone-hook.py")
+        self.add_row("Stop", {"type": "command", "command": "py", "args": ["-3", gone]})
+        rc, data = self.drift()
+        paths = [f["path"] for f in _dang(data)]
+        self.assertEqual(len(paths), 1, "an absolute path that is not a file is a finding; got %r" % paths)
+        self.assertEqual(paths[0].split(":", 4)[4], gone, "raw is everything after the fourth colon, as written")
+
+    def test_an_existing_absolute_path_is_no_finding(self):
+        _dangling_function(self)
+        here = self.w.project_put("elsewhere/real.py", "# r\n")
+        self.add_row("Stop", {"type": "command", "command": "py", "args": ["-3", str(here)]})
+        rc, data = self.drift()
+        self.assertDangling(data, [], "absolute and a file")
+
+    # ---- gate launcher roles
+    def test_a_gate_launcher_row_with_everything_present_is_clean(self):
+        _dangling_function(self)
+        self.gate_files()
+        self.add_row("PreToolUse", self.gate_row())
+        rc, data = self.drift()
+        self.assertDangling(data, [], "negative control")
+
+    def test_a_missing_launcher_is_one_finding_with_role_launched(self):
+        self.gate_files(launcher=False, body=False, gate=True)
+        self.add_row("PreToolUse", self.gate_row())
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.json:PreToolUse:Edit|Write:launched:" + HOOKS_VAR + "gate-launch.py"],
+                            "a missing launcher is one finding; its body is not checked then")
+
+    def test_a_missing_launcher_body_is_role_launcher_body(self):
+        self.gate_files(body=False)
+        self.add_row("PreToolUse", self.gate_row())
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.json:PreToolUse:Edit|Write:launcher-body:" + HOOKS_VAR + "_gate_launch.py"],
+                            "the body beside the launcher; a missing body blocks like a missing launcher")
+
+    def test_a_missing_gate_is_role_gate_argument(self):
+        self.gate_files(gate=False)
+        self.add_row("PreToolUse", self.gate_row())
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.json:PreToolUse:Edit|Write:gate-argument:" + HOOKS_VAR + "concept-gate.py"],
+                            "the token after the launcher; a missing gate returns a block")
+
+    # ---- layers, matchers, dedup
+    def test_settings_local_json_is_named_as_its_layer(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="", local=True)
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.local.json:UserPromptSubmit:*:launched:" + HOOKS_VAR + GUARD], "layer is named")
+
+    def test_two_matchers_give_two_findings(self):
+        self.add_row("PreToolUse", self.exec_row("gone.py"), matcher="Edit")
+        self.add_row("PreToolUse", self.exec_row("gone.py"), matcher="Bash")
+        rc, data = self.drift()
+        self.assertEqual(len(_dang(data)), 2, "INV-4: rows that differ only in matcher are two findings")
+
+    def test_identical_rows_in_one_layer_collapse_into_one_finding(self):
+        self.add_row("PreToolUse", self.exec_row("gone.py"))
+        self.add_row("PreToolUse", self.exec_row("gone.py"))
+        rc, data = self.drift()
+        self.assertEqual(len(_dang(data)), 1, "findings are deduplicated by (kind, path)")
+
+    # ---- skipped forms (INV-3)
+    def test_forms_the_doctor_cannot_resolve_are_never_reported(self):
+        _dangling_function(self)
+        for i, token in enumerate(("${CLAUDE_PLUGIN_ROOT}/.claude/hooks/gone.py", "%OTHER%/hooks/gone.py",
+                                   "$HOME/hooks/gone.py", "${OTHER}/hooks/gone.py", "~/hooks/gone.py")):
+            self.add_row("PreToolUse", {"type": "command", "command": "py", "args": ["-3", token]}, matcher="m%d" % i)
+        rc, data = self.drift()
+        self.assertDangling(data, [], "INV-3: no guessing")
+
+    def test_a_row_that_is_not_a_py_file_is_never_reported(self):
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command", "command": "node", "args": ["${CLAUDE_PROJECT_DIR}/tools/gone.js"]})
+        rc, data = self.drift()
+        self.assertDangling(data, [], "only .py paths are checked")
+
+    def test_the_user_settings_layer_is_never_scanned(self):
+        _dangling_function(self)
+        row = {"type": "command", "command": "py", "args": ["-3", HOOKS_VAR + "gone.py"]}
+        for base in (self.w.home / ".claude", self.w.config_dir):
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [row]}]}}), encoding="utf-8")
+        rc, data = self.drift()
+        self.assertDangling(data, [], "INV-8: project layers only")
+
+    # ---- review round: shell-form quoting (reviewer F1)
+    def _shell_variants(self):
+        return (("$CLAUDE_PROJECT_DIR", 'python3 "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py'),
+                ("%CLAUDE_PROJECT_DIR%", 'py -3 "%CLAUDE_PROJECT_DIR%"\\.claude\\hooks\\x.py'))
+
+    def test_a_shell_form_row_with_the_variable_quoted_apart_from_the_path_is_no_finding_when_the_file_exists(self):
+        _dangling_function(self)
+        self.w.project_put(".claude/hooks/x.py", "# x\n")
+        for i, (_var, command) in enumerate(self._shell_variants()):
+            self.add_row("PreToolUse", {"type": "command", "command": command}, matcher="m%d" % i)
+        rc, data = self.drift()
+        self.assertDangling(data, [], "the closing quote before the path must not leak into the resolved path")
+
+    def test_a_shell_form_row_with_the_variable_quoted_apart_from_the_path_is_one_finding_when_the_file_is_deleted(self):
+        _dangling_function(self)
+        for i, (var, command) in enumerate(self._shell_variants()):
+            self.add_row("PreToolUse", {"type": "command", "command": command}, matcher="m%d" % i)
+        rc, data = self.drift()
+        found = _dang(data)
+        self.assertEqual(len(found), 2, "one finding per row; got " + json.dumps(_findings(data))[:600])
+        for (var, _cmd), finding in zip(self._shell_variants(), sorted(found, key=lambda f: f["path"])):
+            parts = finding["path"].split(":", 4)
+            self.assertEqual(parts[1:4], ["PreToolUse", parts[2], "launched"], "event and role are named")
+            self.assertNotIn('"', parts[4], "raw is as written with the quotes removed")
+            self.assertTrue(parts[4].startswith(var) and parts[4].endswith("x.py"), "raw names the variable and file: %r" % parts[4])
+
+    def test_a_quoted_absolute_path_with_a_space_is_read_whole(self):
+        _dangling_function(self)
+        here = self.w.project_put("Program Files/tool dir/x.py", "# x\n")
+        self.add_row("Stop", {"type": "command", "command": 'py -3 "%s"' % here})
+        rc, data = self.drift()
+        self.assertDangling(data, [], "a quoted absolute path with spaces that is a file is no finding")
+
+    def test_a_gate_launch_shell_row_with_two_quoted_arguments_is_clean_when_files_exist_and_names_the_gate_when_not(self):
+        _dangling_function(self)
+        command = ('py -3 "$CLAUDE_PROJECT_DIR/.claude/hooks/gate-launch.py" '
+                   '"$CLAUDE_PROJECT_DIR/.claude/hooks/concept-gate.py"')
+        self.gate_files()
+        self.add_row("PreToolUse", {"type": "command", "command": command})
+        rc, data = self.drift()
+        self.assertDangling(data, [], "both quoted tokens resolve to existing files")
+        self.w.project_remove(".claude/hooks/concept-gate.py")
+        rc, data = self.drift()
+        self.assertEqual([f["path"].split(":", 4)[3] for f in _dang(data)], ["gate-argument"],
+                         "only the gate argument is missing; got " + json.dumps(_findings(data))[:500])
+
+    # ---- second review round: false positives (INV-2, INV-3)
+    def test_an_apostrophe_inside_a_double_quoted_existing_path_is_no_finding(self):
+        _dangling_function(self)
+        here = self.w.project_put("O'Brien dir/y.py", "# y\n")
+        self.w.project_put(".claude/hooks/ok.py", "# ok\n")
+        self.add_row("PreToolUse", {"type": "command", "command": 'python "%s"' % here.as_posix()}, matcher="abs")
+        self.add_row("PreToolUse", {"type": "command", "command": 'python "${CLAUDE_PROJECT_DIR}/O\'Brien dir/y.py"'},
+                     matcher="var")
+        rc, data = self.drift()
+        self.assertDangling(data, [], "INV-2: the file exists; an apostrophe inside double quotes is not a quote")
+
+    def test_an_apostrophe_inside_a_double_quoted_deleted_path_is_one_finding_keeping_the_apostrophe(self):
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command", "command": 'python "${CLAUDE_PROJECT_DIR}/O\'Brien dir/y.py"'})
+        rc, data = self.drift()
+        found = _dang(data)
+        self.assertEqual(len(found), 1, "one finding; got " + json.dumps(_findings(data))[:500])
+        raw = found[0]["path"].split(":", 4)[4]
+        self.assertIn("O'Brien dir", raw, "raw still contains the apostrophe: %r" % raw)
+
+    def test_a_backslash_escaped_space_in_a_shell_form_row_is_never_reported(self):
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command",
+                                    "command": "python ${CLAUDE_PROJECT_DIR}/.claude/hooks/x\\ y.py"})
+        rc, data = self.drift()
+        self.assertDangling(data, [], "INV-3: an escaped space is unresolvable, so it is skipped even if absent")
+
+    @unittest.skipUnless(os.name == "nt", "a Git Bash drive path is only meaningful on Windows")
+    def test_a_git_bash_drive_path_is_never_reported_on_windows(self):
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command", "command": "python /c/Users/nobody-here/hooks/x.py"})
+        rc, data = self.drift()
+        self.assertDangling(data, [], "INV-3: /c/... is not resolvable by the doctor, so it is skipped")
+
+    # ---- review round: near-miss variable names (reviewer F2, INV-3)
+    def test_a_variable_name_that_only_begins_with_the_project_variable_is_never_reported(self):
+        _dangling_function(self)
+        tokens = ("$CLAUDE_PROJECT_DIR_ALT/.claude/hooks/x.py", "${CLAUDE_PROJECT_DIR}_ALT/.claude/hooks/x.py",
+                  "%CLAUDE_PROJECT_DIR%_ALT/.claude/hooks/x.py", "$CLAUDE_PROJECT_DIRS/.claude/hooks/x.py")
+        for i, token in enumerate(tokens):
+            self.add_row("PreToolUse", {"type": "command", "command": "py", "args": ["-3", token]}, matcher="m%d" % i)
+        rc, data = self.drift()
+        self.assertDangling(data, [], "INV-3: a different variable is unresolvable, not the project folder plus a suffix")
+
+    def test_a_second_variable_after_the_project_variable_is_never_reported(self):
+        _dangling_function(self)
+        self.add_row("PreToolUse", {"type": "command", "command": "py",
+                                    "args": ["-3", "${CLAUDE_PROJECT_DIR}/$X/gone.py"]})
+        rc, data = self.drift()
+        self.assertDangling(data, [], "INV-3: a second variable cannot be resolved")
+
+    # ---- review round: a read error is a skipped row (reviewer F4)
+    def test_an_oserror_while_checking_a_path_skips_that_row_and_does_not_crash_the_scan(self):
+        import pathlib
+        from unittest import mock
+        fn = _dangling_function(self)
+        self.add_row("PreToolUse", self.exec_row("unreadable.py"), matcher="a")
+        self.add_row("PreToolUse", self.exec_row("gone.py"), matcher="b")
+        self.w.write_all()
+        original = pathlib.Path.is_file
+
+        def is_file(path_self, *a, **kw):
+            if path_self.name == "unreadable.py":
+                raise PermissionError("denied: " + path_self.name)
+            return original(path_self, *a, **kw)
+
+        with mock.patch.object(pathlib.Path, "is_file", is_file):
+            try:
+                found = list(fn(self.w.project))
+            except OSError as exc:
+                self.fail("the scan crashed with %r instead of skipping the row" % exc)
+        paths = [_norm_path(f.path) for f in found]
+        self.assertEqual(len(paths), 1, "only the readable, missing file is reported; got %r" % paths)
+        self.assertTrue(paths[0].endswith("gone.py"), "the unreadable row is skipped, not reported: %r" % paths)
+
+    # ---- review round: pinned behaviour (critic F4-F6)
+    def test_a_directory_named_like_a_py_file_counts_as_dangling(self):
+        self.w.project_put(".claude/hooks/x.py/inner.txt", "dir\n")
+        self.add_row("Stop", self.exec_row("x.py"))
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.json:Stop:Edit|Write:launched:" + HOOKS_VAR + "x.py"],
+                            "INV-2: found only when the path is not a regular file; a directory is not")
+
+    def test_an_uppercase_py_extension_is_checked_like_a_lowercase_one(self):
+        self.add_row("Stop", self.exec_row("GONE.PY"))
+        rc, data = self.drift()
+        self.assertDangling(data, ["settings.json:Stop:Edit|Write:launched:" + HOOKS_VAR + "GONE.PY"],
+                            "the extension test is case-insensitive (Windows file names), so .PY is a .py file")
+
+    def test_a_settings_file_with_a_byte_order_mark_is_read(self):
+        self.add_row("Stop", self.exec_row("gone.py"))
+        self.w.write_all()
+        settings = self.w.project / ".claude" / "settings.json"
+        settings.write_bytes(b"\xef\xbb\xbf" + settings.read_bytes())
+        found = _dangling_function(self)(self.w.project)
+        self.assertEqual(len(found), 1, "a BOM-prefixed settings.json is still read")
+
+    # ---- review round: the two findings of one row (critic F2, product decision)
+    def test_a_row_that_is_both_a_disabled_hook_and_dangling_gives_both_findings(self):
+        """Decision (critic F2): the two findings answer different questions. `disabled-hook-installed` says the
+        add-on retired this hook; `dangling-hook-row` says the row launches a file that is not on disk. A row that is
+        both is reported under BOTH kinds, once each; neither kind suppresses the other."""
+        _dangling_function(self)
+        add_disabled_addon(self.w, former=[FORMER])
+        self.w.project_register("PreToolUse", RETIRED)
+        rc, data = run_raw(self.w)
+        self.assertEqual(rc, 1)
+        self.assertEqual(_paths(data), ["settings.json:PreToolUse:" + RETIRED], "the disabled-hook finding")
+        self.assertEqual(len(_paths(data, KIND_DANGLING)), 1, "and the dangling-row finding: " + json.dumps(_findings(data))[:500])
+
+    # ---- report shape
+    def test_merged_findings_are_sorted_with_a_kind_that_sorts_after_the_dangling_kind(self):
+        """Critic F1: with a one-sided finding (sorts after dangling-hook-row) an unsorted concatenation of the
+        comparison and the scan would put one-sided first."""
+        self.w.plugin_remove(".claude/hooks/b.py")
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        rc, data = self.drift()
+        kinds = [f["kind"] for f in _findings(data)]
+        self.assertEqual(kinds, [KIND_DANGLING, "one-sided"], "dangling-hook-row sorts before one-sided; got %r" % kinds)
+        order = [(f["kind"], f["path"]) for f in _findings(data)]
+        self.assertEqual(order, sorted(order))
+
+    def test_the_json_finding_carries_the_remedy_and_other_kinds_do_not(self):
+        self.w.project_put(".claude/hooks/b.py", "# b changed here\n")
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        rc, data = self.drift()
+        dangling = _dang(data)
+        self.assertEqual(len(dangling), 1, "fixture: one dangling finding; got " + json.dumps(_findings(data))[:400])
+        self.assertEqual(dangling[0].get("remedy"), REMEDY, "the fixed remedy text names both repairs")
+        self.assertEqual(sorted(dangling[0]), ["kind", "owner", "path", "remedy"])
+        others = [f for f in _findings(data) if f.get("kind") != KIND_DANGLING]
+        self.assertTrue(others, "fixture: a content-differs finding rides along")
+        self.assertTrue(all(sorted(f) == ["kind", "owner", "path"] for f in others),
+                        "every other kind keeps its exact shape")
+        order = [(f["kind"], f["path"]) for f in _findings(data)]
+        self.assertEqual(order, sorted(order), "both sets are sorted by (kind, path)")
+
+    def test_the_text_output_prints_the_remedy_after_the_finding(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        rc, out, err, _ = self.w.run(as_json=False)
+        self.assertEqual(rc, 1)
+        self.assertIn(KIND_DANGLING, out, "the finding is printed; out=%r" % out[-400:])
+        self.assertIn(REMEDY, out, "the remedy is printed")
+
+    def test_the_finding_still_counts_under_ignore_repo_owned(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        rc, data = self.drift("--ignore-repo-owned")
+        self.assertEqual(rc, 1, "INV-6: owner plugin is always counted")
+        self.assertEqual(len(_dang(data)), 1, "the finding is listed; got " + json.dumps(_findings(data))[:400])
+
+    def test_finding_kinds_lists_the_new_kind(self):
+        self.assertIn(KIND_DANGLING, _pd.FINDING_KINDS)
+
+    # ---- survival (INV-7)
+    def test_with_no_plugin_found_the_finding_is_listed_beside_the_error_and_exit_is_4(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        rc, out, err, data = self.w.run(plugin=None)
+        self.assertEqual(rc, 4, "the comparison could not run")
+        self.assertTrue(data and data.get("error"), "error holds the cause; out=%r" % out[-300:])
+        self.assertDangling(data, ["settings.json:UserPromptSubmit:*:launched:" + HOOKS_VAR + GUARD],
+                            "the scan does not need a plugin")
+
+    def test_with_zero_file_pairs_the_finding_is_listed_beside_the_error_and_exit_is_4(self):
+        for tree in self.w.config["synced_trees"]:
+            tree["files"] = []
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        rc, out, err, data = self.w.run()
+        self.assertEqual(rc, 4)
+        self.assertTrue(data and data.get("error"))
+        self.assertEqual(len(_dang(data)), 1, "listed beside error; out=%r" % out[-300:])
+
+    def test_the_text_output_prints_findings_before_the_cannot_compare_line(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        rc, out, err, _ = self.w.run(plugin=None, as_json=False)
+        self.assertEqual(rc, 4)
+        self.assertIn(KIND_DANGLING, out, "findings are printed on exit 4; out=%r" % out[-400:])
+        self.assertLess(out.index(KIND_DANGLING), out.index("cannot compare"), "before the 'cannot compare' line")
+
+    def test_an_unparseable_local_layer_is_skipped_by_the_scan_and_the_comparison_exits_4(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        self.w.write_all()
+        (self.w.project / ".claude" / "settings.local.json").write_text("{ not json", encoding="utf-8")
+        argv = [sys.executable, "-B", str(DOCTOR), "--drift", "--project", str(self.w.project),
+                "--plugin", str(self.w.plugin), "--json"]
+        out = subprocess.run(argv, capture_output=True, text=True, env=self.w.env(), timeout=120)
+        try:
+            data = json.loads(out.stdout)
+        except ValueError:
+            data = None
+        self.assertEqual(out.returncode, 4, "the comparison reports the parse error")
+        self.assertEqual(len(_dang(data or {})), 1, "INV-8: the readable layer is still scanned; out=%r" % out.stdout[-300:])
+
+
+class TestDanglingHookRowsFunction(DanglingCase):
+    def test_it_is_public_pure_and_needs_no_plugin(self):
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        found = self.scan()
+        self.assertEqual([(f.kind, f.owner) for f in found], [(KIND_DANGLING, "plugin")])
+        self.assertEqual(_norm_path(found[0].path), "settings.json:UserPromptSubmit:*:launched:" + HOOKS_VAR + GUARD)
+
+    def test_it_returns_nothing_for_a_project_without_settings(self):
+        fn = _dangling_function(self)
+        self.assertEqual(list(fn(self.w.tmp / "empty-project")), [], "no settings file, no rows, no finding")
+
+    def test_the_comparison_does_not_include_the_finding(self):
+        _dangling_function(self)
+        self.add_row("UserPromptSubmit", self.exec_row(GUARD), matcher="")
+        self.w.write_all()
+        result = _pd.compute_drift(self.w.project, self.w.plugin)
+        self.assertNotIn(KIND_DANGLING, [f.kind for f in result["findings"]],
+                         "INV-7: compute_drift does not call the scan, so nothing is counted twice")
+
+    def test_a_dangling_row_is_found_by_the_scan_and_a_present_file_is_not(self):
+        self.w.project_put(".claude/hooks/here.py", "# h\n")
+        self.add_row("Stop", self.exec_row("here.py"))
+        self.add_row("Stop", self.exec_row("gone.py"), matcher="other")
+        found = self.scan()
+        self.assertEqual(len(found), 1)
+        self.assertTrue(_norm_path(found[0].path).endswith("gone.py"))
+
+
+class TestDanglingRowSharedReaders(DanglingCase):
+    """INV-5: one token reader and one row walker."""
+
+    def test_launched_and_first_argument_still_returns_file_names(self):
+        self.assertEqual(_pd._launched_and_first_argument(self.gate_row()), ("gate-launch.py", "concept-gate.py"))
+
+    def test_registered_twice_and_dangling_read_exec_shell_and_gate_rows_to_the_same_names(self):
+        """INV-5 by behaviour: the two readers agree on which file each row launches."""
+        self.w.project_register("PreToolUse", "p1.py", matcher="exec")
+        self.w.project_register("Stop", "p2.py", matcher="shell", shell=True)
+        self.w.project_register("SessionStart", "gate-launch.py", matcher="gate", gate="c.py")
+        for event, hook, gate in (("PreToolUse", "p1.py", None), ("Stop", "p2.py", None),
+                                  ("SessionStart", "gate-launch.py", "c.py")):
+            self.w.plugin_register(event, hook, matcher="p", gate=gate)
+        rc, data = self.drift()
+        twice = sorted(tuple(f["path"].split(":", 1)) for f in _findings(data) if f["kind"] == "registered-twice")
+        self.assertEqual(twice, [("PreToolUse", "p1.py"), ("SessionStart", "c.py"), ("Stop", "p2.py")],
+                         "fixture: the three rows are double registrations; got " + json.dumps(_findings(data))[:600])
+        import posixpath
+        launched = set()
+        for f in _dang(data):
+            _layer, event, _matcher, role, raw = f["path"].split(":", 4)
+            if role in ("launched", "gate-argument") and posixpath.basename(raw.replace("\\", "/")) != "gate-launch.py":
+                launched.add((event, posixpath.basename(raw.replace("\\", "/"))))
+        self.assertEqual(launched, set(twice), "dangling names the same (event, file) pairs registered-twice does")
 
 
 if __name__ == "__main__":

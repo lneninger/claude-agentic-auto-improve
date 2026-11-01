@@ -303,6 +303,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract adds a new `failure:` kind, a new failed-record writer, or a human-only exit guarded by existing refusals
 - **Tags:** failed-record, legacy, escape-hatch, guard-interplay
 
+### 2026-11-01 — A shared reader reused by a stricter consumer must be re-checked against the forms its errors were harmless for
+- **Trigger:** post-impl divergence
+- **Source contract:** D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261031-infra-71-warn-on-unshipped-hook-rows\.claude\concepts\2026-10-31-warn-on-unshipped-hook-rows.md
+- **Lesson:** When a contract reuses an existing token or path reader for a check that reports absence, list the row forms the reader mis-splits (here `shlex.split(posix=False)` splits `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py` into two tokens) and either fix the reader or prove each form is never reported; a basename-only consumer hid the split, a path-existence consumer turns it into a false finding on a working row.
+- **Apply when:** a contract adds a finding of the form "file X is missing" on top of a reader whose existing callers use only the file name, or reuses `_launch_tokens` / `_launched_raw_tokens` for a new purpose
+- **Tags:** false-positive, token-reader, shell-quoting, reuse, hook-row
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

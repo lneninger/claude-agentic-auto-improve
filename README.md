@@ -230,7 +230,8 @@ also one at turn end. Then delete the file and its rules file. Do not delete the
 row that points at a missing script exits with code 2, so a prompt-submit row would block every
 prompt. Start a new session afterwards. The hook's optional leftovers,
 `.claude/state/plain-language-guard-<session>.json` and `.claude/logs/plain-language-guard.log`,
-are never read again and you may delete them by hand.
+are never read again and you may delete them by hand. Since 0.12.2,
+`plugin_doctor.py --drift` reports a row left behind this way as `dangling-hook-row`.
 
 **Changed in 0.9.21:** `architecture-guard.py` knows a component without view encapsulation
 (`ViewEncapsulation.None`): `:host` matches nothing there, so it warns about a `:host` rule and
@@ -298,6 +299,11 @@ measured once, on one Windows workstation, for issue #84, and was not measured a
 the add-on registers no row on any event that runs per prompt, so no program starts for Angular
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
+
+**Changed in 0.12.2 (issue #71, follow-up 1):** `plugin_doctor.py --drift` warns about a project
+hook row that launches a file that is not there, such as a row for a hook the plugin no longer
+ships. The finding kind is `dangling-hook-row`. It is read-only, needs no plugin, and is still
+listed when the comparison exits `4`. The manifests read 0.12.2.
 
 **Changed in 0.12.0 (follow-ups to the `angular-tailwind` rule documents, issue #86):** this
 release closes the items the 0.10.0 work left open. The manifests read 0.12.0. It has eight
@@ -926,6 +932,15 @@ compared). `--json` adds the `compared` count, so a caller can tell an empty com
 clean one, `compared_addons` counts the installed add-on files it compared (they are never
 counted in `compared`), and `--ignore-repo-owned` prints a repository-owned finding as `reported` instead of
 counting it.
+
+`--drift` also reports `dangling-hook-row`: a row in the project's `settings.json` or
+`settings.local.json` that launches a `.py` file that is not on disk (for a `gate-launch.py` row,
+also the launcher's `_gate_launch.py` body and the gate argument). This is not drift, because no
+plugin copy is compared. It reads the project alone, so it is listed even when the comparison
+cannot run and the run exits `4`. The finding path is
+`<layer>:<event>:<matcher>:<role>:<path as written>`, and its remedy is: restore the file if the
+plugin still ships it, otherwise remove the row. The doctor never edits a settings file. Paths
+that use any variable other than the project folder, or a leading `~`, are never reported.
 
 It creates the directories, copies the templates and registries out of the plugin, and
 scaffolds the configuration files. It is safe to re-run: a second pass finds nothing to do.
