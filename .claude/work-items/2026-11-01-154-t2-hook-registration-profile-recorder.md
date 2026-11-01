@@ -15,9 +15,9 @@ north_stars: inherited from .claude/work-items/2026-10-31-148-plugin-owns-hook-m
 parent_issue: 148
 base: feature/148-plugin-owns-hook-mechanism-tests
 contract: .claude/concepts/2026-10-31-plugin-owns-hook-mechanism-tests.md
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/159
+issue_link: deferred
+status: shipped
 created: 2026-11-01
 ---
 
