@@ -416,9 +416,26 @@ def _launch_tokens(entry: dict) -> List[str]:
     return [t.strip("\"'") for t in tokens[1:]]
 
 
+def _launcher_row_parts(entry: dict) -> Optional[Tuple[str, str, List[str]]]:
+    """``(class, script, extra arguments)`` when the row is a Project hook launcher row, else ``None``.
+    The reader lives in ``_project_paths`` beside the launcher text it compares to; ``_claude_paths`` is
+    imported here, not at the top, so a copy of this script without a hooks folder still loads."""
+    try:
+        from _claude_paths import project_hook_launcher_parts
+    except ImportError:
+        return None
+    return project_hook_launcher_parts(entry)
+
+
 def _launched_and_first_argument(entry: dict) -> Tuple[Optional[str], Optional[str]]:
     """The launched script file name and the argument that follows it. Exec form launches the first
-    ``args`` element that does not start with ``-``; shell form the first token ending in ``.py``."""
+    ``args`` element that does not start with ``-``; shell form the first token ending in ``.py``.
+    A Project hook launcher row launches its script (the argument after the class), and the argument
+    after that is the first extra, so a ``gate-launch.py`` launcher row is the gate it names."""
+    launcher = _launcher_row_parts(entry)
+    if launcher is not None:
+        _hook_class, script, extras = launcher
+        return script, (posixpath.basename(_rel(extras[0])) if extras else None)
     tokens = _launch_tokens(entry)
     isolated = isinstance(entry.get("args"), list)
     for index, token in enumerate(tokens):

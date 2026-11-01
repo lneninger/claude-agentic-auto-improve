@@ -85,6 +85,24 @@ if _SCRIPTS_DIR not in sys.path:
 from pr_merged import DEFAULT_IMPLEMENTERS, DEFAULT_REVIEW_GATES, load_slot  # noqa: E402
 from plugin_doctor import find_plugin_root  # noqa: E402
 
+
+def _launcher_api() -> Optional[Any]:
+    """The Project hook launcher surface of ``_claude_paths`` (the builder, the reader and the two classes),
+    or ``None`` when this copy of the scripts has no usable ``_project_paths.py`` beside it.
+
+    Imported at call time, like every other locator: a copy of these scripts whose hooks folder is a stub
+    (``import sys; sys.exit(0)``) or an older vendored copy without the launcher must not fail at import.
+    ``SystemExit`` is caught for that reason only. The result is never cached, so a test that swaps the
+    hooks folder sees the swap."""
+    try:
+        import _claude_paths
+        for name in ("PROJECT_HOOK_LAUNCHER_SOURCE", "HOOK_CLASS_BLOCK", "HOOK_CLASS_WARN",
+                     "project_hook_launcher_parts", "project_hook_launcher_row"):
+            getattr(_claude_paths, name)
+    except (ImportError, AttributeError, SystemExit):
+        return None
+    return _claude_paths
+
 Result = Dict[str, Any]
 
 # --- Exit codes -----------------------------------------------------------------------
@@ -1030,6 +1048,13 @@ def _hook_tokens(hook: Dict[str, Any]) -> List[str]:
 def _hook_key(hook: Dict[str, Any]) -> Optional[Tuple[str, Tuple[str, ...], str, str, str]]:
     """(hook file, arguments after it, folder, launcher, path token) of a registration, or None."""
     tokens = _hook_tokens(hook)
+    api = _launcher_api()
+    launcher = api.project_hook_launcher_parts(hook) if api is not None else None
+    if launcher is not None:
+        # A Project hook launcher row runs its script from the project's own hooks folder, so that is its
+        # folder; the arguments after the class and the script are its extras.
+        _hook_class, script, extras = launcher
+        return script, tuple(extras), _PROJECT_HOOK_DIRS[0], tokens[0], script
     for i, token in enumerate(tokens):
         if token.lower().endswith(".py"):
             path = token.replace("\\", "/")
@@ -1309,11 +1334,10 @@ def _parse_settings(data: bytes, target: Path) -> Tuple[Optional[Result], Any]:
     return None, parsed
 
 
-def _written_hook(reg: _Registration, platform: str) -> Dict[str, Any]:
-    """The command + args form, with the project path variable, never the plugin one."""
+def _written_project_path_hook(reg: _Registration, platform: str) -> Dict[str, Any]:
+    """The earlier command + args form, with the project path variable, never the plugin one. Used only
+    when the launcher is unavailable (see ``_written_hook``)."""
     path = "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + reg.file
-    # An argument that is itself a plugin script (the gate launcher's gate) gets the same rewrite as the
-    # first path; every other argument is copied unchanged.
     extras = ["${CLAUDE_PROJECT_DIR}/.claude/hooks/" + a.replace("\\", "/").rsplit("/", 1)[-1]
               if _is_plugin_script_arg(a) else a for a in reg.extras]
     if platform == "win32":
@@ -1321,6 +1345,29 @@ def _written_hook(reg: _Registration, platform: str) -> Dict[str, Any]:
     else:
         command, args = "python3", [path] + extras
     hook: Dict[str, Any] = {"type": reg.hook_type, "command": command, "args": args}
+    hook.update(dict(reg.other_keys))
+    return hook
+
+
+def _written_hook(reg: _Registration, platform: str) -> Dict[str, Any]:
+    """The Project hook launcher row (contract Revision 9): ``py -3 -c <launcher source> <class> <script>
+    [extra arguments]``, or ``python3 -c ...`` off Windows. The class is ``block`` exactly for a ``PreToolUse``
+    row and ``warn`` for every other event (L2). The script is the bare file name; the launcher finds it in
+    the project's hooks folder, so no row names the project path or the plugin one. An argument that is
+    itself a plugin script (the gate launcher's gate) is written as its bare file name, which the launcher
+    expands to the target's folder for ``gate-launch.py``; every other argument is copied unchanged.
+
+    When this copy of the scripts has no usable launcher (``_launcher_api()`` is ``None``: a stub or an older
+    vendored ``_project_paths.py``) the row is written in the earlier project-path form, which is what this
+    writer wrote before the launcher existed, and ``_plan_settings_edit`` says so in its notes. The writer
+    never invents a second copy of the launcher text."""
+    api = _launcher_api()
+    if api is None:
+        return _written_project_path_hook(reg, platform)
+    extras = [a.replace("\\", "/").rsplit("/", 1)[-1] if _is_plugin_script_arg(a) else a for a in reg.extras]
+    hook_class = api.HOOK_CLASS_BLOCK if reg.event == "PreToolUse" else api.HOOK_CLASS_WARN
+    hook: Dict[str, Any] = api.project_hook_launcher_row(reg.file, hook_class, extras, platform)
+    hook["type"] = reg.hook_type
     hook.update(dict(reg.other_keys))
     return hook
 
@@ -1619,6 +1666,11 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
             if different:
                 notes.append("%s is registered under matcher %r, the source uses %r; tools only the source "
                              "matcher names are not covered" % (reg.key, match["matcher"], reg.matcher))
+    if to_add and _launcher_api() is None:
+        notes.append("the Project hook launcher is not available beside this script (no usable "
+                     ".claude/hooks/_project_paths.py), so the rows are written in the earlier form that names "
+                     "${CLAUDE_PROJECT_DIR}/.claude/hooks/ directly; update the vendored hooks folder and run this "
+                     "again to get launcher rows for new registrations")
     text = old_bytes.decode("utf-8-sig") if old_bytes is not None else ""
     newline = "\r\n" if "\r\n" in text else "\n"
     indent_match = re.search(r"\n([ \t]+)\S", text)

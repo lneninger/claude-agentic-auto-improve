@@ -239,7 +239,10 @@ Do not try it.
    (empty when the project's own `hooks.json` is the source), so a wrong pick is visible.
    Show the exact `unified-diff`. Say how many registrations will be added and how many were
    already present. Report any `notes`, such as a registration under a different matcher or a
-   database guard that matches no PowerShell tool.
+   database guard that matches no PowerShell tool. Tell the user that every row the diff adds
+   carries a short launcher program inside it (`py -3 -c <program> <class> <hook file>`), so the
+   hook is still found if this session's project folder is removed; the long program text in each
+   row is expected, and the README section "Project hook launcher" explains it.
 2. Say plainly: **registration turns enforcement on, and it takes effect only in a NEW
    session.** This session keeps running without it.
 3. Ask **once**: apply this change? If the user wants to leave a hook out, add
