@@ -13,10 +13,10 @@ branch: feature/71-warn-on-unshipped-hook-rows
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261031-infra-71-warn-on-unshipped-hook-rows
 north_stars: none
 contract: .claude/concepts/2026-10-31-warn-on-unshipped-hook-rows.md
-pr: none
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/151
 partial: true
-issue_link: unknown
-status: designing
+issue_link: unresolved
+status: verifying
 created: 2026-10-31
 ---
 
@@ -66,3 +66,6 @@ non-trivial → /design-first
   - Reviewer's suggested fix, not applied: in `dangling_hook_rows` only, treat a shell-form row as unresolvable when a separator (`&&`, `||`, `;`, `|`, `&`) precedes the launched word, when the first word is `cd`, `pushd` or `Set-Location`, or when the word before the launched word is `-c`, `/c`, `/k` or `-Command`. Do not change `_launched_raw_tokens`. Tests: the four working rows give no finding, and `cd ... && python missing.py` is skipped too (accepted cost).
   - Tests: 518 pass (exit 0), including the new ones. The open defect has no failing test yet.
   - Intake assumption still stands: this run covers issue #71 follow-up 1 only (`partial: true`).
+- 2026-11-01 /flow resumed after "Continue". The open defect was closed by switching to a whitelist for both row forms (reviews 4 to 6; review 6 was clean). Master moved to 0.12.3 (Project hook launcher rows, pull request #150), so the branch merged master and is now 0.12.4. Launcher rows are skipped by the check. The read-back tests were rewritten for that.
+- 2026-11-01 /ship: draft pull request #151 opened. `verify_issue_link.py` returned `unexpected-closing-ref` (halt): GitHub reports a closing link to #71 although the body says `Refs #71` and the brief says `partial: true`. Cause: the branch was cut with `gh issue develop` at intake, so GitHub treats it as linked to the issue. A merge would close #71 while follow-ups 2 and 3 are still open. No repair was attempted. `issue_link: unresolved`. Needs a human: unlink the branch from the issue (issue #71 sidebar, Development section), or reopen #71 after the merge.
+- 19 failures in `test_auto_improve_finish_install.py` are master's own (identical on a clean `origin/master` checkout) and are not part of this work.
