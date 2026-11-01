@@ -473,5 +473,343 @@ class RealProjectConfigTests(VerCase):
                       "the per-file line appears for the file that crashed on import")
 
 
+# ===========================================================================
+# Failure attribution (contract 2026-10-31-plugin-owns-hook-mechanism-tests, block 3)
+# ===========================================================================
+def _step(step_id, command, fmt="exit-code", when_paths=None, suite=None):
+    step = {"id": step_id, "suite": suite or step_id, "command": list(command),
+            "results": {"format": fmt}, "timeout_minutes": 1, "environment_signatures": []}
+    if when_paths is not None:
+        step["when_paths"] = when_paths
+    return step
+
+
+def _regression(step_id, new_failures=()):
+    return {"id": step_id, "suite": step_id, "reading": "regression", "new_failures": list(new_failures)}
+
+
+class AttributionCase(VerCase):
+
+    def sides(self, contract=(), default=(), landing=()):
+        return self.fn("AttributionSides")(list(contract), list(default), list(landing))
+
+    def attribute(self, unit, step, **sides):
+        return self.fn("attribute_failure")(unit, step, self.sides(**sides), None)
+
+    @staticmethod
+    def step_unit(step_id):
+        return {"unit": "step %s" % step_id, "unit_kind": "step", "step_id": step_id}
+
+    @staticmethod
+    def named_unit(failure_id, step_id):
+        return {"unit": failure_id, "unit_kind": "test", "step_id": step_id}
+
+
+FILE_STEP = _step("check", ["py", "-3", "scripts/check_x.py"])
+INLINE_STEP = _step("inline", ["py", "-3", "-c", "import sys; sys.exit(1)"])
+UT_STEP = _step("ut", ["py", "-3", "run_unit.py"], fmt="unittest-text", suite="scripts")
+UT_ID = "scripts::tests.test_mod.TestA::test_x"
+UT_FILE = "tests/test_mod.py"
+
+
+class TestFailureUnits(AttributionCase):
+
+    def test_a_named_failure_is_one_test_unit_each(self):
+        units = self.fn("failure_units")([_regression("ut", [UT_ID, "scripts::tests.test_mod.TestA::test_y"])])
+        self.assertEqual([(u["unit"], u["unit_kind"], u["step_id"]) for u in units],
+                         [(UT_ID, "test", "ut"), ("scripts::tests.test_mod.TestA::test_y", "test", "ut")])
+
+    def test_a_regression_with_no_named_failures_is_exactly_one_step_unit(self):
+        units = self.fn("failure_units")([_regression("check")])
+        self.assertEqual([(u["unit"], u["unit_kind"]) for u in units], [("step check", "step")])
+
+    def test_control_a_reading_that_is_not_a_regression_yields_nothing(self):
+        readings = [{"id": "a", "reading": "ok", "new_failures": []},
+                    {"id": "b", "reading": "environment", "new_failures": []}]
+        self.assertEqual(self.fn("failure_units")(readings), [])
+
+
+class TestAttributionRules(AttributionCase):
+
+    def test_fa1_a_named_file_the_landing_itself_changes_is_undetermined(self):
+        got = self.attribute(self.step_unit("check"), FILE_STEP, contract=["scripts/check_x.py"],
+                             landing=["scripts/check_x.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+        self.assertIn("the landing itself changes scripts/check_x.py", got["reason"])
+
+    def test_fa1_control_without_the_landing_term_the_same_file_is_in_diff(self):
+        got = self.attribute(self.step_unit("check"), FILE_STEP, contract=["scripts/check_x.py"])
+        self.assertEqual(got["attribution"], "in-diff")
+
+    def test_fa1_a_file_changed_only_by_the_version_raise_commit_is_undetermined(self):
+        step = _step("v", ["py", "-3", "plugin.json"])
+        got = self.attribute(self.step_unit("v"), step, default=["plugin.json"], landing=["plugin.json"])
+        self.assertEqual(got["attribution"], "undetermined")
+
+    def test_fa1_a_version_file_when_p7b_committed_nothing_is_undetermined(self):
+        # the landing side still holds every MANIFESTS path, whether or not this run committed one
+        step = _step("v", ["py", "-3", ".claude-plugin/plugin.json"])
+        got = self.attribute(self.step_unit("v"), step, contract=[".claude-plugin/plugin.json"],
+                             landing=list(self.mod().MANIFESTS))
+        self.assertEqual(got["attribution"], "undetermined")
+
+    def test_fa2_a_file_in_both_diffs_is_undetermined(self):
+        got = self.attribute(self.step_unit("check"), FILE_STEP, contract=["scripts/check_x.py"],
+                             default=["scripts/check_x.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+        self.assertIn("both the contract's diff and the default branch's diff", got["reason"])
+        self.assertIn("scripts/check_x.py", got["reason"])
+
+    def test_fa2_different_named_files_in_each_diff_are_undetermined(self):
+        step = _step("two", ["py", "-3", "a/one.py", "b/two.py"])
+        got = self.attribute(self.step_unit("two"), step, contract=["a/one.py"], default=["b/two.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+        self.assertIn("both the contract's diff and the default branch's diff", got["reason"])
+
+    def test_fa3_a_named_file_only_in_the_contract_diff_is_in_diff(self):
+        got = self.attribute(self.step_unit("check"), FILE_STEP, contract=["scripts/check_x.py"],
+                             default=["other.txt"])
+        self.assertEqual(got["attribution"], "in-diff")
+        self.assertIn("only the contract's diff changes scripts/check_x.py", got["reason"])
+
+    def test_fa4_a_named_file_only_in_the_default_branch_diff_is_outside_diff(self):
+        got = self.attribute(self.step_unit("check"), FILE_STEP, contract=["other.txt"],
+                             default=["scripts/check_x.py"])
+        self.assertEqual(got["attribution"], "outside-diff")
+        self.assertIn("only the default branch's diff changes scripts/check_x.py", got["reason"])
+
+    def test_fa5_a_step_naming_no_file_is_undetermined_with_that_reason(self):
+        got = self.attribute(self.step_unit("inline"), INLINE_STEP, contract=["src/a.py"], default=["b.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+        self.assertIn("the step names no file, so a failure cannot be traced to a diff", got["reason"])
+
+    def test_fa5_a_when_paths_match_never_decides_a_side(self):
+        step = _step("inline", ["py", "-3", "-c", "pass"], when_paths=["src/**"])
+        got = self.attribute(self.step_unit("inline"), step, contract=["src/a.py"])
+        self.assertEqual(got["attribution"], "undetermined", "a path match shows why the step ran, not what failed")
+
+    def test_fa5_a_file_naming_step_with_a_when_paths_match_gives_the_when_paths_reason(self):
+        step = _step("check", ["py", "-3", "scripts/check_x.py"], when_paths=["src/**"])
+        got = self.attribute(self.step_unit("check"), step, contract=["src/a.py"], default=["src/b.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+        self.assertIn("when_paths match the contract's diff and the default branch's diff", got["reason"])
+        self.assertIn("which shows only why the step ran, not what failed", got["reason"])
+
+    def test_fa5_otherwise_no_file_the_failure_names_is_in_either_diff(self):
+        got = self.attribute(self.step_unit("check"), FILE_STEP, contract=["src/a.py"], default=["b.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+        self.assertIn("no file the failure names is in either diff", got["reason"])
+
+    def test_fa5_control_a_when_paths_that_matches_nothing_gives_the_last_reason(self):
+        step = _step("check", ["py", "-3", "scripts/check_x.py"], when_paths=["docs/**"])
+        got = self.attribute(self.step_unit("check"), step, contract=["src/a.py"])
+        self.assertIn("no file the failure names is in either diff", got["reason"])
+
+    def test_a_backslash_argument_equals_the_diff_path(self):
+        step = _step("check", ["py", "-3", "scripts\\check_x.py"])
+        got = self.attribute(self.step_unit("check"), step, default=["scripts/check_x.py"])
+        self.assertEqual(got["attribution"], "outside-diff")
+
+    def test_an_option_argument_never_names_a_file(self):
+        step = _step("opt", ["py", "-3", "--settings", "-x.py"])
+        got = self.attribute(self.step_unit("opt"), step, default=["-x.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+
+    def test_the_file_a_unittest_unit_names_is_its_module_path_suffix(self):
+        got = self.attribute(self.named_unit(UT_ID, "ut"), UT_STEP, default=["pkg/" + UT_FILE])
+        self.assertEqual(got["attribution"], "outside-diff", "whole-segment suffix, unique match")
+        self.assertEqual(got["unit_kind"], "test")
+
+    def test_a_unittest_module_matching_two_diff_paths_names_no_file(self):
+        got = self.attribute(self.named_unit(UT_ID, "ut"), UT_STEP, contract=["a/" + UT_FILE],
+                             default=["b/" + UT_FILE])
+        self.assertEqual(got["attribution"], "undetermined")
+        self.assertIn("no file the failure names", got["reason"])
+
+    def test_a_partial_segment_is_not_a_suffix_match(self):
+        got = self.attribute(self.named_unit(UT_ID, "ut"), UT_STEP, default=["xtests/test_mod.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+
+    def test_a_main_module_names_no_file(self):
+        unit = self.named_unit("scripts::__main__.TestA::test_x", "ut")
+        got = self.attribute(unit, UT_STEP, default=["__main__.py"])
+        self.assertEqual(got["attribution"], "undetermined")
+
+    def test_a_vitest_unit_names_its_path(self):
+        step = _step("ui", ["npx", "vitest"], fmt="vitest-json", suite="ui")
+        unit = self.named_unit("ui::src/app/a.spec.ts::does x", "ui")
+        self.assertEqual(self.attribute(unit, step, contract=["src/app/a.spec.ts"])["attribution"], "in-diff")
+        self.assertEqual(self.attribute(unit, step, default=["src/app/a.spec.ts"])["attribution"], "outside-diff")
+
+    def test_a_trx_unit_names_no_file(self):
+        step = _step("dn", ["dotnet", "test"], fmt="trx", suite="dn")
+        unit = self.named_unit("dn::Ns.Cls::T", "dn")
+        got = self.attribute(unit, step, contract=["Ns/Cls.cs"], default=["Ns.Cls.cs"])
+        self.assertEqual(got["attribution"], "undetermined")
+
+
+class TestAttributionOnThisRepositorysSteps(AttributionCase):
+    """Every expectation is derived from the loaded steps: no step id and no count is written here."""
+
+    def setUp(self):
+        block = _real_landing_block()
+        if not block:
+            self.skipTest(NO_CONFIG_REASON)
+        self.steps = list((block.get("verification") or {}).get("steps") or [])
+        self.assertTrue(self.steps, "the block configures verification steps")
+
+    @staticmethod
+    def named_file(step):
+        """The independent reading of the rule: a non-option argument (not inline code) that is a file here."""
+        args = list(step["command"])[1:]
+        found, skip = [], False
+        for arg in args:
+            if skip:
+                skip = False
+                continue
+            if arg == "-c":
+                skip = True
+                continue
+            if not arg.startswith("-") and (REPO_ROOT / arg.replace("\\", "/")).is_file():
+                found.append(arg.replace("\\", "/"))
+        return found[0] if found else None
+
+    def build(self, **sides):
+        readings = [_regression(s["id"]) for s in self.steps]
+        return self.fn("build_attribution")(readings, self.steps, self.sides(**sides), [], None)
+
+    def test_every_step_gets_one_entry_with_a_reason_and_the_note_is_written(self):
+        attributed, note = self.build(contract=["unrelated/none.txt"])
+        self.assertEqual([a["unit"] for a in attributed], ["step %s" % s["id"] for s in self.steps])
+        for entry in attributed:
+            self.assertTrue(entry["reason"], "a non-empty reason for %s" % entry["unit"])
+        self.assertTrue(note, "no entry is in-diff or outside-diff, so the note is written")
+
+    def test_a_step_that_names_a_file_is_in_diff_or_outside_diff_by_where_the_file_changed(self):
+        naming = [s for s in self.steps if self.named_file(s)]
+        self.assertTrue(naming, "at least one step names a file, so the test cannot pass vacuously")
+        for step in naming:
+            file = self.named_file(step)
+            for side, expected in (("contract", "in-diff"), ("default", "outside-diff")):
+                with self.subTest(step=step["id"], side=side):
+                    readings = [_regression(step["id"])]
+                    attributed, _ = self.fn("build_attribution")(
+                        readings, [step], self.sides(**{side: [file]}), [], None)
+                    self.assertEqual(attributed[0]["attribution"], expected)
+
+    def test_a_step_naming_no_file_stays_undetermined_with_the_names_no_file_reason(self):
+        silent = [s for s in self.steps if not self.named_file(s)]
+        self.assertTrue(silent, "at least one step names no file, so the test cannot pass vacuously")
+        for step in silent:
+            with self.subTest(step=step["id"]):
+                attributed, _ = self.fn("build_attribution")(
+                    [_regression(step["id"])], [step],
+                    self.sides(contract=["a/x.py"], default=["a/x.py"]), [], None)
+                self.assertEqual(attributed[0]["attribution"], "undetermined")
+                self.assertIn("names no file", attributed[0]["reason"])
+
+
+class TestIssue148Case(AttributionCase):
+    README_STEP = _step("hook-registration-check", [
+        "py", "-3", "-B", ".claude/scripts/check_hook_registrations.py",
+        "--settings", ".claude/settings.json",
+        "--hook-registration-profile", ".claude/hook-registration-profile.json"])
+
+    def test_the_default_branch_changing_settings_reads_outside_diff_and_steers_to_the_default_branch(self):
+        sides = self.sides(contract=["src/a.py"], default=[".claude/settings.json"])
+        attributed, _ = self.fn("build_attribution")([_regression("hook-registration-check")],
+                                                     [self.README_STEP], sides, [], None)
+        self.assertEqual(attributed[0]["attribution"], "outside-diff")
+        facts = self.fn("advice_facts")([], attributed)
+        self.assertEqual(facts, {"all_outside_diff": False, "step_failures_only": True})
+
+    def test_control_the_contract_changing_settings_reads_in_diff(self):
+        sides = self.sides(contract=[".claude/settings.json"])
+        attributed, _ = self.fn("build_attribution")([_regression("hook-registration-check")],
+                                                     [self.README_STEP], sides, [], None)
+        self.assertEqual(attributed[0]["attribution"], "in-diff")
+
+
+class TestAdviceFacts(AttributionCase):
+
+    @staticmethod
+    def entry(kind, attribution):
+        return {"unit": "u", "unit_kind": kind, "attribution": attribution, "reason": "r"}
+
+    def facts(self, reasons, *entries):
+        return self.fn("advice_facts")(list(reasons), list(entries))
+
+    def test_every_unit_outside_diff_with_a_test_unit_is_all_outside_diff(self):
+        got = self.facts([], self.entry("test", "outside-diff"), self.entry("step", "outside-diff"))
+        self.assertEqual(got, {"all_outside_diff": True, "step_failures_only": False})
+
+    def test_control_one_in_diff_unit_clears_it(self):
+        got = self.facts([], self.entry("test", "outside-diff"), self.entry("test", "in-diff"))
+        self.assertEqual(got, {"all_outside_diff": False, "step_failures_only": False})
+
+    def test_steps_only_is_step_failures_only_whatever_the_attribution(self):
+        got = self.facts([], self.entry("step", "in-diff"), self.entry("step", "outside-diff"))
+        self.assertEqual(got, {"all_outside_diff": False, "step_failures_only": True})
+
+    def test_outside_diff_steps_without_a_test_unit_are_not_all_outside_diff(self):
+        got = self.facts([], self.entry("step", "outside-diff"))
+        self.assertFalse(got["all_outside_diff"])
+
+    def test_reasons_or_no_unit_make_both_false_never_vacuously_true(self):
+        none = {"all_outside_diff": False, "step_failures_only": False}
+        self.assertEqual(self.facts(["forbidden paths"], self.entry("test", "outside-diff")), none)
+        self.assertEqual(self.facts([]), none)
+
+
+class TestEmptyListAndRecord(RepoCase):
+    """The Verification Record keys, through _p8_verify in a temporary repository."""
+
+    def call(self, steps, contract_diff, forbidden=(), **kw):
+        config = {"verification": {"steps": steps}, "emulators": [], "reviewCoverage": [],
+                  "forbiddenPaths": list(forbidden)}
+        return self.fn("_p8_verify")(self.repo, self.head, config, {}, "absent", None, list(contract_diff),
+                                     kw.pop("merge_diff", []), [], {}, [], self.logs, self.contract_dir,
+                                     "run-1", "origin/master", **kw)
+
+    FAIL_ARGV = [sys.executable, "-c", "import sys; sys.exit(1)"]
+
+    def test_a_not_ready_from_reasons_only_has_an_empty_list_and_the_no_step_regressed_note(self):
+        got = self.call([_ok_step("always")], ["secrets/key.pem"], forbidden=["secrets/*"])
+        self.assertEqual(got["verdict"], "NOT-READY")
+        self.assertEqual(got["new_failures_attributed"], [])
+        self.assertIn("no step regressed, so there is nothing to attribute; the verdict comes from:",
+                      got["attribution_note"])
+        self.assertIn("forbidden paths in the contract diff", got["attribution_note"])
+        self.assertEqual(self.fn("advice_facts")(got["reasons"], got["new_failures_attributed"]),
+                         {"all_outside_diff": False, "step_failures_only": False})
+
+    def test_a_ready_verdict_has_an_empty_list_and_no_note(self):
+        got = self.call([_ok_step("always")], ["README.md"])
+        self.assertEqual(got["verdict"], "READY")
+        self.assertEqual(got["new_failures_attributed"], [])
+        self.assertNotIn("attribution_note", got)
+
+    def test_a_failing_step_is_one_step_unit_attributed_from_the_three_sides(self):
+        step = {"id": "check", "suite": "check", "command": self.FAIL_ARGV + ["scripts/check_x.py"],
+                "results": {"format": "exit-code"}, "timeout_minutes": 1, "environment_signatures": []}
+        got = self.call([step], ["src/a.py"], merge_diff=["scripts/check_x.py"],
+                        default_branch_diff=["scripts/check_x.py"], landing_paths=[])
+        self.assertEqual(got["verdict"], "NOT-READY")
+        self.assertEqual([(a["unit"], a["unit_kind"], a["attribution"]) for a in got["new_failures_attributed"]],
+                         [("step check", "step", "outside-diff")])
+        self.assertNotIn("attribution_note", got, "an outside-diff entry exists and there are no reasons")
+
+    def test_no_decided_entry_writes_the_note_with_the_distinct_reasons(self):
+        step = {"id": "inline", "suite": "inline", "command": self.FAIL_ARGV,
+                "results": {"format": "exit-code"}, "timeout_minutes": 1, "environment_signatures": []}
+        got = self.call([step], ["src/a.py"])
+        self.assertEqual(got["new_failures_attributed"][0]["attribution"], "undetermined")
+        self.assertIn("the step names no file", got["attribution_note"])
+
+    def test_the_defaults_keep_existing_callers_working(self):
+        got = self.verify([_ok_step("always")], ["README.md"])
+        self.assertEqual(got["new_failures_attributed"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
