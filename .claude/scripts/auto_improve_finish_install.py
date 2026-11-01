@@ -32,6 +32,17 @@ Usage:
   py -3 .claude/scripts/auto_improve_finish_install.py addon-remove --name <add-on> --project . [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py addon-remove --name <add-on> --project . --apply \\
       --expect-sha256 <plan hash>
+  py -3 .claude/scripts/auto_improve_finish_install.py record-registrations --project . [--json]
+  py -3 .claude/scripts/auto_improve_finish_install.py record-registrations --project . --apply \\
+      --expect-sha256 <plan hash>
+
+The ``record-registrations`` subcommand records the project's hook registrations: it reads
+``.claude/settings.json`` through the one Settings shape validator (``check_hook_registrations.load_settings``)
+and writes ``.claude/hook-registration-profile.json``, the file ``check_hook_registrations.py`` judges the settings
+against, through the same preview and plan hash. The plan hash covers the settings bytes, the existing file bytes
+(or ``absent``) and the planned bytes. Every Exclusion already in the hook registration profile is kept verbatim,
+a stale one included (the preview lists it); a hook registration profile that cannot be read is never overwritten.
+An existing file is backed up before it is replaced, and planned bytes equal to the existing bytes write nothing.
 
 The ``addon-remove`` subcommand takes an add-on out again, through the same preview and plan hash: it removes
 the add-on's rows from settings.json first (with a backup, as a text splice that keeps every other byte), then
@@ -125,6 +136,8 @@ REFUSAL_CODES: Tuple[str, ...] = (
     "disabled-hook-present",
     "stylesheet-partial-snippet",
     "stylesheet-missing",
+    "registration-settings-missing",
+    "hook-registration-profile-unreadable",
 )
 
 _ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing",
@@ -3045,6 +3058,142 @@ def apply_addon_removal(
 
 
 # =======================================================================================
+# The hook registration profile recorder (record-registrations)
+# =======================================================================================
+
+HOOK_REGISTRATION_PROFILE_REL = ".claude/hook-registration-profile.json"
+REGISTRATION_SETTINGS_REL = ".claude/settings.json"
+
+
+def _plan_hook_registration_profile(project: Path) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """What a record would write, shared by the preview and the apply so both hash the same bytes.
+
+    ``check_hook_registrations`` is imported here, never at module level (it imports this module). When this
+    module runs as ``__main__`` that import loads a second copy of this module; only plain data (dicts, lists,
+    strings, bytes) crosses between the copies.
+    """
+    bad = _check_project(project)
+    if bad:
+        return bad, {}
+    import check_hook_registrations as checker
+
+    settings_path = project / Path(*REGISTRATION_SETTINGS_REL.split("/"))
+    target = project / Path(*HOOK_REGISTRATION_PROFILE_REL.split("/"))
+    if not settings_path.is_file():
+        return refusal("registration-settings-missing",
+                       "%s does not exist, so there are no registrations to record" % REGISTRATION_SETTINGS_REL,
+                       settings_path), {}
+    try:
+        settings_bytes = settings_path.read_bytes()
+    except OSError as exc:
+        return refusal("project-unreadable", "%s cannot be read: %s" % (REGISTRATION_SETTINGS_REL, exc),
+                       settings_path), {}
+    try:
+        settings = checker.load_settings(settings_bytes)
+    except checker.SettingsError as exc:
+        code = "unexpected-settings-shape" if exc.kind == "shape" else "malformed-settings"
+        return refusal(code, "%s (%s): %s" % (REGISTRATION_SETTINGS_REL, exc.kind, exc), settings_path), {}
+    existing: Optional[bytes] = None
+    previous: Optional[Dict[str, Any]] = None
+    if os.path.lexists(str(target)):
+        try:
+            existing = target.read_bytes()
+        except OSError as exc:
+            return refusal("hook-registration-profile-unreadable",
+                           "the hook registration profile cannot be read: %s; it is left as it is" % exc,
+                           target), {}
+        try:
+            previous = checker.load_hook_registration_profile(existing)
+        except checker.ProfileError as exc:
+            return refusal("hook-registration-profile-unreadable",
+                           "the hook registration profile cannot be read: %s. It is never overwritten, because "
+                           "that would lose its Exclusions; repair it by hand" % exc, target), {}
+    planned = checker.serialise(checker.build_hook_registration_profile(settings, previous))
+    rows = checker.read_rows(settings)
+    stale = [copy.deepcopy(ex) for ex in (previous["excluded"] if previous else [])
+             if not any(checker._matches(ex, r.event, r.matcher, r.identity) for r in rows)]
+    plan_sha = _plan_digest(settings_bytes, existing if existing is not None else b"absent", planned)
+    return None, {"settings": settings_path, "target": target, "settings-bytes": settings_bytes,
+                  "old-bytes": existing, "new-bytes": planned, "plan-sha256": plan_sha,
+                  "row-count": len(rows), "stale": stale,
+                  "kept": len(previous["excluded"]) if previous else 0}
+
+
+def propose_hook_registration_profile(project: Path) -> Dict[str, Any]:
+    """Preview the hook registration profile a record would write. Writes nothing.
+
+    ``plan-sha256`` binds the settings bytes, the existing file bytes (or ``absent``) and the planned bytes.
+    """
+    project = Path(project)
+    problem, plan = _plan_hook_registration_profile(project)
+    if problem:
+        return problem
+    old, new = plan["old-bytes"], plan["new-bytes"]
+    diff = "".join(difflib.unified_diff(
+        (old or b"").decode("utf-8").splitlines(keepends=True), new.decode("utf-8").splitlines(keepends=True),
+        fromfile=str(plan["target"]), tofile=str(plan["target"])))
+    return {
+        "status": "plan", "target": str(plan["target"]), "settings": str(plan["settings"]),
+        "existed": old is not None, "nothing-to-write": old == new, "plan-sha256": plan["plan-sha256"],
+        "row-count": plan["row-count"], "exclusions-kept": plan["kept"], "stale-exclusions": plan["stale"],
+        "unified-diff": diff,
+    }
+
+
+def apply_hook_registration_profile(project: Path, expect_sha256: str) -> Dict[str, Any]:
+    """Write the hook registration profile the preview showed.
+
+    Refused (nothing written) when the settings or the existing file changed since the preview, when the
+    target is a symbolic link or sits in a linked folder, or when the write fails. Planned bytes equal to the
+    existing bytes write nothing. An existing file is backed up first.
+    """
+    project = Path(project)
+    problem, plan = _plan_hook_registration_profile(project)
+    if problem:
+        return problem
+    target: Path = plan["target"]
+    if expect_sha256 != plan["plan-sha256"]:
+        return refusal("changed-since-preview",
+                       "the settings or the hook registration profile changed since it was previewed (or the "
+                       "hash was not the plan-sha256); run the preview again", target)
+    old_bytes, new_bytes = plan["old-bytes"], plan["new-bytes"]
+    if old_bytes == new_bytes:
+        return {"status": "nothing-to-do", "target": str(target)}
+    linked = _linked_folder_refusal(project, (".claude",), target)
+    if linked:
+        return linked
+    if os.path.islink(str(target)):
+        return refusal("write-failed", "%s is a symbolic link; the apply would replace the link or write "
+                       "through it, so nothing was written. Edit the file it points to by hand" % target.name,
+                       target)
+    try:
+        current = target.read_bytes() if target.is_file() else None
+        current_settings = plan["settings"].read_bytes()
+    except OSError as exc:
+        return refusal("project-unreadable", "a file cannot be read: %s" % exc, target)
+    if current != old_bytes or current_settings != plan["settings-bytes"]:
+        return refusal("changed-since-preview",
+                       "the settings or the hook registration profile changed while the apply was running", target)
+    backup: Optional[Path] = None
+    try:
+        if old_bytes is not None:
+            backup = _backup_write(target, old_bytes)
+    except OSError as exc:
+        return refusal("write-failed", "the backup could not be written: %s" % exc, target)
+    error = _atomic_write(target, new_bytes)
+    if error:
+        if backup is not None:
+            try:
+                backup.unlink()  # the original is untouched, so the tree must be byte-identical
+            except OSError:
+                pass
+        return refusal("write-failed", "the hook registration profile could not be written: %s" % error, target)
+    return {"status": "applied", "target": str(target), "backup": str(backup) if backup else None,
+            "row-count": plan["row-count"], "stale-exclusions": plan["stale"],
+            "rollback": ("copy %s over %s" % (backup, target)) if backup else "delete %s" % target}
+
+
+# =======================================================================================
 # Command line
 # =======================================================================================
 
@@ -3085,6 +3234,9 @@ def build_parser() -> argparse.ArgumentParser:
     remove = sub.add_parser("addon-remove", parents=[common], help="remove one opt-in add-on")
     remove.add_argument("--name", required=True, help="the add-on to remove (a folder under .claude/addons/)")
     remove.add_argument("--provider", choices=PROVIDERS, default="claude")
+
+    sub.add_parser("record-registrations", parents=[common],
+                   help="record .claude/settings.json's hook registrations in the hook registration profile")
     return parser
 
 
@@ -3098,6 +3250,13 @@ def _render_text(result: Result) -> str:
     if "ready" in result:
         out.append("ready: %s  (%s)" % (result["ready"], result.get("verdict")))
         out += ["  %s: %s" % (c["name"], "ok" if c["ok"] else "FAILED") for c in result.get("checks", [])]
+    if "nothing-to-write" in result:
+        out.append("hook registration profile: %s (%d rows, %d Exclusions kept)" % (
+            "nothing to write" if result["nothing-to-write"] else "will be written",
+            result["row-count"], result["exclusions-kept"]))
+    for stale in result.get("stale-exclusions", []):
+        out.append("  stale Exclusion kept (matches no row; remove it by hand): %s %s" % (
+            stale.get("event"), stale.get("identity")))
     for item in result.get("files", []):
         out.append("  file %-60s %s" % (item["path"], item["action"]))
     if result.get("action") == "remove":
@@ -3148,6 +3307,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             result = plan_addon(project, args.name, args.platform, home, provider=args.provider,
                                 stylesheets=args.stylesheet)
+    elif args.command == "record-registrations":
+        if args.apply:
+            result = apply_hook_registration_profile(project, args.expect_sha256 or "")
+        else:
+            result = propose_hook_registration_profile(project)
     elif args.command == "addon-remove":
         if args.apply:
             result = apply_addon_removal(project, args.name, args.expect_sha256 or "", home,
