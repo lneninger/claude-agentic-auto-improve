@@ -367,6 +367,59 @@ def has_plugin_root_variable(text):
     return "CLAUDE_PLUGIN_ROOT" in text
 
 
+# Revision 9 (block 28): the Project hook launcher row. The writer writes
+#   py -3 -c <launcher source> <class> <script> [extra arguments]      (python3: without -3)
+# where the source is ONE constant in the plugin's _project_paths.py, the class is `block` exactly for
+# PreToolUse rows and `warn` for every other event (L2), and the script is the bare hook file name (L1).
+LAUNCHER_CONSTANT = "PROJECT_HOOK_LAUNCHER_SOURCE"
+#: Used only while the constant does not exist yet, so a row fails today for the row shape it pins, not at
+#: one lookup. test_the_launcher_source_constant_exists pins the constant itself.
+_STAND_IN_LAUNCHER_TEXT = ("# agentic-auto-improve project-hook-launch v1\nimport os, sys\n"
+                           "# stand-in text: the real constant does not exist yet\n")
+
+
+def _launcher_constant():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_t28_finish_install_project_paths", str(SCRIPT_ROOT / ".claude" / "hooks" / "_project_paths.py"))
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        return None
+    value = getattr(module, LAUNCHER_CONSTANT, None)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def launcher_text():
+    value = _launcher_constant()
+    return value if value is not None else _STAND_IN_LAUNCHER_TEXT
+
+
+def launcher_row(script, hook_class, *extras, python3=False):
+    """A launcher row built by hand from the constant (never by the writer under test)."""
+    args = ["-c", launcher_text(), hook_class, script, *extras]
+    if python3:
+        return {"type": "command", "command": "python3", "args": args}
+    return {"type": "command", "command": "py", "args": ["-3"] + args}
+
+
+def assert_launcher_row(case, entry, script, event, why):
+    """The launcher row shape: args is [-3, -c, <source>, <class>, <script>, ...] (python3: without -3),
+    the source equals the constant, and the class follows L2."""
+    command = entry.get("command")
+    args = entry.get("args")
+    case.assertIn(command, ("py", "python3"), msg="%s: exec form, the interpreter is the command" % why)
+    case.assertIsInstance(args, list, msg="%s: exec form, args is a list" % why)
+    head = ["-3", "-c"] if command == "py" else ["-c"]
+    case.assertEqual(args[:len(head)], head, msg="%s: args begins %r (the launcher), got %r" % (why, head, args[:3]))
+    rest = args[len(head):]
+    case.assertEqual(rest[:1], [launcher_text()], msg="%s: the program text equals the constant" % why)
+    case.assertEqual(rest[1:2], ["block" if event == "PreToolUse" else "warn"],
+                     msg="%s: class block exactly for PreToolUse, warn otherwise (L2)" % why)
+    case.assertEqual(rest[2:3], [script], msg="%s: the bare script name follows the class (L1)" % why)
+
+
 # INV-12's scan, re-implemented (test_plugin_manifests.py): the variables the hook sources read.
 _ENV_READ = re.compile(
     r"""(?:environ\.get\(\s*|environ\[\s*|getenv\(\s*)["'](CLAUDE_[A-Z0-9_]+)["']""")
@@ -2051,13 +2104,10 @@ class TestInterpreterSwap(Base):
                 self.assertEqual(len(regs), 17, msg="all registrations written")
                 for _e, _m, name, _x, hook in regs:
                     self.assertEqual(hook.get("command"), command, msg="%s on %s" % (name, platform))
-                    args = hook.get("args")
-                    if first_arg_is_path:
-                        self.assertEqual(args[0], "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + name,
-                                         msg="python3 takes the path first, with no -3")
-                    else:
-                        self.assertEqual(args[:2], ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + name],
-                                         msg="py keeps -3 as its first argument")
+                    # rule changed: args begins [-3, ${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>] (python3:
+                    # [${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>]) -> args is [-3, -c, <source>, <class>,
+                    # <name>, ...] (python3: without -3), with the class rule L2 (Revision 9, section K).
+                    assert_launcher_row(self, hook, name, _e, "%s on %s" % (name, platform))
 
     def test_the_plugin_root_variable_never_survives(self):
         _, result = self.apply_to_fresh()
@@ -3572,8 +3622,9 @@ class AddonHarness(Base):
             self.assertEqual(got_matcher, matcher, msg="the row for %s keeps the manifest's matcher" % hook)
             self.assertIsInstance(entry.get("args"), list, msg="exec form: args is a list, no shell parses it")
             self.assertIn(entry.get("command"), ("py", "python3"), msg="exec form: the interpreter is the command")
-            self.assertIn("${CLAUDE_PROJECT_DIR}/.claude/hooks/" + hook, entry["args"],
-                          msg="the row points into the PROJECT's hooks folder, never the plugin's")
+            # rule changed: "${CLAUDE_PROJECT_DIR}/.claude/hooks/<hook> is in args" -> "the launcher row
+            # names <hook> as its script, with the source equal to the constant" (Revision 9, section K).
+            assert_launcher_row(self, entry, hook, event, "the add-on row for %s" % hook)
             self.assertNotIn("CLAUDE_PLUGIN_ROOT", json.dumps(entry), msg="and never at ${CLAUDE_PLUGIN_ROOT}")
 
 
@@ -4242,6 +4293,63 @@ def make_directory_link(link, target):
     except (OSError, ImportError, AttributeError, NotImplementedError) as exc:
         raise AssertionError("the directory link %s -> %s could not be made (%s); this row cannot pass without "
                              "it and is never skipped" % (link, target, exc))
+
+
+class TestLauncherRowIdentity(AddonHarness):
+    """Revision 9, block 28: the writer's "already registered" identity reads through a launcher row.
+
+    The rows here are built by hand from the constant, never by the writer under test, so a writer that
+    has not changed yet cannot make them pass or fail by accident. NEVER rewritten or removed: as today the
+    writer adds the missing and leaves every existing row alone.
+    """
+
+    def test_the_launcher_source_constant_exists(self):
+        self.assertIsNotNone(_launcher_constant(),
+                             "_project_paths.py must define the launcher source as a non-empty string constant named "
+                             "%s (Revision 9, L3); it defines none today" % LAUNCHER_CONSTANT)
+
+    def second_install_writes_nothing(self, row, why):
+        self.install_addon("strict-shell-gate")      # copies the hook and helper files and writes its row
+        write_json(self.settings_path(), {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [row]}]}})
+        before = snapshot(self.tmp)
+        rc0, out0, plan = self.cli(self.addon_argv("strict-shell-gate"))
+        self.assertEqual(rc0, 0, msg="%s: a preview is exit 0: %r" % (why, plan or out0))
+        self.assertEqual((plan or {}).get("to-add"), [], msg="%s: the hook is already registered, so nothing is "
+                                                             "to add: %r" % (why, plan))
+        rc, out, parsed = self.apply("strict-shell-gate", (plan or {}).get("plan-sha256") or "")
+        self.assertEqual(rc, 0, msg="%s: nothing to do is still exit 0: %r" % (why, parsed or out))
+        self.assertEqual((parsed or {}).get("status"), "nothing-to-do", msg="%s: got %r" % (why, parsed))
+        self.assertTreeSame(before, "%s: the second install writes nothing: no file, no row, no backup" % why)
+        self.assertEqual(len([r for r in flat_registrations(self.read_settings()) if r[2] == "bash-gate.py"]), 1,
+                         msg="%s: and the row was not written twice" % why)
+
+    def test_an_install_again_over_a_launcher_row_of_the_same_hook_writes_nothing(self):
+        # Passes today by design: the identity is the first .py token, which a launcher row keeps as its script.
+        # It stays so a writer that learns the launcher form cannot start adding a second row.
+        self.second_install_writes_nothing(launcher_row("bash-gate.py", "block"), "launcher row")
+
+    def test_an_install_again_over_an_old_form_row_of_the_same_hook_writes_nothing(self):
+        # Passes today by design (the old form is what the writer writes today); it must stay green after the
+        # writer changes: a project that registered by hand or by an older release is never given a second row.
+        old = {"type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/bash-gate.py"]}
+        self.second_install_writes_nothing(old, "old-form row")
+
+
+class TestLauncherRowForeignPath(Base):
+    """Revision 9, block 28, found by the reader search of section N (a vendored project, no installed plugin)."""
+
+    def test_a_launcher_row_of_the_hook_in_the_project_is_not_reported_as_a_foreign_path(self):
+        # "already-present" reports foreign-path from the folder of the row's first .py token. A launcher row
+        # has the BARE script there, so its folder is empty and today it is reported as foreign, although the
+        # launcher runs the script from the project's own .claude/hooks folder.
+        self.make_vendored()
+        write_json(self.settings_path(), {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            launcher_row("bash-gate.py", "block")]}]}})
+        plan = self.plan()
+        hits = [p for p in plan.get("already-present", []) if "bash-gate.py" in str(p.get("registration-key"))]
+        self.assertEqual(len(hits), 1, msg="the launcher row is found as the registration of bash-gate.py: %r" % (plan,))
+        self.assertIs(hits[0].get("foreign-path"), False,
+                      msg="a launcher row runs the script from the project's .claude/hooks, so it is not foreign")
 
 
 class WriterHarness(Base):
@@ -5294,7 +5402,39 @@ class TestDanglingRowsReadBackWriter(unittest.TestCase):
                 self.put(self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
                 self.assertEqual(self.scan(), [], "launcher, body, gate and guard all exist")
 
-    def test_each_deleted_file_gives_one_finding_with_its_role(self):
+    def write_old_settings(self, platform):
+        """Rows in the exec form the installer wrote before the launcher (`_written_project_path_hook`),
+        built by hand so the test does not depend on the writer's current shape."""
+        base = "${CLAUDE_PROJECT_DIR}/.claude/hooks/"
+
+        def row(*names):
+            paths = [base + n for n in names]
+            if platform == "win32":
+                return {"type": "command", "command": "py", "args": ["-3"] + paths}
+            return {"type": "command", "command": "python3", "args": paths}
+        hooks = {"UserPromptSubmit": [{"matcher": "", "hooks": [row(self.GUARD_FILE)]}],
+                 "PreToolUse": [{"matcher": "Edit|Write", "hooks": [row("gate-launch.py", "concept-gate.py")]}]}
+        settings = self.project / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"hooks": hooks}, indent=2), encoding="utf-8")
+        return settings
+
+    def test_launcher_rows_written_today_give_no_finding_even_with_a_project_file_deleted(self):
+        """Documented skip: the rows `_written_hook` writes are Project hook launcher rows (`-c <source> <class>
+        <script>`). The launcher falls back when a project file is missing, so a missing file is not the
+        failure this finding is about, and a row form the doctor cannot judge is skipped, not guessed."""
+        names = (self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
+        for platform in ("win32", "linux"):
+            for deleted in (None,) + names:
+                with self.subTest(platform=platform, deleted=deleted):
+                    self.write_settings(platform)
+                    self.put(*names)
+                    if deleted:
+                        (self.project / ".claude" / "hooks" / deleted).unlink()
+                    self.assertEqual(self.scan(), [], "launcher rows are skipped: the launcher falls back")
+
+    def test_rows_the_old_installer_wrote_are_still_checked_and_give_one_finding_with_its_role(self):
+        """The vendored-install case: an install registered before the launcher change, whose hook file
+        the operator then deleted. Those exec-form rows name the file directly, so they are checked."""
         cases = (
             ("the guard", self.GUARD_FILE, ["launched"]),
             ("the launcher", "gate-launch.py", ["launched"]),
@@ -5304,20 +5444,20 @@ class TestDanglingRowsReadBackWriter(unittest.TestCase):
         for platform in ("win32", "linux"):
             for label, deleted, roles in cases:
                 with self.subTest(platform=platform, deleted=label):
-                    self.write_settings(platform)
+                    self.write_old_settings(platform)
                     self.put(self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
                     (self.project / ".claude" / "hooks" / deleted).unlink()
                     found = self.scan()
                     self.assertEqual(self.roles(found), roles, "one finding for %s; got %r" % (label, [f.path for f in found]))
-                    self.assertTrue(found[0].path.replace("\\", "/").endswith(self.HOOKS + deleted)
-                                    or found[0].path.replace("\\", "/").endswith("/" + deleted),
+                    self.assertTrue(found[0].path.replace("\\", "/").endswith("/" + deleted),
                                     "the path names the deleted file as written: %s" % found[0].path)
 
-    def test_a_missing_body_is_reported_only_while_the_launcher_is_present(self):
-        self.write_settings("linux")
-        self.put(self.GUARD_FILE, "concept-gate.py")
-        found = self.scan()
-        self.assertEqual(self.roles(found), ["launched"], "launcher and body both gone: one finding, role launched")
+    def test_old_rows_for_files_that_exist_give_no_finding(self):
+        for platform in ("win32", "linux"):
+            with self.subTest(platform=platform):
+                self.write_old_settings(platform)
+                self.put(self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
+                self.assertEqual(self.scan(), [], "launcher, body, gate and guard all exist")
 
     def test_scanning_leaves_the_settings_bytes_identical(self):
         settings = self.write_settings("win32")

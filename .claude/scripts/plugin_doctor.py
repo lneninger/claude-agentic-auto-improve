@@ -420,6 +420,17 @@ def _launch_tokens(entry: dict) -> List[str]:
     return [_unquote(word) for word in _shell_words(command)[1:]]
 
 
+def _launcher_row_parts(entry: dict) -> Optional[Tuple[str, str, List[str]]]:
+    """``(class, script, extra arguments)`` when the row is a Project hook launcher row, else ``None``.
+    The reader lives in ``_project_paths`` beside the launcher text it compares to; ``_claude_paths`` is
+    imported here, not at the top, so a copy of this script without a hooks folder still loads."""
+    try:
+        from _claude_paths import project_hook_launcher_parts
+    except ImportError:
+        return None
+    return project_hook_launcher_parts(entry)
+
+
 # The ONE shell word-splitter: a quoted span stays inside its word even when text follows the closing quote.
 _SHELL_WORD = re.compile(r"""(?:"[^"]*"|'[^']*'|[^\s"'])+""")
 _QUOTED_SPAN = re.compile(r"\"[^\"]*\"|'[^']*'")
@@ -452,7 +463,13 @@ def _launched_raw_tokens(entry: dict) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _launched_and_first_argument(entry: dict) -> Tuple[Optional[str], Optional[str]]:
-    """The launched script file name and the argument that follows it."""
+    """The launched script file name and the argument that follows it. A Project hook launcher row launches
+    its script (the argument after the class) and the argument after that is the first extra, so a
+    ``gate-launch.py`` launcher row is the gate it names."""
+    launcher = _launcher_row_parts(entry)
+    if launcher is not None:
+        _hook_class, script, extras = launcher
+        return script, (posixpath.basename(_rel(extras[0])) if extras else None)
     launched, following = _launched_raw_tokens(entry)
     if launched is None:
         return None, None
@@ -598,8 +615,10 @@ def dangling_hook_rows(project: Path) -> List[DriftFinding]:
         except (OSError, ValueError):
             continue
         for event, matcher, entry in _iter_rows(body):
+            if _row_skipped(entry):
+                continue
             launched, following = _launched_raw_tokens(entry)
-            if launched is None or _row_skipped(entry):
+            if launched is None:
                 continue
             is_gate_launcher = posixpath.basename(_rel(launched)) == GATE_LAUNCHER
             checks = [("launched", launched)]

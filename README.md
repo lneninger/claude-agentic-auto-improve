@@ -230,8 +230,10 @@ also one at turn end. Then delete the file and its rules file. Do not delete the
 row that points at a missing script exits with code 2, so a prompt-submit row would block every
 prompt. Start a new session afterwards. The hook's optional leftovers,
 `.claude/state/plain-language-guard-<session>.json` and `.claude/logs/plain-language-guard.log`,
-are never read again and you may delete them by hand. Since 0.12.2,
-`plugin_doctor.py --drift` reports a row left behind this way as `dangling-hook-row`.
+are never read again and you may delete them by hand. Since 0.12.4,
+`plugin_doctor.py --drift` reports such a row as `dangling-hook-row` when it is an old
+exec-form row (written before 0.12.3) or a hand-written row that plainly launches a Python
+script; a Project hook launcher row is skipped (see the `--drift` paragraph).
 
 **Changed in 0.9.21:** `architecture-guard.py` knows a component without view encapsulation
 (`ViewEncapsulation.None`): `:host` matches nothing there, so it warns about a `:host` rule and
@@ -300,10 +302,13 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
-**Changed in 0.12.2 (issue #71, follow-up 1):** `plugin_doctor.py --drift` warns about a project
+**Changed in 0.12.4 (issue #71, follow-up 1):** `plugin_doctor.py --drift` warns about a project
 hook row that launches a file that is not there, such as a row for a hook the plugin no longer
-ships. The finding kind is `dangling-hook-row`. It is read-only, needs no plugin, and is still
-listed when the comparison exits `4`. The manifests read 0.12.2.
+ships. The finding kind is `dangling-hook-row`. It covers rows written before 0.12.3 (the old
+exec-form rows) and hand-written rows that plainly launch a Python script; Project hook launcher
+rows (what the installer writes since 0.12.3) are skipped, because the launcher falls back on its
+own when a project file is missing. It is read-only, needs no plugin, and is still
+listed when the comparison exits `4`. The manifests read 0.12.4.
 
 **Changed in 0.12.0 (follow-ups to the `angular-tailwind` rule documents, issue #86):** this
 release closes the items the 0.10.0 work left open. The manifests read 0.12.0. It has eight
@@ -398,7 +403,8 @@ default install runs none of them:
 
 Each install skill runs `auto_improve_finish_install.py addon --name <add-on>`. The script copies the
 add-on's hook files and the helper files its `addon.json` names (a helper only when the project
-lacks it), then writes the rows in exec form on `${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>`, through
+lacks it), then writes the rows as Project hook launcher rows that run `<file>` from your project's
+`.claude/hooks/` (see [Project hook launcher](#project-hook-launcher)), through
 the same preview, plan hash, backup and symbolic-link refusal as the hooks step. The rows are
 inserted into the existing `settings.json` as text, so every other byte of the file (escapes,
 one-line lists, line endings, byte order mark) stays as it was, and a folder it would write into
@@ -412,8 +418,9 @@ compares an installed add-on's files with the plugin's.
 **To remove an add-on**, run its uninstall skill. It runs `auto_improve_finish_install.py
 addon-remove --name <add-on>`: it previews the rows, files and profile entries, asks once, and
 writes `settings.json` first (with a backup), the profile next and deletes files last. Do not
-delete a hook file by hand before its row is gone: a row that points at a missing script exits
-with code 2 and blocks every prompt. It deletes a file only when it is identical to the plugin's
+delete a hook file by hand before its row is gone: a row in the earlier form that points at a
+missing script exits with code 2 and blocks every prompt (a launcher row exits by its class
+instead; see [Project hook launcher](#project-hook-launcher)). It deletes a file only when it is identical to the plugin's
 copy (line endings and a leading byte order mark ignored) or matches a copy an earlier release
 shipped; an edited file is kept and reported. Helper files and the stylesheet snippet are never
 deleted. A second run finds nothing to do. The skill never edits `settings.json` by hand; only when a
@@ -422,7 +429,11 @@ hook cannot run, as in the table below, do you remove its row by hand.
 #### Ways out when a hook cannot run
 
 In normal operation the uninstall skill is the way out. When an add-on's hook cannot run, its row
-has to come out of `.claude/settings.json` by hand. Which route works depends on which hook fails:
+has to come out of `.claude/settings.json` by hand. Which route works depends on which hook fails.
+The table describes rows in the earlier form, which name the file directly. A launcher row (see
+[Project hook launcher](#project-hook-launcher)) whose file is missing exits by its class instead:
+`block` rows (the `PreToolUse` ones) still stop the call with a message that names the file, and
+`warn` rows print the message and let the prompt through.
 
 | Failure | What you see | Route |
 |---|---|---|
@@ -439,6 +450,96 @@ is stale, run `codegraph sync` or `codegraph init -i`.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
 `post-edit-dispatcher.py` rather than as four separate hook entries.
+
+### Project hook launcher
+
+Since 0.12.3, a hook row that this plugin writes into a project's `settings.json` (the vendored
+hooks step and every add-on install) does not name the hook file directly. It runs a short
+program that finds the hook file and runs it:
+
+```json
+{ "type": "command", "command": "py", "args": ["-3", "-c", "<launcher program>", "<class>", "<hook file>"] }
+```
+
+Off Windows the command is `python3` and the `"-3"` is left out. Any extra argument the hook takes
+comes after the hook file. The program is the launcher, and it is the only copy of that text:
+`PROJECT_HOOK_LAUNCHER_SOURCE` in `.claude/hooks/_project_paths.py`. The row writer writes it, and the
+database guards' stand-down check compares to it. The plugin registers no launcher file, and its
+`hooks.json` is unchanged.
+
+**What it fixes.** Claude Code fixes the value of `CLAUDE_PROJECT_DIR` when a session starts. If a
+session moves into a worktree and the folder it started in is then removed, a row that names
+`${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>.py` points at nothing. Python exits with code 2 for a
+missing script, and on `UserPromptSubmit` that blocks every prompt, so the session cannot recover.
+
+**Why the program sits inside the row.** The obvious design is a launcher file in the plugin that
+every row names. It does not work. The plugin's cache folder changes with each version and differs
+on each machine, so a committed row cannot name it. `${CLAUDE_PLUGIN_ROOT}` does not expand in a
+project's `settings.json`: with the plugin installed and Claude Code 2.1.302, a project row that
+used it did not run. And a committed row that names a file a teammate does not have wedges that
+teammate, because a missing script exits with code 2. A program carried in the row needs nothing on
+disk to start, so it works in a vendored project and for a teammate without the plugin.
+
+**What the launcher does.**
+
+1. It looks for `<CLAUDE_PROJECT_DIR>/.claude/hooks/<file>` and runs that.
+2. If that file is gone, it falls back to the main checkout. It takes the text of `CLAUDE_PROJECT_DIR`,
+   removes every `.claude/worktrees/<name>` part, and looks in `.claude/hooks/` of what is left.
+3. It runs the hook in the same Python process. The hook sees the same arguments, standard input,
+   working folder and environment, and its exit code, output and error text pass through unchanged.
+   The launcher never reads standard input, never changes the working folder, never sets a variable,
+   and prints nothing when it succeeds.
+4. If the file is found in neither place, it prints one message on standard error. The message names
+   the class, the file and every path it tried, and tells you to restart Claude Code from an
+   existing checkout. It then exits by the row's class.
+
+**The two classes.** A row has the class `block` or `warn`, and nothing else is accepted.
+
+| Class | Written for | File missing everywhere | Why |
+|---|---|---|---|
+| `block` | every `PreToolUse` row | exit 2, the tool call is stopped | a guard that cannot be found must not let the call through |
+| `warn` | every other event | exit 1, the message shows, nothing is blocked | exit 2 outside `PreToolUse` is the wedge described above |
+
+A class that is neither makes the launcher print a message, run nothing and exit 1. A hook file
+name that is not a bare `.py` name (a folder separator, a drive colon, no `.py`) is refused by the
+class's exit code. An error inside the hook itself is not the launcher's: an uncaught exception
+exits 1, as it does when the file is run directly, except that its traceback also shows a `<string>`
+frame and a `runpy` frame.
+
+**When the plugin's own guards step down.** If your project registers its own copy of
+`db-destructive-guard.py` or `db-research-readonly-guard.py`, the plugin's copy and yours both run,
+unless your row proves it runs your copy. A launcher row counts as that proof only when all
+three hold: its program is byte-equal to the installed plugin's own text, its class is exactly
+`block`, and its file is a bare `.py` name equal to the guard's file. Anything else (an older text,
+a hand-written row, a `warn` row) fails the check and both copies run. The direction of every
+failure is that a guard runs twice, never that none runs. The first line of the program carries a
+version (`v1`). A release that changes the text raises it, and until a project's rows are rewritten
+the two guards both run. The writer never rewrites a row you already have; `plugin_doctor.py --drift`
+reads a launcher row as the file it launches, so it still reports a hook registered on both sides.
+If the scripts are run from a copy whose `_project_paths.py` has no launcher (a stub, or a vendored
+copy from before 0.12.3), the writer falls back to the earlier form that names
+`${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>` and says so in the preview's notes.
+
+**Limits.** These are known and accepted.
+
+- **R1, the fallback runs the main checkout's copy.** That copy may be older or newer than the
+  branch the session works on. The session keeps working, but not with its own branch's hooks.
+- **R2, hooks may decide differently during a fallback.** `CLAUDE_PROJECT_DIR` still names the
+  removed folder, so a hook that writes a log or state file under it writes nothing there. The
+  plugin's database guards also act beside your copies, and each reads its rules from its own place,
+  so the stricter answer wins: more blocks, never fewer. `codegraph-first-guard.py` may block source
+  reads. The cure is the message's advice: restart Claude Code from an existing checkout.
+- **R3, no fallback outside a worktree folder.** If the session's folder was not under
+  `<main>/.claude/worktrees/`, there is nothing to fall back to, and the class rule applies.
+- **R4, a missing `codegraph-turn-tracker.py` only warns.** The CodeGraph gate then blocks every
+  source read by its own decision.
+- **R5, a syntax error in the launcher text** would make every launcher row exit 1, because Python
+  cannot catch it. The tests compile the text and compare the rows to it byte for byte.
+- **R6, a database guard missing in both places** blocks through the launcher with exit 2 on
+  `PreToolUse`. The plugin's own copy also acts.
+
+The launcher text is long, and when a `block` row blocks, Claude Code prints the whole command in
+its message. That is a cost of carrying the program inside the row.
 
 ### Local development workflow
 
@@ -769,7 +870,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 304 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 308 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
@@ -936,7 +1037,10 @@ counting it.
 `--drift` also reports `dangling-hook-row`: a row in the project's `settings.json` or
 `settings.local.json` that launches a `.py` file that is not on disk (for a `gate-launch.py` row,
 also the launcher's `_gate_launch.py` body and the gate argument). This is not drift, because no
-plugin copy is compared. It reads the project alone, so it is listed even when the comparison
+plugin copy is compared. It covers rows written before 0.12.3 (the old exec-form rows) and
+hand-written rows that plainly launch a Python script; Project hook launcher rows (what the
+installer writes since 0.12.3) are skipped, because the launcher falls back on its own when a
+project file is missing. It reads the project alone, so it is listed even when the comparison
 cannot run and the run exits `4`. The finding path is
 `<layer>:<event>:<matcher>:<role>:<path as written>`, and its remedy is: restore the file if the
 plugin still ships it, otherwise remove the row. The doctor never edits a settings file. Paths

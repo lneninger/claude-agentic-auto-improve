@@ -58,7 +58,7 @@ Not applicable. Reason: the scan is read-only. It persists nothing and owns no a
 **Invariants**
 
 - **INV-1 (read only).** The scan only reads files and calls `is_file`. It never writes, renames or deletes, and `--fix` does not touch it.
-- **INV-2 (found only when absent).** A finding exists if and only if a Resolved hook path is `absolute` and is not a regular file. A project whose rows all launch existing files gets none. A `launcher-body` path is checked only when the `launched` gate-launcher file exists, so a missing launcher is one finding, not two.
+- **INV-2 (found only when absent).** A finding exists if and only if a Resolved hook path is `absolute` and is not a regular file. A project whose rows all launch existing files gets none. (Since the 2026-11-01 amendment this applies to rows the doctor checks; a Project hook launcher row is skipped, so rows `_written_hook` writes today give no finding even when their file is gone.) A `launcher-body` path is checked only when the `launched` gate-launcher file exists, so a missing launcher is one finding, not two.
 - **INV-3 (no guessing).** A path the doctor cannot resolve is never a finding.
 - **INV-4 (names the event and the row).** The path names the layer, event, matcher, role and raw token. Two rows that differ only in matcher give two findings. Identical rows in one layer collapse into one finding, because findings are deduplicated by `(kind, path)`.
 - **INV-5 (one token reader).** A new helper, `_launched_raw_tokens(entry)`, returns the launched token and the token after it as written. `_launched_and_first_argument` becomes a wrapper that returns their file names, so its callers do not change. The loop over event, then group, then entry moves into one generator, `_iter_rows(body)`, used by both `_effective_hooks` and the new scan.
@@ -180,7 +180,7 @@ Confidence: Medium. High on the token reader, the layer walk, the finding shape,
 - `VERIFIED via plugin_doctor.py:746-767`: every `DriftError` returns exit 4 with `findings: []` today. INV-7 changes this for dangling-row findings only.
 - `VERIFIED via the parent contract and README.md:227-231`: a row whose launched script is missing exits 2. The parent contract checked this with a real call.
 - `ASSUMED`: the host runs a hook command with the project root as its working directory. If it does not, a relative-path row could produce a false finding or be missed. Verification: one harmless relative-path row in a scratch project. The installer never writes such a row.
-- `ASSUMED`: a patch raise (0.12.1 → 0.12.2) is enough. The version check only requires a raise. Verification: run `check_version_bump.py` in its default mode against the base.
+- `ASSUMED`: a patch raise (0.12.3 → 0.12.4) is enough. The version check only requires a raise. Verification: run `check_version_bump.py` in its default mode against the base.
 
 ---
 
@@ -325,10 +325,12 @@ CONSTRAINTS:
     POSIX; the gate launcher with its gate) give zero dangling-hook-row findings while the launcher, body
     and gate exist, and one finding per deleted file after deletion (body only while the launcher is
     present). The settings file bytes are identical before and after.
+    [Superseded 2026-11-01, see the amendment below: that per-file result holds only for old exec-form
+    rows built by hand; rows _written_hook writes today are Project hook launcher rows and give no finding.]
   - README.md: in the --drift paragraph, the new kind, its remedy and that exit 4 can carry it; a
-    pointer in the 0.9.20 plain-language removal paragraph; a short "Changed in 0.12.2" note before the
+    pointer in the 0.9.20 plain-language removal paragraph; a short "Changed in 0.12.4" note before the
     0.12.0 one.
-  - Raise the version 0.12.1 -> 0.12.2 in all five declarations (marketplace.json twice).
+  - Raise the version 0.12.3 -> 0.12.4 in all five declarations (marketplace.json twice).
   - Run both suites and test_check_version_bump.py, and report the commands with their exit codes.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-10-31-warn-on-unshipped-hook-rows.md
@@ -353,3 +355,5 @@ PRIOR_FINDINGS:
 ---
 
 Amendment 2026-11-01: whitelist, per review passes 4-6. Rows are checked only when they plainly launch a Python script through a bare Python interpreter with simple flags (shell and exec form); paths with unresolvable characters or shell syntax are skipped; all other shapes are skipped.
+
+Amendment 2026-11-01 (after the merge of master 0.12.3, Project hook launcher): Project hook launcher rows are out of scope and are skipped. Why: the launcher falls back on its own when a project file is missing (it also looks in the main checkout of a worktree), so the doctor cannot judge from the project alone that such a row is broken, and a form the doctor cannot judge is skipped. This corrects the CONSTRAINTS test line and INV-2 above: the per-deleted-file result of the `_written_hook` round-trip holds only for old exec-form rows built by hand; rows the installer writes today give no finding. Status is unchanged.

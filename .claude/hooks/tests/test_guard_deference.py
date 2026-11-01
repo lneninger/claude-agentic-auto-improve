@@ -75,6 +75,37 @@ MARKER_PREFIX = "auto-improve-session-start-"
 BASELINE_PREFIX = "auto-improve-changed-baseline-"
 
 
+#: Where the launcher source lives and what it is called (contract Revision 9, section L): the constant is
+#: read from the helper beside this tests folder, never from a fixture copy.
+LAUNCHER_CONSTANT = "PROJECT_HOOK_LAUNCHER_SOURCE"
+
+
+#: Used ONLY while the constant does not exist yet, so that every launcher row below fails today for
+#: its stated reason (the plugin copy did not defer) instead of all failing at one lookup. One row,
+#: test_r9_the_launcher_source_constant_exists, fails for the missing constant itself.
+_STAND_IN_LAUNCHER_TEXT = ("# agentic-auto-improve project-hook-launch v1\nimport os, sys\n"
+                           "# stand-in text: the real constant does not exist yet\n")
+
+
+def _load_launcher_constant():
+    """The launcher source constant of the real ``_project_paths.py``, or ``None`` when it is absent."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_t28_deference_project_paths", str(HOOKS_SRC / "_project_paths.py"))
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+    except Exception:
+        return None
+    value = getattr(module, LAUNCHER_CONSTANT, None)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def launcher_source_or_fail(case: unittest.TestCase) -> str:
+    """The launcher source constant, or the stand-in text while the constant is absent."""
+    value = _load_launcher_constant()
+    return value if value is not None else _STAND_IN_LAUNCHER_TEXT
+
+
 def _rmtree(path: Path) -> None:
     def _onerror(func, p, _exc):
         try:
@@ -734,6 +765,127 @@ class DeferenceRows:
                 row = {"type": "command", "command": launcher, "args": ["-3", w.registered_path]}
                 w.write_settings(w.settings_body(row))
                 self.assert_defers(w, "launcher %s" % launcher)
+
+    # ===================================================================
+    # Revision 9 (block 28, section N) -- a Project hook launcher row
+    #
+    # A row `py -3 -c <launcher source> <class> <script>` runs the project's guard through the launcher.
+    # Condition (d) counts it as the project's registration ONLY when all three hold: the program text is
+    # byte-equal to the installed reader's own launcher constant, the class is exactly 'block', and the
+    # script is a bare .py name equal to the guard file. Anything else fails (d), so the plugin copy acts:
+    # the failure direction is always "the guard runs twice", never "no guard runs" (I-D3).
+    # Every row below is a control-then-mutation pair, like the rows above, so each is RED today for the
+    # control's reason: today the launched script of such a row is the program text, never the guard file.
+    # ===================================================================
+    def launcher_text(self) -> str:
+        return launcher_source_or_fail(self)
+
+    def launcher_entry(self, w: World, *, hook_class: str = "block", script: str | None = None,
+                       text: str | None = None, command: str = "py") -> dict:
+        args = ["-c", text if text is not None else self.launcher_text(), hook_class,
+                script if script is not None else self.SPEC.file_name]
+        if command.lower().startswith("py"):
+            args.insert(0, "-3")
+        return {"type": "command", "command": command, "args": args}
+
+    def launcher_world(self, **entry_kwargs) -> World:
+        w = self.world()
+        w.write_settings(w.settings_body(self.launcher_entry(w, **entry_kwargs)))
+        started = w.start_session("startup")
+        self.assertEqual(started.returncode, 0, "the session-start hook must exit 0")
+        return w
+
+    def launcher_mutation(self, why: str, mutate, **entry_kwargs) -> World:
+        w = self.launcher_world(**entry_kwargs)
+        self.assert_defers(w, "CONTROL for %s: a block-class launcher row with the constant's text" % why)
+        w.clear_log()
+        mutate(w)
+        self.assert_acts(w, why)
+        return w
+
+    def test_r9_the_launcher_source_constant_exists(self):
+        self.assertIsNotNone(_load_launcher_constant(),
+                             "_project_paths.py must define the launcher source as a non-empty string constant named "
+                             "%s (Revision 9, L3); it defines none today" % LAUNCHER_CONSTANT)
+
+    def test_r9_a_block_class_launcher_row_defers_for_each_tool_the_guard_is_registered_for(self):
+        for tool in ("Bash", "PowerShell"):
+            with self.subTest(tool=tool):
+                w = self.launcher_world()
+                self.assert_defers(w, "launcher row, %s payload" % tool, payload=self.SPEC.payload(tool, str(w.project)))
+
+    def test_r9_a_python3_launcher_row_without_the_dash_3_defers(self):
+        w = self.launcher_world(command="python3")
+        self.assert_defers(w, "python3 launcher row")
+
+    def test_r9_a_launcher_row_whose_class_is_warn_acts(self):
+        # A warn row would not block on a missing script, so it cannot stand for the project's guard.
+        self.launcher_mutation("r9 class warn", lambda w: w.write_settings(
+            w.settings_body(self.launcher_entry(w, hook_class="warn"))))
+
+    def test_r9_a_launcher_row_whose_class_is_spelled_block_with_other_case_or_spaces_acts(self):
+        for spelling in ("Block", " block", "block ", "BLOCK"):
+            with self.subTest(spelling=repr(spelling)):
+                self.launcher_mutation("r9 class %r" % spelling, lambda w, s=spelling: w.write_settings(
+                    w.settings_body(self.launcher_entry(w, hook_class=s))))
+
+    def test_r9_a_launcher_row_that_names_the_other_guard_acts(self):
+        other = READONLY if self.SPEC is DESTRUCTIVE else DESTRUCTIVE
+
+        def mutate(w):
+            (w.project_hooks / other.file_name).write_text("# the other guard exists on disk\n", encoding="utf-8")
+            w.write_settings(w.settings_body(self.launcher_entry(w, script=other.file_name)))
+        self.launcher_mutation("r9 the row launches the other guard", mutate)
+
+    def test_r9_a_launcher_row_whose_text_differs_from_the_constant_by_one_byte_acts(self):
+        text = self.launcher_text()
+        changed = text[:-1] + chr(ord(text[-1]) ^ 1)
+        self.assertNotEqual(changed, text, "fixture: one byte changed")
+        self.launcher_mutation("r9 text differs by one byte", lambda w: w.write_settings(
+            w.settings_body(self.launcher_entry(w, text=changed))))
+
+    def test_r9_a_launcher_row_with_an_earlier_or_later_marker_version_acts(self):
+        text = self.launcher_text()
+        self.assertIn("project-hook-launch v1", text.splitlines()[0], "fixture: the constant carries marker v1")
+        for version in ("v0", "v2"):
+            with self.subTest(marker=version):
+                other = text.replace("project-hook-launch v1", "project-hook-launch " + version, 1)
+                self.assertNotEqual(other, text, "fixture: the marker changed")
+                self.launcher_mutation("r9 marker %s" % version, lambda w, t=other: w.write_settings(
+                    w.settings_body(self.launcher_entry(w, text=t))))
+
+    def test_r9_with_the_project_file_missing_condition_e_fails_and_the_copy_acts(self):
+        self.launcher_mutation("r9 the launched project file is missing",
+                               lambda w: (w.project_hooks / self.SPEC.file_name).unlink())
+
+    def test_r9_a_launcher_row_with_a_script_that_only_resembles_the_guard_acts(self):
+        for label, script in (("backup suffix", self.SPEC.file_name + ".bak"),
+                              ("longer name", "old-" + self.SPEC.file_name),
+                              ("folder separator", "sub/" + self.SPEC.file_name)):
+            with self.subTest(label=label):
+                def mutate(w, script=script):
+                    target = w.project_hooks / script
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("# a look-alike that exists on disk\n", encoding="utf-8")
+                    w.write_settings(w.settings_body(self.launcher_entry(w, script=script)))
+                self.launcher_mutation("r9 look-alike script %s" % label, mutate)
+
+    def _launcher_worktree(self, w: World, with_row: bool) -> Path:
+        tree = w.tmp / "wt"
+        (tree / "sub").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(tree)], check=True, capture_output=True, timeout=60)
+        body = w.settings_body(self.launcher_entry(w)) if with_row else {"hooks": {}}
+        w.write_settings(body, tree / ".claude" / "settings.json")
+        return tree
+
+    def test_r9_a_launcher_row_in_a_worktree_settings_file_follows_condition_c(self):
+        w = self.launcher_world()
+        tree = self._launcher_worktree(w, with_row=True)
+        payload = self.SPEC.payload(cwd=str(tree / "sub"))
+        self.assert_defers(w, "r9 the worktree's settings carry the launcher row too", payload=payload)
+        w.clear_log()
+        w.write_settings({"hooks": {}}, tree / ".claude" / "settings.json")
+        self.assert_acts(w, "r9 the worktree's settings lack the row while the project dir's has it", payload=payload)
 
 
 class DestructiveGuardDeferenceTests(DeferenceRows, unittest.TestCase):

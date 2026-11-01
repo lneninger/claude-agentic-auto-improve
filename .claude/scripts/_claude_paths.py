@@ -90,6 +90,13 @@ hook_file = _pp.hook_file
 tree_kind = _pp.tree_kind
 main_checkout_root = _pp.main_checkout_root
 installed_plugin_root = _pp.installed_plugin_root
+# The Project hook launcher (Revision 9): the one source text, the row builder and the row reader.
+# PROJECT_HOOK_LAUNCHER_SOURCE is a constant, not a call-time function: it is fixed text.
+PROJECT_HOOK_LAUNCHER_SOURCE = _pp.PROJECT_HOOK_LAUNCHER_SOURCE
+project_hook_launcher_row = _pp.project_hook_launcher_row
+project_hook_launcher_parts = _pp.project_hook_launcher_parts
+HOOK_CLASS_BLOCK = _pp.HOOK_CLASS_BLOCK
+HOOK_CLASS_WARN = _pp.HOOK_CLASS_WARN
 
 __all__ = [
     "claude_roots",
@@ -111,4 +118,9 @@ __all__ = [
     "tree_kind",
     "main_checkout_root",
     "installed_plugin_root",
+    "PROJECT_HOOK_LAUNCHER_SOURCE",
+    "project_hook_launcher_row",
+    "project_hook_launcher_parts",
+    "HOOK_CLASS_BLOCK",
+    "HOOK_CLASS_WARN",
 ]
