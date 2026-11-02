@@ -1047,7 +1047,7 @@ PRIOR_FINDINGS:
 
 ### 9. Documentation (`python-ai-developer`)
 
-**Depends on:** 5, 8
+**Depends on:** 5, 13
 
 **Files to touch:**
 - `README.md`
@@ -1108,6 +1108,71 @@ PRIOR_FINDINGS:
 ### 11. Scope note on version, registries and deferred work
 
 No block raises the version. The landing raises it once, and corrects the manifest description counts (Open Question 15). Registry appends (MECHANISMS, VOCABULARY) are shipped files. They ride with block 9, which merges before the landing raise. Journal entries confirmed at the approval step ride with the first block that merges. Every review gate names only its artefact (Open Question 20). The token-efficiency fixes and the other audit defects are in `.claude/concepts/followups/2026-11-01-token-efficiency-and-audit-defects.followup.md`, `**Issue:** pending` until Step 3.4 fills it. Revision 5 removed the deployment-authorization block and the conditional deploy-guard add-on block at the user's instruction. No block touches `auto_improve_finish_install.py`, its test, `skills/auto-improve-finish-install/SKILL.md`, any settings file or the brief.
+
+**Revision 6 (2026-11-02, user instruction).** The review of block 7 (`t8`, verdict `blocked`) found that `agents/cloud-engineer.md` tells the agent to load the `cloud-engineering` skill with the Skill tool while its tool line omits `Skill` (finding B1), and that `/debug` hands a cloud bug to the agent without a contract path, which the agent refuses (finding W3). The user decided to keep both the `cloud-engineer` agent and the `cloud-engineering` skill and to fix B1. Blocks 12 and 13 are appended so that block identities and records of blocks 1 to 10 stay as they are. Block 9 now depends on block 13 instead of block 8, because block 13's review supersedes block 8's. Findings W1 and W2 (scanner tightening) are not in scope; they stay recorded in the block 8 review. This revision adds no agent, skill, flow or mechanism, and no block raises the version. The contract was amended without a new critic round, because the change is two small blocks that fix a recorded review finding; `/critique-now` can still be run on it.
+
+### 12. Cloud agent skill-load fix (`python-ai-developer`)
+
+**Depends on:** 7
+
+**Files to touch:**
+- `agents/cloud-engineer.md`
+- `skills/debug/SKILL.md`
+- `.claude/scripts/tests/test_agent_skill_preloads.py`
+
+**Pre-written TASK block:**
+```
+TASK: Fix review findings B1 and W3 of the block 8 review.
+  B1: add Skill to the tool line of agents/cloud-engineer.md, so the line reads
+  "Read, Edit, Write, Grep, Glob, Bash, Skill, mcp__codegraph__*". Add the instruction that if the
+  cloud-engineering skill cannot be loaded the agent stops and says so, as agents/senior-test-engineer.md
+  does. Update the test in test_agent_skill_preloads.py that pins the old tool line, and add a test that
+  every agent whose body says to invoke a skill with the Skill tool lists Skill on its tool line or
+  preloads it with a skills: entry (cover all files under agents/).
+  W3: in skills/debug/SKILL.md, make the hand-off to cloud-engineer carry a contract_path when one exists,
+  and when none exists say that a contract is required first (run /design-first) instead of invoking the
+  agent. Change nothing else in /debug.
+CONTEXT: concept contract (Revision 6); the block 8 review at
+  .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t8-review-cloud-capability-fullstack-code-reviewer.md
+  (findings B1 and W3).
+FILES: the three listed.
+CONSTRAINTS:
+  - No new agent, skill or flow. Do not bump the plugin version (Parent Branch Delivery Rule).
+  - Follow the subagent_type literal rule in test_plugin_text_scans.py.
+  - Keep agents/cloud-engineer.md passing test_cloud_text_scans.py.
+  - Run test_agent_skill_preloads.py, test_cloud_text_scans.py and test_plugin_text_scans.py and quote the results.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
+
+### 13. Re-review cloud capability (`fullstack-code-reviewer`)
+
+**Depends on:** 6, 7, 12
+
+**Files to touch:**
+- `.claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t13-re-review-cloud-capability-fullstack-code-reviewer.md`
+
+**Pre-written TASK block:**
+```
+TASK: Review blocks 6, 7 and 12 afresh and write the review artefact. This review supersedes the block 8 review.
+CONTEXT: concept contract at .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md (Revision 6)
+FILES: .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t13-re-review-cloud-capability-fullstack-code-reviewer.md
+CONSTRAINTS:
+  - Start from a cold context. Do not read the block 8 review before forming your own findings; read it
+    afterwards only to confirm that B1 and W3 are cleared.
+  - Check the same list as block 8: capability off while cloud.providers is unset; only selected references load,
+    on both the skill path and the agent path; the cloud scope rule is stated in both the skill and the agent;
+    no shipped cloud text instructs a mutating command (test_cloud_text_scans.py, control fails when planted);
+    no settings file, permission row, hook or finish-install change was added; database guards untouched;
+    the Cloud coverage table in Appendix A.6 is true.
+  - Six fixed sections, base..head named, verdict line exactly "**Verdict:** pass",
+    "**Verdict:** pass-with-findings" or "**Verdict:** blocked". Write the Gate Output beside it, and set its
+    supersedes field to the block 8 review artefact.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
 
 ---
 
