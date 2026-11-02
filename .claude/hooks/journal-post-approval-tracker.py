@@ -64,10 +64,13 @@ try:
 except Exception:
     _DEPS_OK = False
 
-
-ENTRY_HEADER = re.compile(r"^###\s+(\d{4}-\d{2}-\d{2})\s+(?:—|--|-)\s+(.+?)\s*$", re.MULTILINE)
-TRIGGER_LINE = re.compile(r"^\s*-\s*\*\*Trigger:\*\*\s*(.+?)\s*$", re.MULTILINE)
-SOURCE_LINE = re.compile(r"^\s*-\s*\*\*Source contract:\*\*\s*`?([^\s`]+)`?", re.MULTILINE)
+# The shared registry reader. Fail-soft: a missing or stale reader leaves this None, and
+# main() then skips and logs instead of crashing a tool call.
+try:
+    import generate_registry_digest as _grd  # type: ignore
+    _journal_entries = getattr(_grd, "journal_entries", None)
+except Exception:
+    _journal_entries = None
 
 
 def is_disabled() -> bool:
@@ -98,31 +101,19 @@ def parse_entries(text: str) -> list[dict]:
     Body is the text from the entry's `###` heading to the next `###` (or
     next top-level heading), inclusive of the header.
     """
-    headers = list(ENTRY_HEADER.finditer(text))
-    entries: list[dict] = []
-    for i, h in enumerate(headers):
-        start = h.start()
-        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
-        # Stop at the next `## ` heading if it comes before the next `### `
-        tail = text[h.end():end]
-        ss_break = re.search(r"(?m)^##\s", tail)
-        if ss_break:
-            end = h.end() + ss_break.start()
-        body = text[start:end]
-        date = h.group(1)
-        title = h.group(2).strip()
-        sig = hashlib.sha1(f"{date}|{title}".encode("utf-8", errors="ignore")).hexdigest()
-        trig_m = TRIGGER_LINE.search(body)
-        src_m = SOURCE_LINE.search(body)
-        entries.append({
-            "sig": sig,
-            "date": date,
-            "title": title,
-            "trigger": (trig_m.group(1).strip().lower() if trig_m else ""),
-            "source_contract": (src_m.group(1).strip() if src_m else ""),
-            "body": body,
-        })
-    return entries
+    if _journal_entries is None:
+        return []
+    return [
+        {
+            "sig": e["sig"],
+            "date": e["date"],
+            "title": e["title"],
+            "trigger": e["trigger"],
+            "source_contract": e["source"],
+            "body": e["text"],
+        }
+        for e in _journal_entries(text)
+    ]
 
 
 def load_seen() -> dict:
@@ -154,6 +145,16 @@ def resolve_contract_path(raw: str) -> Path | None:
 
 def main() -> int:
     if is_disabled() or not _DEPS_OK:
+        return 0
+
+    if _journal_entries is None:
+        log_event(
+            hook="accuracy",
+            event="journal-tracker-reader-missing",
+            file=str(JOURNAL_PATH),
+            details={"reason": "generate_registry_digest.journal_entries is unavailable"},
+            log_name="accuracy",
+        )
         return 0
 
     try:
