@@ -29,13 +29,14 @@ Sub-task 9 of the approved contract `.claude/concepts/2026-11-01-memory-client-a
 ## Acceptance criteria
 ### 9. Documentation (`python-ai-developer`)
 
-**Depends on:** 5, 8
+**Depends on:** 13, 14, 15, 16
 
 **Files to touch:**
 - `README.md`
 - `CONTRIBUTING.md`
 - `.claude/registries/MECHANISMS.md`
 - `.claude/registries/VOCABULARY.md`
+- `.claude/registries/JOURNAL.md`
 
 **Pre-written TASK block:**
 ```
@@ -47,12 +48,24 @@ TASK: Document the architecture (one diagram of the delivery chain with the two 
   and Known limitations (shape v0 provisional; no capture retry; changed items found only when
   re-returned; an empty project-name token list keeps all capture project-scoped; Cursor and Codex MCP
   naming untested; the cloud scope rule is enforced in text only, by the user's own permission prompts
-  and the existing guards; cloud-management MCP deferred). Update the
-  README skill and agent counts. In CONTRIBUTING, add the rule: no shipped file (check_version_bump
+  and the existing guards; cloud-management MCP deferred; AND, from review I3 of the t5 review: the
+  mcp__<server>__<tool> id form and the host MCP timeout returning an error are unverified, because the
+  block 3 stub-server trials left no recorded evidence, so a project should not set memory.shape until
+  that trial is run). Document the Project history record (Revision 7) exactly as the Business Concept
+  term defines it: what it holds, that /design-first and the data-architect read it, which confirmed
+  steps append to it, and that the Central Memory System only supplements it; do not claim that every
+  flow reads or appends it. Update the README skill and agent counts, and the working-agreement count and
+  list (README "6 working agreements" rows and the agreements paragraph) to seven, naming the block 15
+  agreement. In CONTRIBUTING, add the rule: no shipped file (check_version_bump
   is_shipped) but memory_boundary.py names a memory tool. Append the Memory adapter entry to the Universal
-  tier of MECHANISMS.md and the confirmed terms (Business Concept list) to VOCABULARY.md.
-CONTEXT: concept contract (whole).
-FILES: the four listed.
+  tier of MECHANISMS.md and the confirmed terms (Business Concept list, including Project history record)
+  to VOCABULARY.md. Append to JOURNAL.md the entry the t5 review's Disposition item 6 drafts ("A skill
+  written around an adapter refusal hides a contract divergence"), verbatim, plus the pre-approval critic
+  entries the user confirmed for the Revision 7 critique, as the main session records them at approval.
+CONTEXT: concept contract (whole); the t5 review at
+  .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t5-review-memory-boundary-fullstack-code-reviewer.md
+  (I3 and Disposition items 5 and 6) and the block 16 re-review.
+FILES: the five listed.
 CONSTRAINTS: plain language; no version files; counts must match skills/ and agents/. README and
   CONTRIBUTING are exempt from the single-adapter scan by is_shipped, so they may name the two tools.
   Registry appends are append-only and go in the Universal tier. The registries are shipped and are

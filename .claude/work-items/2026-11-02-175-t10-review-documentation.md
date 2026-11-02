@@ -29,7 +29,7 @@ Sub-task 10 of the approved contract `.claude/concepts/2026-11-01-memory-client-
 ## Acceptance criteria
 ### 10. Review documentation (`fullstack-code-reviewer`)
 
-**Depends on:** 9
+**Depends on:** 9, 14, 15, 16
 
 **Files to touch:**
 - `.claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t10-review-documentation-fullstack-code-reviewer.md`
@@ -41,8 +41,11 @@ CONTEXT: concept contract at .claude/concepts/2026-11-01-memory-client-and-cloud
 FILES: .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t10-review-documentation-fullstack-code-reviewer.md
 CONSTRAINTS:
   - Check every documented behaviour against the code (journal 2026-10-04 "check a documented guard
-    behaviour"); counts; every Known limitation present; the registry appends from block 9 match the
-    merged code. Do NOT append to any registry yourself: report a missing append as a finding.
+    behaviour"); counts; every Known limitation present, including the unverified MCP tool id form and
+    host timeout (t5 review I3); the Project history record documented as the Business Concept term
+    defines it (no claim that every flow reads or appends it), with the Central Memory System only
+    supplementing it; the README working-agreement count matches .claude/agreements/; the registry appends from block 9 (MECHANISMS, VOCABULARY, JOURNAL)
+    match the merged code. Do NOT append to any registry yourself: report a missing append as a finding.
   - Six fixed sections, base..head named, verdict line exactly "**Verdict:** pass",
     "**Verdict:** pass-with-findings" or "**Verdict:** blocked"; write the Gate Output beside it.
 PRIOR_FINDINGS:
