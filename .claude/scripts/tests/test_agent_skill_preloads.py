@@ -48,6 +48,26 @@ class AgentSkillPreloadTests(unittest.TestCase):
     def test_python_ai_developer_preloads_nothing(self):
         self.assertEqual(_skills_entries(ROOT / "agents" / "python-ai-developer.md"), [])
 
+    def test_cloud_engineer_ships_with_its_tools_and_scope_rule(self):
+        path = ROOT / "agents" / "cloud-engineer.md"
+        self.assertTrue(path.is_file())
+        front = _front_matter(path)
+        self.assertIn("tools: Read, Edit, Write, Grep, Glob, Bash, mcp__codegraph__*", front)
+        text = path.read_text(encoding="utf-8")
+        for needle in ("cloud.providers", "cloud.roots", "for the user to run", "never run a deploy",
+                       "No concept contract provided", "permission prompts"):
+            self.assertIn(needle, text)
+        self.assertTrue((ROOT / "skills" / "cloud-engineering" / "SKILL.md").is_file())
+
+    def test_security_auditor_has_the_infrastructure_checklist(self):
+        text = (ROOT / "agents" / "security-auditor.md").read_text(encoding="utf-8")
+        self.assertIn("### Infrastructure as code (active when `cloud.providers` is set)", text)
+
+    def test_debug_routes_container_bugs_to_cloud_engineer(self):
+        text = (ROOT / "skills" / "debug" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("`cloud-engineer`", text)
+        self.assertNotIn("docker-master-goat", text)
+
     def test_the_angular_agents_still_preload_their_skill(self):
         for name in ("angular-senior-dev", "ui-ux-designer"):
             self.assertIn("angular-ui-rules", _skills_entries(ROOT / "agents" / f"{name}.md"))
