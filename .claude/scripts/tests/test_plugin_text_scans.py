@@ -32,11 +32,16 @@ Run: py -3 .claude/scripts/tests/test_plugin_text_scans.py
 
 from __future__ import annotations
 
+import os
 import re
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
+sys.path.append(str(PLUGIN_ROOT / ".claude" / "scripts"))
+import check_version_bump  # noqa: E402
 AGENTS = PLUGIN_ROOT / "agents"
 SKILLS = PLUGIN_ROOT / "skills"
 NAMESPACE = "agentic-auto-improve"
@@ -201,6 +206,93 @@ class TestSubagentTypeLiteralsFollowTheDispatchRule(unittest.TestCase):
                          "a plugin agent is dispatched as '%s:<name>' unless the project carries "
                          ".claude/agents/<name>.md; a bare name addresses nothing once the project's copy is gone"
                          % NAMESPACE)
+
+
+# --- (4) only the memory adapter names the memory tools ---------------------------------------------------------
+# Contract: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md, Extension Points. The file set is
+# built by walking the named shipped folders from this checkout's own root (never the current directory, never a
+# walk from the repo root), dropping every path with a `.claude/worktrees/` segment, then keeping what
+# check_version_bump.is_shipped() calls shipped. The registries, .claude/hooks/tests/ and .claude/agent-memory/ are
+# shipped and get no exemption.
+SHIPPED_FOLDERS = ("agents", "skills", ".claude/hooks", ".claude/scripts", ".claude/templates", ".claude/references",
+                   ".claude/registries", ".claude/agreements", ".claude/addons", ".claude/agent-memory")
+ROOT_MANIFESTS = ("plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json",
+                  ".claude-plugin/marketplace.json")
+MEMORY_TOOL_NAMES = ("memory_" + "retrieve", "memory_" + "capture")
+MEMORY_ADAPTER = ".claude/scripts/memory_boundary.py"
+
+
+def shipped_files(root: Path) -> list[str]:
+    """Root-relative posix paths of the shipped files under the named folders of ``root``."""
+    found = []
+    for folder in SHIPPED_FOLDERS:
+        for dirpath, dirnames, filenames in os.walk(root / folder):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            for name in filenames:
+                found.append((Path(dirpath) / name).relative_to(root).as_posix())
+    found += [m for m in ROOT_MANIFESTS if (root / m).is_file()]
+    return sorted(rel for rel in set(found)
+                  if "/.claude/worktrees/" not in "/" + rel and check_version_bump.is_shipped(rel))
+
+
+def memory_name_files(root: Path) -> list[str]:
+    """Shipped files under ``root`` that contain either memory tool name."""
+    hits = []
+    for rel in shipped_files(root):
+        try:
+            text = (root / rel).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if any(name in text for name in MEMORY_TOOL_NAMES):
+            hits.append(rel)
+    return hits
+
+
+class TestOnlyTheMemoryAdapterNamesTheMemoryTools(unittest.TestCase):
+    def plant(self, root: Path, rel: str) -> None:
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("call " + MEMORY_TOOL_NAMES[0] + " here\n", encoding="utf-8")
+
+    def test_control_a_planted_made_up_shipped_path_is_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.plant(root, "skills/zz-made-up/SKILL.md")
+            self.plant(root, ".claude/registries/ZZ.md")
+            self.assertEqual(memory_name_files(root), [".claude/registries/ZZ.md", "skills/zz-made-up/SKILL.md"])
+
+    def test_control_a_copy_under_a_worktrees_segment_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.plant(root, "skills/zz-copy/.claude/worktrees/x/SKILL.md")
+            self.plant(root, ".claude/scripts/.claude/worktrees/x/copy.py")
+            self.assertEqual(memory_name_files(root), [])
+
+    def test_control_unshipped_and_cached_files_are_not_scanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.plant(root, ".claude/scripts/tests/test_x.py")
+            self.plant(root, ".claude/scripts/__pycache__/x.pyc")
+            self.plant(root, "README.md")
+            self.plant(root, "docs/notes.md")
+            self.assertEqual(memory_name_files(root), [])
+
+    def test_the_walk_starts_from_this_checkout_not_the_current_directory(self):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                files = shipped_files(PLUGIN_ROOT)
+            finally:
+                os.chdir(cwd)
+        self.assertGreater(len(files), 0)
+        self.assertIn(MEMORY_ADAPTER, files)
+
+    def test_only_the_adapter_contains_the_tool_names(self):
+        self.assertIn(MEMORY_ADAPTER, shipped_files(PLUGIN_ROOT), "the scan must reach the adapter")
+        self.assertEqual(memory_name_files(PLUGIN_ROOT), [MEMORY_ADAPTER],
+                         "only %s may name the memory tools; every other shipped file says 'the configured "
+                         "retrieve tool' and 'the configured capture tool'" % MEMORY_ADAPTER)
 
 
 if __name__ == "__main__":
