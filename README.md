@@ -302,6 +302,11 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.12.5 (tests only):** the installer, guard-deference and launcher test files now pin the
+Project hook launcher row form (`py -3 -c <source> <class> <script>`) that 0.12.3 started writing, and
+one new pair of rows pins the earlier-form fallback when no launcher is available. No shipped behaviour
+changed. The manifests read 0.12.5.
+
 **Changed in 0.12.4 (issue #71, follow-up 1):** `plugin_doctor.py --drift` warns about a project
 hook row that launches a file that is not there, such as a row for a hook the plugin no longer
 ships. The finding kind is `dangling-hook-row`. It covers rows written before 0.12.3 (the old
@@ -870,7 +875,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 308 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 315 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 

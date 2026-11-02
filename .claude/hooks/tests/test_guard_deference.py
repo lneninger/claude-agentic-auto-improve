@@ -784,7 +784,7 @@ class DeferenceRows:
                        text: str | None = None, command: str = "py") -> dict:
         args = ["-c", text if text is not None else self.launcher_text(), hook_class,
                 script if script is not None else self.SPEC.file_name]
-        if command.lower().startswith("py"):
+        if command == "py":
             args.insert(0, "-3")
         return {"type": "command", "command": command, "args": args}
 
