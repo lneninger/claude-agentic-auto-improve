@@ -4,7 +4,7 @@
 **Date:** 2026-11-01
 **Requested by:** user
 **Status:** approved
-**Revision:** 5 (2026-11-01). Revisions 2-4 answered three critique rounds and Open Questions 1-21. Revision 5 removes the deployment-authorization mechanism at the user's instruction (Decision note in Business Concept) and renumbers the handoff blocks.
+**Revision:** 7 (2026-11-02). Revisions 2-4 answered three critique rounds and Open Questions 1-21. Revision 5 removes the deployment-authorization mechanism at the user's instruction (Decision note in Business Concept) and renumbers the handoff blocks. Revisions 6 and 7 (2026-11-02, notes under Handoff 11) append fix and re-review blocks after two blocked reviews; Revision 7 also adds the user's Project history record requirement, and was amended after the `## Critique (Revision 7)` round with the user's answers to Open Questions 22 and 23.
 **Work Item Brief:** .claude/work-items/2026-11-01-memory-client-and-cloud-engineering.md
 **Tracking issue:** #161
 **Budget:** 20,000 tokens. This is raised from the template's 12,000 because the brief asks for the full audit to sit inside the contract. Open Question 14 offers to move the appendices out.
@@ -50,6 +50,7 @@
   - **Memory exchange outcome**, **Retrieval request**, **Capture candidate**, **Capture receipt**, **Memory change notice** — the value objects defined under Data Shapes, proposed with the definitions given there. *Memory change notice* is chosen over any "drift" wording, because "drift" already names vendored-asset drift (`VOCABULARY.md:36`).
   - **Cloud capability** — the cloud skill, agent and checklist, active for a project only when its `cloud.providers` slot names at least one provider.
   - **Hand-off command** — a deploy, apply, create, update or destroy command that the cloud skill or the cloud agent writes out for the user to run themselves, and never runs. The user's normal Claude Code permission prompts and the existing destructive-operation guards apply to it unchanged. No new authorization mechanism exists (Decision note, Revision 5).
+  - **Project history record** *(Revision 7; the user chose this name over "Project memory", critique Revision 7)* — a project's own file-based record of its design history, committed in its repository: the registries under `.claude/registries/` (`MECHANISMS.md`, `VOCABULARY.md`, `JOURNAL.md`, and `INTEGRATION.md` where the project keeps one), the concept contracts and follow-up stubs under `.claude/concepts/`, and the Work Item Briefs under `.claude/work-items/`. `/design-first` and the data-architect read it on every design, in every memory state. Confirmed steps append to it: `/task` writes the brief, the data-architect writes the contract, `/design-first` Steps 3 and 5 append the critic findings the user confirmed to `JOURNAL.md`, `fullstack-code-reviewer` appends on a justified contract divergence (and, as janitor, to `MECHANISMS.md` and `VOCABULARY.md`), and `/journal-add` appends a manual lesson. Routes with no design step (an XS/S direct edit, `/debug`, `/git-commit`, `/ship`) neither read nor append it by this definition. The **Central Memory System** only supplements it: an item never replaces, hides or skips a read of it, and a local entry wins a conflict until the user decides (Open Question 9). Not to be confused with `memory: project` agent memory (the folders under `.claude/agent-memory/`).
 
 ---
 
@@ -93,13 +94,15 @@ Not applicable. Reason: `Files to touch` holds no Angular component, template, s
 | A contract's `ASSUMED` line | the architect's guess | `ai-hypothesis` — not offered |
 | any source | — | `test-confirmed` is **never claimed in v1**. No registry entry links to a test run, so the value cannot be derived |
 
+**Trigger matching (Revision 7, review W3).** A Trigger maps only when its whole trimmed value (case-folded, surrounding backticks removed) equals one of the four canonical values. Any other text, such as `manual (follow-up to a pre-approval critic finding)`, is not a candidate and is skipped as `unknown-trigger`. Matching by substring is ruled out, because it can give a stronger provenance than the table allows.
+
 **Candidate reading: the existing readers are extended, not bypassed.** Capture needs things neither existing reader provides:
 - each entry's **full text**, including where a bullet ends and its indented `**Correction**` sub-bullets (for example `MECHANISMS.md:16,44,47,59-60,68-69`);
 - a journal entry's **tier and line together with** its Trigger, Source contract and `sig`.
 
 `tier_split` returns only `(title, line)`. `parse_entries` returns no line and no tier. Joining them would be new parsing, and the two use different heading patterns (`DATED` matches `#{2,3}`, `ENTRY_HEADER` only `###`). So the contract **extends the shared reader in its existing file** rather than writing a parser in the adapter:
 - **In `.claude/scripts/generate_registry_digest.py`** (importable by name; `main` runs only under `__main__`), add two functions:
-  - `entry_blocks(text, pattern, per_domain=False)` returns, per top-level entry: title, first line, tier, its own text (up to its first indented sub-bullet) and a list of indented sub-bullets, each with its line and text. An entry ends at the next top-level match or a `##` heading.
+  - `entry_blocks(text, pattern, per_domain=False)` returns, per top-level entry: title, first line, tier, its own text (up to its first indented sub-bullet) and a list of indented sub-bullets, each with its line and text. An entry ends at the next top-level match or a `##` heading. **Its own text also ends at a blank line followed by a non-indented line that is not a top-level match** (Revision 7, review I1); such a note paragraph belongs to no entry, so it can never make the bullet above it a capture candidate.
     - Tier follows the existing rule: `## Universal…` gives Universal, and `## Project:…` gives Project.
     - **An entry before any tier heading is Project**, as `tier_split` already files it (`generate_registry_digest.py:57,67`).
     - `per_domain=True` (a file under `<REGISTRY>/<domain>.md`) makes every entry Project.
@@ -139,11 +142,11 @@ These are recorded as lines in the brief. There is no event bus.
 | Report memory state | `memory_boundary.py status --project <root>` | project root (explicit) | none by design: it exits 0 and prints a state. Its imports are fail-soft with `getattr` binding (Guard fallback mode), and it appends to `sys.path`, never inserts. **Whatever any caller sees, any non-zero exit, crash, timeout or missing script reads as memory off**: one printed line, nothing written, and the run continues |
 | Render retrieval request | `memory_boundary.py retrieve-request --project <root> --brief <path>` | brief | `not-enabled`, `empty-query`, `shape-unknown` |
 | Normalise response | `memory_boundary.py normalise --project <root> --input <file>` | raw tool response saved to a file | `malformed-response` (whole response); per-item rejections are counted, not fatal |
-| List capture candidates | `memory_boundary.py capture-candidates --project <root> --contract <slug> --run-report <file>` | contract slug; the **live writing run's** JSON report (its completion verdict and `written_files`) | `capture-not-enabled`; `not-flipped` (the report's verdict for this contract is not `flipped`); `brief-not-carried` (no linked brief, or the linked brief is not in `written_files`). Both refusals come **before** anything is offered or sent, so nothing is ever sent without a receipt path |
+| List capture candidates | `memory_boundary.py capture-candidates --project <root> --contract <slug> --run-report <file>` | contract slug; the **live writing run's** JSON report (its completion verdict and `written_files`) | `capture-not-enabled`; `not-flipped` (the report's verdict for this contract is not `flipped`); `brief-not-carried` (no linked brief, or the linked brief is not in `written_files`); `default-branch-unknown` (Revision 7, review I2: no `--default-branch` was given and `pr_merged.default_branch_or_none(cwd=<project>)` cannot read the project's `origin/HEAD`; the adapter never falls back to a fixed name). Every refusal comes **before** anything is offered or sent, so nothing is ever sent without a receipt path |
 | Render capture request | `memory_boundary.py capture-request --project <root> --candidate <file>` | one confirmed candidate | `ai-hypothesis-refused`, `status-not-proposed`, `capture-not-enabled` |
-| Record outcome | `memory_boundary.py record --project <root> --brief <path> --outcome <file> [--receipts --run-report <file>]` | outcome, items, decisions; with `--receipts`, the receipts plus the **same live writing run's report**, whose `written_files` is the list checked | `not-enabled` (state `disabled`: **writes nothing**), `brief-not-found`, `would-add-frontmatter`, `brief-not-carried` (receipts only: the brief is not in the report's `written_files`) |
+| Record outcome | `memory_boundary.py record --project <root> --brief <path> --outcome <file> [--receipts --run-report <file>]` | outcome, items, decisions; with `--receipts`, the receipts plus the **same live writing run's report**, whose `written_files` is the list checked | `not-enabled` (state `disabled`: **writes nothing**; with `--receipts`, any state but `enabled`). Under state `unconfigured` it is not refused: it writes only the `Memory: unconfigured (<reason>) \| <date>` line, with the reason read from the profile, never from the outcome (Revision 7), `brief-not-found`, `would-add-frontmatter`, `brief-not-carried` (receipts only: the brief is not in the report's `written_files`) |
 | Check citations | `memory_boundary.py check-contract --project <root> --brief <path> --contract <path>` | brief, contract | none. It prints `cited` / `not-cited` per `applies` item, plus any `Memory item` line naming an item that is not `applies` (reported as `uncleared-item`) |
-| List changed items | `memory_boundary.py changed-items --project <root> --input <normalised file>` | normalised items | none. It prints zero or more Memory change notices |
+| List changed items | `memory_boundary.py changed-items --project <root> --input <normalised file>` | normalised items (the file `normalise` wrote, never the raw response). It applies the same per-item rules as `normalise` to its input, so an item `normalise` rejects never raises a notice, and it compares versions as the normalised strings (Revision 7, review W2) | none. It prints zero or more Memory change notices |
 | Deploy / apply / destroy (cloud) | the user only, after the host's "ask" prompt | command line | the agent never issues it; the host asks |
 
 Every subcommand is pure except `record`. It writes only the one brief it is given, with the replace-then-rename write the scripts already use.
@@ -176,6 +179,7 @@ What each part extends (acceptance criterion: "a reviewer can name the existing 
 | Cloud deployment validation | `land_contract.py --verify-here` with `contractLanding.verification.steps` in `.claude/work-item-conventions.json` (line 90), consumed as-is. The project adds non-mutating steps; the skill documents them |
 | Live cloud changes | **No mechanism (design decision, Revision 5).** The cloud skill and agent never run a deploy, apply, create, update or destroy command against a live environment; they write it out as a Hand-off command. The user's normal Claude Code permission prompts and the existing destructive-operation guards apply unchanged. Enforced in text and by `test_cloud_text_scans.py` |
 | Cloud review | `security-auditor` agent, extended by an infrastructure-as-code checklist section |
+| Telling a host project that its Project history record is what to use (Revision 7) | **Two-tier registry** and the concept-contract folder, consumed as-is; the **plugin doctor** (`plugin_doctor.py`), consumed as-is in report mode, with `--fix` run only after the user confirms the list it would create (Open Question 23); **Session-start context delivery** (`MECHANISMS.md`, "Extend by: adding a markdown file to the plugin's folder (plus its name in the suite's required-file test)"), extended by one shipped agreement; the `/auto-improve-finish-install` skill and the Step 1.5 printed lines, extended by text only. No new store, hook, seed or frontmatter key |
 | Existing destructive database guards | `db-destructive-guard.py` and `db-research-readonly-guard.py`, consumed as-is and never weakened |
 
 **Persistence check (consumed as-is):** `load_slot` reads one profile table and treats an unfilled slot as empty (verified at `pr_merged.py:85-98`). The brief linkage reader filters `none`, `UNKNOWN` and placeholders. The journal header defines three Triggers and `/journal-add` a fourth (`post-approval`); the provenance table covers all four. The project-name check list is a plain `tokens` array, empty in the shipped template.
@@ -201,7 +205,8 @@ No other new mechanism. The cloud skill and agent are assets, not mechanisms. No
 - `/design-first` new **Step 1.5 "Consult the Central Memory System"**. It runs only for non-trivial tasks.
   1. Locate the script and run `status`. On `disabled`, or an empty lookup, **print nothing, write nothing** and go to Step 2 exactly as today.
   2. **Any non-zero exit, crash, timeout or unreadable output of any adapter subcommand, at any point in this step:** print one line naming the subcommand and its exit code, write nothing further, treat memory as off for the rest of this run, and go to Step 2.
-  3. On `unconfigured`, record and print the one line, then go on.
+  3. On `unconfigured`, print the status line, then record it with `record` into the brief whose `branch:` is the branch you are on (the same rule as point 4). `record` accepts this state and writes only the state line (Revision 7, review B1). With no such brief, print one line saying the memory record was skipped for want of a brief and go to Step 2: that is not a failure. Only a refusal or non-zero exit from `record` when a brief was found is a failure under point 2.
+  - **The Project history record comes first, in every state (Revision 7).** The step's text states that the project's design history is its Project history record (registries, concept contracts, briefs), which Step 2 and the architect read whatever the memory state. The Central Memory System only supplements it. On `disabled` this is a sentence in the skill text only: nothing is printed and nothing is written (I-M0). Every line the step prints in any other state (the point 2 failure line, the point 3 status line and skipped line, the point 4 skipped line, and the reference's `unavailable` lines) ends with the fixed suffix `; design continues from the project history record (registries and concept contracts)`. The skill text appends the suffix when it prints; `memory_boundary.py` does not change for it. The recorded brief line keeps its format.
   4. On `enabled`, read `references/central-memory.md` and follow it:
      - Check the session tool list for the configured tool.
      - Make **one** call with the rendered request. The bound on that call is the host's MCP tool timeout. No retry. Any error, timeout or absent tool records `unavailable (<reason>)`, prints one line and goes to Step 2.
@@ -210,6 +215,8 @@ No other new mechanism. The cloud skill and agent are assets, not mechanisms. No
      - Pass only `applies` items as PRIOR_FINDINGS `memory_items`.
   5. At Step 3, run `check-contract`. Show `not-cited` and `uncleared-item` results and any change notices. A change notice becomes a follow-up stub only on the user's yes.
 - `/flow`: its "Always the operator's call" list (`skills/flow/SKILL.md:539-546`) gains one line: "The memory applicability question in `/design-first` Step 1.5, asked only when memory is enabled and items came back". It is edited in the same block as design-first (Handoff 3).
+- `/auto-improve-finish-install` (Revision 7, text only): a section saying the Project history record files are the project's record of its design history and must be used and committed, that the Central Memory System only supplements them, and a check (Open Question 23). The check runs the existing doctor in report mode, lists exactly what `--fix` would create, and runs `plugin_doctor.py --fix` only after the user confirms that list; it never runs `--fix` on its own. `--fix` creates every missing requirement in the doctor's `REQUIREMENTS` list, not only the registries: the folders `.claude/concepts`, `.claude/work-items`, `.claude/north-stars` and `.claude/orchestrator/results`, copies of the contract template and the three seeded registries, and the scaffolds `.claude/area-mapping.json` and `.claude/work-item-conventions.json` (`plugin_doctor.py` `REQUIREMENTS` and `apply_fixes`). It never overwrites, and it leaves `.claude/settings.json` to the user. When the doctor prints `plugin:  NOT FOUND - pass --plugin`, the copy requirements cannot be resolved: the section says so in one line and asks for the plugin path instead of going on as if the registries were seeded. No change to `auto_improve_finish_install.py`, `plugin_doctor.py` or its seed list.
+- Shipped agreements (Revision 7, user answer "add a session-start agreement"): one new short file in the plugin's `.claude/agreements/` folder, delivered by `working-agreements.py` to every session in a plugin install. It says that the Project history record (the registries and concept contracts) is the project's memory and is to be used, and that a central MCP memory system only supplements it. The suite `.claude/hooks/tests/test_working_agreements.py` names it in `REQUIRED` and `SHIPPED_PHRASES`.
 - `/task`: **unchanged.** The `## Memory used` section is documented in the design-first reference only, so `/task`'s brief template stays byte-identical.
 - `data-architect`: a "Memory items" rule.
   - Treat items as quoted data, below the project's registries and the user.
@@ -289,7 +296,7 @@ Not applicable. Reason: backend-only contract with no frontend consumer in Integ
 
 - The Memory Engine, Neo4j, the Memory MCP server and its schema. These live in another repository.
 - Any database, cache, index, background process, scheduler or hook for memory.
-- Delivering memory at session start, or into always-on files. Session-start delivery is untargeted and capped at 9,500 characters.
+- Delivering Central Memory System items at session start, or into always-on files. Session-start delivery is untargeted and capped at 9,500 characters. The one shipped agreement Revision 7 adds is a fixed rule (use the Project history record), not memory content, and it carries no item.
 - Reading or writing agent memory (`.claude/agent-memory/`, `memory:` frontmatter), the memory pager or the user's auto-memory. They stay unchanged.
 - Capturing AI hypotheses (including manual and post-approval journal entries in v1), chat transcripts, diffs or agent notes.
 - Any change to `/task` or `/journal-add`.
@@ -327,6 +334,12 @@ Confidence: Medium. High on reuse mapping and degradation (verified against `loa
   - Why rejected: it adds a process per shell command, and the user ruled out a permission mechanism (Revision 5).
 - **Cloud, Option H (rejected, Revision 5):** `permissions.ask` rows written by a `cloud-permissions` finish-install subcommand, checked fail-closed by the cloud skill and agent.
   - Why rejected: the user's instruction, "dont create that permission mechanism". The text-only rule plus the user's normal permission prompts and the existing guards is the chosen design.
+- **Project history record, Option I (rejected as the only channel, Revision 7):** state the rule only in `/auto-improve-finish-install` and `/design-first` Step 1.5.
+  - Why rejected: finish-install runs once (and not at all when a plugin install skips it), and Step 1.5 runs only for non-trivial designs. An XS/S direct edit, `/debug`, `/journal-add` and any session that never designs would get no instruction (critique Revision 7, WARN 1).
+- **Project history record, Option J (chosen with Option I, Revision 7):** also add one shipped agreement through **Session-start context delivery**, so every session in a plugin install hears the rule before its first reply.
+  - Why: it is the plugin's existing channel for standing guidance, extended exactly as its registry entry says (one markdown file plus its name in the suite's required-file test), with no new code. Cost: one short agreement, about 400 characters, inside the 9,000-character limit that the suite pins. Limits: a vendored copy of the hook delivers nothing (`vendored-unsupported`), so finish-install and Step 1.5 still carry the rule for those installs.
+- **Project history record, Option K (rejected, Revision 7):** a new SessionStart hook or a `CLAUDE.md` edit in the host project.
+  - Why rejected: a hook adds a process per session for text the agreements hook already delivers, and the plugin never writes a host's `CLAUDE.md`.
 
 ---
 
@@ -380,6 +393,12 @@ Confidence: Medium. High on reuse mapping and degradation (verified against `loa
   - **Mitigation:** the scope rule in the skill and agent text says they never run such a command and hand it to the user instead. `test_cloud_text_scans.py` pins that the shipped text never presents one as something to run. The user's normal Claude Code permission prompts and the existing database guards apply unchanged. Verification uses only non-mutating steps. Residual risk, accepted by the user's instruction: no new hook or rule enforces this at run time.
 - **FM:** a `/design-first` run in a project without the script (old vendored copy).
   - **Mitigation:** the lookup block returns empty, which reads as `disabled`. Never a halt, because memory is optional.
+- **FM (Revision 7):** finish-install's doctor check cannot find the plugin root and prints `plugin:  NOT FOUND - pass --plugin`, so the registry copies would be left `UNRESOLVED` while the skill goes on.
+  - **Mitigation:** the **plugin doctor**'s own report line is the signal (`plugin_doctor.py` report mode, `apply_fixes` `unresolved` list). The finish-install section reads it, says in one line that the registries cannot be seeded, and asks for the plugin path to pass as `--plugin` before offering `--fix`. It never reports the registries as present.
+- **FM (Revision 7):** `record` refuses, or no brief exists, on the `unconfigured` path of Step 1.5.
+  - **Mitigation:** the **Brief linkage** rule already used by point 4 (the brief whose `branch:` is the current branch) picks the brief. With no brief, one "skipped for want of a brief" line is printed and design continues; this is not a failure. A refusal when a brief was found falls to point 2's one-line failure rule (tracker-cascade degradation, consumed as-is), and design continues from the Project history record.
+- **FM (Revision 7):** `plugin_doctor.py --fix` creates more than the user expected (north-stars and orchestrator folders, the contract template, the `area-mapping.json` and `work-item-conventions.json` scaffolds).
+  - **Mitigation:** report then ask. The **plugin doctor**'s report mode lists every `missing` entry first; finish-install shows that list as what `--fix` would create and runs `--fix` only on the user's yes, matching the skill's own "It proposes, you confirm, and only then does it write". `apply_fixes` never overwrites and leaves `.claude/settings.json` to the user.
 
 ---
 
@@ -408,6 +427,15 @@ All 21 questions are resolved and shrunk to one line each, as the template's rev
 - [x] **19. A missing or empty project-name token list lowers every candidate to `project` (fail closed)** — Answered: accepted recommendation (user, 2026-11-01).
 - [x] **20. Registry appends in the documentation block, not in its review gate** — Answered: accepted recommendation (user, 2026-11-01). After the Revision 5 renumbering, these are Handoffs 9 and 10.
 - [x] **21. Accept the Step 1.5 applicability question as a `/flow` stop (only when memory is enabled and items came back)** — Answered: accepted recommendation (user, 2026-11-01). It is now listed in `/flow`'s operator stops (Handoff 3).
+
+Revision 7 adds two questions. The user answered both on 2026-11-02, and the answers are written into the body below.
+
+- [x] **22. `INTEGRATION.md` has no seed.** Answered: "Name it, add no seed" (user, 2026-11-02). The term lists `INTEGRATION.md` "where the project keeps one"; this contract adds no seed or template for it.
+  → Addressed by: Business Concept term **Project history record**; block 15 TASK point 1 and the shipped agreement; block 15 CONSTRAINTS (no seed, no change to the doctor's `REQUIREMENTS`).
+- [x] **23. Registries missing in a project that already has a profile.** Answered: "Report, then ask before --fix" (user, 2026-11-02). Finish-install runs the doctor in report mode, lists exactly what `--fix` would create, and writes only after the user confirms. It never runs `--fix` on its own. `--fix` creates every missing requirement in `plugin_doctor.py` `REQUIREMENTS` (via `apply_fixes`), including `.claude/north-stars`, `.claude/orchestrator/results`, `area-mapping.json`, `work-item-conventions.json` and the contract template, not only the registries.
+  → Addressed by: Extension Points bullet `/auto-improve-finish-install`; Failure Modes entries on `NOT FOUND - pass --plugin` and on `--fix` creating more than expected; block 15 TASK point 1.
+
+Revision 7 also took one decision outside the numbered questions: "Yes, add a session-start agreement" (user, 2026-11-02), in answer to the critic's WARN on reach. → Addressed by: Extension Points bullet "Shipped agreements"; Alternatives Considered Options I, J and K; block 15 TASK point 5. The user also renamed the proposed term "Project memory" to **Project history record** and narrowed its definition. → Addressed by: Business Concept, and every Revision 7 mention in this contract outside the critique sections, which keep the old name as history.
 
 ---
 
@@ -707,14 +735,22 @@ The critic checked each revision-2 finding against the contract body and the cod
 - **2026-10-28 — State the real trigger of a hook** — heeded: no hook is added, and the cost of the disabled path is stated as one silent script call per design.
 - **2026-10-30 — A delivery rule must name every route into delivery** — heeded by the route table under Extension Points.
 - **2026-10-30 — One shared reader must own the filtering** and **2026-10-15 — Reuse the existing brief-linkage reader** — heeded: `load_slot` and `select_linked_brief` are reused, with no new reader.
-- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — noted for the approval pass.
+- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — noted for the approval pass; heeded again in the Revision 7 amendment, which writes the answers to Open Questions 22 and 23 into the body and removes block 15's "the user's answer wins" hand-off.
+- **2026-10-28 — A new term's definition must be true against every existing member** — heeded in Revision 7 by renaming "Project memory" to **Project history record** and naming exactly who reads and appends it, with the no-design routes excluded.
+- **2026-10-04 — Check a documented guard behaviour against the guard's code** — heeded in Revision 7: block 15's who-appends text follows `agents/contract-critic.md:150` and `JOURNAL.md` "Maintained by", and the `--fix` description follows `plugin_doctor.py` `REQUIREMENTS` and `apply_fixes`.
+- **2026-10-15 — A script that reads a project-owned file must be told which project** — heeded in Revision 7 by block 14 I2 (`default_branch_or_none(cwd=<project>)`, no `master` fallback).
 - Orthogonal to north-stars: none active (`.claude/north-stars/` does not exist, matching the brief's intake grade).
 
 ---
 
 ## Implementation Handoff
 
-This contract has ten mergeable blocks plus one scope note, so it is delivered through the parent branch `feature/memory-client-and-cloud-engineering` (Parent Branch Delivery Rule). No block touches a version file; the landing raises the version once. Block 1 holds the profile slots, blocks 2-5 the memory boundary, 6-8 the cloud capability and 9-10 the documentation; block 11 is the scope note. The graph is 1→2→3→4→5, 1→6→7→8, and 5,8→9→10, with no cycle. Revision 5 removed the old block 8 (deployment authorization) and the conditional block 13, and renumbered the rest.
+This contract has fifteen mergeable blocks plus one scope note (sixteen numbered blocks), so it is delivered through the parent branch `feature/memory-client-and-cloud-engineering` (Parent Branch Delivery Rule). No block touches a version file; the landing raises the version once. Block 1 holds the profile slots, blocks 2-5 the memory boundary, 6-8 the cloud capability and 9-10 the documentation; block 11 is the scope note. Revision 6 added the cloud fix 12 and its re-review 13; Revision 7 added the memory-boundary fixes 14, the Project history record block 15 and their re-review 16. The true graph, with no cycle:
+- 1→2→3→4→5 (5 also waits for 2 and 3); 2,3,4→14→15; 2,3,4,14,15→16.
+- 1→6→7→8 (8 also waits for 6); 7→12; 6,7,12→13.
+- 13,14,15,16→9; 9,14,15,16→10.
+
+Blocks 5 and 8 keep their recorded `blocked` reviews; 16 supersedes 5 and 13 supersedes 8, so 9 waits for the re-reviews, not the originals. Revision 5 removed the old block 8 (deployment authorization) and the conditional block 13 of that older numbering, and renumbered the rest; today's block 13 is the Revision 6 re-review.
 
 ### 1. Profile slots (`python-ai-developer`)
 
@@ -1047,13 +1083,14 @@ PRIOR_FINDINGS:
 
 ### 9. Documentation (`python-ai-developer`)
 
-**Depends on:** 5, 13
+**Depends on:** 13, 14, 15, 16
 
 **Files to touch:**
 - `README.md`
 - `CONTRIBUTING.md`
 - `.claude/registries/MECHANISMS.md`
 - `.claude/registries/VOCABULARY.md`
+- `.claude/registries/JOURNAL.md`
 
 **Pre-written TASK block:**
 ```
@@ -1065,12 +1102,24 @@ TASK: Document the architecture (one diagram of the delivery chain with the two 
   and Known limitations (shape v0 provisional; no capture retry; changed items found only when
   re-returned; an empty project-name token list keeps all capture project-scoped; Cursor and Codex MCP
   naming untested; the cloud scope rule is enforced in text only, by the user's own permission prompts
-  and the existing guards; cloud-management MCP deferred). Update the
-  README skill and agent counts. In CONTRIBUTING, add the rule: no shipped file (check_version_bump
+  and the existing guards; cloud-management MCP deferred; AND, from review I3 of the t5 review: the
+  mcp__<server>__<tool> id form and the host MCP timeout returning an error are unverified, because the
+  block 3 stub-server trials left no recorded evidence, so a project should not set memory.shape until
+  that trial is run). Document the Project history record (Revision 7) exactly as the Business Concept
+  term defines it: what it holds, that /design-first and the data-architect read it, which confirmed
+  steps append to it, and that the Central Memory System only supplements it; do not claim that every
+  flow reads or appends it. Update the README skill and agent counts, and the working-agreement count and
+  list (README "6 working agreements" rows and the agreements paragraph) to seven, naming the block 15
+  agreement. In CONTRIBUTING, add the rule: no shipped file (check_version_bump
   is_shipped) but memory_boundary.py names a memory tool. Append the Memory adapter entry to the Universal
-  tier of MECHANISMS.md and the confirmed terms (Business Concept list) to VOCABULARY.md.
-CONTEXT: concept contract (whole).
-FILES: the four listed.
+  tier of MECHANISMS.md and the confirmed terms (Business Concept list, including Project history record)
+  to VOCABULARY.md. Append to JOURNAL.md the entry the t5 review's Disposition item 6 drafts ("A skill
+  written around an adapter refusal hides a contract divergence"), verbatim, plus the pre-approval critic
+  entries the user confirmed for the Revision 7 critique, as the main session records them at approval.
+CONTEXT: concept contract (whole); the t5 review at
+  .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t5-review-memory-boundary-fullstack-code-reviewer.md
+  (I3 and Disposition items 5 and 6) and the block 16 re-review.
+FILES: the five listed.
 CONSTRAINTS: plain language; no version files; counts must match skills/ and agents/. README and
   CONTRIBUTING are exempt from the single-adapter scan by is_shipped, so they may name the two tools.
   Registry appends are append-only and go in the Universal tier. The registries are shipped and are
@@ -1084,7 +1133,7 @@ PRIOR_FINDINGS:
 
 ### 10. Review documentation (`fullstack-code-reviewer`)
 
-**Depends on:** 9
+**Depends on:** 9, 14, 15, 16
 
 **Files to touch:**
 - `.claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t10-review-documentation-fullstack-code-reviewer.md`
@@ -1096,8 +1145,11 @@ CONTEXT: concept contract at .claude/concepts/2026-11-01-memory-client-and-cloud
 FILES: .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t10-review-documentation-fullstack-code-reviewer.md
 CONSTRAINTS:
   - Check every documented behaviour against the code (journal 2026-10-04 "check a documented guard
-    behaviour"); counts; every Known limitation present; the registry appends from block 9 match the
-    merged code. Do NOT append to any registry yourself: report a missing append as a finding.
+    behaviour"); counts; every Known limitation present, including the unverified MCP tool id form and
+    host timeout (t5 review I3); the Project history record documented as the Business Concept term
+    defines it (no claim that every flow reads or appends it), with the Central Memory System only
+    supplementing it; the README working-agreement count matches .claude/agreements/; the registry appends from block 9 (MECHANISMS, VOCABULARY, JOURNAL)
+    match the merged code. Do NOT append to any registry yourself: report a missing append as a finding.
   - Six fixed sections, base..head named, verdict line exactly "**Verdict:** pass",
     "**Verdict:** pass-with-findings" or "**Verdict:** blocked"; write the Gate Output beside it.
 PRIOR_FINDINGS:
@@ -1107,9 +1159,21 @@ PRIOR_FINDINGS:
 
 ### 11. Scope note on version, registries and deferred work
 
-No block raises the version. The landing raises it once, and corrects the manifest description counts (Open Question 15). Registry appends (MECHANISMS, VOCABULARY) are shipped files. They ride with block 9, which merges before the landing raise. Journal entries confirmed at the approval step ride with the first block that merges. Every review gate names only its artefact (Open Question 20). The token-efficiency fixes and the other audit defects are in `.claude/concepts/followups/2026-11-01-token-efficiency-and-audit-defects.followup.md`, `**Issue:** pending` until Step 3.4 fills it. Revision 5 removed the deployment-authorization block and the conditional deploy-guard add-on block at the user's instruction. No block touches `auto_improve_finish_install.py`, its test, `skills/auto-improve-finish-install/SKILL.md`, any settings file or the brief.
+No block raises the version. The landing raises it once, and corrects the manifest description counts (Open Question 15). Registry appends (MECHANISMS, VOCABULARY) are shipped files. They ride with block 9, which merges before the landing raise. Journal entries confirmed at the approval step ride with the first block that merges. Every review gate names only its artefact (Open Question 20). The token-efficiency fixes and the other audit defects are in `.claude/concepts/followups/2026-11-01-token-efficiency-and-audit-defects.followup.md`, `**Issue:** pending` until Step 3.4 fills it. Revision 5 removed the deployment-authorization block and the conditional deploy-guard add-on block at the user's instruction. No block touches `auto_improve_finish_install.py`, its test, `plugin_doctor.py`, any settings file or the brief. The only finish-install change is block 15's text in `skills/auto-improve-finish-install/SKILL.md` (Revision 7); it adds no cloud permission row, so the cloud reviews' check "no finish-install change was added", which concerns those rows, still holds.
 
 **Revision 6 (2026-11-02, user instruction).** The review of block 7 (`t8`, verdict `blocked`) found that `agents/cloud-engineer.md` tells the agent to load the `cloud-engineering` skill with the Skill tool while its tool line omits `Skill` (finding B1), and that `/debug` hands a cloud bug to the agent without a contract path, which the agent refuses (finding W3). The user decided to keep both the `cloud-engineer` agent and the `cloud-engineering` skill and to fix B1. Blocks 12 and 13 are appended so that block identities and records of blocks 1 to 10 stay as they are. Block 9 now depends on block 13 instead of block 8, because block 13's review supersedes block 8's. Findings W1 and W2 (scanner tightening) are not in scope; they stay recorded in the block 8 review. This revision adds no agent, skill, flow or mechanism, and no block raises the version. The contract was amended without a new critic round, because the change is two small blocks that fix a recorded review finding; `/critique-now` can still be run on it.
+
+**Revision 7 (2026-11-02, user instruction).** Two inputs.
+- **The block 5 review** (`t5`, verdict `blocked`, `.claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t5-review-memory-boundary-fullstack-code-reviewer.md`) found that `record` refuses the `unconfigured` state, which the Commands table, Extension Points Step 1.5 point 3 and I-M1 say it records (B1). Block 3's skill text documented around the refusal, and a test name claimed coverage it lacked. The review also found that receipt lines lose their source reference (W1), that `changed-items` is fed the raw response (W2), and that provenance is chosen by substring (W3). It added three information notes: a trailing note paragraph is absorbed into the bullet above it (I1), `--default-branch` is hard-coded to `master` (I2), and the block 3 stub-server trials left no evidence (I3). Block 14 fixes B1, W1 to W3, I1 and I2. Block 9's Known limitations now state I3. Data Shapes are amended in place and marked "Revision 7": the `record` and `changed-items` rows of Commands, Trigger matching under the provenance table, and the entry end under Candidate reading.
+- **A new user requirement:** "the plugin must instruct to use the memory system it currently use/provide in the host repos". The user clarified this as the file-based record (registries, contracts and so on) that a host project uses to track its history. This is the new term **Project history record** (Business Concept; first drafted as "Project memory", renamed by the user after the Revision 7 critique). Block 15 states it in host onboarding (`/auto-improve-finish-install`), on every printed line of `/design-first` Step 1.5 and its reference, and in one new shipped agreement delivered at session start. It reuses the doctor (report, then ask before `--fix`), the finish-install skill, the Step 1.5 printed lines and Session-start context delivery, and adds no store, hook, seed or frontmatter key.
+
+**Why two blocks.** The requirement is its own block (15), not part of the fix block. Block 14 is judged against a recorded review report and stays limited to it: it carries no Project history record text, and the suffix on the printed lines is added by block 15 in the skill text, not in `memory_boundary.py`. Block 15 adds a new acceptance criterion and touches a skill (`/auto-improve-finish-install`) and the shipped agreements that no fix touches. The two blocks share three files (`skills/design-first/SKILL.md`, `references/central-memory.md` and `test_memory_off_parity.py`), so block 15 depends on block 14 and they never run in parallel. Both blocks change only text the user sees, plus block 14's script fixes. They are reviewed together by block 16, which supersedes the block 5 review the way block 13 superseded block 8.
+
+**What else changes.**
+- Blocks 9 and 10 now depend on 14, 15 and 16, so block 9 is released only after the re-review passes. Block 16 replaces block 5 in block 9's Depends on.
+- Block 9 also appends the journal entry the t5 review drafted, the user-confirmed Revision 7 critic entries, documents the Project history record and updates the README agreement count, so it gains `JOURNAL.md`.
+- No block raises the version. The user answered Open Questions 22 and 23 and the critic findings on 2026-11-02, and the answers are written into the body; this is the re-approval of Revision 7. The Revision 7 critique was run (`## Critique (Revision 7)`, at the end), and each finding carries its disposition there.
+- Budget: this contract is over the template's budget rule (critique Revision 7 NIT). The superseded critique rounds and the appendices stay inline; at the user's instruction this amendment only notes it and trims nothing. Moving them to `.claude/contract-history/` (Open Question 14) is still owed and has no block yet.
 
 ### 12. Cloud agent skill-load fix (`python-ai-developer`)
 
@@ -1174,6 +1238,239 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
+### 14. Memory boundary review fixes (`python-ai-developer`)
+
+**Depends on:** 2, 3, 4
+
+**Files to touch:**
+- `.claude/scripts/memory_boundary.py`
+- `.claude/scripts/tests/test_memory_boundary.py`
+- `.claude/scripts/tests/test_memory_off_parity.py`
+- `.claude/scripts/generate_registry_digest.py`
+- `.claude/scripts/tests/test_registry_entries.py`
+- `skills/design-first/SKILL.md`
+- `skills/design-first/references/central-memory.md`
+
+**Pre-written TASK block:**
+```
+TASK: Fix findings B1, W1, W2, W3, I1 and I2 of the block 5 review. Tests first.
+  B1: in cmd_record, refuse "not-enabled" only when the profile state is "disabled" or the outcome's state
+  is "disabled". Under profile state "unconfigured", write only the line
+  "Memory: unconfigured (<reason>) | <date>", with the reason taken from the profile (read_config), never
+  from the outcome, and ignore any retrieved or reported entries. --receipts still requires "enabled".
+  Do not change the status "line" strings (block 15 adds the printed suffix in the skill text). Rewrite
+  skills/design-first/SKILL.md Step 1.5 point 3 as: print its line (one line), then record it with
+  record (outcome {"state": "unconfigured", "date": "<today>"}) into the brief whose branch: is the
+  branch you are on (the same rule as point 4), then go to Step 2. With no such brief, print one line
+  saying the memory record was skipped for want of a brief (point 4's wording) and go to Step 2; that is
+  not a failure. Only a refusal or non-zero exit from record when a brief was found is a failure under
+  point 2. Delete the sentence saying a not-enabled refusal "is expected". Split test_unavailable_and_unconfigured_states_are_recorded into an
+  _unavailable_ test and an _unconfigured_ test. The second asserts the "Memory: unconfigured (shape-unknown)"
+  line, frontmatter bytes unchanged, no Retrieved line even when the outcome carries items, and that
+  --receipts is refused with not-enabled. Add an unconfigured variant to the positive control in
+  test_memory_off_parity.py; the three disabled profiles stay byte-identical.
+  W1: receipt_line accepts source_ref as the object capture-candidates emits ({file, line, title, date})
+  and renders "<file>:<line>" (file through clean_text, line through safe_token). It keeps accepting a
+  string. Use one helper for both receipt_line and cmd_capture_request's source_ref, not a copy. Add a
+  test that runs capture-candidates on a fixture, puts a candidate's own source_ref object into a receipt,
+  runs record --receipts and asserts "<file>:<line>" on the Captured: and Not sent: lines.
+  W2: in central-memory.md section 3, write the normalise output to a second temporary file and pass that
+  file to changed-items. In cmd_changed_items, pass each input item through the same per-item rules
+  normalise applies (call the same function, do not copy it) and compare versions as the normalised
+  strings. Tests: a raw item with scope NOT-A-SCOPE raises no notice; an integer version 1 against a
+  recorded "1" raises no notice. Update the parity test's changed-items call to use a normalised file.
+  W3: map a Trigger only by an exact match of its whole value (trimmed, case-folded, surrounding backticks
+  removed): "pre-approval critic" gives user-decision; "post-impl divergence" gives source-code-fact;
+  "manual" and "post-approval" are skipped as ai-hypothesis; anything else is skipped as unknown-trigger.
+  Tests: "manual (follow-up to a pre-approval critic finding)" and "post-approval, found after post-impl
+  review" are both skipped and never offered; each of the four canonical values maps as the table says;
+  on the current JOURNAL.md every entry's mapping is unchanged.
+  I1: in entry_blocks, an entry's own text also ends at a blank line followed by a non-indented line that
+  is not a top-level match (Candidate reading, Revision 7). Test: a planted note paragraph naming
+  .claude/concepts/<slug>.md after the last bullet of a section does not make that bullet a candidate.
+  TierSplitIsByteIdentical stays green.
+  I2: capture-candidates --default-branch defaults to None. When it is None, bind
+  pr_merged.default_branch_or_none fail-soft (the existing _bind list at memory_boundary.py:58) and call
+  it with cwd=str(<--project root>), so the project's own origin/HEAD is read, never the process's
+  working directory. Pass the name it returns to select_linked_brief as default_branch_name. When it
+  returns None (or the function is unbound), refuse "default-branch-unknown" before anything is offered,
+  with one line saying to pass --default-branch <name>; never call pr_merged.default_branch(), which
+  falls back to "master" (pr_merged.py:2380-2381), and never let select_linked_brief reach it with None
+  (pr_merged.py:3016). Tests: a fixture project whose origin/HEAD is main, run from a different working
+  directory, links the brief through main; a fixture with no origin/HEAD and no flag refuses
+  default-branch-unknown and offers nothing; an explicit --default-branch still wins.
+CONTEXT: concept contract (Revision 7: Commands, Provenance mapping and Trigger matching, Candidate
+  reading, Extension Points Step 1.5); the block 5 review at
+  .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t5-review-memory-boundary-fullstack-code-reviewer.md
+  (B1, W1-W3, I1, I2).
+FILES: the seven listed.
+CONSTRAINTS:
+  - No new subcommand, frontmatter key, hook, store or background process. Do not bump the plugin version
+    (Parent Branch Delivery Rule).
+  - I-M0 holds: with memory disabled, nothing is printed and no brief is touched.
+  - Do NOT change the three tests that guard I-M0 (the disabled state): in test_memory_boundary.py,
+    test_disabled_refuses_not_enabled_and_writes_nothing (:742-748, assertion at :747),
+    test_an_outcome_that_says_disabled_writes_nothing (:750-755, assertion at :754) and
+    test_receipts_with_memory_disabled_write_nothing (:860-866, assertion at :865). They must pass
+    unchanged after B1. The only existing test to change is
+    test_unavailable_and_unconfigured_states_are_recorded (:796), which B1 splits. If any other test
+    asserts a refusal under unconfigured, change it and say why in your HANDOFF. Name each test after
+    only what it asserts (journal entry drafted in the block 5 review).
+  - Keep every pin passing: Step15TextTests in test_memory_off_parity.py (the regex
+    "unconfigured.{0,300}one line" must still match), test_parent_branch_rule_text.py and
+    test_repo_consistency.py SENTENCE_PLACEMENT for design-first, test_skill_script_lookup.py (the lookup
+    block is unchanged), and test_plugin_text_scans.py (no skill text names a memory tool).
+  - The adapter still never loads the hook file and parses no registry text itself.
+  - Run test_memory_boundary.py, test_memory_off_parity.py, test_registry_entries.py,
+    test_plugin_text_scans.py, test_skill_script_lookup.py, test_parent_branch_rule_text.py,
+    test_repo_consistency.py and the .claude/hooks/tests suite, and quote the results.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
+
+### 15. Project history record in host onboarding (`python-ai-developer`)
+
+**Depends on:** 14
+
+**Files to touch:**
+- `skills/auto-improve-finish-install/SKILL.md`
+- `skills/design-first/SKILL.md`
+- `skills/design-first/references/central-memory.md`
+- `.claude/scripts/tests/test_memory_off_parity.py`
+- `.claude/agreements/use-the-project-history-record.md`
+- `.claude/hooks/tests/test_working_agreements.py`
+
+**Pre-written TASK block:**
+```
+TASK: State the Project history record requirement (Business Concept, Revision 7) in host onboarding,
+  on every printed line of /design-first Step 1.5, and in one shipped session-start agreement.
+  1. skills/auto-improve-finish-install/SKILL.md: add a section "The project history record" after Stage 2
+     and before "Add-ons". It says that the project's record of its design history is its Project history
+     record: .claude/registries/MECHANISMS.md, VOCABULARY.md and JOURNAL.md (seeded by the doctor),
+     INTEGRATION.md where the project keeps one (no seed exists for it), the concept contracts and
+     follow-up stubs under .claude/concepts/, and the Work Item Briefs under .claude/work-items/.
+     Who uses it, exactly: /design-first and the data-architect read it on every design. /task writes the
+     brief and the data-architect the contract. /design-first appends to JOURNAL.md only the critic
+     findings the user confirmed (Steps 3 and 5); fullstack-code-reviewer appends on a justified contract
+     divergence and, as janitor, to MECHANISMS.md and VOCABULARY.md; /journal-add appends a manual lesson.
+     The contract-critic reads it and never appends. Do not say that anything appends "on every run".
+     Commit these files, and never delete, gitignore or bypass them. The Central Memory System, when a
+     project switches it on through the memory.* profile slots, only supplements them: it never replaces
+     or hides them, and a local entry wins a conflict until the user decides.
+     The check (Open Question 23, "Report, then ask before --fix"): run the doctor in report mode
+     ($PY "<dir of FI>/plugin_doctor.py" --project .). If it prints "plugin:  NOT FOUND - pass --plugin",
+     say in one line that the registries cannot be seeded and ask for the plugin path; offer --fix only
+     with --plugin <path>. If it lists any "missing" entry, show the user that whole list as exactly what
+     --fix would create: --fix creates every missing requirement in the doctor's REQUIREMENTS, not only the
+     registries (for example .claude/north-stars, .claude/orchestrator/results, the contract template,
+     .claude/area-mapping.json and .claude/work-item-conventions.json); it never overwrites and leaves
+     .claude/settings.json alone. Run $PY "<dir of FI>/plugin_doctor.py" --fix only after the user says
+     yes; never run it on its own. Add one Closing bullet (which history-record files exist and which the
+     doctor created, if the user agreed) and one Anti-patterns bullet (treating the Central Memory System
+     as the project's record, skipping the registries, or running --fix without asking).
+  2. skills/design-first/SKILL.md Step 1.5: add one lead sentence. The project's design history is its
+     Project history record (the registries, including INTEGRATION.md where present, the concept contracts
+     and the briefs). Step 2 and the architect read it in every memory state, including disabled. The
+     Central Memory System only supplements it: its items never replace, hide or skip a registry read. In
+     point 1, add after the existing sentences that the Project history record is read as always. Nothing
+     is printed or written on disabled. Every line Step 1.5 prints in any other state ends with the fixed
+     suffix "; design continues from the project history record (registries and concept contracts)": the
+     point 2 failure line, the point 3 status line and its skipped-for-want-of-a-brief line (block 14's
+     text), and the point 4 skipped-for-want-of-a-brief line. The skill text appends the suffix when it
+     prints; memory_boundary.py is not changed.
+  3. references/central-memory.md, Ground rules: add the same rule. Each one-line "unavailable" print ends
+     with the same suffix.
+  4. test_memory_off_parity.py: add a ProjectHistoryRecordTextTests class. It pins that the finish-install
+     section names the three seeded registries, INTEGRATION.md, .claude/concepts/ and .claude/work-items/,
+     says the Central Memory System only supplements them, runs plugin_doctor.py in report mode, and asks
+     before --fix (a "--fix" mention is preceded within the section by a confirmation sentence); that it
+     does not contain "on every run" next to "append". It pins the Step 1.5 lead sentence, the suffix on
+     points 2, 3 and 4, and the central-memory.md ground rule. It pins that Step 1.5 point 1 still prints
+     nothing and writes nothing on disabled.
+  5. .claude/agreements/use-the-project-history-record.md (new shipped agreement, user answer "Yes, add a
+     session-start agreement"): first line "# Use the Project History Record", then three or four short
+     sentences, under about 400 characters in all. It says: the registries (.claude/registries/) and the
+     concept contracts (.claude/concepts/) are the project's memory and its design history; read them and
+     use them; a central MCP memory system, when one is switched on, only supplements them and never
+     replaces them. It names no project, person, machine path, incident date, MCP server or memory tool.
+  6. .claude/hooks/tests/test_working_agreements.py: add the file to REQUIRED and add a SHIPPED_PHRASES
+     row for it (for example "project's memory", "only supplements", "concept contracts"). Rename
+     case_real_shipped_folder_is_exactly_the_six_required_files and
+     case_s3_the_phrase_table_covers_exactly_the_six_required_files (and their add() labels and messages)
+     to say seven, so each test is named after what it asserts.
+CONTEXT: concept contract (Revision 7: Business Concept "Project history record", Extension Points
+  (Step 1.5, /auto-improve-finish-install, Shipped agreements), Reused Mechanisms row "Telling a host
+  project...", Alternatives Considered Options I-K, Failure Modes (Revision 7 entries), Open Questions 22
+  and 23 as answered); MECHANISMS.md "Session-start context delivery".
+FILES: the six listed.
+CONSTRAINTS:
+  - Text and tests only. Do not touch auto_improve_finish_install.py, plugin_doctor.py, the doctor's
+    REQUIREMENTS, memory_boundary.py, working-agreements.py, working-agreements.rules.json, any settings
+    file, any hook code, agents/data-architect.md (its rule 9 already ranks items below the registries)
+    or any registry. Add no seed or template for INTEGRATION.md (Open Question 22). No new store, seed,
+    hook or frontmatter key. Do not bump the plugin version.
+  - The shipped agreement set must still fit the default limit with nothing dropped
+    (case_real_shipped_set_fits_default_limit_with_nothing_dropped, 9000 characters), plain-language must
+    stay first (INV-6), and the new file must pass every real-file case in test_working_agreements.py.
+    test_plugin_text_scans.py scans .claude/agreements/, so the agreement names no memory tool.
+  - test_plugin_manifests.py INV-14: every --flag the finish-install text names must exist in
+    auto_improve_finish_install's parser unless the line names plugin_doctor, so keep each doctor command
+    on a line that names plugin_doctor.py. INV-13: frontmatter name and user_invocable unchanged, and the
+    description stays non-empty.
+  - Keep passing, without editing them: test_plugin_manifests.py, test_skill_script_lookup.py (the lookup
+    blocks in finish-install and design-first are unchanged), test_parent_branch_rule_text.py,
+    test_repo_consistency.py, test_plugin_text_scans.py (no memory tool name in any text),
+    test_auto_improve_finish_install.py and test_plugin_doctor.py. Also keep Step15TextTests passing
+    (the disabled regex "disabled.{0,300}print(s)? nothing.{0,200}writ(e|es) nothing", so the new
+    sentence goes after it). If one of these pins must change, stop and report it; do not edit the file.
+  - Run the suites named above plus test_memory_off_parity.py and
+    py -3 .claude/hooks/tests/test_working_agreements.py, and quote the results.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
+
+### 16. Re-review memory boundary (`fullstack-code-reviewer`)
+
+**Depends on:** 2, 3, 4, 14, 15
+
+**Files to touch:**
+- `.claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t16-re-review-memory-boundary-fullstack-code-reviewer.md`
+
+**Pre-written TASK block:**
+```
+TASK: Review blocks 2, 3, 4, 14 and 15 afresh and write the review artefact. This review supersedes the block 5 review.
+CONTEXT: concept contract at .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md (Revision 7)
+FILES: .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t16-re-review-memory-boundary-fullstack-code-reviewer.md
+CONSTRAINTS:
+  - Start from a cold context. Do not read the block 5 review before forming your own findings. Read it
+    afterwards only to confirm that B1, W1, W2 and W3 are cleared and that I1 and I2 are handled.
+  - Check the same list as block 5. Then check Revision 7: record writes the unconfigured line and
+    refuses only disabled (and --receipts unless enabled); the skill no longer documents a refusal as
+    expected; receipts carry <file>:<line> from the real capture-candidates output; changed-items gets
+    the normalised file and applies the normalise rules; Triggers map only by exact canonical value; a
+    trailing note paragraph is no entry's text; --default-branch is not hard-coded and, when unset, is
+    read with default_branch_or_none(cwd=<project>) or refused as default-branch-unknown; the unconfigured
+    path records into the brief whose branch: is the current branch and treats a missing brief as a
+    skipped line, not a failure; the three I-M0 disabled tests are unchanged.
+  - Check block 15: finish-install, /design-first Step 1.5 and its reference, and the new shipped
+    agreement state that the Project history record is the project's record and that the Central Memory
+    System only supplements it; the finish-install text says exactly who appends (no "on every run"
+    claim); finish-install runs the doctor in report mode, shows what --fix would create, and runs --fix
+    only on the user's yes; every Step 1.5 printed line carries the suffix; the disabled path still prints
+    and writes nothing (I-M0, test_memory_off_parity.py); no change to plugin_doctor.py or
+    memory_boundary.py from block 15; test_working_agreements.py names the new file and the set fits the
+    limit; no store, seed, hook or frontmatter key added.
+  - Six fixed sections; the file does not exist yet and you create it. Name base..head.
+  - Verdict line alone, exactly one of: "**Verdict:** pass", "**Verdict:** pass-with-findings",
+    "**Verdict:** blocked". Write the Gate Output <artefact stem>.gate.json beside it, and set its
+    supersedes field to the block 5 review artefact.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
+
 ---
 
 ## Review checklist (filled in after implementation)
@@ -1221,7 +1518,7 @@ The plugin is a **contract-driven delivery chain**. Skills run in the main sessi
 3. **Contract `## Lessons referenced` and `## Uncertain Assumptions`**: what shaped a design (a new line format), and the source of `ai-hypothesis` provenance (not captured).
 4. **Agent memory**: untouched.
 5. **Memory pager**: untouched.
-6. **Working agreements (session start)**: untouched; explicitly not a memory channel.
+6. **Working agreements (session start)**: gain one shipped agreement in Revision 7 (block 15), a fixed rule to use the Project history record; still never a channel for Central Memory System items.
 7. **North-stars and follow-up stubs**: follow-up stubs are the only "proposed work item" channel.
 8. **Accuracy ledger** (`accuracy_update.py`): untouched.
 
@@ -1262,7 +1559,7 @@ At session start the host loads every skill and agent description. `working-agre
 6. **The concept template** is about 8,000 tokens and loads on every design. Its Chat Tool Impact section belongs to one consuming project.
 7. **Hook processes.** Per edit: three sync processes plus one async. Per shell command: three sync. Per prompt: one. Per Stop: one sync plus one async (the pager, which usually only logs a failure). The gates must stay as command hooks because they fail closed. Only the pager is a cheap win.
 8. **Flow vs task duplication** is small: `/flow` repeats the design handoff block that `/task` Step 6 already writes, and it states that the stage skill wins.
-9. **This contract adds**: zero always-loaded tokens for memory (no new skill; the procedure lives in a reference read only when enabled). The cloud skill adds one description, about 60 tokens. The cloud agent adds one description. The disabled memory path costs one silent script call per design and writes nothing.
+9. **This contract adds**: zero always-loaded tokens for Central Memory System items (no new skill; the procedure lives in a reference read only when enabled). Revision 7's shipped agreement adds about 100 always-loaded tokens (about 400 characters) at session start, inside the agreements' 9,000-character limit. The cloud skill adds one description, about 60 tokens. The cloud agent adds one description. The disabled memory path costs one silent script call per design and writes nothing.
 
 ---
 
@@ -1273,9 +1570,117 @@ At session start the host loads every skill and agent description. `working-agre
 | P1 | Slots plus the adapter, with degradation and single-adapter tests | 1, 2 | none | wrong tool-id assumption | `test_memory_boundary.py` passes; scan control fails when planted; all existing suites pass |
 | P2 | Retrieval at design time, applicability asked before the draft, recorded in the brief | 3 | P1 | prompt injection via items; a hung server | the stub-server trials (tool id, a server that never answers); `test_memory_off_parity.py` shows memory-off briefs byte-identical and `/task`'s template hash unchanged |
 | P3 | Capture as its own question after the writing run flips | 4 | P2 | over-capture, leakage, lost receipts, a hung server | only contract-named entries offered; an empty token list lowers everything; receipts reach the records pull request; exactly one capture question, asked after the flip, under `/pr-merged` and `/flow`; the records confirmation is unchanged; the stop rule caps a hung server at one timeout |
-| P4 | Memory review gate | 5 | P1-P3 | none | verdict pass |
+| P4 | Memory review gate | 5 | P1-P3 | none | verdict pass (block 5 recorded `blocked`; superseded by P4b) |
+| P4b | Memory-boundary review fixes, the Project history record in onboarding, Step 1.5 and a shipped agreement, and their re-review (Revision 7) | 14, 15, 16 | P1-P3 | weakening I-M0 while fixing B1; `--fix` writing more than the user expected | the three I-M0 disabled tests unchanged and passing; finish-install asks before `--fix`; `test_working_agreements.py` passes with seven files; block 16 verdict pass |
 | P5 | Cloud skill and references | 6 | 1 | stale provider facts; a live-changing command run by mistake | references load only for the selected providers; the scope rule is stated; `test_cloud_text_scans.py` control fails when planted |
 | P6 | Cloud agent, auditor checklist, debug route | 7 | P5 | agent overreach | agent refuses when the slot is unset; the scope rule is stated and passes the text scan; preload test passes |
-| P7 | Cloud review gate | 8 | P5-P6 | none | verdict pass |
-| P8 | Documentation, registry appends and their review | 9, 10 | P4, P7 | documentation that disagrees with the code | reviewer checks each claim against the code |
+| P7 | Cloud review gate | 8 | P5-P6 | none | verdict pass (block 8 recorded `blocked`; superseded by P7b) |
+| P7b | Cloud agent skill-load fix and its re-review (Revision 6) | 12, 13 | P6 | none | block 13 verdict pass |
+| P8 | Documentation, registry appends and their review | 9, 10 | P4b, P7b (blocks 13, 14, 15, 16) | documentation that disagrees with the code | reviewer checks each claim against the code |
 | Later | Token-efficiency fixes; cloud-management MCP adapter | follow-up stub; a new contract | none | none | separate contracts |
+
+---
+
+## Critique (Revision 7)
+
+**Critic:** contract-critic
+**Date:** 2026-11-02
+**Verdict:** blockers-found
+**Scope:** Revision 7 only (the Revision 7 note under Handoff 11, blocks 14-16, the Depends on lines of blocks 9 and 10, the `record` and `changed-items` Commands rows, Trigger matching, the Candidate reading entry end, the two Extension Points bullets, the term "Project memory" and the Reused Mechanisms row). Checked against the t5 review and the user's Project memory requirement.
+
+### Findings
+
+- **[BLOCKER] Status stays `approved` while Open Questions 22 and 23 are open, and block 15 leaves the implementer to apply whatever the user answers.**
+  - **What is wrong:** questions 22 and 23 are unticked, but the body, the Reused Mechanisms row and block 15's TASK already assume the recommended answers. Block 15's constraint "If they differ from the recommendations, the user's answer wins" hands any change to the implementer, and `concept-gate.py` reads only `Status: approved`, so block 15 can be dispatched before the questions are answered.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-22, "An accepted critic WARN or answered Open Question must amend the contract body before approval".
+  - **Where in this contract:** `## Open Questions for User`, "Revision 7 adds two questions. Answering them is the user's re-approval of Revision 7."; `### 15`, "Apply the answers the user gave to Open Questions 22 and 23. If they differ from the recommendations, the user's answer wins."
+  - → Addressed by: Open Questions 22 and 23 ticked with the user's answers (2026-11-02) and `→ Addressed by:` lines; the answers written into Business Concept, Extension Points, Failure Modes and block 15's TASK; the "user's answer wins" constraint removed from block 15.
+
+- **[WARN] The Project memory instruction reaches only two places, onboarding and non-trivial design, and the plugin's existing channel for standing guidance is not used or considered.**
+  - **What is wrong:** the user asked that the plugin tell host repositories to use their file-based memory. Block 15 puts the instruction in `/auto-improve-finish-install` (run once, and never by a plugin install that skips it) and in `/design-first` Step 1.5 (non-trivial tasks only). The XS/S direct edit, `/debug`, `/journal-add` and every session that never designs get no instruction. The shipped agreements folder already delivers standing guidance to every session in every plugin-installed host. `## Alternatives Considered` has no Revision 7 entry that weighs it.
+  - **Prior artifact ignored:** `MECHANISMS.md:65` **Session-start context delivery** ("the way the plugin hands standing guidance to the model once per session start"; "Extend by: adding a markdown file to the plugin's folder"); `.claude/agreements/` holds six shipped agreements today.
+  - **Where in this contract:** `## Reused Mechanisms`, "Telling a host project that its registries and contracts are its memory (Revision 7) | ... the `/auto-improve-finish-install` skill and the Step 1.5 printed line, extended by text only".
+  - → Addressed by: user answer "Yes, add a session-start agreement". Block 15 adds `.claude/agreements/use-the-project-history-record.md` and updates `.claude/hooks/tests/test_working_agreements.py` (`REQUIRED`, `SHIPPED_PHRASES`); Reused Mechanisms row now names Session-start context delivery; Alternatives Considered Options I, J and K; Extension Points bullet "Shipped agreements"; block 9 updates the README agreement count.
+
+- **[WARN] Block 15's shipped text says the contract-critic and the other roles "append to them on every run". That is false.**
+  - **What is wrong:** the contract-critic never appends to a registry. `/design-first` Step 5 appends confirmed findings, and the reviewer appends only on a divergence. The data-architect appends only after approval. The finish-install text would describe behaviour the agents do not have.
+  - **Prior artifact ignored:** `agents/contract-critic.md:150` ("Append entries to `JOURNAL.md` ... Never by you"); `JOURNAL.md:5-8` ("Maintained by"); `JOURNAL.md` 2026-10-04, "Check a documented guard behaviour against the guard's code".
+  - **Where in this contract:** `### 15`, TASK point 1, "/design-first, the data-architect, the contract-critic and the reviewer read them and append to them on every run."
+  - → Addressed by: block 15 TASK point 1 now names who appends and when (`/design-first` Steps 3 and 5 for confirmed critic findings, `fullstack-code-reviewer` on a justified divergence and as janitor, `/journal-add` manually; the contract-critic reads and never appends) and forbids "on every run"; block 15 point 4 pins it; block 16 checks it.
+
+- **[WARN] The definition of "Project memory" makes a universal claim that some existing flows contradict.**
+  - **What is wrong:** "the memory every plugin flow reads and appends to, in every memory state" is false for the routes the contract's own route table lists as having no design step (XS/S direct edit, `/debug`), and for `/git-commit` and `/ship`. This text goes into `VOCABULARY.md` through block 9.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-28, "A new term's definition must be true against every existing member"; this contract's `## Extension Points` route table, row "XS/S direct edit or `/debug` | none (no design step ...)".
+  - **Where in this contract:** `## Business Concept`, "**Project memory** *(Revision 7)* — ... It is the memory every plugin flow reads and appends to, in every memory state."
+  - → Addressed by: the Business Concept term (now **Project history record**) says `/design-first` and the data-architect read it, names the confirmed steps that append, and states that XS/S direct edits, `/debug`, `/git-commit` and `/ship` neither read nor append it; block 9 and block 10 require the documentation to match.
+
+- **[WARN] The term "Project memory" is already used for something else in this repository.**
+  - **What is wrong:** eight plugin agents declare `memory: project`, which selects the project-scope agent-memory folder under `.claude/agent-memory/`. The definition has to add "It is not agent memory" because the same words already name that folder. The host's own documentation also uses "project memory" for the project's CLAUDE.md file. So `VOCABULARY.md` would gain a term that means a third thing.
+  - **Prior artifact ignored:** this contract's `## Uncertain Assumptions`, "`VERIFIED via agents/*.md frontmatter`: ... eight declare `memory: project`"; the *Central Memory System* term in this contract, which was defined against "the three existing 'memory' things" (`## Lessons referenced`, 2026-10-28).
+  - **Where in this contract:** `## Business Concept`, "New terms proposed", **Project memory**.
+  - → Addressed by: the user renamed the term to **Project history record** (2026-11-02) everywhere in Revision 7 outside the critique sections; the definition keeps one line distinguishing it from `memory: project` agent memory. The shipped agreement still calls the registries and contracts "the project's memory" in plain words, at the user's instruction.
+
+- **[WARN] The contract understates what `plugin_doctor.py --fix` does, and block 15 runs it without the confirmation the finish-install skill promises.**
+  - **What is wrong:** `--fix` creates every missing requirement, not only the memory seeds. That includes `.claude/north-stars`, `.claude/orchestrator/results`, the contract template, and the scaffolds `area-mapping.json` and `work-item-conventions.json`. Block 15 triggers it whenever one memory file is missing, in a project that already has a profile. That is a wider case than Stage 1a's "no profile yet", and no question is asked first.
+  - **Prior artifact ignored:** `.claude/scripts/plugin_doctor.py:58-87` (`REQUIREMENTS`) and `:200-244` (`apply_fixes` writes every missing entry); `skills/auto-improve-finish-install/SKILL.md:12` ("It proposes, you confirm, and only then does it write").
+  - **Where in this contract:** `## Extension Points`, "runs `plugin_doctor.py --fix`, which copies the plugin's seeds and never overwrites"; `### 15`, TASK point 1, "run ... --fix, which copies the plugin's seed files and never overwrites (as Stage 1a)".
+  - → Addressed by: user answer to Open Question 23, "Report, then ask before --fix". Extension Points bullet `/auto-improve-finish-install` and block 15 TASK point 1 describe `--fix` from `REQUIREMENTS` and `apply_fixes` (every missing requirement, including north-stars, orchestrator results, the contract template and both scaffolds) and run it only after the user confirms the listed set; Failure Modes entry "`--fix` creates more than the user expected".
+
+- **[WARN] Block 14 tells the implementer to change three tests that check the disabled state, not the unconfigured state.**
+  - **What is wrong:** `test_memory_boundary.py:747` and `:865` use an empty profile or none at all, and `:754` uses an outcome that says `disabled`. All three guard I-M0 and must stay unchanged after B1. The only test that misstates unconfigured coverage is `:796`, which the TASK already splits. The constraint invites the implementer to weaken the I-M0 refusals.
+  - **Prior artifact ignored:** `.claude/scripts/tests/test_memory_boundary.py:742-755` (`test_disabled_refuses_not_enabled_and_writes_nothing`, `test_an_outcome_that_says_disabled_writes_nothing`) and `:861-865`; the t5 review B1 fix, item 1 ("refuse `not-enabled` only when ... `disabled`").
+  - **Where in this contract:** `### 14`, CONSTRAINTS, "Where an existing test asserts that record refuses under unconfigured (for example around test_memory_boundary.py:747, :754, :865), change it to the new behaviour".
+  - → Addressed by: block 14 CONSTRAINTS now forbid changing the three I-M0 tests, named with their verified lines (:742-748, :750-755, :860-866), and name `:796` as the only test to change (the split).
+
+- **[WARN] On the unconfigured path, nothing says which brief `record` writes to, so a design run with no brief turns into a reported failure.**
+  - **What is wrong:** the rewritten point 3 calls `record`, which needs `--brief`, but the rule for finding the brief ("the one whose `branch:` is the branch you are on") sits only in point 4, the enabled path. On the route "/design-first run directly", `record` refuses `brief-not-found`. The new text says "a refusal or non-zero exit from record here is a failure under point 2", so a normal case prints a failure line.
+  - **Prior artifact ignored:** `skills/design-first/SKILL.md:79` (brief resolution, enabled only); this contract's route table row "`/design-first` run directly | Step 1.5".
+  - **Where in this contract:** `### 14`, B1, "record it with record (outcome {"state": "unconfigured", ...}), then go to Step 2; a refusal or non-zero exit from record here is a failure under point 2."
+  - → Addressed by: block 14 B1 and Extension Points Step 1.5 point 3 now pick the brief by point 4's rule (the brief whose `branch:` is the current branch); a missing brief prints one skipped-for-want-of-a-brief line and design continues, which is not a failure; only a refusal when a brief was found falls to point 2. Failure Modes entry on `record` under `unconfigured`.
+
+- **[WARN] The I2 fix relies on a reader that ignores `--project` and still falls back to `master`.**
+  - **What is wrong:** with `default_branch_name=None`, `select_linked_brief` calls `default_branch()`. That reads `origin/HEAD` in the process's working directory, not in the `--project` root, and answers `master` when the value cannot be read. A `main` project whose `origin/HEAD` is unset still gets the hard-coded name. The TASK's "reuse its function" does not say to pass `cwd=<project>` through `default_branch_or_none`.
+  - **Prior artifact ignored:** `.claude/scripts/pr_merged.py:2364-2381` and `:3016`; `JOURNAL.md` 2026-10-15, "A script that reads a project-owned file must be told which project, not search for one".
+  - **Where in this contract:** `### 14`, I2, "When it is None, resolve the default branch the way pr_merged does (reuse its function; do not hard-code a name)."
+  - → Addressed by: block 14 I2 now binds `pr_merged.default_branch_or_none` and calls it with `cwd=<--project root>` (verified `pr_merged.py:2364-2377`), never `default_branch()` (`:2380-2381`, the `master` fallback), and never passes None into `select_linked_brief` (`:3016`). When it cannot read `origin/HEAD`, `capture-candidates` refuses the new `default-branch-unknown` before offering anything (Commands row amended). Tests cover a `main` project run from another directory, the unreadable case and an explicit flag.
+
+- **[WARN] Failure Modes has no entry for anything Revision 7 adds.**
+  - **What is wrong:** three new failure paths have no mitigation. The doctor can fail to find the plugin root ("NOT FOUND - pass --plugin"), which leaves the copy requirements `unresolved` while finish-install goes on. `record` can refuse under `unconfigured`. And `--fix` can create files nobody expected (finding above).
+  - **Prior artifact ignored:** `.claude/scripts/plugin_doctor.py:993` and `:226-230`; the checklist rule that every mitigation cites a mechanism.
+  - **Where in this contract:** `## Failure Modes & Mitigations`, which is unchanged since Revision 5.
+  - → Addressed by: three Revision 7 entries in Failure Modes (doctor `NOT FOUND - pass --plugin`; `record` refusing or no brief under `unconfigured`; `--fix` creating more than expected), each citing the plugin doctor, the brief linkage rule or the tracker-cascade degradation rule.
+
+- **[NIT] Several summary lines are stale.** The Handoff intro still says "ten mergeable blocks" with the graph "5,8→9→10". Appendix C row P8 says "Depends on P4, P7". The header still says "**Revision:** 5". All three contradict blocks 9 and 10's new Depends on lines (13, 14, 15, 16).
+  - → Addressed by: header now "Revision: 7"; Handoff intro gives fifteen mergeable blocks plus the scope note and the true dependency graph; Appendix C gains rows P4b and P7b, and P8 depends on them.
+- **[NIT] The scope note contradicts itself.** Its first paragraph still says "No block touches ... `skills/auto-improve-finish-install/SKILL.md`", and a later Revision 7 bullet amends that instead of the sentence being edited where it stands.
+  - → Addressed by: the scope note's first paragraph edited in place; the later amending bullet removed.
+- **[NIT] Block 14 implements part of the new requirement.** It carries the Project memory suffix on the `status` line, although "Why two blocks" says block 14 stays limited to the review report.
+  - → Addressed by: the suffix moved to block 15 as skill text appended when the line is printed, so `memory_boundary.py`'s status strings do not change and block 14 carries no Project history record text; "Why two blocks" says so.
+- **[NIT] The suffix "every state" bullet is only partly delivered.** The point 2 failure line and the point 4 "skipped for want of a brief" line get no "design continues from the project memory" suffix, although the Extension Points bullet is titled "in every state".
+  - → Addressed by: Extension Points bullet and block 15 TASK point 2 put the suffix on every printed line of Step 1.5 (points 2, 3 and 4) and the reference's `unavailable` lines; block 15 point 4 pins it.
+- **[NIT] The contract is over its budget rule.** Three superseded critique rounds and the appendices are still inline, against the template's budget rule (`.claude/templates/concept-contract.md:22`) and the answer to Open Question 14.
+  - → Deferred: at the user's instruction this amendment notes it only and trims nothing (scope note, "Budget"). Moving the old rounds and appendices to `.claude/contract-history/` is still owed.
+
+### What Revision 7 gets right (checked, no finding)
+
+- **The t5 findings are covered.** B1 (record writes the unconfigured line with the reason from the profile, refuses only `disabled`, `--receipts` still needs `enabled`, the "is expected" sentence is deleted, the test is split, a parity variant is added), W1 (one shared source_ref helper, plus a test on the real `capture-candidates` output), W2 (a normalised file, the same function, string versions) and W3 (an exact canonical match, with both compound strings tested) match the review's fixes. I1 and I2 ride with block 14, and I2 has the caveat above. I3 is carried into block 9's Known limitations and checked by block 10. Disposition items 5 and 6 land in block 9.
+- **Pins hold.** INV-14 skips any line that names `plugin_doctor` (`test_plugin_manifests.py:503`), and block 15 keeps the doctor commands on such lines. INV-13 checks only frontmatter. The Step15TextTests searches (`unconfigured.{0,300}one line`, `disabled.{0,300}print(s)? nothing...`) still match the rewritten point 3 and an appended sentence. `test_skill_script_lookup.py` cuts only fenced blocks that hold the plugin-cache search line, and the doctor commands carry none. `SENTENCE_PLACEMENT` for design-first pins a Step 3 sentence that blocks 14 and 15 do not touch.
+- **Ordering and file scope hold.** Blocks 9 and 10 now wait for 16, 16 waits for 14 and 15, and 15 waits for 14. No cycle. The three files 14 and 15 share are sequenced. Every shipped file the blocks change is listed. No version file appears. The registry appends ride in block 9, before the landing raise.
+
+### Applicable journal entries
+
+- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — violated (see the BLOCKER).
+- **2026-10-28 — A new term's definition must be true against every existing member** — violated by "Project memory" (see the WARNs).
+- **2026-10-04 — Check a documented guard behaviour against the guard's code** — violated in spirit by block 15's "append to them on every run" claim (see the WARN).
+- **2026-10-15 — A script that reads a project-owned file must be told which project** — not addressed by I2 (see the WARN).
+- **2026-10-15 — A skill that edits a block pinned by a lookup-block test must name that test** — heeded: blocks 14 and 15 both run `test_skill_script_lookup.py`.
+- **2026-10-30 — One shared reader must own the filtering** — heeded by W2 ("call the same function, do not copy it") and W1 (one source_ref helper).
+- **2026-11-01 — A shared reader reused by a stricter consumer must be re-checked against the forms its errors were harmless for** — heeded by W3's exact-match rule and I1's entry end.
+- **2026-10-05 — Neutralise every field echoed from untrusted input** — heeded: W1 sends `file` through `clean_text` and `line` through `safe_token`.
+
+### What the critic did not check
+
+- `pr_merged.py --contract <slug> --status --json` was not run (no shell in this session), so `layout_defects` are not cited. The check above was by reading.
+- No test suite was run. Pin compatibility was judged from the test source.
+- CodeGraph tools were not available in this session, so symbols were checked with Grep and Read.
+- North-star alignment was not checked: `.claude/north-stars/` does not exist.
