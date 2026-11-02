@@ -85,7 +85,7 @@
     ]
   },
   "contractLanding": {
-    "$comment": "This project's landing gate. land_contract.py runs each step in its own landing checkout of the parent branch, after merging the default branch into it, and merges nothing unless every step exits 0. Every step reads its result from the exit code alone, so no result file is written into the tree. The hook-tests step runs each hook test file directly, because two of them are script-style and fail unittest discovery at import. test_gate_cost.py is left out on purpose: it is a timing measurement that needs a production-sized contracts folder named by an environment variable, not a correctness check. versionRaise turns on the landing's version raise (P7b): a sub-task pull request never raises the plugin version, and the landing raises it once, minor + 1, after the default branch is merged in.",
+    "$comment": "This project's landing gate. land_contract.py runs each step in its own landing checkout of the parent branch, after merging the default branch into it, and merges nothing unless every step exits 0. Every step reads its result from the exit code alone, so no result file is written into the tree. The hook-registration-tests step runs the plugin-owned Hook registration check's own suite (.claude/scripts/tests/test_check_hook_registrations.py). .claude/scripts/tests/test_land_contract_verification.py is the test that reads these steps, so a step added, renamed or reordered here is checked there. The hook-tests step runs each hook test file directly, because two of them are script-style and fail unittest discovery at import. test_gate_cost.py is left out on purpose: it is a timing measurement that needs a production-sized contracts folder named by an environment variable, not a correctness check. versionRaise turns on the landing's version raise (P7b): a sub-task pull request never raises the plugin version, and the landing raises it once, minor + 1, after the default branch is merged in.",
     "versionRaise": true,
     "verification": {
       "steps": [
@@ -100,6 +100,12 @@
           "command": ["py", "-3", ".claude/scripts/tests/test_pr_merged.py"],
           "results": { "format": "exit-code" },
           "timeout_minutes": 15
+        },
+        {
+          "id": "hook-registration-tests",
+          "command": ["py", "-3", ".claude/scripts/tests/test_check_hook_registrations.py"],
+          "results": { "format": "exit-code" },
+          "timeout_minutes": 5
         },
         {
           "id": "hook-tests",
