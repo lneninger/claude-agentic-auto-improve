@@ -1,0 +1,20 @@
+status: completed
+commit: 7e5ff77f09b37de68d25b9e22d661029bc1d459a
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/160
+merged_at: '2026-11-01T17:01:00Z'
+verified: github
+sub_issue_closed: closed
+hand_resolved:
+  files: []
+  merge_commits: 0
+  commits_inspected: 2
+  commits_unread: 0
+base_ref: feature/148-plugin-owns-hook-mechanism-tests
+base_is_default: false
