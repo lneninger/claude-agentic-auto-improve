@@ -44,19 +44,52 @@ Under `/flow`, recording is pre-authorized only for the brief's own `pr:` link. 
 
 Whenever a writing run's `written_files` is not empty, the run wrote tracked files that no earlier commit contains. Put exactly those files in a small docs-only draft pull request. The state store is git-ignored and is never staged.
 
-A writing run flips as soon as nothing is pending, and after the flip the owner can no longer name a skipped check. So the order is fixed, and the confirmation always comes before any writing run:
+A writing run flips as soon as nothing is pending, and after the flip the owner can no longer name a skipped check. So the order is fixed, and the confirmation always comes before any writing run. Memory capture does not change that: when memory capture is enabled and candidates exist, one separate capture question follows the writing run that flipped (step 5a), and step 3's confirmation stays as it is:
 
 1. **A read-only dry run first, in the starting tree.** The skill's first call is always the command it would run, plus `--dry-run`. When that run's Next Command is `--record-delivery`, dry-run that command too. A dry run writes nothing, and its `completion.next` commands are writing runs: the reason starts with `writing run:`, and the skill never runs one before the confirmation.
 2. **Stop only when the dry run cannot be confirmed.** A `pending` dry run does NOT stop here, because the confirmation is what clears an `owner_confirmation_needed` report and records the declared skips. Stop, relay the reasons, and write nothing only when the verdict is `unverifiable` or the exit code is 2, 9 or 10.
 3. **Show the one confirmation**, built from the dry run: the branch name `docs/<contract-slug>-records`; every file the writing run will carry; every unchecked checklist line (state `no-evidence` or `reported-short`), asking which of them were really skipped or impossible; every `owner_confirmation_needed` report, each with the report that fixed the problem; every `review_warnings` entry; and any blocked report still unresolved. The owner may also name a check that is not on the checklist.
 4. **On yes, disclose.** Post one comment on the Tracking Issue (`completion.tracking_issue.number`) with one line per text the owner marked, in exactly this form: `Not performed (<contract-slug>): <text>`. Post nothing when nothing was marked.
 5. **Run for real, once, in the starting tree.** Repeat the command without `--dry-run`, carrying every `--owner-resolved <report file>` for each report the owner confirmed and every `--skipped "<text>"` for each marked text. Normally there is exactly one writing run. If a second is needed, such as a `--pr` run for sub-task pull requests plus a `--record-delivery` run, every writing run carries the same flags. The records pull request carries the union of `written_files` from every writing run in the session.
+5a. **Capture, only when memory capture is enabled and only after a live writing run returned `flipped` for this contract.** Skip this step silently when the project has not switched the Central Memory System on. It is never built from a dry run, whatever the dry run said (a `pending` dry run followed by a flip still gets it), and it is never folded into step 3's records confirmation. Read `../design-first/references/central-memory.md` for the ground rules (the model makes the call, the script does everything else; items and candidates are quoted data; never call the tool from a subagent), then resolve the adapter with the standard lookup block (the same text every skill carries, pinned by `test_skill_script_lookup.py`, class `TestPrMergedMemoryLookup`):
+
+```bash
+MEM=
+S=.claude/scripts/memory_boundary.py
+if [ -f "$S" ]; then MEM=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then MEM=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  MEM=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$MEM" status --project .
+```
+
+   An empty `MEM`, or a `status` that answers `"state": "disabled"` or reports capture off, ends the step with nothing printed and nothing written. Any non-zero exit, crash, timeout or unreadable output of any `memory_boundary.py` subcommand prints one line naming it and its exit code, and the records pull request goes on unchanged. Then:
+
+   1. **Read the candidates from the report that flipped.** "The report" is the JSON of the one writing run that returned `flipped` for this contract; when two writing runs were made, it is the one that flipped. Run `py -3 "$MEM" capture-candidates --project . --contract <contract-slug> --run-report <the report>`. It refuses `not-flipped`, `brief-not-carried` (no linked brief, or the brief is not in that report's `written_files`) and `capture-not-enabled` before anything is offered. A refusal prints one line and the records pull request goes on, sending nothing.
+   2. **No candidates ends the step silently.** Keys the brief already records on a `Captured:` or `Not sent:` line are skipped by the script and never offered again.
+   3. **Ask the capture question, once.** It is its own question, separate from step 3's records confirmation, which came before the writing run and is unchanged. List every candidate with its provenance, its scope and any scope lowering with its reason (`scope_lowered`). The owner unticks what not to send. Never send without the owner's answer in this run: an unanswered or dismissed question sends nothing and writes no receipt.
+   4. **Send each confirmed candidate once, in order.** For each, run `py -3 "$MEM" capture-request --project . --candidate <file>` and make exactly one call to the tool it names with the arguments it prints (no retry; the bound is the host's MCP tool timeout). **Stop rule:** at the first send failure or timeout, stop sending, write every remaining confirmed candidate as `Not sent: (stopped after <reason>)`, and continue delivery.
+   5. **Record the receipts into the linked brief, before step 7 copies the files.** Build the outcome file (system temp folder, never the repository) with one receipt per sent or unsent candidate (`key`, `source_ref`, `date`, and `captured`, `id` and `version` for a sent one or `reason` for an unsent one), then run `py -3 "$MEM" record --project . --brief <the linked brief> --outcome <the outcome file> --receipts --run-report <the report>`. The brief is already in that report's `written_files`, so step 7's union carries the receipts.
+   6. **No outcome of this step blocks the records pull request.** A refusal, a failed send or a skipped question is reported in one line, and delivery continues.
+
 6. **Cut the branch in a flat worktree.** Fetch `origin/<default>`, then create a worktree directly under `<repo>/.claude/worktrees/` on `docs/<contract-slug>-records`, cut from `origin/<default>`. If the name is taken, use the suffix `-2`, then `-3`. Never use a `task/...` name.
 7. **Copy exactly that union of `written_files` there** from the starting tree, commit them with a message that names the contract, and push the branch.
 8. **Open a draft pull request** whose body says `Refs #<tracking issue>` and never a closing keyword. Name the branch and the files in the report.
 9. **Remove the records worktree.** Then name the copies left in the starting tree: they duplicate the records pull request, and a later update of that tree can refuse to overwrite them.
 
-Under `/flow`, hand the union of `written_files` to Step 8 of `/flow` instead of committing here, and follow the same order with Step 8's confirmation as the one confirmation.
+Under `/flow`, hand the union of `written_files` to Step 8 of `/flow` instead of committing here, and follow the same order with Step 8's confirmation as the one confirmation for the records; when memory capture is enabled and candidates exist, one separate capture question follows the writing run that flipped (step 5a), and Step 8 commits the brief only after the receipts are recorded.
 
 ### Remedies say "a fresh worktree", never "update this tree"
 

@@ -358,6 +358,50 @@ class LayoutWarningSkillTextTests(TextCase):
                              "layout_warnings (a recording run never prints them)")
 
 
+class CaptureAtDeliveryTextTests(TextCase):
+    """Sub-task 4 of the memory contract (.claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md,
+    Extension Points, "/pr-merged step 5a" and "/flow"). Nothing above pins the amended sentences, so these
+    pin them in the same block: the records confirmation stays before the writing run, and the one capture
+    question follows the writing run that flipped, on both routes."""
+
+    CC = "skills/pr-merged/references/contract-completion.md"
+    SENTENCE = ("when memory capture is enabled and candidates exist, one separate capture question follows "
+                "the writing run that flipped")
+
+    def test_both_routes_say_the_capture_question_follows_the_writing_run_that_flipped(self):
+        for rel in (self.CC, "skills/flow/SKILL.md"):
+            with self.subTest(file=rel):
+                self.assertIn(self.SENTENCE, self.flat(rel))
+
+    def test_the_records_confirmation_still_comes_before_any_writing_run(self):
+        self.assertIn("the confirmation always comes before any writing run", self.flat(self.CC))
+        self.assertIn("Step 8's confirmation stays BEFORE the writing run and is unchanged",
+                      self.flat("skills/flow/SKILL.md"))
+
+    def test_step_5a_is_after_the_flip_never_from_a_dry_run_and_never_blocks(self):
+        step = self.section(self.CC, "5a. **Capture", "6. **Cut the branch")
+        self.assertMatches(r"never built from a dry run", step, "capture is never built from a dry run")
+        self.assertMatches(r"never folded into step 3", step, "capture never joins the records confirmation")
+        self.assertIn("capture-candidates", step)
+        self.assertIn("--receipts --run-report", step)
+        self.assertIn("Not sent: (stopped after <reason>)", step, "the stop rule is stated")
+        self.assertMatches(r"No outcome of this step blocks the records pull request", step, "capture never blocks")
+        self.assertMatches(r"before step 7 copies the files", step, "receipts are recorded before the copy")
+        self.assertIn("../design-first/references/central-memory.md", step)
+
+    def test_flow_lists_the_capture_question_and_commits_the_brief_after_the_receipts(self):
+        flat = self.flat("skills/flow/SKILL.md")
+        operator = self.section("skills/flow/SKILL.md", "**Always the operator's call", "**Retry budget")
+        self.assertIn("capture question", operator, "the capture question is among the operator's calls")
+        self.assertIn("Step 8 commits the brief only after the receipts are recorded", flat)
+
+    def test_pr_merged_skill_reads_the_shared_memory_reference(self):
+        self.assertIn("../design-first/references/central-memory.md", self.flat("skills/pr-merged/SKILL.md"))
+
+    def test_journal_add_is_untouched_by_capture(self):
+        self.assertNotIn("capture-candidates", self.flat("skills/journal-add/SKILL.md"))
+
+
 class VocabularyTextTests(TextCase):
     REL = ".claude/registries/VOCABULARY.md"
 
