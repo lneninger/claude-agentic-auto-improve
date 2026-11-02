@@ -52,12 +52,29 @@ class AgentSkillPreloadTests(unittest.TestCase):
         path = ROOT / "agents" / "cloud-engineer.md"
         self.assertTrue(path.is_file())
         front = _front_matter(path)
-        self.assertIn("tools: Read, Edit, Write, Grep, Glob, Bash, mcp__codegraph__*", front)
+        self.assertIn("tools: Read, Edit, Write, Grep, Glob, Bash, Skill, mcp__codegraph__*", front)
         text = path.read_text(encoding="utf-8")
         for needle in ("cloud.providers", "cloud.roots", "for the user to run", "never run a deploy",
                        "No concept contract provided", "permission prompts"):
             self.assertIn(needle, text)
         self.assertTrue((ROOT / "skills" / "cloud-engineering" / "SKILL.md").is_file())
+
+    def test_cloud_engineer_stops_when_its_skill_cannot_load(self):
+        text = (ROOT / "agents" / "cloud-engineer.md").read_text(encoding="utf-8")
+        self.assertIn("If the skill cannot be loaded, stop and say so", text)
+
+    def test_every_agent_that_invokes_a_skill_can_load_it(self):
+        offenders: list[str] = []
+        for agent in sorted((ROOT / "agents").glob("*.md")):
+            text = agent.read_text(encoding="utf-8")
+            body = text[len(re.match(r"---\r?\n.*?\r?\n---", text, re.S).group(0)):]
+            if "with the Skill tool" not in body:
+                continue
+            tools_line = next((ln for ln in _front_matter(agent).splitlines() if ln.startswith("tools:")), "")
+            tools = [t.strip() for t in tools_line[len("tools:"):].split(",")]
+            if "Skill" not in tools and not _skills_entries(agent):
+                offenders.append(agent.name)
+        self.assertEqual(offenders, [])
 
     def test_security_auditor_has_the_infrastructure_checklist(self):
         text = (ROOT / "agents" / "security-auditor.md").read_text(encoding="utf-8")
