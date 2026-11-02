@@ -15,9 +15,9 @@ north_stars: inherited from .claude/work-items/2026-11-01-memory-client-and-clou
 parent_issue: 161
 base: feature/memory-client-and-cloud-engineering
 contract: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
-pr: UNKNOWN
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/203
+issue_link: deferred
+status: shipped
 created: 2026-11-02
 ---
 
