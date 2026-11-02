@@ -303,6 +303,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract adds a new `failure:` kind, a new failed-record writer, or a human-only exit guarded by existing refusals
 - **Tags:** failed-record, legacy, escape-hatch, guard-interplay
 
+### 2026-11-01 — A shared reader reused by a stricter consumer must be re-checked against the forms its errors were harmless for
+- **Trigger:** post-impl divergence
+- **Source contract:** D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261031-infra-71-warn-on-unshipped-hook-rows\.claude\concepts\2026-10-31-warn-on-unshipped-hook-rows.md
+- **Lesson:** When a contract reuses an existing token or path reader for a check that reports absence, list the row forms the reader mis-splits (here `shlex.split(posix=False)` splits `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py` into two tokens) and either fix the reader or prove each form is never reported; a basename-only consumer hid the split, a path-existence consumer turns it into a false finding on a working row.
+- **Apply when:** a contract adds a finding of the form "file X is missing" on top of a reader whose existing callers use only the file name, or reuses `_launch_tokens` / `_launched_raw_tokens` for a new purpose
+- **Tags:** false-positive, token-reader, shell-quoting, reuse, hook-row
+
+### 2026-11-01 — After merging a base that changes the row shape a feature reads, re-check every coverage claim and round-trip test against the merged writer
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-10-31-warn-on-unshipped-hook-rows.md
+- **Lesson:** After merging a base that changes the shape of the rows a feature reads (here the Project hook launcher row replacing the exec-form row), re-check every README and contract coverage sentence and every writer-to-reader round-trip test against the rows the merged writer now produces; the feature's own tests stayed green on hand-built old rows while the rows actually written today were skipped and its prose claimed they were covered.
+- **Apply when:** a feature reads data another change's writer produces
+- **Tags:** merge, row-shape, round-trip, coverage-claim, hook-row
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

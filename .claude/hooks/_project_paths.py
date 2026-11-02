@@ -876,10 +876,121 @@ def _read_json_object(path: Path) -> dict:
     return data
 
 
+# ---------------------------------------------------------------------------
+# Project hook launcher (contract 2026-10-12-dedupe-claude-config, Revision 9, sections K to O)
+#
+# A project's settings row can run `py -3 -c <launcher source> <class> <script> [extra arguments]`.
+# Claude Code fixes CLAUDE_PROJECT_DIR when a session starts; a session that moves into a worktree
+# that is later removed would otherwise find every `${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>.py`
+# row missing, and Python exits 2 on a missing script. That blocks every prompt. The launcher text
+# travels INSIDE the row, so nothing on disk has to exist for it to start. It finds the script in the
+# project's hooks folder, falls back to the main checkout, and exits by the row's class when no
+# copy exists (2 for `block`, 1 for `warn`). This constant is the ONLY copy of the text: the row
+# writer writes it and the deference reader compares to it. A change to the text raises the version
+# in its first line (L7). It holds no `$`, `%`, double quote or backslash (L6), is at most 40 lines
+# (L5), and does not end in `.py`.
+# ---------------------------------------------------------------------------
+
+PROJECT_HOOK_LAUNCHER_SOURCE = """# agentic-auto-improve project-hook-launch v1
+import os, sys
+sys.path[:1] == [''] and sys.path.pop(0)
+import runpy
+c, s = (sys.argv[1:] + ['', ''])[:2]
+d = 2 if c == 'block' else 1
+try:
+    if c not in ('block', 'warn'):
+        raise ValueError('unknown hook class ' + repr(c))
+    if not s.endswith('.py') or '/' in s or chr(92) in s or ':' in s:
+        raise ValueError('not a bare .py script name: ' + repr(s))
+    p = os.environ.get('CLAUDE_PROJECT_DIR')
+    if not p:
+        raise ValueError('CLAUDE_PROJECT_DIR is unset')
+    g, k, i = p.replace(chr(92), '/').split('/'), [], 0
+    while i < len(g):
+        w = g[i].lower() == '.claude' and i + 2 < len(g) and g[i + 1].lower() == 'worktrees'
+        k, i = k + ([] if w else [g[i]]), i + (3 if w else 1)
+    h = '/.claude/hooks/' + s
+    m = [p + h] + (['/'.join(k) + h] if len(k) < len(g) else [])
+    t = next((x for x in m if os.path.isfile(x)), None)
+    if t is None:
+        raise ValueError('hook ' + s + ' not found, tried ' + ', '.join(m) + '; restart Claude Code from an existing checkout')
+    f = os.path.dirname(t)
+    x = sys.argv[3:]
+    if s[:-3] == 'gate-launch':
+        x = [os.path.join(f, y) if y.endswith('.py') and '/' not in y and chr(92) not in y else y for y in x]
+    sys.argv = [t] + x
+    sys.path.insert(0, f)
+except Exception as e:
+    print('project hook launcher (' + c + '): ' + str(e), file=sys.stderr)
+    sys.exit(d)
+try:
+    runpy.run_path(t, run_name='__main__')
+except SystemExit:
+    raise
+except BaseException:
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)"""
+
+#: The two classes a launcher row can have. The launcher text compares its class to the same two
+#: literals with plain equality, and so does the reader below; there is no case folding anywhere.
+HOOK_CLASS_BLOCK = "block"
+HOOK_CLASS_WARN = "warn"
+#: How a launcher row's script is written once read as the project's own copy of the hook.
+PROJECT_HOOK_DIR_TEXT = "${CLAUDE_PROJECT_DIR}/.claude/hooks/"
+
+
+def _bare_py_name(text: object) -> bool:
+    """L1: a file name ending ``.py`` with no folder separator (and no drive colon)."""
+    return (isinstance(text, str) and text.endswith(".py") and not any(c in text for c in "/\\:"))
+
+
+def project_hook_launcher_row(script: str, hook_class: str, extras: "tuple[str, ...] | list[str]" = (),
+                              platform: str = "win32") -> dict:
+    """The command + args form of a Project hook launcher row (L1 to L3): ``py -3 -c <source> <class>
+    <script> <extras>`` on Windows, ``python3 -c ...`` elsewhere. The caller adds the row's other keys.
+    Raises ``ValueError`` for a class that is neither ``block`` nor ``warn`` or a script that is not a
+    bare ``.py`` name."""
+    if hook_class not in (HOOK_CLASS_BLOCK, HOOK_CLASS_WARN):
+        raise ValueError("a launcher row's class is %r or %r, not %r" % (HOOK_CLASS_BLOCK, HOOK_CLASS_WARN, hook_class))
+    if not _bare_py_name(script):
+        raise ValueError("a launcher row's script is a bare .py file name, not %r" % (script,))
+    args = ["-c", PROJECT_HOOK_LAUNCHER_SOURCE, hook_class, script, *extras]
+    if platform == "win32":
+        return {"type": "command", "command": "py", "args": ["-3"] + args}
+    return {"type": "command", "command": "python3", "args": args}
+
+
+def project_hook_launcher_parts(entry: object) -> "tuple[str, str, list[str]] | None":
+    """``(class, script, extra arguments)`` of a hook row that is a Project hook launcher row, else ``None``.
+
+    A row counts only when its ``args`` are ``[-3,] -c <program> <class> <script> ...``, the program is
+    byte-equal to ``PROJECT_HOOK_LAUNCHER_SOURCE`` (so a stale, newer or hand-written text is not one),
+    the class is exactly ``block`` or ``warn``, and the script is a bare ``.py`` name."""
+    args = entry.get("args") if isinstance(entry, dict) else None
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return None
+    body = args[1:] if args[:1] == ["-3"] else args
+    if len(body) < 4 or body[0] != "-c" or body[1] != PROJECT_HOOK_LAUNCHER_SOURCE:
+        return None
+    hook_class, script = body[2], body[3]
+    if hook_class not in (HOOK_CLASS_BLOCK, HOOK_CLASS_WARN) or not _bare_py_name(script):
+        return None
+    return hook_class, script, list(body[4:])
+
+
 def _launched_script(entry: dict) -> str | None:
     """The script a hook row launches: the first ``args`` element that does not start with ``-``
-    (exec form), or the first token after the interpreter that ends in ``.py`` (shell form)."""
+    (exec form), or the first token after the interpreter that ends in ``.py`` (shell form).
+
+    A Project hook launcher row of class ``block`` launches ``<project>/.claude/hooks/<script>``, so it
+    is read as that path and condition (d)'s equality rule applies to it unchanged. Any other
+    ``-c`` row (a ``warn`` row, a stale or hand-written text) keeps the old reading: its first
+    argument is the program text, which never equals a guard's path, so (d) fails and the guard acts."""
     args = entry.get("args")
+    parts = project_hook_launcher_parts(entry)
+    if parts is not None and parts[0] == HOOK_CLASS_BLOCK:
+        return PROJECT_HOOK_DIR_TEXT + parts[1]
     if isinstance(args, list):
         for arg in args:
             if isinstance(arg, str) and arg and not arg.startswith("-"):
