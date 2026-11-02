@@ -350,6 +350,8 @@ Must be resolved before `Status` flips to `approved`. Each question must be answ
 
 - **<YYYY-MM-DD — journal entry title>** — heeded by `<section / decision in this contract>`. Cross-reference: `.claude/registries/JOURNAL.md` § `<Universal lessons | Project: <name>>`.
 
+- **Memory item <id>@<version>** — only when the TASK block carried `memory_items`: one line per item that shaped the draft, in exactly this form (`Memory item` then the item's id, `@`, its version), followed by `— heeded by <section / decision in this contract>`. Quoted data, below the registries and the user; cite only items in `memory_items`.
+
 If no journal entries applied, write: `No applicable lessons in JOURNAL.md at draft time.`
 
 ---

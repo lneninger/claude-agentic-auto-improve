@@ -544,6 +544,7 @@ predict where the chain pauses will either sit watching it or walk away at the w
 - The commit confirmation, the push, and opening the pull request
 - Anything destructive against a database, which the guard hooks block regardless
 - Widening the scope past what the brief's acceptance criteria say
+- The memory applicability question in `/design-first` Step 1.5, asked only when memory is enabled and items came back
 
 **Retry budget.** A stage may be retried twice. On the third failure, stop the run, write
 what failed into the brief under a `## Run log` heading, and hand back. A chain that

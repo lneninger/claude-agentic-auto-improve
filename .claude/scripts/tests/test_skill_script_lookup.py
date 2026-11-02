@@ -499,7 +499,8 @@ class TestDesignFirstApprovalGateLookup(unittest.TestCase):
     REL = "skills/design-first/SKILL.md"
 
     def gate_snippets(self) -> list[dict]:
-        return [s for s in snippets() if s["file"] == self.REL]
+        # The approval gate's block is the pr_merged.py one; Step 1.5 carries its own (TestDesignFirstMemoryLookup).
+        return [s for s in snippets() if s["file"] == self.REL and s["script"] == "pr_merged.py"]
 
     def run_lines(self) -> list[str]:
         """The `py -3 "$VAR" ...` line of every fenced block in the gate's skill that holds a cache search line."""
@@ -511,7 +512,7 @@ class TestDesignFirstApprovalGateLookup(unittest.TestCase):
                 while j < len(lines) and not lines[j].lstrip().startswith("```"):
                     j += 1
                 block = lines[i + 1:j]
-                if any(NEEDLE in line for line in block):
+                if any(NEEDLE in line for line in block) and any("pr_merged.py" in line for line in block):
                     found.extend(line.strip() for line in block if RUN_LINE.match(line))
                 i = j
             i += 1
@@ -540,6 +541,41 @@ class TestDesignFirstApprovalGateLookup(unittest.TestCase):
         self.assertGreater(len(gate), 0, "the gate carries a PRM block")
         self.assertEqual(gate[0]["text"], standard[0]["text"],
                          "one snippet is shared by every copy: the gate must not carry a variant")
+
+
+class TestDesignFirstMemoryLookup(unittest.TestCase):
+    """Sub-task 3 of the memory contract (journal 2026-10-15: a skill that adds a lookup block names the test
+    that pins it): /design-first Step 1.5 finds memory_boundary.py through the STANDARD script lookup block,
+    so the generic cases above (newest cache folder, recorded install path, project copy first, nothing found
+    gives an empty value, which Step 1.5 reads as 'memory off') exercise it too.
+
+    Contract: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md, Extension Points
+    ("/design-first new Step 1.5").
+    """
+
+    REL = "skills/design-first/SKILL.md"
+
+    def memory_snippets(self) -> list[dict]:
+        return [s for s in snippets() if s["file"] == self.REL and s["script"] == "memory_boundary.py"]
+
+    def test_step_1_5_carries_a_lookup_block_for_the_adapter_into_MEM(self):
+        found = self.memory_snippets()
+        self.assertGreater(len(found), 0, "%s holds no lookup block for memory_boundary.py" % self.REL)
+        for snip in found:
+            self.assertEqual(snip["var"], "MEM", "the adapter lookup assigns $MEM and runs py -3 \"$MEM\" ...")
+
+    def test_the_block_is_the_standard_one_with_only_the_names_changed(self):
+        standard = [s for s in snippets() if s["var"] == "PRM" and s["file"] == "skills/advance/SKILL.md"]
+        self.assertGreater(len(standard), 0, "fixture sanity: /advance carries the standard PRM block")
+        found = self.memory_snippets()
+        self.assertGreater(len(found), 0, "no adapter lookup block in %s" % self.REL)
+        expected = standard[0]["text"].replace("PRM", "MEM").replace("pr_merged.py", "memory_boundary.py")
+        self.assertEqual(found[0]["text"], expected,
+                         "one snippet is shared by every copy: the Step 1.5 block must not carry a variant")
+
+    def test_the_run_line_is_the_status_subcommand(self):
+        text = (SKILLS / "design-first" / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+        self.assertRegex(text, r'py -3 "\$MEM" status --project')
 
 
 if __name__ == "__main__":
