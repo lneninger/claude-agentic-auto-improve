@@ -302,6 +302,11 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.12.5 (tests only):** the installer, guard-deference and launcher test files now pin the
+Project hook launcher row form (`py -3 -c <source> <class> <script>`) that 0.12.3 started writing, and
+one new pair of rows pins the earlier-form fallback when no launcher is available. No shipped behaviour
+changed. The manifests read 0.12.5.
+
 **Changed in 0.12.4 (issue #71, follow-up 1):** `plugin_doctor.py --drift` warns about a project
 hook row that launches a file that is not there, such as a row for a hook the plugin no longer
 ships. The finding kind is `dangling-hook-row`. It covers rows written before 0.12.3 (the old

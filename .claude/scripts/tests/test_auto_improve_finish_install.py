@@ -404,6 +404,12 @@ def launcher_row(script, hook_class, *extras, python3=False):
     return {"type": "command", "command": "py", "args": ["-3"] + args}
 
 
+def is_launcher_form(row):
+    """True for a launcher-form row: command is py and args begin -3, -c, <the constant>. No other reading."""
+    args = row.get("args")
+    return row.get("command") == "py" and isinstance(args, list) and args[:3] == ["-3", "-c", launcher_text()]
+
+
 def assert_launcher_row(case, entry, script, event, why):
     """The launcher row shape: args is [-3, -c, <source>, <class>, <script>, ...] (python3: without -3),
     the source equals the constant, and the class follows L2."""
@@ -1726,9 +1732,17 @@ class TestMerge(Base):
             self.assertEqual(hook.get("type"), "command", msg="a command hook")
             self.assertEqual(hook.get("command"), "py", msg="command + args form: the launcher alone")
             args = hook.get("args")
-            self.assertEqual(args[:2], ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + name],
-                             msg="-3 first, then the braced project path of %s" % name)
-            self.assertEqual(tuple(reduce_arg(a) for a in args[2:]), extras, msg="arguments after the file are kept")
+            # rule changed: args[:2] == [-3, ${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>] and args[2:] reduce to
+            # the extras -> assert_launcher_row holds; args[5:] reduce to the extras through reduce_arg; for
+            # gate-launch.py args[5:] == ["concept-gate.py"] compared raw. Reason: Revision 9, section K, and
+            # block 29's writer constraint (the writer writes the launcher row).
+            assert_launcher_row(self, hook, name, event, "the written row of %s on %s" % (name, event))
+            if name == "gate-launch.py":
+                self.assertEqual(args[5:], ["concept-gate.py"],
+                                 msg="the gate argument is the bare name, compared raw: %r" % (args,))
+            else:
+                self.assertEqual(tuple(reduce_arg(a) for a in args[5:]), extras,
+                                 msg="arguments after the script are kept")
 
     def test_each_registration_keeps_its_matcher(self):
         self.apply_to_fresh()
@@ -1975,14 +1989,16 @@ class TestMerge(Base):
 
 
 class TestLauncherGateArgument(Base):
-    """Contract 2026-10-07-worktree-isolation-by-default, block 6: the gate launcher's second argument.
+    """Contract 2026-10-07-worktree-isolation-by-default, block 6, in the launcher form of Revision 9 (block 29).
 
     The plugin registers the concept gate as ``gate-launch.py <plugin path of concept-gate.py>``. A vendored
-    consumer's written row must carry the project path for BOTH, or the launcher blocks every edit (I-3).
+    consumer's written row is a Project hook launcher row, ``py -3 -c <source> block gate-launch.py
+    concept-gate.py``: the gate argument is the BARE name, which the launcher resolves in the project's own
+    hooks folder, so no project or plugin variable survives in the row (I-3). A gate argument that stays a
+    path, or is dropped, makes the launcher block every edit.
     The plugin has no bash-gate row (round-7: bash-gate stays cut by 2026-09-28-hook-server-modes, INV-O1).
     """
 
-    GATE_ARG_PROJECT = "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py"
     LAUNCHER_PROJECT = "${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py"
 
     def real_launcher_project(self):
@@ -2019,9 +2035,16 @@ class TestLauncherGateArgument(Base):
         self.assertEqual(result.get("status"), "applied", msg="got %r" % result)
         rows = self.launcher_rows()
         self.assertEqual(len(rows), 1, msg="exactly one launcher row: the concept gate (the plugin has no bash-gate row)")
-        self.assertEqual(rows[0].get("args"), ["-3", self.LAUNCHER_PROJECT, self.GATE_ARG_PROJECT],
-                         msg="both script paths name the project's hooks folder, never ${CLAUDE_PLUGIN_ROOT}")
-        self.assertNotIn("CLAUDE_PLUGIN_ROOT", json.dumps(rows[0]), msg="the plugin variable is gone from the row")
+        # rule changed: args == [-3, LAUNCHER_PROJECT, GATE_ARG_PROJECT] -> assert_launcher_row(row,
+        # gate-launch.py, PreToolUse) holds; args[5:] == ["concept-gate.py"] exactly; no argument holds
+        # ${CLAUDE_PROJECT_DIR} or CLAUDE_PLUGIN_ROOT; the written row, launched with CLAUDE_PROJECT_DIR set,
+        # prints GATE RAN, exits 0 and never says "launcher misregistered". Reason: Revision 9, K.
+        assert_launcher_row(self, rows[0], "gate-launch.py", "PreToolUse", "the written launcher row")
+        self.assertEqual(rows[0]["args"][5:], ["concept-gate.py"],
+                         msg="the gate argument is the bare name, nothing else follows it: %r" % (rows[0]["args"],))
+        for arg in rows[0]["args"]:
+            self.assertNotIn("${CLAUDE_PROJECT_DIR}", arg, msg="no argument holds the project variable")
+            self.assertNotIn("CLAUDE_PLUGIN_ROOT", arg, msg="no argument holds the plugin variable")
         names = [n for _e, _m, n, _x, _h in flat_registrations(self.read_settings())]
         self.assertNotIn("bash-gate.py", [a for h in self.launcher_rows() for a in h["args"]],
                          msg="no bash-gate argument anywhere in the launcher rows")
@@ -2041,8 +2064,15 @@ class TestLauncherGateArgument(Base):
         plan2 = self.plan()
         self.assertEqual(plan2.get("to-add"), [],
                          msg="the rewritten launcher row is found by its file-name key: nothing to add")
-        self.assertIn(self.GATE_ARG_PROJECT, [a for h in self.launcher_rows() for a in h["args"]],
-                      msg="and what was found is the REWRITTEN row, not a copy of the plugin path")
+        # rule changed: GATE_ARG_PROJECT is among the launcher rows' args -> the found row's args[5] is the bare
+        # concept-gate.py and no extra holds ${CLAUDE_PROJECT_DIR}. Reason: Revision 9, K.
+        found = self.launcher_rows()
+        self.assertEqual(len(found), 1, msg="exactly one launcher row is found: %r" % (found,))
+        self.assertEqual(found[0]["args"][5:6], ["concept-gate.py"],
+                         msg="and what was found is the REWRITTEN row, with the bare gate argument: %r"
+                             % (found[0]["args"],))
+        for extra in found[0]["args"][5:]:
+            self.assertNotIn("${CLAUDE_PROJECT_DIR}", extra, msg="no extra argument holds the project variable")
         result = self.apply(self.need(plan2, "plan-sha256"))
         self.assertEqual(result.get("status"), "nothing-to-do", msg="got %r" % result)
         self.assertEqual(path.read_bytes(), data, msg="settings.json is byte-identical")
@@ -2081,6 +2111,83 @@ class TestLauncherGateArgument(Base):
         self.assertIn("launcher misregistered", proc.stderr, msg="the banner names the cause")
         self.assertIn("auto_improve_finish_install.py", proc.stderr, msg="and the fix")
         self.assertNotIn("GATE RAN", proc.stdout, msg="the gate is never run silently from the wrong folder")
+
+
+class TestLauncherFallbackNote(Base):
+    """Gate 30, finding F4: the writer's fallback when the Project hook launcher is not available.
+
+    Both rows PIN THE WRITER'S BEHAVIOUR AT 217f97e, they do not endorse it. Revision 18's Open Question 26
+    and gate 32's item (h) decide whether the fallback (the earlier ${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>
+    form, with a note) stays; when it goes, row (i) goes with it and row (ii) stays.
+
+    The seam for row (i) is a child process on a copied tree, because ``_claude_paths`` loads
+    ``_project_paths`` from the hooks folder beside the scripts folder and a module stays loaded once
+    imported, so a stub installed in this process never reaches it. The copy holds .claude/scripts/ beside a
+    .claude/hooks/ whose only file is a ``_project_paths.py`` that raises ImportError: it must not call
+    sys.exit and must not import cleanly, because plugin_doctor catches only ImportError.
+    """
+
+    NOTE = "the Project hook launcher is not available beside this script"
+
+    def child_cli(self, scripts_root, argv):
+        """Run the copied script as a child process; returns (returncode, parsed json or None, stderr)."""
+        fake_bin = self.tmp / "fakebin"
+        fake_bin.mkdir(exist_ok=True)
+        for name in ("py", "py.exe", "python3", "python3.exe"):   # the interpreter lookup finds something
+            (fake_bin / name).write_text("", encoding="utf-8")
+            (fake_bin / name).chmod(0o755)
+        env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                   PYTHONDONTWRITEBYTECODE="1")
+        proc = subprocess.run([sys.executable, str(scripts_root / ".claude" / "scripts" /
+                                                   "auto_improve_finish_install.py")] + argv,
+                              capture_output=True, text=True, env=env, timeout=120, cwd=str(self.tmp))
+        try:
+            parsed = json.loads(proc.stdout)
+        except ValueError:
+            parsed = None
+        return proc.returncode, parsed, proc.stderr
+
+    def argv(self, apply_sha=None):
+        argv = ["hooks", "--project", str(self.project), "--json", "--claude-home", str(self.home),
+                "--platform", "win32"]
+        return argv + ["--apply", "--expect-sha256", apply_sha] if apply_sha else argv
+
+    def test_i_without_a_usable_launcher_the_plan_says_so_and_the_rows_are_the_earlier_form(self):
+        copy = self.tmp / "scripts-copy"
+        shutil.copytree(SCRIPT_ROOT / ".claude" / "scripts", copy / ".claude" / "scripts",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        (copy / ".claude" / "hooks").mkdir()
+        (copy / ".claude" / "hooks" / "_project_paths.py").write_text(
+            'raise ImportError("a stub _project_paths: the launcher surface is missing")\n', encoding="utf-8")
+        self.make_vendored()
+        rc, plan, err = self.child_cli(copy, self.argv())
+        self.assertEqual(rc, 0, msg="a preview is exit 0: %r %r" % (plan, err[-400:]))
+        self.assertEqual((plan or {}).get("status"), "plan", msg="got %r" % (plan,))
+        self.assertTrue(any(self.NOTE in n for n in plan.get("notes", [])),
+                        msg="the plan's notes hold the fixed phrase %r: %r" % (self.NOTE, plan.get("notes")))
+        rc2, applied, err2 = self.child_cli(copy, self.argv(apply_sha=plan["plan-sha256"]))
+        self.assertEqual((rc2, (applied or {}).get("status")), (0, "applied"),
+                         msg="the apply writes: %r %r" % (applied, err2[-400:]))
+        regs = flat_registrations(self.read_settings())
+        self.assertEqual(len(regs), 17, msg="all registrations written")
+        for _e, _m, name, _x, hook in regs:
+            self.assertFalse(is_launcher_form(hook), msg="%s: no launcher row without a launcher: %r" % (name, hook))
+            self.assertEqual(hook.get("command"), "py", msg="%s: the interpreter is the command" % name)
+            self.assertEqual(hook.get("args")[:2], ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + name],
+                             msg="%s: the earlier project-path form" % name)
+
+    def test_ii_with_the_real_hooks_folder_there_is_no_note_and_the_rows_are_launcher_form(self):
+        self.make_vendored()
+        plan = self.plan()
+        notes = [n for n in plan.get("notes", []) if self.NOTE in n]
+        self.assertEqual(notes, [], msg="the launcher is available beside this script, so no such note")
+        result = self.apply(self.need(plan, "plan-sha256"))
+        self.assertEqual(result.get("status"), "applied", msg="got %r" % (result,))
+        regs = flat_registrations(self.read_settings())
+        self.assertEqual(len(regs), 17, msg="all registrations written")
+        for event, _m, name, _x, hook in regs:
+            assert_launcher_row(self, hook, name, event, "the written row of %s" % name)
+            self.assertTrue(is_launcher_form(hook), msg="%s: a launcher-form row" % name)
 
 
 class TestInterpreterSwap(Base):
@@ -4215,8 +4322,15 @@ def _holds_insertion_point(old_line, new_line, hook_paths):
 
 
 def row_hook_paths(rows):
-    """The hook paths (as bytes) in the args of the rows a plan adds."""
-    return [a.encode("utf-8") for row in rows for a in row.get("args", []) if "/hooks/" in a]
+    """The hook paths (as bytes) in the args of the rows a plan adds.
+
+    rule changed: the arguments holding /hooks/ -> the same, plus each launcher row's script (the argument
+    after the class) as its JSON string, quotes included. Reason: Revision 9, K; a launcher row holds the
+    bare script name, not a path."""
+    paths = [a.encode("utf-8") for row in rows for a in row.get("args", []) if "/hooks/" in a]
+    paths += [json.dumps(row["args"][4]).encode("utf-8") for row in rows
+              if is_launcher_form(row) and len(row["args"]) > 4]
+    return paths
 
 
 def lines_kept_by_insertions_only(old, new, rows=()):
@@ -4466,7 +4580,12 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                         lines_kept_by_insertions_only(raw, new, rows),
                         msg="line by line: every old line must appear in order, changed only by insertions "
                             "(a whitespace-only re-layout of a line fails this)")
-                    self.assertLessEqual(len(new) - len(raw), 700 * len(rows),
+                    # rule changed: len(new) - len(raw) <= 700 * len(rows) -> <= sum(700 + L(row)), L(row) =
+                    # len(json.dumps(launcher_text())) for a launcher-form row, 0 otherwise. Reason: Revision 9,
+                    # K, and block 29's writer constraint (a launcher row carries the program text once).
+                    cap = sum(700 + (len(json.dumps(launcher_text())) if is_launcher_form(row) else 0)
+                              for row in rows)
+                    self.assertLessEqual(len(new) - len(raw), cap,
                                          msg="and the insertion is small: no layout changes were added")
                     self.assertEqual(new.count(b"\\u"), raw.count(b"\\u"),
                                      msg="the escape count is unchanged (a guard reads these bytes)")
