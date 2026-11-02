@@ -526,6 +526,44 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
+### 6. Merge the default branch into the parent branch (`python-ai-developer`)
+
+*Amendment of 2026-11-02, a remedy sub-task.* The landing run `20261102T133845Z-5f35db` halted at gate P7 (`unresolvable-conflict`): `master` moved on after the parent branch was cut and three files now conflict. This block clears them by hand, so the landing's own merge of `master` is clean. It adds no data shape and no mechanism.
+
+**Depends on:** 5
+
+**Files to touch:**
+- `.claude/registries/VOCABULARY.md`
+- `README.md`
+- `.claude/scripts/tests/test_auto_improve_finish_install.py`
+
+**Pre-written TASK block:**
+```
+TASK: On the sub-task branch, merge origin/master into it (git fetch origin master, then git merge origin/master) and
+resolve the three conflicts by hand. Commit the merge. Open no version change.
+CONTEXT: concept contract; landing report for run 20261102T133845Z-5f35db (gate P7, unresolvable-conflict).
+FILES: as listed.
+CONSTRAINTS:
+  - .claude/registries/VOCABULARY.md: both sides only append at the end of the Universal tier. Keep every entry from
+    both sides, verbatim, and never edit or reorder an existing one. Master's two entries (Dangling hook row, Vendored-asset
+    drift amendment) go first, then the four of this contract (Registration row, Hook registration profile, Registration
+    rule, Failure attribution). Regenerate the registry digest if the generator exists.
+  - .claude/scripts/tests/test_auto_improve_finish_install.py: both sides add new test classes at the same place. Keep all
+    of them, unchanged. Check that no class or function name is defined twice and that the imports both sides need are present.
+  - README.md: one line differs, the number of cases of test_auto_improve_finish_install.py (326 here, 308 on master).
+    After the merge, run the suite and write the real count it reports. Do not guess it, and do not add 326 and 308.
+  - A change to any other file than these three comes only from master itself. Resolve nothing else by choosing a side.
+  - Never edit plugin.json, .claude-plugin/plugin.json, .cursor-plugin/plugin.json or .claude-plugin/marketplace.json
+    by hand. The merge brings master's version in, and the landing raises it once.
+  - Run, and report the exit code of, test_auto_improve_finish_install.py, test_check_hook_registrations.py,
+    test_pr_merged.py and `py -3 .claude/scripts/check_version_bump.py --base <parent branch> --default-branch master
+    --head-ref <this branch>`. A failure that also fails on origin/master is reported as such, not fixed here.
+  - Every command in a form that runs in PowerShell.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-10-31-plugin-owns-hook-mechanism-tests.md
+  contract_status: approved
+```
+
 ---
 
 ## Review checklist (filled in after implementation)
