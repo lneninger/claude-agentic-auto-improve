@@ -59,3 +59,6 @@ L — a new plugin-owned checker, a migrated test set, a change to the landing r
 
 ## Routing
 non-trivial → /design-first. A contract with two or more mergeable blocks is delivered through a parent branch and needs a GitHub parent issue (Parent Branch Delivery Rule).
+
+## Run log
+- 2026-11-02: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/158, https://github.com/lneninger/claude-agentic-auto-improve/pull/159, https://github.com/lneninger/claude-agentic-auto-improve/pull/160, https://github.com/lneninger/claude-agentic-auto-improve/pull/162, https://github.com/lneninger/claude-agentic-auto-improve/pull/163, https://github.com/lneninger/claude-agentic-auto-improve/pull/187, https://github.com/lneninger/claude-agentic-auto-improve/pull/190); contract 2026-10-31-plugin-owns-hook-mechanism-tests flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #148: Implementation matches Data Shapes exactly
