@@ -13,9 +13,9 @@ branch: feature/148-plugin-owns-hook-mechanism-tests
 worktree: D:/Dev/HIPALANET/claude-agentic-auto-improve/.claude/worktrees/20261031-feature-148-plugin-owns-hook-mechanism-tests
 north_stars: none
 contract: .claude/concepts/2026-10-31-plugin-owns-hook-mechanism-tests.md
-pr: none
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/190
+issue_link: closes
+status: shipped
 created: 2026-10-31
 ---
 
