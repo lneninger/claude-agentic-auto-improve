@@ -4,7 +4,7 @@
 **Date:** 2026-11-01
 **Requested by:** user
 **Status:** approved
-**Revision:** 7 (2026-11-02). Revisions 2-4 answered three critique rounds and Open Questions 1-21. Revision 5 removes the deployment-authorization mechanism at the user's instruction (Decision note in Business Concept) and renumbers the handoff blocks. Revisions 6 and 7 (2026-11-02, notes under Handoff 11) append fix and re-review blocks after two blocked reviews; Revision 7 also adds the user's Project history record requirement, and was amended after the `## Critique (Revision 7)` round with the user's answers to Open Questions 22 and 23.
+**Revision:** 8 (2026-11-03; needs the user's re-approval at `/design-first` Step 3, see block 17). Revision 8 appends a remedy block 17 and its review 18 after the landing halted at gate P7. Revision 7 (2026-11-02): Revisions 2-4 answered three critique rounds and Open Questions 1-21. Revision 5 removes the deployment-authorization mechanism at the user's instruction (Decision note in Business Concept) and renumbers the handoff blocks. Revisions 6 and 7 (2026-11-02, notes under Handoff 11) append fix and re-review blocks after two blocked reviews; Revision 7 also adds the user's Project history record requirement, and was amended after the `## Critique (Revision 7)` round with the user's answers to Open Questions 22 and 23.
 **Work Item Brief:** .claude/work-items/2026-11-01-memory-client-and-cloud-engineering.md
 **Tracking issue:** #161
 **Budget:** 20,000 tokens. This is raised from the template's 12,000 because the brief asks for the full audit to sit inside the contract. Open Question 14 offers to move the appendices out.
@@ -364,6 +364,7 @@ Confidence: Medium. High on reuse mapping and degradation (verified against `loa
 - `VERIFIED via agents/*.md frontmatter`: every plugin agent declares a fixed `tools:` line; eight declare `memory: project` and two `memory: user`.
 - `VERIFIED via .claude/area-mapping.json:14`: the area map is empty.
 - `VERIFIED via glob`: `.claude/.scout-cache/registry-digest.md` and `.claude/registries/INTEGRATION.md` do not exist here.
+- `ASSUMED` (Revision 8): `master` is at 8ea2dd4, with version 0.14.x, as fetched on 2026-11-03. The conflict list in block 17 was computed against that commit. Matters because a later `master` can add conflicts, or reach 0.15 and move the landing raise to 0.16.0. Verification path: block 17 lists git's own conflicts before resolving and aborts on an unlisted one; the landing's `--raise` always reads `origin/master` at landing time.
 
 ---
 
@@ -399,6 +400,14 @@ Confidence: Medium. High on reuse mapping and degradation (verified against `loa
   - **Mitigation:** the **Brief linkage** rule already used by point 4 (the brief whose `branch:` is the current branch) picks the brief. With no brief, one "skipped for want of a brief" line is printed and design continues; this is not a failure. A refusal when a brief was found falls to point 2's one-line failure rule (tracker-cascade degradation, consumed as-is), and design continues from the Project history record.
 - **FM (Revision 7):** `plugin_doctor.py --fix` creates more than the user expected (north-stars and orchestrator folders, the contract template, the `area-mapping.json` and `work-item-conventions.json` scaffolds).
   - **Mitigation:** report then ask. The **plugin doctor**'s report mode lists every `missing` entry first; finish-install shows that list as what `--fix` would create and runs `--fix` only on the user's yes, matching the skill's own "It proposes, you confirm, and only then does it write". `apply_fixes` never overwrites and leaves `.claude/settings.json` to the user.
+- **FM (Revision 8):** while resolving a registry conflict by hand (block 17), an entry of either side is dropped, duplicated or edited.
+  - **Mitigation:** append-only registries (registry "Maintained by" rule). Block 18 compares every entry heading against `git show origin/master:<path>` and against the pre-merge parent tip. Each must appear once, unedited, with master's entries first.
+- **FM (Revision 8):** an auto-merged script or test defines a name twice or drops an import.
+  - **Mitigation:** the **Parent Branch Delivery Rule** review gate (block 18) checks for duplicates. The landing's own verification step (`contractLanding.verification.steps`, `test_pr_merged.py`) runs on the merged tree, and block 17 stops instead of hand-editing an auto-merged file.
+- **FM (Revision 8):** `master` appends to a registry tail again after block 17, so the landing halts at P7 a second time.
+  - **Mitigation:** the landing's P7 gate (`land_contract.py`) reports it with the same remedy. A further remedy block on the same pattern merges again; nothing reaches `master` in a broken state.
+- **FM (Revision 8):** README counts are wrong after the merge (each side's count is copied, or the two are added).
+  - **Mitigation:** block 17 rewrites every count from the merged tree and from each suite's own output (journal 2026-11-01, "After merging a base..."). Block 18 re-checks the counts, and `test_plugin_manifests.py` checks the README counts it pins.
 
 ---
 
@@ -434,6 +443,19 @@ Revision 7 adds two questions. The user answered both on 2026-11-02, and the ans
   → Addressed by: Business Concept term **Project history record**; block 15 TASK point 1 and the shipped agreement; block 15 CONSTRAINTS (no seed, no change to the doctor's `REQUIREMENTS`).
 - [x] **23. Registries missing in a project that already has a profile.** Answered: "Report, then ask before --fix" (user, 2026-11-02). Finish-install runs the doctor in report mode, lists exactly what `--fix` would create, and writes only after the user confirms. It never runs `--fix` on its own. `--fix` creates every missing requirement in `plugin_doctor.py` `REQUIREMENTS` (via `apply_fixes`), including `.claude/north-stars`, `.claude/orchestrator/results`, `area-mapping.json`, `work-item-conventions.json` and the contract template, not only the registries.
   → Addressed by: Extension Points bullet `/auto-improve-finish-install`; Failure Modes entries on `NOT FOUND - pass --plugin` and on `--fix` creating more than expected; block 15 TASK point 1.
+
+Revision 8 adds five questions. The user answered all five on 2026-11-03, and the answers are written into block 17. Only the final approval is still open.
+
+- [x] **24. The conflicting-file list.** Answered by a computed fact (2026-11-03, `master` at 8ea2dd4). `git merge-tree` reports conflicts in exactly JOURNAL.md, MECHANISMS.md, VOCABULARY.md, README.md and `skills/pr-merged/references/contract-completion.md`. It auto-merges `pr_merged.py`, `test_pr_merged.py`, `skills/flow/SKILL.md` and `skills/pr-merged/SKILL.md`.
+  → Addressed by: block 17, "Conflicting files" and Files to touch (the five conflicts plus the two text-fix files); block 18's file-scope rule; the stop-and-`git merge --abort` fallback kept.
+- [x] **25. Which Revision 7 critic findings get a journal entry (t10 W2).** Answered: append J1-J10. The parent brief records "no new entry" for the five findings that re-apply existing lessons, and that critique rounds 1-3 were not journaled (user, 2026-11-03).
+  → Addressed by: block 17, "Journal entries" and the W2 bullet of its TASK; "Main-session actions".
+- [x] **26. Append the t10 review's proposed entry (J11).** Answered: yes, verbatim from t10 Disposition 7 (user, 2026-11-03).
+  → Addressed by: block 17, J11 and the W2 bullet of its TASK.
+- [x] **27. Fix the same false sentence in finish-install (t10 I3).** Answered: yes, in both `README.md` and `skills/auto-improve-finish-install/SKILL.md`. Everything else left over (t16 W1 and I1-I5; t10 I4 and I6) goes into one follow-up stub (user, 2026-11-03).
+  → Addressed by: block 17's I3 bullet and Files to touch; "Deferred review leftovers" names `.claude/concepts/followups/2026-11-03-memory-boundary-review-leftovers.followup.md`, `**Issue:** pending`.
+- [x] **28. The version after the remedy.** Answered: accepted (user, 2026-11-03). The remedy pull requests keep merged `master`'s 0.14.x, no version file is edited by hand, and the landing raises to 0.15.0 while `master` is on 0.14.
+  → Addressed by: block 17, "Version".
 
 Revision 7 also took one decision outside the numbered questions: "Yes, add a session-start agreement" (user, 2026-11-02), in answer to the critic's WARN on reach. → Addressed by: Extension Points bullet "Shipped agreements"; Alternatives Considered Options I, J and K; block 15 TASK point 5. The user also renamed the proposed term "Project memory" to **Project history record** and narrowed its definition. → Addressed by: Business Concept, and every Revision 7 mention in this contract outside the critique sections, which keep the old name as history.
 
@@ -739,16 +761,20 @@ The critic checked each revision-2 finding against the contract body and the cod
 - **2026-10-28 — A new term's definition must be true against every existing member** — heeded in Revision 7 by renaming "Project memory" to **Project history record** and naming exactly who reads and appends it, with the no-design routes excluded.
 - **2026-10-04 — Check a documented guard behaviour against the guard's code** — heeded in Revision 7: block 15's who-appends text follows `agents/contract-critic.md:150` and `JOURNAL.md` "Maintained by", and the `--fix` description follows `plugin_doctor.py` `REQUIREMENTS` and `apply_fixes`.
 - **2026-10-15 — A script that reads a project-owned file must be told which project** — heeded in Revision 7 by block 14 I2 (`default_branch_or_none(cwd=<project>)`, no `master` fallback).
+- **2026-11-01 — After merging a base that changes the row shape a feature reads, re-check every coverage claim and round-trip test against the merged writer** — heeded in Revision 8: block 17 re-runs the suites on the merged tree and rewrites every README count from what the merged tree and suites report, never by adding the two sides.
+- **2026-10-17 — Judge "identical to master" by git's view, not raw bytes, on Windows** — heeded in Revision 8: block 18 checks the master side of each registry with `git show origin/master:<path>`, not a copy on disk.
+- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — heeded in Revision 8. The user's answers to Open Questions 24-28 (2026-11-03) are written into blocks 17 and 18, which keep no conditional branch. Each Revision 8 critic finding carries its `→ Addressed by:` line.
 - Orthogonal to north-stars: none active (`.claude/north-stars/` does not exist, matching the brief's intake grade).
 
 ---
 
 ## Implementation Handoff
 
-This contract has fifteen mergeable blocks plus one scope note (sixteen numbered blocks), so it is delivered through the parent branch `feature/memory-client-and-cloud-engineering` (Parent Branch Delivery Rule). No block touches a version file; the landing raises the version once. Block 1 holds the profile slots, blocks 2-5 the memory boundary, 6-8 the cloud capability and 9-10 the documentation; block 11 is the scope note. Revision 6 added the cloud fix 12 and its re-review 13; Revision 7 added the memory-boundary fixes 14, the Project history record block 15 and their re-review 16. The true graph, with no cycle:
+This contract has seventeen mergeable blocks plus one scope note (eighteen numbered blocks; Revision 8 added the remedy 17 and its review 18, graph 9,10→17→18), so it is delivered through the parent branch `feature/memory-client-and-cloud-engineering` (Parent Branch Delivery Rule). No block touches a version file; the landing raises the version once. Block 1 holds the profile slots, blocks 2-5 the memory boundary, 6-8 the cloud capability and 9-10 the documentation; block 11 is the scope note. Revision 6 added the cloud fix 12 and its re-review 13; Revision 7 added the memory-boundary fixes 14, the Project history record block 15 and their re-review 16. The true graph, with no cycle:
 - 1→2→3→4→5 (5 also waits for 2 and 3); 2,3,4→14→15; 2,3,4,14,15→16.
 - 1→6→7→8 (8 also waits for 6); 7→12; 6,7,12→13.
 - 13,14,15,16→9; 9,14,15,16→10.
+- 9,10→17→18 (Revision 8).
 
 Blocks 5 and 8 keep their recorded `blocked` reviews; 16 supersedes 5 and 13 supersedes 8, so 9 waits for the re-reviews, not the originals. Revision 5 removed the old block 8 (deployment authorization) and the conditional block 13 of that older numbering, and renumbered the rest; today's block 13 is the Revision 6 re-review.
 
@@ -1175,6 +1201,8 @@ No block raises the version. The landing raises it once, and corrects the manife
 - No block raises the version. The user answered Open Questions 22 and 23 and the critic findings on 2026-11-02, and the answers are written into the body; this is the re-approval of Revision 7. The Revision 7 critique was run (`## Critique (Revision 7)`, at the end), and each finding carries its disposition there.
 - Budget: this contract is over the template's budget rule (critique Revision 7 NIT). The superseded critique rounds and the appendices stay inline; at the user's instruction this amendment only notes it and trims nothing. Moving them to `.claude/contract-history/` (Open Question 14) is still owed and has no block yet.
 
+**Revision 8 (2026-11-03).** The landing halted at gate P7; the remedy and its review are blocks 17 and 18, and the Revision 8 note opens block 17.
+
 ### 12. Cloud agent skill-load fix (`python-ai-developer`)
 
 **Depends on:** 7
@@ -1471,6 +1499,174 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
+### 17. Merge the default branch into the parent branch (`python-ai-developer`)
+
+*Revision 8 (2026-11-03), a remedy sub-task.* The user answered Open Questions 24-28 and the Revision 8 critique on 2026-11-03, and the answers are written in below. The amendment awaits only the user's final approval at `/design-first` Step 3. `Status` stays `approved` in the header for the blocks already delivered. It adds no data shape, mechanism or term. Blocks 1-16 keep their identities and records, and 9 and 10 stay as delivered.
+
+**Why.** Landing run `20261103T101941Z-58fe7b` (`.claude/state/landing/2026-11-01-memory-client-and-cloud-engineering/report.json`) halted at gate P7, `unresolvable-conflict`: "`.claude/registries/JOURNAL.md` conflicts and is neither a union path nor regenerated". Nothing reached `master`. `master` (8ea2dd4, version 0.14.x) gained the records-leftover-cleanup work (#178 and later) after the parent branch (0.12.4) was cut, while block 9 appended to the same registry tails. The t10 review (`pass-with-findings`) also left text fixes W1, W2, I1, I2, I3 and I5 owed before the landing's flip; entries appended after that flip are never offered for capture.
+
+**Conflicting files (computed 2026-11-03, `master` at 8ea2dd4; Open Question 24).** The main session ran `git merge-tree --write-tree --name-only origin/feature/memory-client-and-cloud-engineering origin/master`. It reports conflicts in exactly five files:
+- `.claude/registries/JOURNAL.md`, `.claude/registries/MECHANISMS.md` and `.claude/registries/VOCABULARY.md`. Both sides appended at the end of the Universal tier. In JOURNAL.md, master added "2026-11-02 — A sweep that deletes every proven file..." and this contract added the t5 entry, both after the 2026-11-01 "After merging a base..." entry.
+- `README.md`.
+- `skills/pr-merged/references/contract-completion.md`.
+
+Four files that both sides changed are auto-merged by git with no conflict: `.claude/scripts/pr_merged.py`, `.claude/scripts/tests/test_pr_merged.py`, `skills/flow/SKILL.md` and `skills/pr-merged/SKILL.md`. No manifest conflicts. That conclusion rests on the `merge-tree` result alone. The P7 halt on JOURNAL.md proves nothing about the manifests, for two reasons. With `versionRaise: true`, a manifest conflict is a `version-fields` case, not `halt` (`land_contract.py:1038-1039`). And `plugin.json` and `.cursor-plugin/plugin.json` sort after JOURNAL.md. If `master` moves before block 17 runs, git's own conflict list governs. A conflict in a file not listed below stops the block with `git merge --abort`.
+
+**Version (Open Question 28, accepted).** No conflict with the version rule. The parent side never changed a manifest, and `merge-tree` reports no manifest conflict. So git takes `master`'s 0.14.x into all five entries, and no version file is edited by hand. The sub-task pull request is checked in `parent` mode (`check_version_bump.py:166-174`). That mode allows the base's version (0.12.4) or the version at `merge-base(origin/master, HEAD)`. After the merge, that merge base is the merged `master` commit itself, so 0.14.x is allowed and the check exits 0. It still exits 0 if `master` moves on later. Block 18's pull request is cut from the merged parent, where base and head both hold 0.14.x. The landing then merges `master` again, which is clean or a no-op, and `--raise` writes minor + 1 with patch 0 of `origin/master` (`exact_version`, `:91-97`). That is **0.15.0** while `master` stays on 0.14, and `--exact` checks the same value. A `master` that reaches 0.15 first moves the landing to 0.16.0. The precedent is block 6 of `.claude/concepts/2026-10-31-plugin-owns-hook-mechanism-tests.md` (#183, pull request #187).
+
+**Journal entries for t10 W2.** The user confirmed all eleven, J1-J11 (Open Questions 25 and 26). They take the `/design-first` Step 3 shape.
+
+The t10 review placed these entries in the landing's version-raise commit. Block 17 moves them into its own sub-task commit, for two reasons. The landing halts at P7 before its raise commit exists. And entries appended after the landing's flip are never offered for capture. `raise_manifests` commits only the manifests, so nothing is lost by the move. Source contract for all: `.claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md`. The Trigger is `pre-approval critic` for J1-J10 and `post-impl divergence` for J11. Each title starts `2026-11-02 — `.
+- **J1** (WARN reach) "A rule every session needs goes in a shipped agreement, not a once-run step". Lesson: before putting a standing instruction in an onboarding skill or one design step, check Session-start context delivery and list the routes (direct edit, `/debug`, `/journal-add`, sessions that never design) that would never see it. Apply when: a contract adds a standing instruction to `/auto-improve-finish-install`, one skill step or any once-run path. Tags: agreements, session-start, standing-guidance, reach.
+- **J2** (WARN term collision) "Search a proposed term against agent frontmatter and host docs before adding it". Lesson: if the words already name something else (`memory: project`, the host's "project memory"), rename the term instead of adding "it is not X" to its definition. Apply when: a contract proposes a VOCABULARY term that reuses a word the repository or host already uses. Tags: vocabulary, term-collision, naming, agent-memory.
+- **J3** (WARN `--fix`) "Describe a fixer a skill runs by everything it writes, and keep the skill's confirm-first promise". Lesson: describe `plugin_doctor.py --fix` (or any list-driven fixer) from its own requirement list (`REQUIREMENTS`, `apply_fixes`), and run it only after the user confirms the listed set. Apply when: a contract triggers `--fix` or another fixer that creates every missing item. Tags: plugin-doctor, fix-scope, confirmation, side-effects.
+- **J4** (WARN tests) "Name the tests a fix may change by the state they guard, after reading them". Lesson: before telling an implementer to change tests "around" given lines, read each one; a test that guards a neighbouring invariant (here `disabled`, I-M0) is named as unchangeable. Apply when: a fix block's CONSTRAINTS tell the implementer to change or relax tests by line number. Tags: tests, invariant, fix-scope, line-reference.
+- **J5** (WARN brief on the unconfigured path) "A path that calls a command must say how it finds the command's input". Lesson: when a step calls a command that needs an input (`record --brief`), state on that same path how the input is found and what happens when it is absent; a rule that lives only on a sibling path turns a normal case into a reported failure. Apply when: one branch of a skill step (unconfigured, disabled, error) calls a command whose argument is resolved only on another branch. Tags: skill-steps, missing-input, brief-linkage, degradation.
+- **J6** (WARN Failure Modes) "A revision that adds a path adds its failure modes". Lesson: for each new script call, fixer run or degraded path a revision adds, add a Failure Modes entry whose mitigation cites a mechanism. Apply when: a contract revision adds blocks or Extension Points and leaves `## Failure Modes & Mitigations` unchanged. Tags: failure-modes, amendment, revision, completeness.
+- **J7** (NIT stale lines) "After amending a contract, update every summary of the block graph". Lesson: re-check the header Revision line, the Handoff intro's block count and graph, and the prioritised plan's Depends on against the new blocks. Apply when: a revision adds, removes or re-links handoff blocks. Tags: amendment, summary-drift, handoff-graph.
+- **J8** (NIT scope note) "Edit a reversed sentence where it stands". Lesson: when an amendment reverses an earlier claim, edit that sentence; do not keep it and add a later bullet that contradicts it. Apply when: a revision changes a claim made earlier in the same section. Tags: amendment, self-contradiction, scope-note.
+- **J9** (NIT block 14 scope) "Keep a review-fix block to the review's findings". Lesson: put text for a new requirement in the block that owns the requirement, so each block's review judges one thing. Apply when: one revision adds both review fixes and a new user requirement. Tags: block-scope, review-fix, separation.
+- **J10** (NIT suffix) "A rule titled 'every' must list every line it covers". Lesson: a rule for "every state" or "every printed line" names each line, including failure and skipped lines, and a test pins each. Apply when: a contract adds text to every output line or state of a step. Tags: every-claim, printed-lines, coverage.
+- **J11** (t10 Disposition 7, verbatim from the review artefact) "A 'fails the build' claim must name the workflow that runs the check".
+- No new entry (Open Question 25) for five findings, which re-apply existing lessons or are deferred:
+  - the BLOCKER (re-applies 2026-10-22);
+  - the WARN on the term definition (2026-10-28);
+  - the WARN on "append on every run" (2026-10-04);
+  - the WARN on the I2 reader (2026-10-15);
+  - the budget NIT (deferred, Open Question 14).
+- Critique rounds 1-3 were not journaled. No entries are added for them.
+
+**Deferred review leftovers (Open Question 27).** The t16 review's W1 and I1-I5, and the t10 review's I4 and I6, go into one follow-up stub: `.claude/concepts/followups/2026-11-03-memory-boundary-review-leftovers.followup.md`, `**Issue:** pending`. No block of this contract fixes them.
+
+**Main-session actions, outside any block:**
+- Append the t10 reviewer-verdict line (Disposition 8) to `~/.claude/logs/reviewer-verdicts.jsonl`.
+- In the parent brief, record "no new entry" for the five findings above, and that critique rounds 1-3 were not journaled.
+- Create the follow-up stub named above and open its issue (`/design-first` Step 3.4).
+
+**Depends on:** 9, 10
+
+**Files to touch:**
+- `.claude/registries/JOURNAL.md`
+- `.claude/registries/MECHANISMS.md`
+- `.claude/registries/VOCABULARY.md`
+- `README.md`
+- `skills/pr-merged/references/contract-completion.md`
+- `CONTRIBUTING.md`
+- `skills/auto-improve-finish-install/SKILL.md`
+
+The first five files are the computed conflicts; the last two take text fixes. No test pins the replaced sentences, so the text fixes change no test file. The four auto-merged files are not listed: they keep git's automatic merge and are not edited by hand.
+
+**Pre-written TASK block:**
+```
+TASK: On the sub-task branch (cut from origin/feature/memory-client-and-cloud-engineering), run
+  git fetch origin, then git merge origin/master, and resolve every conflict by hand. Commit the merge on
+  its own. Then, in a second commit, apply the t10 text fixes and the confirmed journal entries.
+  Merge:
+  - Before resolving, list the conflicts (git diff --name-only --diff-filter=U) and quote them. If any
+    conflicting file is not in Files to touch, stop, abort the merge (git merge --abort) and report the
+    list: the contract must be amended first.
+  - JOURNAL.md, MECHANISMS.md, VOCABULARY.md: both sides append at the end of the Universal tier. Keep
+    every entry of both sides, verbatim, once each; never edit, reorder or drop an existing entry. Master's
+    entries go first, then this contract's (precedent: block 6 of
+    .claude/concepts/2026-10-31-plugin-owns-hook-mechanism-tests.md). Keep each file's closing lines once.
+  - skills/pr-merged/references/contract-completion.md: keep both sides' changes, so that both behaviours
+    stay (master's records-leftover steps and this contract's step 5a capture).
+  - Do not edit the four auto-merged files (pr_merged.py, test_pr_merged.py, skills/flow/SKILL.md,
+    skills/pr-merged/SKILL.md). Check only that no function, class or test name is defined twice in
+    them and every import is present; if one is, stop and report it (the contract must be amended).
+  - README.md: keep both sides' sections. Every count (skills, agents, agreements, hooks, test cases of
+    any suite either side changed) is rewritten from the merged tree and from what each suite reports
+    when run; never add the two sides' numbers.
+  Text fixes (second commit). Line numbers are from the parent tip before the merge and will shift in
+  README.md; locate each sentence by its text.
+  - W1, CONTRIBUTING.md:162-163: "A scan in .claude/scripts/tests/test_plugin_text_scans.py enforces it:
+    run it before committing a change to a shipped file. It is not yet run in CI."
+  - I1 and I2: one append-only sub-bullet under the Memory adapter entry of MECHANISMS.md:
+    "**Correction (2026-11-03):** a new bullet registry as a capture source is one pair in the tuple in
+    select_candidates; any other source kind is a new branch there with its own key and provenance rule
+    (there is no source-kind table). The call is bounded by the host's MCP timeout, and by a deadline
+    argument where the shape supports one (v0 sends deadline_seconds: 20)."
+  - I3, in both README.md (~903, "The contract-critic reads it and never appends.") and
+    skills/auto-improve-finish-install/SKILL.md (~292, "The `contract-critic` reads it and never
+    appends."): replace with "The contract-critic appends only its Critique section to the contract
+    under review, and never writes a registry."
+  - I5, README.md:885-886: "With both off, every brief, every Step 1.5 run and every capture step is what
+    it was before they existed. The Project history record rule below applies whatever the switches say."
+  - W2: append to JOURNAL.md, after the merged tail, all eleven entries J1-J11 of block 17, in that
+    order, each in the /design-first Step 3 shape (title "### 2026-11-02 — <title>", then
+    Trigger, Source contract, Lesson, Apply when, Tags lines), J11 verbatim from the t10 artefact's
+    Disposition item 7.
+CONTEXT: concept contract, block 17 (Revision 8 note, conflict list, Version, journal entries); landing
+  report .claude/state/landing/2026-11-01-memory-client-and-cloud-engineering/report.json; the t10 review
+  .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t10-review-documentation-fullstack-code-reviewer.md
+  (W1, W2, I1, I2, I3, I5, Disposition 7).
+FILES: as listed.
+CONSTRAINTS:
+  - A change to any file not listed comes only from master through the merge; resolve nothing else by
+    choosing a side.
+  - Never edit plugin.json, .claude-plugin/plugin.json, .cursor-plugin/plugin.json or
+    .claude-plugin/marketplace.json by hand. The merge brings master's version; the landing raises once.
+  - Registry text names no memory tool literally ("the configured retrieve tool", "the configured
+    capture tool").
+  - No conflict marker may remain in any file (search for "<<<<<<<", "=======" at line start, ">>>>>>>").
+  - Run, and report the exit code and case count of: test_pr_merged.py (on its own; it is large),
+    every .claude/hooks/tests/test_*.py except test_gate_cost.py, test_plugin_text_scans.py,
+    test_registry_entries.py, test_repo_consistency.py, test_memory_boundary.py, test_memory_off_parity.py,
+    test_plugin_manifests.py, test_auto_improve_finish_install.py, test_check_version_bump.py,
+    test_parent_branch_rule_text.py, test_skill_script_lookup.py and test_cleanup_delivered.py (the
+    last three read the merged skills/pr-merged/references/contract-completion.md, skills/flow/SKILL.md
+    and skills/pr-merged/SKILL.md, and pin sentences in them), and
+    py -3 .claude/scripts/check_version_bump.py --base origin/feature/memory-client-and-cloud-engineering
+    --default-branch master --head-ref <this branch>. A failure that also fails on origin/master is
+    reported as such, with the origin/master run quoted, and is not fixed here.
+  - Every command in a form that runs in PowerShell.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
+
+### 18. Review merge and text fixes (`fullstack-code-reviewer`)
+
+**Depends on:** 17
+
+**Files to touch:**
+- `.claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t18-review-merge-and-text-fixes-fullstack-code-reviewer.md`
+
+**Pre-written TASK block:**
+```
+TASK: Review block 17 and write the review artefact.
+CONTEXT: concept contract at .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md (Revision 8, block 17)
+FILES: .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t18-review-merge-and-text-fixes-fullstack-code-reviewer.md
+CONSTRAINTS:
+  - Start from a cold context. Name base..head (the parent tip before the merge, and block 17's head).
+  - Merge: for JOURNAL.md, MECHANISMS.md and VOCABULARY.md, every entry heading of git show
+    origin/master:<path> and of the pre-merge parent tip is present exactly once, unedited, master's
+    first; no conflict marker in any file. Files in block 17's Files to touch are judged on content.
+    Every OTHER file the merge commit changed against the parent tip carries no hand edit, judged by git
+    blob ids, not bytes on disk:
+    - a file only master changed (the manifests included) is identical to its version in the master
+      commit that was merged;
+    - a file both sides changed and git auto-merged (pr_merged.py, test_pr_merged.py,
+      skills/flow/SKILL.md, skills/pr-merged/SKILL.md) is identical to the same path in the tree that
+      git merge-tree --write-tree <pre-merge parent tip> <merged master commit> prints. It cannot equal
+      origin/master, because it holds both sides.
+    No name is defined twice in pr_merged.py or test_pr_merged.py.
+  - Text fixes: W1, I1/I2 (one Correction sub-bullet, append-only), I3 (in both README.md and
+    skills/auto-improve-finish-install/SKILL.md), and I5 read as block 17 states. The JOURNAL.md
+    entries are exactly J1-J11, in that order and in the Step 3 shape. Every README count is true
+    against the merged tree and the suites' own output.
+  - Re-run the suites block 17 lists (including test_parent_branch_rule_text.py,
+    test_skill_script_lookup.py and test_cleanup_delivered.py) and the parent-mode version check; quote exit codes; a failure
+    that also fails on origin/master is reported as pre-existing.
+  - Six fixed sections; the file does not exist yet and you create it. Verdict line alone, exactly one
+    of: "**Verdict:** pass", "**Verdict:** pass-with-findings", "**Verdict:** blocked". Write the Gate
+    Output <artefact stem>.gate.json beside it. Do NOT append to any registry yourself: report a missing
+    append as a finding.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
+
 ---
 
 ## Review checklist (filled in after implementation)
@@ -1577,6 +1773,7 @@ At session start the host loads every skill and agent description. `working-agre
 | P7 | Cloud review gate | 8 | P5-P6 | none | verdict pass (block 8 recorded `blocked`; superseded by P7b) |
 | P7b | Cloud agent skill-load fix and its re-review (Revision 6) | 12, 13 | P6 | none | block 13 verdict pass |
 | P8 | Documentation, registry appends and their review | 9, 10 | P4b, P7b (blocks 13, 14, 15, 16) | documentation that disagrees with the code | reviewer checks each claim against the code |
+| P9 | Merge `master` into the parent branch by hand, the t10 text fixes and the W2 journal entries, and their review (Revision 8) | 17, 18 | P8 | dropping an entry of either side while resolving a registry | every entry of both sides present once; block 18 verdict pass; the landing reruns clean |
 | Later | Token-efficiency fixes; cloud-management MCP adapter | follow-up stub; a new contract | none | none | separate contracts |
 
 ---
@@ -1684,3 +1881,83 @@ At session start the host loads every skill and agent description. `working-agre
 - No test suite was run. Pin compatibility was judged from the test source.
 - CodeGraph tools were not available in this session, so symbols were checked with Grep and Read.
 - North-star alignment was not checked: `.claude/north-stars/` does not exist.
+
+---
+
+## Critique (Revision 8)
+
+**Critic:** contract-critic
+**Date:** 2026-11-03
+**Verdict:** blockers-found
+**Scope:** Revision 8 only: blocks 17 and 18, Open Questions 24-28, the Revision 8 note under Handoff 11, the header Revision line, the Handoff intro and graph, the three Revision 8 lines of `## Lessons referenced` and Appendix C row P9. Checked against `check_version_bump.py`, `land_contract.py`, `pr_merged.derive_subtask_id`, the t10 review artefact and `## Critique (Revision 7)`.
+
+### Findings
+
+- **[BLOCKER] Block 18's merge check fails on a file that auto-merges, and Open Question 24's recommendation would add three more failures.**
+  - **What is wrong:** block 18 requires "every file the merge commit changed against the parent tip is either in block 17's Files to touch or identical to origin/master". A file that both sides changed and git auto-merges is neither. `skills/flow/SKILL.md` is one: the parent changed it in blocks 3 and 4 (this contract `:878`, `:922`), the caller's `git merge-tree` run reports it as auto-merged, and block 17 does not list it. Block 18 therefore cannot return `pass`. Open Question 24 then recommends replacing the conflict part of Files to touch with "exactly the names it prints". `--name-only` prints only the conflicted paths, so that would also drop `pr_merged.py`, `test_pr_merged.py` and `skills/pr-merged/SKILL.md`, which auto-merge, and they would fail the same check. The set block 18 needs is the conflicted files plus every file both sides changed, not the conflicted files alone.
+  - **Prior artifact ignored:** this contract's blocks 3 and 4 Files to touch (`skills/flow/SKILL.md`); `JOURNAL.md` 2026-11-01, "After merging a base that changes the row shape a feature reads, re-check every coverage claim ... against the merged writer" (the merged file holds both sides' changes, so it matches neither side).
+  - **Where in this contract:** `### 18`, CONSTRAINTS, "every file the merge commit changed against the parent tip is either in block 17's Files to touch or identical to origin/master"; `## Open Questions for User` 24, "replaces block 17's 'Files to touch' conflict part with exactly the names it prints".
+  - → Addressed by:
+    - Block 17's Files to touch now lists the five computed conflicts plus `CONTRIBUTING.md` and the finish-install skill. The text fixes change no test.
+    - Block 18 judges listed files on content. Every other changed file must carry no hand edit: a master-only file (the manifests included) equals the merged master commit; an auto-merged both-sided file equals git's own `merge-tree --write-tree` result.
+    - The literal "identical to origin/master" rule for auto-merged files was not used, because it fails by construction.
+    - Open Question 24's recommendation was replaced by the computed answer.
+
+- **[BLOCKER] The contract says `approved` while Open Questions 24-28 are open, and block 17's TASK leaves the answers to the implementer.**
+  - **What is wrong:** this is the same defect as the Revision 7 BLOCKER. Questions 24-28 are unticked. Block 17's TASK still carries the branches the user has not chosen: "skills/auto-improve-finish-install/SKILL.md:292 (the latter only if Open Question 27 says yes)", "the entries J1-J11 the contract's block 17 still lists as confirmed", and "strike the rest here before approval". The dispatch path reads only `Status`, and that already says `approved`, so block 17 could be dispatched with the conditions still in it. `## Lessons referenced` says the 2026-10-22 lesson is "heeded in Revision 8". The TASK text says otherwise.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-22, "An accepted critic WARN or answered Open Question must amend the contract body before approval"; `## Critique (Revision 7)`, first BLOCKER (the same pattern, "the user's answer wins").
+  - **Where in this contract:** `### 17`, TASK, I3 and W2 bullets; header "**Status:** approved" with "**Revision:** 8 (... needs the user's re-approval ...)".
+  - → Addressed by: Open Questions 24-28 are ticked with the user's answers (2026-11-03). Block 17's TASK and notes state the final answers: I3 is fixed in both files, all of J1-J11 are appended, and "only if", "still lists as confirmed" and "strike the rest" are removed. The block 17 Revision 8 note now says the amendment awaits only the final approval.
+
+- **[WARN] Block 17's list of suites leaves out the suites that pin the text of the files being merged.**
+  - **What is wrong:** `test_parent_branch_rule_text.py` pins paragraphs in `skills/pr-merged/references/contract-completion.md` (a conflict resolved by hand) and in `skills/flow/SKILL.md` and `skills/pr-merged/SKILL.md` (auto-merged), at `:201`, `:308-315`, `:336-394`. `test_skill_script_lookup.py` and `test_cleanup_delivered.py` also read these skill files, and master's records-leftover-cleanup work (#178) changed the cleanup path. None of the three is in block 17's run list or block 18's re-run. A hand resolution that breaks a pinned sentence would pass both gates and first surface at the landing's verification.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-15, "A skill that edits a block pinned by a lookup-block test must name that test"; revision-2 critique NIT at this contract `:644`, which names `test_parent_branch_rule_text.py` as pinning these same files.
+  - **Where in this contract:** `### 17`, CONSTRAINTS, "Run, and report the exit code and case count of: test_pr_merged.py ... test_check_version_bump.py".
+  - → Addressed by: `test_parent_branch_rule_text.py`, `test_skill_script_lookup.py` and `test_cleanup_delivered.py` are added to block 17's required suites, noting that they read the three merged skill files. Block 18 re-runs them by name.
+
+- **[WARN] The reasoning that clears the manifests misstates the landing code.**
+  - **What is wrong:** block 17 says no `unionPaths` or `regenerators` are configured, "so every conflict is `halt`", and that paths sorting before JOURNAL.md "therefore do not conflict". Both steps are false. `versionRaise` is `true` (`.claude/work-item-conventions.json:89`), so a conflicting manifest is classed `version-fields`, not `halt` (`land_contract.py:1038-1039`). And `plugin.json` and `.cursor-plugin/plugin.json` sort after `.claude/registries/JOURNAL.md`, so the halt on JOURNAL.md does not clear them. The conclusion (no manifest conflicts) agrees with the caller's `merge-tree` run, but only by chance, and Open Question 28 relies on the same premise ("the parent side never changed a manifest").
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-04, "Check a documented guard behaviour against the guard's code"; `land_contract.py:1028-1040`.
+  - **Where in this contract:** `### 17`, "Conflicting files", "Cleared: every path that sorts before it. ... so every conflict is `halt` ... The manifests ... therefore do not conflict."
+  - → Addressed by: the "Cleared" reasoning is removed. Block 17 now says that `versionRaise: true` makes a manifest conflict `version-fields`, and that `plugin.json` and `.cursor-plugin/plugin.json` sort after JOURNAL.md, so the P7 halt proves nothing about them. "No manifest conflict" rests only on the computed `merge-tree` result, and the Version paragraph cites that result.
+
+- **[WARN] Revision 8 adds a hand-merge path but no failure modes and no uncertain assumption.**
+  - **What is wrong:** `## Failure Modes & Mitigations` is unchanged since Revision 7. It has nothing on these failures:
+    - a registry entry dropped or duplicated while resolving by hand;
+    - an auto-merged script that defines a name twice or drops an import;
+    - the landing halting again at P7 because `master` appended to a registry tail after block 17;
+    - README counts that are wrong after the merge.
+    These appear only as TASK constraints and as Appendix C's Risk cell. `## Uncertain Assumptions` also has no entry for the conflict list, which the contract itself calls derived rather than computed, or for "master (8ea2dd4, version 0.14.x)". The architect's own proposed J6 is exactly this lesson.
+  - **Prior artifact ignored:** `## Critique (Revision 7)`, WARN "Failure Modes has no entry for anything Revision 7 adds" (this contract `:1800`); block 17 J6.
+  - **Where in this contract:** `## Failure Modes & Mitigations` (no Revision 8 entry); `### 17`, "Conflicting files (derived ...)".
+  - → Addressed by: four Revision 8 Failure Modes entries (a dropped or duplicated registry entry; a name defined twice or a dropped import in an auto-merged script; a second P7 halt when `master` moves; wrong README counts), each with a mitigation citing a mechanism; an `ASSUMED` (Revision 8) entry in Uncertain Assumptions for `master` at 8ea2dd4 with version 0.14.x; and the conflict list is now marked computed.
+
+- **[NIT] The dependency graph list leaves out blocks 17 and 18.** The intro sentence says "graph 9,10→17→18", but the "true graph" bullets (`:760-762`) end at "9,14,15,16→10". This is the stale-summary class of proposed J7.
+  - → Addressed by: the graph bullets gain "9,10→17→18 (Revision 8)".
+- **[NIT] The text-fix line numbers are from before the merge.** README `:885-886` and `:903` are correct on the parent tip, but the second commit runs after merging a README that conflicts, so they will shift. The quoted replacement sentences still locate the text.
+  - → Addressed by: block 17's TASK says the line numbers are from before the merge and will shift in README.md, so each sentence is located by its text. The I3 bullet quotes both old sentences.
+- **[NIT] Block 17 moves the W2 append without saying so.** t10 Disposition 2 and W2's Fix put the entries "in the same commit as the landing's version raise". Block 17 appends them in a sub-task commit instead. That works, because `raise_manifests` commits only the manifests, with `--no-verify`. The contract does not state the move or the reason for it.
+  - → Addressed by: block 17's "Journal entries" now states the move and the reasons. The landing halts at P7 before its raise commit exists. Entries appended after the flip are never offered for capture. `raise_manifests` commits only the manifests.
+
+### Checked, no finding
+
+- **Version (Open Question 28).** Parent mode (`check_version_bump.py:166-174`) allows the head's version when it matches the version at `--base` or at `merge-base(origin/master, HEAD)`. After the merge, that merge base is the merged `origin/master` tip, so 0.14.x passes for block 17 (base 0.12.4) and for block 18 (base 0.14.x). `--raise` writes `max(default) minor + 1, patch 0` (`:91-97`, `:150-157`), which is 0.15.0 while `master` is on 0.14.x, and `--exact` checks the same value. The answer is right. The worktree's `plugin.json` reads 0.12.4. No block lists a version file, and the `**Work Item Brief:**` header is present.
+- **The conflicted files are covered.** All five paths the caller's `merge-tree` run reports as conflicted are in block 17's Files to touch, so the "abort if a conflict is unlisted" stop will not trip. The conflict-hand edits are all `.md`, and `concept-gate.py` allows `.md`. `merge_direction.py` judges pull requests only, not a local `git merge`.
+- **Block 18's artefact name maps through `derive_subtask_id`.** `pr_merged.py:265-273` turns "Review merge and text fixes (`fullstack-code-reviewer`)" into `t18-review-merge-and-text-fixes`. The stem `t18-review-merge-and-text-fixes-fullstack-code-reviewer` follows the t10 pattern.
+- **J1-J10 match the Revision 7 dispositions.** Revision 7 had 1 BLOCKER, 9 WARNs and 5 NITs. J1 (reach), J2 (term collision), J3 (`--fix`), J4 (tests), J5 (brief on unconfigured) and J6 (Failure Modes) cover the six WARNs no journal entry held. The other three WARNs re-applied 2026-10-28, 2026-10-04 and 2026-10-15, and the BLOCKER re-applied 2026-10-22, all of which exist in `JOURNAL.md`. J7-J10 cover four NITs, and the budget NIT is deferred under Open Question 14. That accounts for all 15 findings, and each lesson matches its finding's text. J11 is verbatim from t10 Disposition 7 (title, Trigger `post-impl divergence`). The J1-J10 Trigger `pre-approval critic` matches the `JOURNAL.md:5-8` "Maintained by" header.
+- **The text fixes match their sources.** W1, I1/I2, I3 and I5 match the t10 Fix lines. `CONTRIBUTING.md:162`, `README.md:885`, `README.md:903` and `skills/auto-improve-finish-install/SKILL.md:292` hold the quoted false sentences on the parent tip. No test pins those sentences. `**Correction (` sub-bullets are an existing form in `MECHANISMS.md` (8 uses).
+
+### Applicable journal entries
+
+- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — violated, see the second BLOCKER.
+- **2026-10-15 — A skill that edits a block pinned by a lookup-block test must name that test** — not addressed. The Apply-when matches only partly, because a hand merge need not move a lookup block, so this is a WARN.
+- **2026-10-04 — Check a documented guard behaviour against the guard's code** — violated by the conflict-clearing reasoning (WARN).
+- **2026-11-01 — After merging a base that changes the row shape a feature reads ...** — heeded for README counts and suites. Not heeded by block 18's file-scope rule (first BLOCKER).
+- **2026-10-17 — Judge "identical to master" by git's view, not raw bytes** — heeded by block 18 (`git show origin/master:<path>`).
+
+### What the critic did not check
+
+- No shell in this session. I did not run `git merge-tree`, `pr_merged.py --contract <slug> --status --json` or any suite, so the conflict and auto-merge sets are the caller's, cross-checked only against this contract's block 3 and 4 file lists. The 0.14.x on `master` and the landing report under `.claude/state/landing/` (not present in this worktree) are unverified.
+- CodeGraph was not available. I checked symbols with Grep and Read.
+- North-star alignment: `.claude/north-stars/` does not exist.
+
