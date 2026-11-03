@@ -302,6 +302,20 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.14.0 (issue #178):** `/pr-merged` no longer leaves its completion records behind as
+untracked files in the tree it ran from. After the records are pushed to the stable branch
+`docs/<contract-slug>-records`, the new `pr_merged.py --sweep-records` deletes each starting-tree
+copy that is identical to a copy on `origin/<default>` (or on that branch's tip while its pull
+request is open), and keeps and names every other copy. The records step is
+`/pr-merged --records <contract-slug>`; every records push to the stable branch now runs without a
+prompt, and a closed or merged records pull request is re-opened as a draft from the same branch.
+`--status --json` gains `records_reading`, `records_unpushed`, `records_differing`,
+`records_stranded` and `records_untracked`; the Next Command puts the records step first, and
+`--dispatch` refuses with exit 12 while records are unpushed or cannot be read, so `/advance` never
+dispatches on top of them. Both skills end with one `tree <root>: clean` line per tree touched.
+**A project that vendors `pr_merged.py` must sync it (`tools/sync-plugin.cmd`)**, or the skills halt
+with "this `pr_merged.py` predates 0.14.0". The manifests read 0.14.0.
+
 **Changed in 0.12.5 (tests only):** the installer, guard-deference and launcher test files now pin the
 Project hook launcher row form (`py -3 -c <source> <class> <script>`) that 0.12.3 started writing, and
 one new pair of rows pins the earlier-form fallback when no launcher is available. No shipped behaviour
