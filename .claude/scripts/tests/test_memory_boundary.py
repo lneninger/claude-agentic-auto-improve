@@ -15,6 +15,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -475,9 +476,12 @@ class CaptureBase(Base):
         return self.json_file(p, "report.json", {"contract": contract, "completion": {"verdict": verdict},
                                                  "written_files": list(written)})
 
-    def candidates(self, p, **report_kw):
+    def candidates(self, p, default_branch="master", **report_kw):
+        # The flag is passed by default: the fixtures are not git repositories, and without the flag the command
+        # reads the project's own origin/HEAD (I2). default_branch=None leaves the flag out.
+        flag = ("--default-branch", default_branch) if default_branch is not None else ()
         code, data, out = run("capture-candidates", "--project", p.root, "--contract", SLUG,
-                              "--run-report", self.report(p, **report_kw))
+                              "--run-report", self.report(p, **report_kw), *flag)
         return code, data, out
 
     def by_title(self, data, kind=None):
@@ -505,7 +509,8 @@ class CaptureRefusalTests(CaptureBase):
     def test_an_unreadable_report_is_not_flipped(self):
         p = self.fixture()
         f = p.write(".scratch/bad.json", "not json")
-        code, data, _ = run("capture-candidates", "--project", p.root, "--contract", SLUG, "--run-report", f)
+        code, data, _ = run("capture-candidates", "--project", p.root, "--contract", SLUG, "--run-report", f,
+                            "--default-branch", "master")
         self.assertEqual((code, data["refused"]), (1, "not-flipped"))
 
     def test_no_linked_brief_is_brief_not_carried(self):
@@ -676,6 +681,176 @@ class CaptureCandidateTests(CaptureBase):
         self.assertEqual(data["candidates"], [])
 
 
+def journal_with(*entries):
+    """A JOURNAL naming the widget contract, one entry per (title, trigger)."""
+    body = "# Journal\n\n## Universal lessons (apply to every project)\n"
+    for title, trigger in entries:
+        body += ("\n### 2026-11-01 — %s\n- **Trigger:** %s\n- **Source contract:** .claude/concepts/%s.md\n"
+                 % (title, trigger, SLUG))
+    return body
+
+
+def old_trigger_mapping(trigger):
+    """The substring rule block 5 shipped, kept here only to prove the current journal maps the same way."""
+    if "pre-approval" in trigger:
+        return "user-decision"
+    if "post-impl" in trigger:
+        return "source-code-fact"
+    return "ai-hypothesis" if ("manual" in trigger or "post-approval" in trigger) else "unknown-trigger"
+
+
+class TriggerMappingTests(CaptureBase):
+    def offered_and_skipped(self, *entries):
+        p = self.fixture()
+        p.write(".claude/registries/JOURNAL.md", journal_with(*entries))
+        code, data, _ = self.candidates(p)
+        self.assertEqual(code, 0)
+        offered = {c["source_ref"]["title"]: c["provenance"] for c in data["candidates"]
+                   if c["source_kind"] == "journal-entry"}
+        return offered, {n["title"]: n["reason"] for n in data["not_offered"]}
+
+    def test_each_canonical_trigger_maps_as_the_table_says(self):
+        offered, skipped = self.offered_and_skipped(
+            ("A", "pre-approval critic"), ("B", "post-impl divergence"), ("C", "manual"), ("D", "post-approval"))
+        self.assertEqual(offered, {"A": "user-decision", "B": "source-code-fact"})
+        self.assertEqual(skipped, {"C": "ai-hypothesis", "D": "ai-hypothesis"})
+
+    def test_the_whole_value_is_matched_trimmed_case_folded_and_without_surrounding_backticks(self):
+        offered, skipped = self.offered_and_skipped(
+            ("A", "`Pre-Approval Critic`"), ("B", "  POST-IMPL DIVERGENCE  "), ("C", "`manual`"))
+        self.assertEqual(offered, {"A": "user-decision", "B": "source-code-fact"})
+        self.assertEqual(skipped, {"C": "ai-hypothesis"})
+
+    def test_a_compound_trigger_is_skipped_and_never_offered(self):
+        offered, skipped = self.offered_and_skipped(
+            ("A", "manual (follow-up to a pre-approval critic finding)"),
+            ("B", "post-approval, found after post-impl review"),
+            ("C", "pre-approval critic and more"), ("D", "something else"))
+        self.assertEqual(offered, {})
+        self.assertEqual(skipped, {"A": "unknown-trigger", "B": "unknown-trigger", "C": "unknown-trigger",
+                                   "D": "unknown-trigger"})
+
+    def test_every_entry_of_the_current_journal_maps_as_it_did(self):
+        text = (SCRIPTS_DIR.parent / "registries" / "JOURNAL.md").read_text(encoding="utf-8")
+        entries = mb._GRD["journal_entries"](text)
+        self.assertGreater(len(entries), 5, "the loop must not be vacuous")
+        for entry in entries:
+            old = old_trigger_mapping(entry["trigger"])
+            provenance, reason = mb.trigger_mapping(entry["trigger"])
+            self.assertEqual(provenance or reason, old, entry["title"])
+
+
+class EntryEndTests(CaptureBase):
+    def test_a_note_paragraph_after_the_last_bullet_does_not_make_it_a_candidate(self):
+        p = self.fixture()
+        p.write(".claude/registries/MECHANISMS.md",
+                "# Mechanisms\n\n## Universal Patterns (cross-project)\n\n"
+                "- **Last bullet** says nothing about the contract.\n"
+                "  A wrapped line that stays part of it.\n\n"
+                "Note: the widget design is in `.claude/concepts/%s.md`.\n\n"
+                "- **Wrapped naming** names it on an indented line\n  .claude/concepts/%s.md\n" % (SLUG, SLUG))
+        _, data, _ = self.candidates(p)
+        titles = {c["source_ref"]["title"] for c in data["candidates"] if c["source_kind"] == "mechanism-entry"}
+        self.assertNotIn("Last bullet", titles)
+        self.assertIn("Wrapped naming", titles)
+
+
+def git(root, *argv):
+    subprocess.run(["git", "-C", str(root), *argv], check=True, capture_output=True)
+
+
+PARENT_BRIEFS = {
+    # Under default "main": the declared base is the default, so no parent is found and the one parentless brief
+    # (P) is linked. Under a wrongly assumed "master" the declared base "main" would make M the parent.
+    "p.md": ("---\nid: 7\ntitle: P\ncontract: .claude/concepts/%s.md\nstatus: designing\nbranch: task/p\n---\n\n# P\n"
+             % SLUG),
+    "m.md": ("---\nid: 5\ntitle: M\ncontract: .claude/concepts/%s.md\nstatus: designing\nbranch: main\n"
+             "parent_issue: 5\n---\n\n# M\n" % SLUG),
+    "x.md": ("---\nid: 6\ntitle: X\ncontract: .claude/concepts/%s.md\nstatus: designing\nbranch: task/x\n"
+             "base: main\nparent_issue: 5\n---\n\n# X\n" % SLUG),
+}
+
+
+class DefaultBranchTests(CaptureBase):
+    def several_briefs(self):
+        p = self.fixture(brief=None, contract=False)
+        p.write(".claude/concepts/%s.md" % SLUG, "# Contract\n")
+        for name, text in PARENT_BRIEFS.items():
+            p.write(".claude/work-items/" + name, text)
+        git(p.root, "init", "-q")
+        return p
+
+    def run_elsewhere(self, p, default_branch):
+        elsewhere = Path(tempfile.mkdtemp(prefix="memory-boundary-cwd-"))
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        here = os.getcwd()
+        os.chdir(elsewhere)
+        try:
+            return self.candidates(p, default_branch=default_branch, written=(".claude/work-items/p.md",))
+        finally:
+            os.chdir(here)
+
+    def test_the_projects_own_origin_head_is_read_never_the_working_directory(self):
+        p = self.several_briefs()
+        git(p.root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        code, data, _ = self.run_elsewhere(p, None)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["brief"], ".claude/work-items/p.md")
+
+    def test_no_origin_head_and_no_flag_refuses_before_anything_is_offered(self):
+        p = self.several_briefs()
+        code, data, _ = self.run_elsewhere(p, None)
+        self.assertEqual((code, data["refused"]), (1, "default-branch-unknown"))
+        self.assertIn("--default-branch", data["detail"])
+        self.assertNotIn("candidates", data)
+
+    def test_an_explicit_default_branch_still_wins(self):
+        p = self.several_briefs()
+        git(p.root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        # told "master", the declared base "main" is a parent branch and M is its parent brief
+        code, data, _ = self.run_elsewhere(p, "master")
+        self.assertEqual((code, data["refused"]), (1, "brief-not-carried"), "M is linked, and P is the carried file")
+        code, data, _ = self.candidates(p, default_branch="main", written=(".claude/work-items/p.md",))
+        self.assertEqual((code, data["brief"]), (0, ".claude/work-items/p.md"))
+
+
+class SourceRefObjectTests(CaptureBase):
+    def test_a_candidates_own_source_ref_object_renders_file_colon_line_in_a_receipt(self):
+        p = self.fixture()
+        _, data, _ = self.candidates(p)
+        by_title = {c["source_ref"]["title"]: c for c in data["candidates"]}
+        sent, unsent = by_title["Critic lesson"], by_title["Widget term"]
+        receipts = self.json_file(p, "receipts.json", {"receipts": [
+            {"key": sent["key"], "source_ref": sent["source_ref"], "captured": True, "id": "c-1", "version": "1"},
+            {"key": unsent["key"], "source_ref": unsent["source_ref"], "captured": False, "reason": "declined"}]})
+        code, out, _ = run("record", "--project", p.root, "--brief", p.root / BRIEF_REL, "--outcome", receipts,
+                           "--receipts", "--run-report", self.report(p))
+        self.assertEqual(code, 0, out)
+        lines = p.read(BRIEF_REL).decode("utf-8").splitlines()
+        captured = [l for l in lines if l.startswith("Captured:")]
+        not_sent = [l for l in lines if l.startswith("Not sent:")]
+        self.assertEqual(captured, ["Captured: %s | %s:%s | c-1@1 | %s" % (
+            sent["key"], sent["source_ref"]["file"], sent["source_ref"]["line"], mb.today())])
+        self.assertEqual(not_sent, ["Not sent: %s | %s:%s | (declined) | %s" % (
+            unsent["key"], unsent["source_ref"]["file"], unsent["source_ref"]["line"], mb.today())])
+
+    def test_the_object_form_is_cleaned_part_by_part(self):
+        line, dropped = mb.receipt_line({"key": "a" * 40, "captured": False, "reason": "r",
+                                         "source_ref": {"file": "f.md\n## X|y", "line": "3\n4"}}, set())
+        self.assertFalse(dropped)
+        self.assertNotIn("\n", line)
+        self.assertIn("| f.md ## X/y: |", line, "an unsafe line part is dropped, the file is cleaned")
+
+    def test_a_string_source_ref_is_still_accepted(self):
+        line, _ = mb.receipt_line({"key": "a" * 40, "captured": False, "reason": "r", "source_ref": "f.md:9"}, set())
+        self.assertIn("| f.md:9 |", line)
+
+    def test_capture_request_and_receipt_line_share_one_rendering(self):
+        ref = {"file": "f.md", "line": 3, "title": "T", "date": None}
+        self.assertEqual(mb.source_ref_text(ref), "f.md:3")
+        self.assertEqual(mb.source_ref_text("f.md:3"), "f.md:3")
+
+
 # ------------------------------------------------------------------------------------------ capture-request
 def candidate(**over):
     base = {"source_kind": "journal-entry", "key": "a" * 40, "source_ref": {"file": "f.md", "line": 3, "title": "T",
@@ -793,10 +968,55 @@ class RecordTests(CaptureBase):
         self.assertEqual(p.read(BRIEF_REL).decode("utf-8").count("## Memory used"), 1)
         self.assertEqual(p.read(BRIEF_REL).decode("utf-8").count("Retrieved: m-1@3"), 1)
 
-    def test_unavailable_and_unconfigured_states_are_recorded(self):
+    def test_the_unavailable_state_is_recorded_with_the_outcomes_reason(self):
         p = self.fixture()
         self.record(p, self.outcome(p, state="unavailable", reason="timeout", retrieved=[], reported=[]))
         self.assertIn("Memory: unavailable (timeout)", p.read(BRIEF_REL).decode("utf-8"))
+
+    def unconfigured(self):
+        return self.fixture(slots=dict(FULL_SLOTS, **{"memory.shape": "`nope`"}))
+
+    def test_the_unconfigured_state_is_recorded_as_one_line_from_the_profile(self):
+        p = self.unconfigured()
+        before = p.read(BRIEF_REL)
+        code, data, _ = self.record(p, self.outcome(p, state="unconfigured"))
+        self.assertEqual(code, 0, data)
+        after = p.read(BRIEF_REL)
+        section = after.decode("utf-8").split("## Memory used\n", 1)[1].splitlines()
+        self.assertEqual(section, ["Memory: unconfigured (shape-unknown) | 2026-11-02"])
+        frontmatter = b"---\n" + before.split(b"---\n", 2)[1] + b"---\n"
+        self.assertTrue(after.startswith(frontmatter), "the frontmatter bytes are unchanged")
+        self.assertTrue(after.startswith(before.rstrip(b"\n")), "the body before the section is unchanged")
+
+    def test_the_unconfigured_state_ignores_retrieved_items_and_the_outcomes_own_reason(self):
+        p = self.unconfigured()
+        # the default outcome carries one applies item, one does-not-apply item and one reported entry
+        self.record(p, self.outcome(p, state="unavailable", reason="timeout"))
+        text = p.read(BRIEF_REL).decode("utf-8")
+        self.assertIn("Memory: unconfigured (shape-unknown) | 2026-11-02", text)
+        self.assertNotIn("Retrieved:", text)
+        self.assertNotIn("Reported:", text)
+        self.assertNotIn("timeout", text, "the reason comes from the profile, never from the outcome")
+
+    def test_the_unconfigured_state_refuses_receipts_as_not_enabled(self):
+        p = self.unconfigured()
+        before = p.read(BRIEF_REL)
+        receipts = self.json_file(p, "receipts.json", {"receipts": [
+            {"key": "b" * 40, "source_ref": "f.md:1", "captured": True, "id": "c-1", "version": "1"}]})
+        code, data, _ = self.record(p, receipts, "--receipts", "--run-report", self.report(p))
+        self.assertEqual((code, data["refused"]), (1, "not-enabled"))
+        self.assertEqual(p.read(BRIEF_REL), before)
+
+    def test_the_unconfigured_state_keeps_receipt_lines_already_on_the_brief(self):
+        p = self.fixture()
+        receipts = self.json_file(p, "receipts.json", {"receipts": [
+            {"key": "b" * 40, "source_ref": "f.md:1", "captured": True, "id": "c-1", "version": "1"}]})
+        self.record(p, receipts, "--receipts", "--run-report", self.report(p))
+        p.write(".claude/project-profile.md", profile_text(dict(FULL_SLOTS, **{"memory.shape": "`nope`"})))
+        self.record(p, self.outcome(p))
+        text = p.read(BRIEF_REL).decode("utf-8")
+        self.assertIn("Memory: unconfigured (shape-unknown)", text)
+        self.assertIn("Captured: " + "b" * 40, text)
 
     def test_a_rewritten_section_keeps_existing_receipt_lines(self):
         p = self.fixture()
@@ -952,6 +1172,27 @@ class ChangedItemsTests(Base):
     def test_items_not_returned_are_not_compared(self):
         _, data, _ = self.changed([])
         self.assertEqual(data["notices"], [])
+
+    def test_a_raw_item_with_an_invalid_scope_raises_no_notice(self):
+        _, data, _ = self.changed([item(id="m-1", version="4", scope="NOT-A-SCOPE")])
+        self.assertEqual(data["notices"], [], "normalise would have rejected it, so it cannot raise a notice")
+
+    def test_an_integer_version_equal_to_the_recorded_string_raises_no_notice(self):
+        _, data, _ = self.changed([item(id="m-2", version=1)])
+        self.assertEqual(data["notices"], [])
+
+    def test_a_notice_carries_the_normalised_version_string(self):
+        _, data, _ = self.changed([item(id="m-2", version=2)])
+        self.assertEqual([(n["recorded_version"], n["current_version"]) for n in data["notices"]], [("1", "2")])
+
+    def test_normalised_output_fed_to_changed_items_gives_the_same_notices_as_the_raw_response(self):
+        raw = {"items": [item(id="m-1", version="4"), item(id="m-2", version=1, scope="bad"),
+                         item(id="m-5", version="1", status="conflicting", title="x\ny")]}
+        _, normalised, _ = run("normalise", "--project", self.p.root, "--input", self.json_file(self.p, "raw.json", raw))
+        via_normalise = run("changed-items", "--project", self.p.root,
+                            "--input", self.json_file(self.p, "n.json", normalised))[1]
+        direct = run("changed-items", "--project", self.p.root, "--input", self.json_file(self.p, "r.json", raw))[1]
+        self.assertEqual(via_normalise, direct)
 
     def test_no_briefs_no_notices(self):
         p = self.project()
