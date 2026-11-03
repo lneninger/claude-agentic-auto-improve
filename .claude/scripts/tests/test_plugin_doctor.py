@@ -931,6 +931,13 @@ REPOSITORY_LAUNCHER_ROWS = [
 
 class TestDriftLauncherRows(DriftCase):
     def launch_register(self, event, script, *, hook_class="warn", matcher="Edit|Write", extras=(), python3=False):
+        # Fixture only (Revision 20, BL, A1): the row's SCRIPT exists in the project's hooks folder, because a
+        # launcher row is judged by its script (Revision 19, BF) and a row to a missing script is a
+        # dangling-hook-row finding, which these Effective-hook tests are not about. The gate argument and
+        # _gate_launch.py are deliberately not written: a launcher row is judged by its script only. Narrower than
+        # DriftWorld.materialize_rows on purpose.
+        if not (self.w.project / ".claude" / "hooks" / script).exists():
+            self.w.project_put(".claude/hooks/" + script, "# %s\n" % script)
         row = launcher_row(script, hook_class, *extras, python3=python3)
         self.w.project_settings.setdefault("hooks", {}).setdefault(event, []).append(
             {"matcher": matcher, "hooks": [row]})

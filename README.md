@@ -302,6 +302,13 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.14.4 (tests only):** 14 older test cases are repaired ahead of the launcher writer
+refusal. Two fixtures change with no rule change: the doctor suite's launcher-row helper now writes
+each row's script, and the installer suite's vendored consumer copies the real `_project_paths.py`.
+One rule changes: a launcher row whose script is deleted now gives exactly one dangling-hook-row
+finding (its four script-deleted subtests are red until the writer refusal merges). No shipped
+behaviour changed. The manifests read 0.14.4.
+
 **Changed in 0.14.1 (tests only):** the installer suite's insertion-point rule is narrower: a changed
 line passes only when one inserted run is a bare comma or holds a whole added row, so a script name
 already on a line no longer vouches for a whitespace re-layout of it. New rows (red until the next
