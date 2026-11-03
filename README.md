@@ -232,8 +232,9 @@ prompt. Start a new session afterwards. The hook's optional leftovers,
 `.claude/state/plain-language-guard-<session>.json` and `.claude/logs/plain-language-guard.log`,
 are never read again and you may delete them by hand. Since 0.12.4,
 `plugin_doctor.py --drift` reports such a row as `dangling-hook-row` when it is an old
-exec-form row (written before 0.12.3) or a hand-written row that plainly launches a Python
-script; a Project hook launcher row is skipped (see the `--drift` paragraph).
+exec-form row (written before 0.12.3), a hand-written row that plainly launches a Python
+script, or, since 0.14.3, a Project hook launcher row whose script is in none of the launcher's
+folders (see the `--drift` paragraph).
 
 **Changed in 0.9.21:** `architecture-guard.py` knows a component without view encapsulation
 (`ViewEncapsulation.None`): `:host` matches nothing there, so it warns about a `:host` rule and
@@ -301,6 +302,24 @@ measured once, on one Windows workstation, for issue #84, and was not measured a
 the add-on registers no row on any event that runs per prompt, so no program starts for Angular
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
+
+**Changed in 0.14.3 (the settings writer refuses without the Project hook launcher):** four changes.
+
+- **The writer refuses instead of falling back.** When the hooks folder beside the scripts has no
+  usable `_project_paths.py` with the launcher, the vendored hooks install and every add-on install
+  that writes a row refuse with `project-hook-launcher-missing` (exit 3), in the preview and in the
+  apply, before `settings.json` is read for writing. Nothing is written and no backup is made. The
+  earlier-form fallback and its preview note are gone. Bring the project's hooks folder to the same
+  release as the scripts, then run the install again.
+- **`_claude_paths` raises `ImportError` for a hooks folder from before the launcher.** The message
+  names that `_project_paths.py` and each missing name, so the callers that guard the import
+  (`plugin_doctor.py`, `pr_merged.py`) degrade instead of failing with `AttributeError`.
+- **The `_launcher_api()` docstring is true.** A failed import is retried on every call, a successful
+  one stays loaded for the life of the process, and `None` makes the install refuse.
+- **`plugin_doctor.py --drift` reads launcher rows.** A launcher row whose script is in none of the
+  launcher's folders is a `dangling-hook-row`, like an old-form row. No new finding kind.
+
+The manifests read 0.14.3.
 
 **Changed in 0.14.1 (tests only):** the installer suite's insertion-point rule is narrower: a changed
 line passes only when one inserted run is a bare comma or holds a whole added row, so a script name
@@ -577,8 +596,14 @@ version (`v1`). A release that changes the text raises it, and until a project's
 the two guards both run. The writer never rewrites a row you already have; `plugin_doctor.py --drift`
 reads a launcher row as the file it launches, so it still reports a hook registered on both sides.
 If the scripts are run from a copy whose `_project_paths.py` has no launcher (a stub, or a vendored
-copy from before 0.12.3), the writer falls back to the earlier form that names
-`${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>` and says so in the preview's notes.
+copy from before 0.12.3), the vendored hooks install and every add-on install that writes a row
+refuse, in the preview and in the apply, with `project-hook-launcher-missing` (exit 3). That is so
+whatever the plan would add, because without the launcher the writer cannot read a launcher row
+you already have. The message names `<project>/.claude/hooks/_project_paths.py`; bring the hooks
+folder to the same release as the scripts and run the install again. The settings file and its
+folder stay as they were, and no backup is written. Since 0.14.3 the writer no longer falls back to
+the earlier form that names `${CLAUDE_PROJECT_DIR}/.claude/hooks/<file>`. It still reads such a row
+you wrote by hand or an older release wrote, and it still never removes or rewrites a row.
 
 **Limits.** These are known and accepted.
 
@@ -1098,9 +1123,13 @@ counting it.
 `settings.local.json` that launches a `.py` file that is not on disk (for a `gate-launch.py` row,
 also the launcher's `_gate_launch.py` body and the gate argument). This is not drift, because no
 plugin copy is compared. It covers rows written before 0.12.3 (the old exec-form rows) and
-hand-written rows that plainly launch a Python script; Project hook launcher rows (what the
-installer writes since 0.12.3) are skipped, because the launcher falls back on its own when a
-project file is missing. It reads the project alone, so it is listed even when the comparison
+hand-written rows that plainly launch a Python script. Since 0.14.3 it also covers Project hook
+launcher rows (what the installer writes since 0.12.3): a launcher row is dangling when its script is
+a file in none of the folders the launcher tries (the project's `.claude/hooks/`, then the main
+checkout's when the project folder is a worktree), and it gives the same finding as an old-form row.
+The row is read by the launcher's own reader, so a launcher row that reader does not recognise (an
+older program text, or scripts run beside a hooks folder from before the launcher) is handled as
+before. It reads the project alone, so it is listed even when the comparison
 cannot run and the run exits `4`. The finding path is
 `<layer>:<event>:<matcher>:<role>:<path as written>`, and its remedy is: restore the file if the
 plugin still ships it, otherwise remove the row. The doctor never edits a settings file. Paths

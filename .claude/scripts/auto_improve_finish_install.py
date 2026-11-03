@@ -55,9 +55,11 @@ former name, in every form an older release wrote.
 The ``addon`` subcommand installs one opt-in add-on (a folder under ``.claude/addons/`` in the plugin)
 into the project: it copies the add-on's hook files, rule documents and the helper files its ``addon.json``
 names, registers the documents in the project profile's ``review.documents`` slot, and writes the
-manifest's registration rows into the project's settings.json in exec form, through the same preview,
-plan hash, backup and atomic writer as ``hooks``. It never removes a row or a file and never overwrites a
-file that differs. A hook the manifest lists under ``disabled`` is never copied and never registered; a
+manifest's registration rows into the project's settings.json as Project hook launcher rows, through the same
+preview, plan hash, backup and atomic writer as ``hooks``. It never removes a row or a file and never overwrites a
+file that differs. When the hooks folder beside these scripts has no usable ``_project_paths.py`` (the launcher is
+unavailable), both ``hooks`` and an ``addon`` install that writes a row refuse as ``project-hook-launcher-missing``
+(exit 3) in the preview and in the apply, and write nothing. A hook the manifest lists under ``disabled`` is never copied and never registered; a
 project that still carries one (under its current or a former name) is refused as ``disabled-hook-present``.
 
 An add-on whose manifest names a ``stylesheet_snippet`` also takes ``--stylesheet <relative path>`` (repeatable):
@@ -103,14 +105,19 @@ def _launcher_api() -> Optional[Any]:
 
     Imported at call time, like every other locator: a copy of these scripts whose hooks folder is a stub
     (``import sys; sys.exit(0)``) or an older vendored copy without the launcher must not fail at import.
-    ``SystemExit`` is caught for that reason only. The result is never cached, so a test that swaps the
-    hooks folder sees the swap."""
+    ``ImportError`` covers an older ``_project_paths.py`` that lacks the five launcher names, because
+    ``_claude_paths`` raises it for exactly that; ``SystemExit`` is caught for the stub only.
+
+    This function keeps no cache of its own. A failed import is retried on every call, because Python does
+    not keep a module whose import raised. A successful import stays in ``sys.modules`` for the life of the
+    process, so a test that swaps the hooks folder after one success needs a child process to see the swap.
+
+    ``None`` makes the install refuse: the hooks install and every add-on install that writes a row return
+    the ``project-hook-launcher-missing`` refusal, because the writer never writes a row without the
+    launcher and the identity reader cannot read a launcher row without it."""
     try:
         import _claude_paths
-        for name in ("PROJECT_HOOK_LAUNCHER_SOURCE", "HOOK_CLASS_BLOCK", "HOOK_CLASS_WARN",
-                     "project_hook_launcher_parts", "project_hook_launcher_row"):
-            getattr(_claude_paths, name)
-    except (ImportError, AttributeError, SystemExit):
+    except (ImportError, SystemExit):
         return None
     return _claude_paths
 
@@ -156,10 +163,11 @@ REFUSAL_CODES: Tuple[str, ...] = (
     "stylesheet-missing",
     "registration-settings-missing",
     "hook-registration-profile-unreadable",
+    "project-hook-launcher-missing",
 )
 
 _ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing",
-                      "addon-manifest-missing")
+                      "addon-manifest-missing", "project-hook-launcher-missing")
 
 # Refusal code -> process exit code (3 environment problem, 2 operator-correctable).
 EXIT_CLASS: Dict[str, int] = {
@@ -1347,19 +1355,15 @@ def _parse_settings(data: bytes, target: Path) -> Tuple[Optional[Result], Any]:
     return None, parsed
 
 
-def _written_project_path_hook(reg: _Registration, platform: str) -> Dict[str, Any]:
-    """The earlier command + args form, with the project path variable, never the plugin one. Used only
-    when the launcher is unavailable (see ``_written_hook``)."""
-    path = "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + reg.file
-    extras = ["${CLAUDE_PROJECT_DIR}/.claude/hooks/" + a.replace("\\", "/").rsplit("/", 1)[-1]
-              if _is_plugin_script_arg(a) else a for a in reg.extras]
-    if platform == "win32":
-        command, args = "py", ["-3", path] + extras
-    else:
-        command, args = "python3", [path] + extras
-    hook: Dict[str, Any] = {"type": reg.hook_type, "command": command, "args": args}
-    hook.update(dict(reg.other_keys))
-    return hook
+def _launcher_missing_refusal(project: Path) -> Result:
+    """The refusal for a writer that has no Project hook launcher to write with (exit 3). It names the file
+    to update and writes nothing: the writer never falls back to a row that names the hooks folder."""
+    hooks_file = project / ".claude" / "hooks" / "_project_paths.py"
+    return refusal("project-hook-launcher-missing",
+                   "the Project hook launcher is missing or incomplete: %s has no usable launcher, so no hook "
+                   "row can be written and nothing was changed. Bring the project's hooks folder to the same "
+                   "release as these scripts (replace %s with the one from that release), then run this again"
+                   % (hooks_file.name, hooks_file), hooks_file)
 
 
 def _written_hook(reg: _Registration, platform: str) -> Dict[str, Any]:
@@ -1370,13 +1374,13 @@ def _written_hook(reg: _Registration, platform: str) -> Dict[str, Any]:
     itself a plugin script (the gate launcher's gate) is written as its bare file name, which the launcher
     expands to the target's folder for ``gate-launch.py``; every other argument is copied unchanged.
 
-    When this copy of the scripts has no usable launcher (``_launcher_api()`` is ``None``: a stub or an older
-    vendored ``_project_paths.py``) the row is written in the earlier project-path form, which is what this
-    writer wrote before the launcher existed, and ``_plan_settings_edit`` says so in its notes. The writer
-    never invents a second copy of the launcher text."""
+    Only called after ``_plan_settings_edit`` found the launcher available: when ``_launcher_api()`` is ``None``
+    the install is refused there (``project-hook-launcher-missing``), so this writer has no other form to
+    write and never invents a second copy of the launcher text."""
     api = _launcher_api()
     if api is None:
-        return _written_project_path_hook(reg, platform)
+        raise RuntimeError("the Project hook launcher is unavailable; _plan_settings_edit refuses before any row "
+                           "is built, so this is unreachable")
     extras = [a.replace("\\", "/").rsplit("/", 1)[-1] if _is_plugin_script_arg(a) else a for a in reg.extras]
     hook_class = api.HOOK_CLASS_BLOCK if reg.event == "PreToolUse" else api.HOOK_CLASS_WARN
     hook: Dict[str, Any] = api.project_hook_launcher_row(reg.file, hook_class, extras, platform)
@@ -1650,7 +1654,14 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
     file. Writes nothing. Returns (refusal, {}) or (None, edit) where edit carries the target, the old and
     new bytes, the rows to add, the rows already present, notes, whether any layer disables hooks, and the
     unified diff.
+
+    Without the Project hook launcher (``_launcher_api()`` is ``None``) it refuses as
+    ``project-hook-launcher-missing`` before it reads the settings file, whatever the plan would add: the
+    identity reader cannot read a launcher row without the launcher, so "nothing to add" could not be
+    trusted. An install with no row to write (``regs`` empty) needs no launcher and is not refused.
     """
+    if regs and _launcher_api() is None:
+        return _launcher_missing_refusal(project), {}
     target = project / ".claude" / "settings.json"
     try:
         old_bytes = target.read_bytes() if target.is_file() else None
@@ -1679,11 +1690,6 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
             if different:
                 notes.append("%s is registered under matcher %r, the source uses %r; tools only the source "
                              "matcher names are not covered" % (reg.key, match["matcher"], reg.matcher))
-    if to_add and _launcher_api() is None:
-        notes.append("the Project hook launcher is not available beside this script (no usable "
-                     ".claude/hooks/_project_paths.py), so the rows are written in the earlier form that names "
-                     "${CLAUDE_PROJECT_DIR}/.claude/hooks/ directly; update the vendored hooks folder and run this "
-                     "again to get launcher rows for new registrations")
     text = old_bytes.decode("utf-8-sig") if old_bytes is not None else ""
     newline = "\r\n" if "\r\n" in text else "\n"
     indent_match = re.search(r"\n([ \t]+)\S", text)
