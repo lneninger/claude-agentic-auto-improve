@@ -5,7 +5,7 @@
 **Date:** 2026-11-03
 **Status:** stub
 **Estimated scope:** small
-**Issue:** pending
+**Issue:** #165
 
 ## What was noticed
 
