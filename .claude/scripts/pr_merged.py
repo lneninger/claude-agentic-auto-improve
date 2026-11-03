@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import copy
@@ -37,7 +38,7 @@ import tempfile
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # The one list of version files (Parent Branch Delivery Rule): the layout reads it, never spells it.
 from check_version_bump import MANIFESTS as VERSION_MANIFESTS
@@ -2821,11 +2822,18 @@ def gh_open_sub_issues(number: int) -> Optional[List[int]]:
     return open_numbers
 
 
-def open_records_pull_requests(slug: str) -> Optional[List[Dict[str, str]]]:
-    """Open pull requests whose head branch starts ``docs/<slug>-records`` (G-6), or None."""
+def open_records_pull_requests(slug: str, head: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+    """Open pull requests whose head branch starts ``docs/<slug>-records`` (G-6), or None.
+
+    ``head`` (I-3) names ONE head branch: ``gh pr list --head <head>`` is asked, so the repository-wide
+    ``--limit 200`` cap cannot hide it, and only a pull request whose head is exactly ``head`` is kept.
+    """
     try:
-        code, out = _run(["gh", "pr", "list", "--state", "open", "--json", "headRefName,url",
-                          "--limit", "200"])
+        if head:
+            cmd = ["gh", "pr", "list", "--state", "open", "--json", "headRefName,url,isCrossRepository", "--head", head]
+        else:
+            cmd = ["gh", "pr", "list", "--state", "open", "--json", "headRefName,url", "--limit", "200"]
+        code, out = _run(cmd)
         if code != 0 or not out:
             return None
         payload = json.loads(out)
@@ -2836,7 +2844,12 @@ def open_records_pull_requests(slug: str) -> Optional[List[Dict[str, str]]]:
     prefix = records_branch_prefix(slug)
     found: List[Dict[str, str]] = []
     for entry in payload:
-        if isinstance(entry, dict) and str(entry.get("headRefName") or "").startswith(prefix):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("headRefName") or "")
+        if head and entry.get("isCrossRepository") is True:
+            continue  # I-14: a fork's pull request with the same branch name does not hold origin's branch
+        if (name == head) if head else name.startswith(prefix):
             found.append({"headRefName": entry["headRefName"], "url": entry.get("url") or ""})
     return found
 
@@ -2859,14 +2872,18 @@ def fetch_default_branch(base: str) -> bool:
     return code == 0
 
 
-def origin_records(base: str, slug: str) -> Optional[Dict[str, Dict[str, Any]]]:
+def origin_records(base: str, slug: str, fetch: bool = True) -> Optional[Dict[str, Dict[str, Any]]]:
     """The records ``origin/<base>`` holds, after fetching it; ``None`` when it cannot be read.
 
     ``None`` (the fetch failed, ``origin/<base>`` is not a ref, the listing exited non-zero, or a record
     blob is missing or does not parse) differs from ``{}`` (readable, and the folder holds no records):
     only a readable origin can prove or disprove a landing, and an unreadable one is ``unverifiable``.
+
+    ``fetch=False`` skips the fetch for a caller that already made it (I-3: each ref is fetched once). The
+    parsing and the filter are ``_records_at``, the same one the Records reading uses, so the two readers
+    cannot drift apart on either.
     """
-    if not fetch_default_branch(base):
+    if fetch and not fetch_default_branch(base):
         return None
     ref = "origin/" + base
     if _run(["git", "rev-parse", "--verify", ref])[0] != 0:
@@ -2877,32 +2894,27 @@ def origin_records(base: str, slug: str) -> Optional[Dict[str, Dict[str, Any]]]:
     code, out = _run(["git", "ls-tree", "--full-tree", "--name-only", "-z", ref, "--", folder + "/"])
     if code != 0:
         return None
-    import yaml
-    found: Dict[str, Dict[str, Any]] = {}
-    for path in (p for p in out.split("\0") if p):
-        name = path.rsplit("/", 1)[-1]
-        if not name.endswith(".yaml") or name[:-len(".yaml")] == DELIVERY_RECORD_NAME:
-            continue  # the reserved Contract Delivery Record is never a sub-task's record
-        text = file_at_commit(ref, path)
-        if text is None:
-            return None
-        try:
-            data = yaml.safe_load(text) or {}
-        except Exception:
-            return None
-        if not isinstance(data, dict):
-            return None
-        found[name[:-len(".yaml")]] = data
-    return found
+    found, failure = _records_at(ref, folder, [p for p in out.split("\0") if p])
+    return None if failure else found
 
 
 def merge_evidence(origin: Dict[str, Dict[str, Any]], records: Dict[str, Dict[str, Any]],
-                   stored: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Origin's records win over the stored local ones; only a record written by THIS run overrides origin's."""
+                   stored: Dict[str, Dict[str, Any]],
+                   branch_heads: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
+    """The one evidence rule (I-6); the inputs are never mutated.
+
+    1. A record written by THIS run (``records`` differs from ``stored``) wins outright.
+    2. Among the other sources -- ``origin/<default>``, the stable records branch's tip
+       (``branch_heads``) and the stored local copy -- a ``completed`` record beats any other.
+    3. On equal status, ``origin/<default>`` beats the tip, which beats the stored local copy.
+    """
+    tip = branch_heads or {}
     merged = dict(records)
-    for tid, rec in origin.items():
-        if records.get(tid) == stored.get(tid):
-            merged[tid] = rec
+    for tid in set(origin) | set(tip):
+        if records.get(tid) != stored.get(tid):
+            continue
+        sources = [r for r in (origin.get(tid), tip.get(tid), stored.get(tid)) if r is not None]
+        merged[tid] = min(sources, key=lambda r: 0 if r.get("status") == "completed" else 1)
     return merged
 
 
@@ -2923,6 +2935,487 @@ def list_review_files(ref: str, slug: str) -> Optional[List[str]]:
 def records_branch_prefix(slug: str) -> str:
     """The head-branch prefix of a Records pull request for ``slug``."""
     return "docs/%s-records" % slug
+
+
+# ---------------------------------------------------------------------------
+# Records leftovers (issue 178, I-1 to I-5): the reading, the classification and the sweep
+# ---------------------------------------------------------------------------
+def _tree_blobs_at(ref: str, folder: str) -> Optional[Tuple[Dict[str, str], List[str]]]:
+    """``({path: blob id}, every path)`` under ``folder`` at ``ref``; ``None`` when git cannot list it.
+
+    ``-r`` reaches nested files, ``--full-tree`` makes the folder relative to the repository root, ``-z``
+    leaves names unquoted, and a failure is ``None``, never an empty answer. The blob ids are PROOF, so they
+    cover regular files only (I-14); the second list names every entry whatever its mode, which is what
+    ``origin_records`` has always read, so the two readers parse the same set of names (``_records_at``).
+    """
+    code, out = _run(["git", "ls-tree", "-r", "--full-tree", "-z", ref, "--", folder + "/"])
+    if code != 0:
+        return None
+    blobs: Dict[str, str] = {}
+    names: List[str] = []
+    for entry in out.split("\0"):
+        if not entry:
+            continue
+        meta, tab, path = entry.partition("\t")
+        fields = meta.split()
+        if not tab or len(fields) != 3:
+            return None
+        names.append(path)
+        # I-14: only a regular file (100644) or an executable (100755) is a copy; a 120000 blob is a link, never proof.
+        if fields[1] == "blob" and fields[0] in ("100644", "100755"):
+            blobs[path] = fields[2].lower()
+    return blobs, names
+
+
+def _records_at(ref: str, folder: str, blobs: Iterable[str]
+                ) -> Tuple[Optional[Dict[str, Dict[str, Any]]], Optional[Tuple[str, str, str]]]:
+    """The completion records among ``blobs`` at ``ref``, or ``(None, (cause, failure, target))``.
+
+    ``target`` is the exact ``<ref>:<path>`` that failed; an unreadable blob is ``transient``, one that does
+    not parse as a mapping is ``persistent`` (I-3).
+    """
+    import yaml
+    found: Dict[str, Dict[str, Any]] = {}
+    for path in sorted(blobs):
+        name = path[len(folder) + 1:]
+        if "/" in name or not name.endswith(".yaml") or name[:-len(".yaml")] == DELIVERY_RECORD_NAME:
+            continue  # nested files and the reserved Contract Delivery Record are never sub-task records
+        text = file_at_commit(ref, path)
+        target = "%s:%s" % (ref, path)
+        if text is None:
+            return None, ("%s could not be read" % target, "transient", target)
+        try:
+            data = yaml.safe_load(text) or {}
+        except Exception:  # noqa: BLE001 -- any parse failure is the same "does not parse"
+            data = None
+        if not isinstance(data, dict):
+            return None, ("%s does not parse" % target, "persistent", target)
+        found[name[:-len(".yaml")]] = data
+    return found, None
+
+
+def _delivery_at(ref: str, folder: str, blobs: Dict[str, str]
+                 ) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[str, str, str]]]:
+    """The Contract Delivery Record at ``ref`` (I-12): ``(None, None)`` when absent, else ``(record, None)``.
+
+    Read like a completion record: an unreadable blob is ``transient`` and one that is not a mapping is
+    ``persistent``, both naming the exact ``<ref>:<path>``; it is never read as "absent".
+    """
+    path = "%s/%s.yaml" % (folder, DELIVERY_RECORD_NAME)
+    if path not in blobs:
+        return None, None
+    import yaml
+    target = "%s:%s" % (ref, path)
+    text = file_at_commit(ref, path)
+    if text is None:
+        return None, ("%s could not be read" % target, "transient", target)
+    try:
+        data = yaml.safe_load(text)
+    except Exception:  # noqa: BLE001 -- any parse failure is the same "does not parse"
+        data = None
+    if not isinstance(data, dict):
+        return None, ("%s does not parse" % target, "persistent", target)
+    return data, None
+
+
+def records_scope() -> Tuple[bool, str]:
+    """I-13, the scope gate: ``(read, probe failure)`` for the working directory.
+
+    ``read`` says the directory is a git tree root that has an ``origin`` to read. It tests the working
+    directory only, never where the contract file sits, so a path-form ``--contract`` that points at another
+    tree's concepts folder still carries the keys. A caller written before 0.14.0 (a folder with no
+    repository metadata, or a repository with no ``origin``) gets no reading and behaves exactly as it did.
+
+    Two different "cannot tell" answers, told apart on purpose. Git exits 2 for "No such remote": there is
+    no origin, the gate is off. A real process that fails any other way while a ``.git`` entry exists did not
+    say there is no origin, so the second item names the failed probe and the caller makes the reading
+    ``unverifiable`` (a silent gate-off would let a dispatch or a flip run unguarded). A runner that
+    refuses or raises is different: it is an in-process legacy driver whose process runner was replaced, no
+    git process ever answered, so there is no repository to read and the gate stays off.
+    """
+    if not os.path.lexists(".git"):
+        return False, ""
+    try:
+        code, out = _run(["git", "remote", "get-url", "origin"])
+    except Exception:  # noqa: BLE001 -- a replaced runner that refuses means "no repository to read"
+        return False, ""
+    if code == 2:
+        return False, ""
+    if code != 0:
+        return False, "git remote get-url origin failed (exit %s): the origin remote could not be probed" % code
+    return bool(out), ""
+
+
+def read_records_state(base: str, slug: str, probe_failure: str = "") -> Dict[str, Any]:
+    """The Records reading (I-3): what ``origin/<base>`` and the stable records branch hold.
+
+    Built only from readers that tell "failed" apart from "empty". Any failure leaves ``reading`` at
+    ``unverifiable`` with the exact failing ref (or ``<ref>:<path>``) in ``cause``/``target`` and its
+    ``failure`` class, and stops reading. Each ref is fetched once; ``fetched`` says ``origin/<base>`` was.
+    """
+    folder = "%s/%s" % (RESULTS_DIR.as_posix(), slug)
+    branch = records_branch_prefix(slug)
+    state: Dict[str, Any] = {
+        "reading": "ok", "cause": "", "failure": "", "target": "", "fetched": False, "branch": branch,
+        "base": base, "origin": None, "origin_blobs": {}, "tip_exists": False, "tip": {}, "tip_blobs": {},
+        "origin_delivery": None, "tip_delivery": None, "open_prs": [], "stranded": []}
+
+    def bad(cause: str, failure: str, target: str) -> Dict[str, Any]:
+        state.update(reading="unverifiable", cause=cause, failure=failure, target=target)
+        return state
+
+    if probe_failure:  # the scope gate's origin probe failed (``records_scope``): nothing can be read
+        return bad(probe_failure, "transient", "git remote get-url origin")
+    if shutil.which("gh") is None:  # no read can finish without gh, and no retry installs it: say so first
+        return bad("gh is not installed: install gh, then authenticate it with gh auth login", "persistent", "gh")
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    code, out = _run(["git", "ls-remote", "origin", "refs/heads/" + branch], env=env)
+    if code != 0:
+        return bad("git ls-remote of %s failed" % branch, "transient", branch)
+    state["tip_exists"] = any(line.split()[-1:] == ["refs/heads/" + branch] for line in out.splitlines())
+
+    ref = "origin/" + base
+    if not fetch_default_branch(base):
+        return bad("git fetch of %s failed" % ref, "transient", ref)
+    state["fetched"] = True
+    if _run(["git", "rev-parse", "--verify", ref])[0] != 0:
+        return bad("%s is not a ref" % ref, "transient", ref)
+    listed = _tree_blobs_at(ref, folder)
+    if listed is None:
+        return bad("git ls-tree of %s failed" % ref, "transient", ref)
+    blobs, names = listed
+    records_there, failure = _records_at(ref, folder, names)
+    if failure:
+        return bad(*failure)
+    origin_delivery, failure = _delivery_at(ref, folder, blobs)
+    if failure:
+        return bad(*failure)
+    state.update(origin=records_there, origin_blobs=blobs, origin_delivery=origin_delivery)
+
+    if state["tip_exists"]:
+        tip_ref = "origin/" + branch
+        if not fetch_default_branch(branch):
+            return bad("git fetch of %s failed" % tip_ref, "transient", tip_ref)
+        tip_listed = _tree_blobs_at(tip_ref, folder)
+        if tip_listed is None:
+            return bad("git ls-tree of %s failed" % tip_ref, "transient", tip_ref)
+        tip_blobs, tip_names = tip_listed
+        tip_records, failure = _records_at(tip_ref, folder, tip_names)
+        if failure:
+            return bad(*failure)
+        tip_delivery, failure = _delivery_at(tip_ref, folder, tip_blobs)
+        if failure:
+            return bad(*failure)
+        state.update(tip=tip_records, tip_blobs=tip_blobs, tip_delivery=tip_delivery)
+
+    open_prs = open_records_pull_requests(slug, head=branch)
+    if open_prs is None:
+        if not gh_authenticated():
+            return bad("gh is not authenticated (gh pr list --head %s failed): authenticate gh with gh auth login"
+                       % branch, "persistent", "gh")
+        return bad("gh pr list --head %s failed" % branch, "transient", "gh")
+    state["open_prs"] = open_prs
+    if state["tip_exists"] and not open_prs:
+        # A tip that origin/<base> already contains was merged: a path that changed on <base> since is not
+        # stranded. Exit 0 = ancestor, 1 = not an ancestor; any other exit is a failed check, never a guess.
+        tip_ref = "origin/" + branch
+        code, _out = _run(["git", "merge-base", "--is-ancestor", tip_ref, ref])
+        if code == 1:
+            state["stranded"] = sorted(p for p, b in state["tip_blobs"].items() if state["origin_blobs"].get(p) != b)
+        elif code != 0:
+            return bad("git merge-base --is-ancestor %s %s failed" % (tip_ref, ref), "transient", tip_ref)
+    return state
+
+
+def _cleanup_helpers() -> Any:
+    """``cleanup_delivered`` for its Untracked Comparison helpers; imported lazily because it imports this module."""
+    import cleanup_delivered
+    return cleanup_delivered
+
+
+def _untracked_results(tree: str, slug: str) -> Optional[List[str]]:
+    """Every untracked file under the contract's results folder in ``tree``, or ``None`` when git cannot say (I-1)."""
+    code, out = _run(["git", "-C", tree, "status", "--porcelain", "-z", "--untracked-files=all", "--",
+                      "%s/%s" % (RESULTS_DIR.as_posix(), slug)])
+    if code != 0:
+        return None
+    return sorted(e[3:] for e in out.split("\0") if e.startswith("?? "))
+
+
+def _record_status(source: str, folder: str, path: str, records: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[str]:
+    """``status`` of the top-level record at ``path``: from ``records`` when given, else parsed from the file ``source``."""
+    name = path[len(folder) + 1:]
+    if "/" in name or not name.endswith(".yaml"):
+        return None
+    if records is not None:
+        return (records.get(name[:-len(".yaml")]) or {}).get("status")
+    try:
+        import yaml
+        with open(source, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except Exception:  # noqa: BLE001 -- an unreadable local copy has no status
+        return None
+    return data.get("status") if isinstance(data, dict) else None
+
+
+def remedy_for(slug: str, path: str) -> str:
+    return "/pr-merged --records %s --discard-differing %s" % (slug, path)
+
+
+def classify_leftovers(tree: str, slug: str, reading: Dict[str, Any], untracked: List[str]
+                       ) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+    """One Leftover Entry per untracked file (I-2, I-4), judged against the Compared refs; ``(None, cause)`` on a failed read.
+
+    ``proven`` is identical (git's view, filters on) to a compared blob; ``update`` is a ``completed`` record over only
+    ``failed`` compared ones; ``differs`` is any other compared copy; ``unpushed`` has none; ``unsafe`` is a link.
+    """
+    if not untracked:
+        return [], ""
+    helpers = _cleanup_helpers()
+    folder = "%s/%s" % (RESULTS_DIR.as_posix(), slug)
+    base_ref = "origin/" + reading["base"]
+    tip_ref = "origin/" + reading["branch"]
+    # The tip is a Compared ref only while an open pull request has the stable branch as its head.
+    tip_compared = bool(reading["tip_exists"] and reading["open_prs"])
+    plain = [p for p in untracked if helpers._plain_file_inside(tree, p)]
+    ids, cause = helpers._hash_files(tree, plain) if plain else ({}, "")
+    if ids is None:
+        return None, cause
+    entries: List[Dict[str, Any]] = []
+    for path in untracked:
+        entry: Dict[str, Any] = {"path": path, "state": "unpushed", "ref": None, "action": "kept", "reason": None}
+        entries.append(entry)
+        if path not in ids:
+            entry.update(state="unsafe", reason="a link, or under a linked folder")
+            continue
+        local = ids[path].lower()
+        compared = [(base_ref, reading["origin_blobs"].get(path), reading["origin"])]
+        if tip_compared:
+            compared.append((tip_ref, reading["tip_blobs"].get(path), reading["tip"]))
+        compared = [c for c in compared if c[1] is not None]
+        match = next((c for c in compared if c[1] == local), None)
+        if match:
+            entry.update(state="proven", ref=match[0], local_blob=local)
+            continue
+        if not compared:
+            entry["reason"] = "not on origin"
+            continue
+        against = [_record_status("", folder, path, records) for _r, _b, records in compared]
+        entry.update(ref=compared[0][0], local_blob=local, ref_blob=compared[0][1])
+        if _record_status(os.path.join(tree, *path.split("/")), folder, path) == "completed" \
+                and all(s == "failed" for s in against):
+            entry.update(state="update", reason="a completed record over a failed one: push it")
+        else:
+            entry.update(state="differs", reason="differs from %s; the owner decides" % compared[0][0],
+                         remedy=remedy_for(slug, path))
+    return entries, ""
+
+
+def leftover_keys(reading: Dict[str, Any], entries: List[Dict[str, Any]], untracked: List[str],
+                  owner: bool) -> Dict[str, Any]:
+    """The Records report keys (Value Objects); lists are meaningful only when the reading is ``ok``."""
+    keys: Dict[str, Any] = {"records_reading": reading["reading"]}
+    if reading["reading"] != "ok":
+        keys["records_reading_cause"] = reading["cause"]
+        keys["records_failure"] = reading["failure"]
+    keys.update(
+        records_action="skipped-by-owner" if owner else "normal",
+        records_untracked=sorted(untracked),
+        records_unpushed=sorted(e["path"] for e in entries if e["state"] in ("unpushed", "update")),
+        records_differing=sorted(e["path"] for e in entries if e["state"] == "differs"),
+        records_stranded=list(reading["stranded"]) if reading["reading"] == "ok" else [])
+    return keys
+
+
+def records_next_command(nc: Dict[str, Any], reading: Dict[str, Any], keys: Dict[str, Any],
+                         slug: str) -> Dict[str, Any]:
+    """I-5: the Next Command around the records. Byte-identical to ``nc`` when nothing is left."""
+    if reading["reading"] != "ok":
+        if reading["failure"] == "persistent":
+            reason = ("records cannot be read: %s; fix it (repair %s through a records pull request, or "
+                      "install or authenticate gh); dispatch stays refused until then"
+                      % (reading["cause"], reading["target"]))
+        else:
+            reason = "records could not be read (%s); retry once git and GitHub answer" % reading["cause"]
+        return {"commands": [], "reason": reason}
+    commands, reason = list(nc["commands"]), nc["reason"]
+    pending = sorted(set(keys["records_unpushed"]) | set(keys["records_stranded"]))
+    if pending:
+        commands = ["/pr-merged --records %s" % slug] + commands
+        reason = "records not on their way to origin (%d files); %s" % (len(pending), reason)
+    if keys["records_differing"]:
+        reason += ("; a copy that differs from origin is kept. To keep origin's record, discard the local copy: "
+                   + "; ".join(remedy_for(slug, p) for p in keys["records_differing"])
+                   + ". To keep the local record instead, the owner replaces origin's by hand")
+    return {"commands": commands, "reason": reason}
+
+
+def _same_root(a: Optional[str], b: Optional[str]) -> bool:
+    return bool(a and b) and os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _emit_line(line: str) -> None:
+    """Print one line; a console that cannot show the dash gets a plain hyphen instead."""
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        print(line.replace("—", "-"))
+
+
+def run_sweep_records(args: argparse.Namespace) -> int:
+    """``--sweep-records`` (I-1 to I-4, I-10): delete the proven copies, keep and name the rest, print one line per tree."""
+    name = re.split(r"[\\/]", args.contract.strip())[-1]
+    slug = name[:-3] if name.lower().endswith(".md") else name
+    if (args.pr or args.record_delivery or args.dispatch or args.status or args.record_subtask or args.resume
+            or args.preconditions):
+        print(json.dumps({"error": "sweep-usage",
+                          "detail": "--sweep-records cannot be combined with --pr, --record-delivery, "
+                                    "--dispatch, --status, --record-subtask, --resume or --preconditions"}))
+        return 2
+    from _claude_paths import main_checkout_root, tree_kind
+    here = main_checkout_root(os.getcwd())
+
+    def refuse(error: str, tree: str, detail: str) -> int:
+        print(json.dumps({"error": error, "tree": tree, "detail": detail}))
+        return 2
+
+    plan: List[Tuple[str, str]] = []  # (tree, mode): tree | main | gone | gone-partial
+    for flag, given in [("from", t) for t in (args.from_trees or [os.getcwd()])] + [("removed", t) for t in args.removed]:
+        tree = os.path.abspath(given)
+        if not os.path.exists(tree):
+            if flag == "from":
+                return refuse("tree-not-found", tree, "--from names a folder that does not exist")
+            plan.append((tree, "gone"))
+        elif not os.path.lexists(os.path.join(tree, ".git")):
+            if flag == "from":
+                return refuse("not-a-tree-root", tree, "--from must be the root of a worktree (a .git entry in it)")
+            plan.append((tree, "gone-partial"))
+        elif tree_kind(tree) not in ("main-checkout", "linked-worktree") or not _same_root(main_checkout_root(tree), here):
+            return refuse("not-this-repository", tree, "the tree is not a worktree of this repository")
+        else:
+            plan.append((tree, "main" if tree_kind(tree) == "main-checkout" else "tree"))
+
+    # I-14: the slug must name an existing contract or results folder; a partial, empty or glob-shaped one
+    # matches nothing and would print `clean` over leftovers that were never looked at.
+    roots = [t for t, m in plan if m in ("main", "tree")] + [os.getcwd(), here or os.getcwd()]
+    if not slug or slug in (".", "..") or re.search(r"[*?\[\]{}]", slug) or not any(
+            os.path.isfile(os.path.join(r, ".claude", "concepts", slug + ".md"))
+            or os.path.isdir(os.path.join(r, *RESULTS_DIR.parts, slug)) for r in roots):
+        print(json.dumps({"error": "sweep-usage", "slug": slug,
+                          "detail": "--contract must name an existing contract or results folder exactly "
+                                    "(no partial, empty or glob-shaped slug); nothing was swept"}))
+        return 2
+
+    reading = read_records_state(default_branch(), slug)
+    owner = bool(args.local_evidence_only)
+    present = [(t, m) for t, m in plan if m in ("main", "tree")]
+    untracked = {t: _untracked_results(t, slug) for t, _m in present}
+    classified: Dict[str, List[Dict[str, Any]]] = {}
+    if reading["reading"] == "ok":
+        for tree, mode in present:
+            if untracked[tree] is None:
+                reading.update(reading="unverifiable", cause="git status of %s failed" % tree, failure="transient",
+                               target=tree)
+                break
+            if mode == "tree":
+                entries, cause = classify_leftovers(tree, slug, reading, untracked[tree])
+                if entries is None:
+                    reading.update(reading="unverifiable", cause=cause, failure="transient", target=tree)
+                    break
+                classified[tree] = entries
+
+    def tree_lines(left: Dict[str, Optional[List[str]]], states: Dict[str, Dict[str, str]],
+                   unreadable: bool) -> List[Dict[str, Any]]:
+        lines = []
+        for tree, mode in plan:
+            if mode in ("gone", "gone-partial"):
+                text, clean = "tree %s: %s" % (tree, mode), True
+            else:
+                rest = left.get(tree)
+                n = "an unknown number of" if rest is None else len(rest)
+                if mode == "main":
+                    text, clean = "tree %s: main checkout — not swept (%s leftovers kept)" % (tree, n), not rest
+                elif unreadable or rest is None:
+                    text, clean ="tree %s: %s entries left — records unverifiable" % (tree, n), False
+                elif not rest:
+                    text, clean = "tree %s: clean" % tree, True
+                else:
+                    why = sorted({states.get(tree, {}).get(p, "untracked") for p in rest})
+                    text, clean = "tree %s: %d entries left — %s" % (tree, len(rest), ", ".join(why)), False
+            lines.append({"tree": tree, "clean": clean, "line": text})
+        return lines
+
+    def emit(report: Dict[str, Any], code: int) -> int:
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print("sweep-records %s: reading %s" % (slug, report["records_reading"]))
+            for e in report["records_leftover"]["entries"]:
+                _emit_line("  %s: %s (%s)" % (e["path"], e["state"], e["action"]))
+            for item in report["tree_lines"]:
+                _emit_line(item["line"])
+        return code
+
+    if reading["reading"] != "ok":
+        keys = leftover_keys(reading, [], sorted({p for v in untracked.values() for p in (v or [])}), owner)
+        return emit({"contract": slug, **keys, "records_leftover": {"entries": []},
+                     "tree_lines": tree_lines(untracked, {}, True)}, 10)
+
+    discards = []
+    for given in args.discard_differing:
+        path = given.replace("\\", "/")
+        path = path[2:] if path.startswith("./") else path
+        if not any(e["path"] == path and e["state"] == "differs" for ents in classified.values() for e in ents):
+            seen = [e for ents in classified.values() for e in ents if e["path"] == path]
+            print(json.dumps({"error": "not-differing", "path": path,
+                              "detail": "the copy does not differ from origin now (state: %s); nothing was deleted"
+                                        % (seen[0]["state"] if seen else "no such leftover"),
+                              "entries": seen}))
+            return 2
+        discards.append(path)
+
+    helpers = _cleanup_helpers()
+    tip_checked, tip_open = False, True
+    for tree, entries in classified.items():
+        for e in entries:
+            owner_asked = e["path"] in discards and e["state"] == "differs"
+            if e["state"] != "proven" and not owner_asked:
+                continue
+            if owner:
+                e["reason"] = "skipped-by-owner"
+                continue
+            if args.dry_run:
+                e.update(action="would-delete", reason=None)
+                continue
+            if e["state"] == "proven" and e["ref"] == "origin/" + reading["branch"]:
+                if not tip_checked:  # re-read right before the first delete a tip proves
+                    tip_checked = True
+                    tip_open = bool(open_records_pull_requests(slug, head=reading["branch"]))
+                if not tip_open:
+                    e["reason"] = "no open pull request holds %s now; nothing it proved is deleted" % reading["branch"]
+                    continue
+            full = os.path.join(tree, *e["path"].split("/"))
+            if not helpers._plain_file_inside(tree, e["path"]):
+                e["reason"] = "became a link or sits under a linked folder"
+                continue
+            now, _cause = helpers._hash_files(tree, [e["path"]])
+            if now is None or now[e["path"]].lower() != e["local_blob"]:
+                e["reason"] = "changed since it was classified"
+                continue
+            try:
+                os.remove(full)
+            except OSError as exc:
+                e["reason"] = "could not be removed: %s" % exc
+                continue
+            e.update(action="discarded" if owner_asked else "deleted", reason=None)
+
+    left = {t: _untracked_results(t, slug) for t, _m in present}
+    states = {t: {e["path"]: e["state"] for e in ents} for t, ents in classified.items()}
+    flat = [e for ents in classified.values() for e in ents]
+    keys = leftover_keys(reading, [e for e in flat if e["action"] not in ("deleted", "discarded")],
+                         sorted({p for v in left.values() for p in (v or [])}), owner)
+    return emit({"contract": slug, **keys, "records_leftover": {"entries": flat},
+                 "tree_lines": tree_lines(left, states, False)}, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -3585,6 +4078,8 @@ class CompletionContext:
     #: The review set a recording run given --owner-resolved already read before its first
     #: write (I-7, W-2), or None. When set, the fetch and the listing are not repeated.
     early_review: Optional[Dict[str, Any]] = None
+    #: True when this run's records reading already fetched ``origin/<base>`` (I-3: each ref once).
+    fetched: bool = False
 
 
 def effective_blocked_reports(readings: Dict[str, Dict[str, Any]]) -> List[str]:
@@ -3683,7 +4178,7 @@ def evaluate_completion(ctx: CompletionContext) -> Tuple[Dict[str, Any], List[st
         _finish(completion, "pending", commands or [], remedy)
         return completion, written
 
-    if ctx.early_review is None and not fetch_default_branch(ctx.base):
+    if ctx.early_review is None and not ctx.fetched and not fetch_default_branch(ctx.base):
         return unverifiable("git fetch origin %s failed" % ctx.base)
     ref = "origin/" + ctx.base
     fresh = "run again in a flat worktree cut fresh from %s" % ref
@@ -3919,7 +4414,29 @@ def main() -> int:
                     help="a verification the owner declares skipped or impossible (repeatable)")
     ap.add_argument("--preconditions", action="store_true",
                     help="read-only: rank the released sub-tasks by their Dispatch preconditions")
+    ap.add_argument("--sweep-records", action="store_true",
+                    help="delete the starting tree's completion-record copies that origin holds; keep and name the rest")
+    ap.add_argument("--from", dest="from_trees", action="append", default=[], metavar="TREE",
+                    help="a worktree root to sweep, with --sweep-records (repeatable; default the working tree)")
+    ap.add_argument("--removed", action="append", default=[], metavar="TREE",
+                    help="a tree the skill removed; reported as gone when it is, with --sweep-records (repeatable)")
+    ap.add_argument("--discard-differing", action="append", default=[], metavar="PATH",
+                    help="the owner exit: delete this differing copy, origin wins, with --sweep-records (repeatable)")
+    ap.add_argument("--local-evidence-only", action="store_true",
+                    help="skip deleting and pushing records for this run; evidence and holds are unchanged")
     args = ap.parse_args()
+
+    if args.locate_parent and args.sweep_records:
+        # I-14: --locate-parent answers first and returns, so the sweep would silently never run.
+        print(json.dumps({"error": "sweep-usage",
+                          "detail": "--sweep-records cannot be combined with --locate-parent"}))
+        return 2
+
+    if not args.sweep_records and (args.from_trees or args.removed or args.discard_differing):
+        print(json.dumps({"error": "sweep-usage",
+                          "detail": "--from, --removed and --discard-differing mean nothing without "
+                                    "--sweep-records; nothing was done"}))
+        return 2
 
     if args.locate_parent:
         # I-10: the slug comes from --contract and the contract file need not exist here.
@@ -3932,7 +4449,7 @@ def main() -> int:
     # before touching the contract, git or gh at all, rather than let a
     # --pr or --dispatch run silently mutate another repository. The script
     # never sets GH_REPO itself; this only ever reads it to refuse.
-    if os.environ.get("GH_REPO") and (args.pr or args.dispatch):
+    if os.environ.get("GH_REPO") and (args.pr or args.dispatch or args.sweep_records):
         print(json.dumps({
             "error": "gh-repo-set",
             "detail": "GH_REPO is set in the environment; refusing to run --pr or --dispatch, "
@@ -3942,6 +4459,10 @@ def main() -> int:
                       "repository is passed as its https:// link instead.",
         }))
         return 8
+
+    if args.sweep_records:
+        # I-1: the slug is enough; no local contract file is needed, so this precedes contract-not-found.
+        return run_sweep_records(args)
 
     usage = _usage_refusal(args)
     if usage:
@@ -3998,11 +4519,50 @@ def main() -> int:
     precondition_cache: Dict[Any, Any] = {}
     _origin_cache: List[Optional[Dict[str, Dict[str, Any]]]] = []
 
+    #: The Records reading (I-3), taken once per run; None for a contract that is not this project's own
+    #: in a worktree root, which has no origin to read (those runs behave exactly as before 0.14.0).
+    reading: Optional[Dict[str, Any]] = None
+
     def _origin() -> Optional[Dict[str, Dict[str, Any]]]:
         """The records origin/<default> holds, read once per run; None when it could not be read."""
         if not _origin_cache:
-            _origin_cache.append(origin_records(base, slug))
+            _origin_cache.append(reading["origin"] if reading is not None else origin_records(base, slug))
         return _origin_cache[0]
+
+    def _evidence(recs: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """I-6: the one evidence every decision reads. Without a reading it is the local records."""
+        if reading is None:
+            return recs
+        return merge_evidence(reading["origin"] or {}, recs, stored_records, branch_heads=reading["tip"])
+
+    def _already_recorded(tid: str, rec: Dict[str, Any], pr: Dict[str, Any]) -> Dict[str, Any]:
+        """I-8: the Already-recorded entry -- where the evidence holds the completed record this run skipped."""
+        where = "local"
+        if reading is not None and (reading["origin"] or {}).get(tid) == rec:
+            where = "origin/" + base
+        elif reading is not None and reading["tip"].get(tid) == rec:
+            where = "origin/" + reading["branch"]
+        return {"sub_task": tid, "ref": where, "pull_request": pr.get("url")}
+
+    _section_cache: List[Dict[str, Any]] = []
+
+    def _records_section() -> Dict[str, Any]:
+        """The Records report keys for the working tree, taken once per run (call it after this run's writes)."""
+        if not _section_cache:
+            assert reading is not None
+            tree = os.getcwd()
+            leftovers = _untracked_results(tree, slug)
+            entries: Optional[List[Dict[str, Any]]] = []
+            if reading["reading"] == "ok":
+                if leftovers is None:
+                    entries, cause = None, "git status of %s failed" % tree
+                else:
+                    entries, cause = classify_leftovers(tree, slug, reading, leftovers)
+                if entries is None:
+                    reading.update(reading="unverifiable", cause=cause, failure="transient", target=tree)
+                    entries = []
+            _section_cache.append(leftover_keys(reading, entries, leftovers or [], args.local_evidence_only))
+        return _section_cache[0]
 
     if args.record_subtask:
         # /flow Step 2.7's writer: stamp one sub-task's issue, declared base
@@ -4048,6 +4608,20 @@ def main() -> int:
                                     "written. Sign in with gh auth login and run again."}))
         return 10
 
+    # I-13: the scope gate asks only whether the working directory is a git tree carrying the metadata the
+    # reading needs (a .git entry of its own and an origin remote); it never asks where the contract file sits.
+    scope_read, scope_failure = records_scope()
+    if scope_read or scope_failure:
+        reading = read_records_state(base, slug, probe_failure=scope_failure)
+        # I-8: a writing run that cannot read the records writes nothing -- it could duplicate or overwrite them.
+        if writes_records and reading["reading"] != "ok":
+            print(json.dumps({"error": "github-unverifiable",
+                              "detail": "records could not be read (%s); nothing was written. Run again once git "
+                                        "and GitHub answer." % reading["cause"],
+                              "records_reading": "unverifiable", "records_reading_cause": reading["cause"],
+                              "records_failure": reading["failure"]}))
+            return 10
+
     # I-7 (W-2): a recording run given --owner-resolved lists and reads the review set NOW,
     # before its first write, validates the names, and hands that one reading to the
     # completion evaluation. A failure of the fetch or the listing exits 10; a name that is
@@ -4078,6 +4652,10 @@ def main() -> int:
     brief_path = find_linked_brief(contract_text, slug, default_branch_name=base)
     brief_fields = read_brief_frontmatter(brief_path) if brief_path is not None else None
     delivery = load_delivery(slug)
+    if delivery is None and reading is not None and reading["reading"] == "ok":
+        # I-12: the Contract Delivery Record is evidence like a completion record: the local copy, else the
+        # stable branch's tip, else origin/<default>. A record read from evidence never causes a local write.
+        delivery = reading["tip_delivery"] or reading["origin_delivery"]
 
     # The Declared base set (Data Shapes): the repository default branch,
     # plus every sub-task's own declared base already on record. This is
@@ -4097,6 +4675,7 @@ def main() -> int:
         "blocks": [asdict(b) for b in blocks],
         "defects": [asdict(d) for d in defects],
         "closed": [], "skipped": [], "unmapped": [], "hand_resolved": [], "failed": [],
+        "already_recorded": [],
     }
     read_only = args.status or args.resume
     writing = not (args.dry_run or read_only)
@@ -4242,13 +4821,15 @@ def main() -> int:
                     "detail": "origin/%s could not be read, so the records cannot be compared; nothing was "
                               "written. Run git fetch origin %s and run again." % (base, base)}))
                 return 10
-            if any(tid not in records for tid in held):
+            # I-7: G-7 reads the evidence, which already carries what origin holds, so a swept tree passes.
+            held_now = _evidence(records)
+            if any(tid not in held_now for tid in held):
                 return _refuse("G-7", "records-not-local",
                                "origin/%s holds records of this contract that this checkout lacks (%s); run "
                                "again in a flat worktree cut fresh from origin/%s"
-                               % (base, ", ".join(sorted(t for t in held if t not in records)), base))
+                               % (base, ", ".join(sorted(t for t in held if t not in held_now)), base))
             cand = _candidate_from(ref, pr, verdict, cross_repository)
-            found = delivery_candidates([cand] if cand else [], tasks, records)
+            found = delivery_candidates([cand] if cand else [], tasks, held_now)
             if not found or not found[0].get("known") or found[0].get("kind") == "early":
                 why = ("it merged before the last sub-task landed (early); finish the sub-task still "
                        "to do" if found else
@@ -4263,7 +4844,7 @@ def main() -> int:
             if defects or not tasks:
                 return _refuse("G-2", "contract-defects",
                                "the contract has defects or no sub-task; amend it before recording a delivery")
-            failed_ids = [tid for tid, rec in records.items() if rec.get("status") == "failed"]
+            failed_ids = [tid for tid, rec in held_now.items() if rec.get("status") == "failed"]
             if failed_ids:
                 return _refuse("G-3", "failed-record", "a failed record exists: %s" % ", ".join(sorted(failed_ids)))
             parent_id = str((brief_fields or {}).get("id") or "").strip()
@@ -4299,8 +4880,13 @@ def main() -> int:
             new_ids: List[str] = []
             already: List[str] = []
             for task in tasks:
-                if task.id in records:
+                if task.id in held_now:
                     already.append(task.id)
+                    held_rec = held_now[task.id]
+                    if reading is not None and held_rec.get("status") == "completed" \
+                            and _norm(str(held_rec.get("pull_request") or "")).rstrip("/") \
+                            == _norm(str(pr.get("url") or "")).rstrip("/"):
+                        report["already_recorded"].append(_already_recorded(task.id, held_rec, pr))
                     continue
                 rec = build_record(
                     "merged", merge_sha, pr.get("url", ""), pr.get("mergedAt"), checks,
@@ -4368,6 +4954,14 @@ def main() -> int:
             candidate = _candidate_from(ref, pr, verdict, cross_repository)
             if candidate is not None:
                 raw_candidates.append(candidate)
+            continue
+
+        # I-8: the evidence (excluding this run) already holds a completed record for this very pull request:
+        # write nothing, close nothing, stamp no state. A failed record, or another pull request, re-records.
+        held_rec = _evidence(stored_records).get(task.id) if reading is not None else None
+        if held_rec and held_rec.get("status") == "completed" and pr.get("url") \
+                and _norm(str(held_rec.get("pull_request") or "")).rstrip("/") == _norm(str(pr["url"])).rstrip("/"):
+            report["already_recorded"].append(_already_recorded(task.id, held_rec, pr))
             continue
 
         # Extension Point 1/4: one walk, via summarise_hand_resolved -- never
@@ -4459,7 +5053,7 @@ def main() -> int:
     # answer counts only when its own url equals the link, which proves the link is
     # this repository's without a repo_view call (X-1).
     if (brief_link_match and delivery is None
-            and any(stored_records.get(t.id, {}).get("base_is_default") is not True for t in tasks)):
+            and any(_evidence(stored_records).get(t.id, {}).get("base_is_default") is not True for t in tasks)):
         link = brief_link
         number = int(brief_link_match.group(3))
         if not brief_link_asked:
@@ -4481,7 +5075,9 @@ def main() -> int:
                 "pr": number, "branch": (brief_fields.get("branch") or None), "merged_at": None,
                 "matched_by": "brief-pr", "known": False})
 
-    candidates = delivery_candidates(raw_candidates, tasks, records)
+    #: I-7: every decision below reads the evidence; the local ``records`` are only what this run writes.
+    evidence = _evidence(records)
+    candidates = delivery_candidates(raw_candidates, tasks, evidence)
     report["delivery"] = delivery if (delivery is not None and (writing or not args.record_delivery)) else None
     report["delivery_candidates"] = candidates
 
@@ -4489,7 +5085,7 @@ def main() -> int:
         tid: rec["review_verdict"] for tid, rec in records.items() if "review_verdict" in rec
     }
 
-    state = reconcile_state(state, records)
+    state = reconcile_state(state, evidence)
 
     # G-6 as the move reads it (I-14): a known candidate that is not early, while
     # condition one fails, costs ONE open-pull-request read, so the move never offers
@@ -4503,7 +5099,7 @@ def main() -> int:
 
     records_pr_url: Optional[str] = None
     if any(c.get("known") and c.get("kind") != "early" for c in candidates) \
-            and not is_delivered(tasks, records, delivery, defects)[0]:
+            and not is_delivered(tasks, evidence, delivery, defects)[0]:
         found_open = _open_records()
         if found_open:
             records_pr_url = found_open[0].get("url")
@@ -4518,7 +5114,26 @@ def main() -> int:
             print(json.dumps({"error": "unknown-sub-task", "sub_task": args.dispatch,
                               "known": list(by_id)}))
             return 2
-        move_now = advance(tasks, records, state, defects=defects,
+        # I-9: nothing is dispatched on top of records that are not on their way to origin, or that cannot be read.
+        # --local-evidence-only lifts neither refusal. Exit 12 is this refusal's own; --dispatch never exits 10.
+        if reading is not None:
+            dispatch_keys = _records_section()
+            if reading["reading"] != "ok":
+                print(json.dumps({
+                    "error": "records-unverifiable", "sub_task": task.id,
+                    "records_reading_cause": reading["cause"], "records_failure": reading["failure"],
+                    "detail": records_next_command({"commands": [], "reason": ""}, reading, dispatch_keys,
+                                                   slug)["reason"]}))
+                return 12
+            waiting = sorted(set(dispatch_keys["records_unpushed"]) | set(dispatch_keys["records_stranded"]))
+            if waiting:
+                print(json.dumps({
+                    "error": "records-unpushed", "sub_task": task.id, "records_unpushed": dispatch_keys["records_unpushed"],
+                    "records_stranded": dispatch_keys["records_stranded"],
+                    "remedy": "/pr-merged --records %s" % slug,
+                    "detail": "records not on their way to origin (%d files); run the records step first" % len(waiting)}))
+                return 12
+        move_now = advance(tasks, evidence, state, defects=defects,
                            briefs=briefs, default_branch=base, candidates=candidates,
                            layout_defects=layout_defects)
         if move_now["action"] == "delivery-unrecorded":
@@ -4666,11 +5281,13 @@ def main() -> int:
             print(f"dispatched {task.id} on {branch} -> {task.agent}")
         return 0
 
-    move = advance(tasks, records, state, defects=defects,
+    move = advance(tasks, evidence, state, defects=defects,
                    briefs=briefs, default_branch=base, candidates=candidates,
                    layout_defects=layout_defects)
     if move["action"] == "delivery-unrecorded" and records_pr_url:
         move["records_pull_request"] = records_pr_url
+    #: I-7: an unreadable reading releases nothing; a stranded record holds the flip.
+    unreadable = reading is not None and reading["reading"] != "ok"
 
     if args.preconditions:
         # The reading /advance decides on, answered before the Completion Verdict. Read-only:
@@ -4678,12 +5295,12 @@ def main() -> int:
         by_id_ready = {t.id: t for t in tasks}
         bodies_ready = handoff_bodies(contract_text)
         ranked: List[Dict[str, Any]] = []
-        for tid in (move.get("sub_tasks", []) if move["action"] == "dispatch" else []):
+        for tid in (move.get("sub_tasks", []) if move["action"] == "dispatch" and not unreadable else []):
             items = read_dispatch_preconditions(by_id_ready[tid], bodies_ready.get(tid, ""),
                                                 Path("."), precondition_cache)
             ranked.append({"id": tid, "preconditions": items, "rank": rank_preconditions(items)})
         all_held = bool(ranked) and all(r["rank"] == "held" for r in ranked)
-        reading = {
+        preconditions_reading = {
             "outcome": "preconditions-read", "contract": slug, "action": move["action"],
             "sub_tasks": ranked,
             "next_command": {
@@ -4692,8 +5309,11 @@ def main() -> int:
                            "nothing until one is met") if all_held else
                           "ranked reading; /advance dispatches a ready sub-task with --dispatch"},
         }
+        if unreadable:
+            preconditions_reading["next_command"] = records_next_command(
+                {"commands": [], "reason": ""}, reading, {}, slug)
         if args.json:
-            print(json.dumps(reading, indent=2))
+            print(json.dumps(preconditions_reading, indent=2))
         else:
             print("contract %s: next move %s" % (slug, move["action"]))
             for r in ranked:
@@ -4701,7 +5321,7 @@ def main() -> int:
                 for item in r["preconditions"]:
                     print("    %s %s (%s): %s - %s" % (item["kind"], item["ref"], item["source"],
                                                        item["state"], item["detail"]))
-            print("next command: none - %s" % reading["next_command"]["reason"])
+            print("next command: none - %s" % preconditions_reading["next_command"]["reason"])
         return 0
 
     # R-8: the layout warnings of a judged contract (the key is ABSENT otherwise), in the read-only modes
@@ -4722,18 +5342,19 @@ def main() -> int:
                 "reason": "held",
                 "detail": "records pull request open: %s" % open_now[0].get("url"),
                 "remedy": "merge the open Records pull request, then run --status again"}]
-        elif is_delivered(tasks, records, {})[0]:  # {}: only status completed AND verified github counts
+        elif is_delivered(tasks, evidence, {})[0]:  # {}: only status completed AND verified github counts
             report["layout_warnings"] = []  # nothing remains to deliver: the warning clears
         else:
             origin_held = _origin()
             if origin_held is None:
                 report["layout_warnings"] = layout_warnings_for(None, {}, [], "origin/" + base)
             else:
-                evidence = merge_evidence(origin_held, records, stored_records)
+                merged_evidence = merge_evidence(origin_held, records, stored_records,
+                                                 branch_heads=reading["tip"] if reading is not None else None)
                 report["layout_warnings"] = layout_warnings_for(
-                    layout.get("parent_branch"), evidence,
-                    delivery_candidates(raw_candidates, tasks, evidence), None,
-                    remaining=not is_delivered(tasks, evidence, {})[0])
+                    layout.get("parent_branch"), merged_evidence,
+                    delivery_candidates(raw_candidates, tasks, merged_evidence), None,
+                    remaining=not is_delivered(tasks, merged_evidence, {})[0])
 
     # D-1: the base each block would be cut from. --status reports it and never refuses.
     topology_now = declared_topology(None, briefs, base, [base])
@@ -4746,14 +5367,27 @@ def main() -> int:
                                 "base_problem": resolved_entry["problem"]})
         else:
             block_entry.update({"base": None, "base_source": None, "base_problem": None})
+    # I-3, I-5, I-7: the Records keys, taken after this run's writes, and the hold they put on the loop.
+    hold: Optional[str] = None
+    if reading is not None:
+        report.update(_records_section())
+        unreadable = reading["reading"] != "ok"
+        if unreadable:
+            hold = "records-unverifiable"
+        elif report["records_stranded"]:
+            hold = "records-stranded"
+        if hold:
+            move["held"] = hold
     report["next_move"] = move
-    report["released"] = move.get("sub_tasks", [])
+    report["released"] = [] if unreadable else move.get("sub_tasks", [])
     report["blocked"] = move.get("blocked", {})
     report["complete"] = move["action"] == "complete"
     report["state"] = state
     # Extension Point 8: the Next Command for this move, so both front doors
     # print one answer instead of each composing an ending.
     report["next_command"] = next_command_for(move, slug)
+    if reading is not None:
+        report["next_command"] = records_next_command(report["next_command"], reading, report, slug)
 
     # The Completion Verdict (I-1 to I-13). It is not a move: it carries its own `next`.
     def _rerun(extra: Sequence[str] = ()) -> str:
@@ -4784,17 +5418,31 @@ def main() -> int:
             parts += ["--skipped", json.dumps(text)]
         return " ".join(parts + tail)
 
-    mode = "read-only" if read_only else ("dry-run" if args.dry_run else "write")
+    # A held loop never flips: the evaluation reads condition one only, then the hold below speaks.
+    mode = "read-only" if (read_only or hold) else ("dry-run" if args.dry_run else "write")
     try:
         completion, flip_written = evaluate_completion(CompletionContext(
-            slug=slug, contract=contract, tasks=tasks, defects=defects, records=records,
+            slug=slug, contract=contract, tasks=tasks, defects=defects, records=evidence,
             delivery=delivery, candidates=candidates, base=base, mode=mode,
             owner_resolved=list(args.owner_resolved), skipped=list(args.skipped),
-            rerun=_rerun, open_records=_open_records, brief=brief_path, early_review=early_review))
+            rerun=_rerun, open_records=_open_records, brief=brief_path, early_review=early_review,
+            fetched=bool(reading is not None and reading["fetched"])))
     except UsageRefusal as refusal:
         print(json.dumps({"error": refusal.error, "detail": refusal.detail}))
         return 2
     written_files.extend(flip_written)
+    if hold == "records-unverifiable":
+        # I-7: the verdict names the cause and its remedy (I-5); nothing is flipped on missing evidence.
+        completion["reasons"].append({"condition": "records", "item": reading["cause"],  # type: ignore[index]
+                                      "remedy": report["next_command"]["reason"]})
+        _finish(completion, "unverifiable", [], report["next_command"]["reason"])
+    elif hold == "records-stranded" and completion["verdict"] == "not-evaluated":
+        remedy = "/pr-merged --records %s" % slug
+        completion["reasons"].append({
+            "condition": "records", "item": "records-stranded: %d records sit on %s with no open pull request"
+                                            % (len(report["records_stranded"]), records_branch_prefix(slug)),
+            "remedy": "run %s, which opens a draft pull request from the same branch" % remedy})
+        _finish(completion, "pending", [remedy], completion["reasons"][-1]["remedy"])
     # I-19 (amendment 3): in a dry run every command in completion.next is a WRITING run,
     # so its reason says so, and a skill never runs it before the owner's confirmation.
     if mode == "dry-run" and completion["next"]["commands"] \
@@ -4803,10 +5451,14 @@ def main() -> int:
     report["completion"] = completion
     report["written_files"] = written_files
 
-    if writing:
+    # I-8: a re-run whose every pull request is already recorded writes nothing, not even the state store.
+    rerun_only = (bool(report["already_recorded"]) and not report["closed"] and not report["failed"]
+                  if args.record_delivery
+                  else bool(pr_refs) and len(report["already_recorded"]) == len(pr_refs))
+    if writing and not rerun_only:
         write_state(slug, state)
 
-    if move["action"] == "dispatch":
+    if move["action"] == "dispatch" and not unreadable:
         bodies = handoff_bodies(contract_text)
         by_id = {t.id: t for t in tasks}
         report["dispatch"] = []

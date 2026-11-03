@@ -97,12 +97,27 @@ py -3 "$PRM" --contract <slug|path> --status --json
 ```
 
 The script owns every rule about sub-tasks, dependencies, records and readiness. It is covered
-by 530 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
-`unittest` summary line reads `Ran 530 tests ... OK` (exit code 0) — and has been mutation-probed. **Read its
+by 760 tests — measured by running `py -3 .claude/scripts/tests/test_pr_merged.py`, whose own
+`unittest` summary line reads `Ran 760 tests ... OK` (exit code 0) — and has been mutation-probed. **Read its
 answer. Do not recompute it from the contract**, or there are two implementations of the same
 rules and they will disagree.
 
 The answer carries `next_move.action`, plus `dispatch` packets when there is something to start.
+
+**Read `records_reading` first, before `next_move`.** The report says whether completion records are
+on their way to origin. Branch on it:
+
+| What the report says | Do |
+|---|---|
+| No `records_reading` key | An older vendored script. Halt with: "this `pr_merged.py` predates 0.14.0: sync the vendored copy (`tools/sync-plugin.cmd`)". The same halt applies when any call exits 2 with `unrecognized arguments:` naming `--sweep-records`, `--from`, `--removed`, `--discard-differing` or `--local-evidence-only`. An absent key never reads as "nothing pending". Any other exit 2 without a JSON `error` is printed verbatim and halts |
+| `records_reading: unverifiable` | Halt and dispatch nothing. Print the Next Command's reason: for `records_failure: transient`, retry once git and GitHub answer; for `persistent`, fix the named cause (repair the named record through a records pull request, or install or authenticate `gh`). Dispatch stays refused until then |
+| `records_unpushed` or `records_stranded` not empty | Run the records step (`/pr-merged --records <slug>`, which is `references/contract-completion.md` "The records pull request" steps 6 to 9), then read `--status --json` again. Never dispatch on top of unpushed records. A `--dispatch` call that exits **12** with `error` `records-unpushed` or `records-unverifiable` means the same: stop and do this row or the row above |
+| `records_differing` not empty | Show each `remedy` (`/pr-merged --records <slug> --discard-differing <path>`, run only when the owner names the path) and continue |
+| `records_reading: ok` and the lists empty | Continue with `next_move` |
+
+`--local-evidence-only` is passed through to `pr_merged.py` only on the owner's word. It skips deleting and
+pushing records for that call and nothing else: it never changes the evidence, never lifts a hold and
+never unblocks dispatch.
 
 ### Where this runs, and what a surprising answer usually means
 
@@ -110,7 +125,7 @@ The answer carries `next_move.action`, plus `dispatch` packets when there is som
 
 **`contract-not-found` is almost always the wrong branch, not a missing contract.** Before anything else, ask which branch holds the file: `git log --all --oneline -- .claude/concepts/<slug>.md`. Then run the locator above and act on its status. Never switch the main checkout to the parent branch and never edit there: the guard refuses it.
 
-**A released sub-task whose branch or pull request already exists on GitHub means a completion record is missing from this checkout.** A record written on a separate records branch is invisible here until that branch reaches the parent. Dispatching on that answer redoes finished work. Stop, name the sub-task, and say which pull request carries the record. This rule is about dispatch, which sees only the parent branch. The landing in `complete` below differs on purpose: it also reads records from the `docs/<contract-slug>-records` branch and from `master`, because that is where `/pr-merged` Step 3 puts them.
+**A released sub-task whose branch or pull request already exists on GitHub means a completion record is missing from this checkout.** A record written on a separate records branch is invisible here until that branch reaches the parent. Dispatching on that answer redoes finished work. Stop, name the sub-task, and say which pull request carries the record. Records on the tip of `docs/<contract-slug>-records` and on `origin/<default>` already count as evidence in the script's answer (`records_reading`), so this backstop catches only a record that no read can see. This rule is about dispatch, which sees only the parent branch. The landing in `complete` below differs on purpose: it also reads records from the `docs/<contract-slug>-records` branch and from `master`, because that is where `/pr-merged` Step 3 puts them.
 
 **Check the packet's `base` against the sub-task brief's `base:` before dispatching for real.** A packet that says the default branch while the brief says the parent branch means the sub-task's identity was never recorded in this checkout's state. Record it first with `--record-subtask`, then dispatch. Otherwise the new branch is cut from the wrong place and misses what earlier sub-tasks built.
 
@@ -207,7 +222,7 @@ a non-empty `GH_REPO` would retarget that call at another repository entirely. T
 no branch and writes nothing either, and it holds under `--dry-run` too. The remedy is unsetting
 `GH_REPO` in that shell and dispatching again.
 
-It refuses with exit code **3** and `{"error": "delivery-unrecorded", ...}` when a merged pull request delivered the whole contract on one branch and no delivery is recorded (the `delivery-unrecorded` move below). That refusal cuts no branch and writes nothing. `--dispatch` never exits 10, so this skill needs no handling for that code.
+It refuses with exit code **3** and `{"error": "delivery-unrecorded", ...}` when a merged pull request delivered the whole contract on one branch and no delivery is recorded (the `delivery-unrecorded` move below). That refusal cuts no branch and writes nothing. `--dispatch` never exits 10, so this skill needs no handling for that code. It refuses with exit code **12** and `error` `records-unpushed` (records not on their way to origin; the remedy is `/pr-merged --records <slug>`) or `records-unverifiable` (the records could not be read; see the table in Step 1), also under `--dry-run`. `--local-evidence-only` lifts neither.
 
 
 **The branch is cut in a new flat worktree.** `--dispatch` creates the sub-task branch inside a new flat worktree under `<main checkout>/.claude/worktrees/` and never switches the checkout it runs from. The packet's `worktree` is that worktree's absolute path, and `worktree_created` is true when this run made it (null on a read-only run). A helper refusal comes back as `branch-failed` carrying the helper's outcome (`nested`, `branch-in-main-checkout`, `path-taken`, `fetch-failed` or `git-failed`); stop and report it.
@@ -510,6 +525,12 @@ the line ends with `finish: <command>`, a session stood in a tree it had to remo
 was left untouched, and the next call from a shell outside it clears it. Print that one command
 and nothing more.
 
+**Then sweep the records leftovers, in every tree this call touched.** Run
+`py -3 "$PRM" --contract <slug> --sweep-records --from "$START" [--from <the --dispatch worktree>] [--removed <a tree this call removed>] --json`
+and print its `tree_lines` verbatim as the report's `- Trees:` entry. The sweep deletes a records copy
+only when its twin is on origin, keeps and names every other, and exits 10 without deleting anything
+when the records cannot be read; it is idempotent, so a call that dispatched nothing still runs it.
+
 ## Step 3: Report, in the same shape every time
 
 **First, make one more call to the script — read-only, and AFTER the move this skill just
@@ -538,6 +559,7 @@ prints it verbatim, exactly as `pr_merged.py`'s own human-readable output does.
 - Completion: <the FINAL call's completion line, verbatim>
 - Next command: <the FINAL call's next_command.commands, joined by ", then ", or "none — <reason>". After a landing, the Landing Report's own next_command>
 - Cleanup: <Step 2.5's cleanup script `line`, verbatim>
+- Trees: <Step 2.5's sweep `tree_lines`, verbatim, one per tree touched: the starting tree, the --dispatch worktree and any removed tree>
 ```
 
 The `completion:` line comes from the same final read-only call: `completion.verdict` and the first entry of `completion.reasons`. Because that call is read-only it shows `not-evaluated` and the dry-run command, never a flip. The flip belongs to `/pr-merged`.

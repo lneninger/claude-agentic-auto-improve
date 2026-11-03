@@ -159,8 +159,8 @@ tool names and shapes belong to the one adapter and to the profile slots it read
 (`memory.retrieve-tool`, `memory.capture-tool`, `memory.shape`). Everywhere else, say "the
 configured retrieve tool" and "the configured capture tool".
 
-- A scan in `.claude/scripts/tests/test_plugin_text_scans.py` enforces it, and fails the build
-  on a shipped file that names a memory tool.
+- A scan in `.claude/scripts/tests/test_plugin_text_scans.py` enforces it:
+  run it before committing a change to a shipped file. It is not yet run in CI.
 - **The registries are shipped and get no exemption.** A mechanism entry, a vocabulary term or
   a journal lesson about memory must not use the literal tool names.
 - This file, the README, contracts, work-item briefs and `.claude/scripts/tests/` are not

@@ -1220,6 +1220,77 @@ class TestFindPluginRootDelegates(unittest.TestCase):
                          "find_plugin_root delegates its cache step to installed_plugin_root()")
 
 
+LAUNCHER_NAMES = ("PROJECT_HOOK_LAUNCHER_SOURCE", "HOOK_CLASS_BLOCK", "HOOK_CLASS_WARN",
+                  "project_hook_launcher_parts", "project_hook_launcher_row")
+
+
+class TestLauncherSurfaceMissingDegrades(unittest.TestCase):
+    """Revision 19, BE, F2 (block 56 writes these, block 57 makes them green).
+
+    A vendored hooks folder from an older release holds a ``_project_paths.py`` that imports cleanly and lacks
+    the five launcher names. ``_claude_paths`` then raises AttributeError at import, which the doctor's three
+    callers that catch only ImportError do not catch. The rule: ``_claude_paths`` raises ImportError, with a
+    message naming that file and each missing name, so those callers degrade. Each case runs in a child process
+    on a copied tree, because a module stays loaded once imported."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="launcher-missing-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.vendored = self.tmp / "vendored"
+        (self.vendored / ".claude" / "scripts").mkdir(parents=True)
+        (self.vendored / ".claude" / "hooks").mkdir(parents=True)
+        for src in SCRIPTS_DIR.glob("*.py"):
+            shutil.copy2(src, self.vendored / ".claude" / "scripts" / src.name)
+        for src in HOOKS_DIR.glob("*.py"):
+            shutil.copy2(src, self.vendored / ".claude" / "hooks" / src.name)
+        stub = self.vendored / ".claude" / "hooks" / "_project_paths.py"
+        stub.write_text(stub.read_text(encoding="utf-8") + "\n\ndel " + ", ".join(LAUNCHER_NAMES) + "\n",
+                        encoding="utf-8")
+        self.scripts = self.vendored / ".claude" / "scripts"
+        (self.tmp / "cfg").mkdir()
+
+    def child(self, code):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
+        env.update({"CLAUDE_CONFIG_DIR": str(self.tmp / "cfg"), "HOME": str(self.tmp / "home"),
+                    "USERPROFILE": str(self.tmp / "home"), "CLAUDE_PROJECT_DIR": str(self.tmp / "project")})
+        return subprocess.run([sys.executable, "-B", "-c", code, str(self.scripts)], capture_output=True, text=True,
+                              env=env, timeout=60)
+
+    def test_the_stub_hooks_file_imports_cleanly_and_lacks_exactly_the_five_names(self):
+        # Positive control: passes today. A stub that failed to import would make the rows below pass for the wrong
+        # reason.
+        proc = self.child(
+            "import sys, importlib.util; p = sys.argv[1].replace('scripts', 'hooks') + '/_project_paths.py'; "
+            "s = importlib.util.spec_from_file_location('pp', p); m = importlib.util.module_from_spec(s); "
+            "s.loader.exec_module(m); print([n for n in %r if hasattr(m, n)], hasattr(m, 'claude_roots'))"
+            % (LAUNCHER_NAMES,))
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "[] True"), proc.stderr[-300:])
+
+    def test_importing_claude_paths_raises_import_error_naming_the_file_and_each_missing_name(self):
+        proc = self.child(
+            "import sys; sys.path.insert(0, sys.argv[1])\n"
+            "try:\n    import _claude_paths\n"
+            "except ImportError as exc:\n    print('IMPORTERROR|' + str(exc))\n"
+            "except BaseException as exc:\n    print('OTHER|' + type(exc).__name__ + '|' + str(exc))\n"
+            "else:\n    print('IMPORTED')\n")
+        out = proc.stdout.strip()
+        self.assertEqual(proc.returncode, 0, proc.stderr[-300:])
+        self.assertTrue(out.startswith("IMPORTERROR|"),
+                        "an ImportError, not AttributeError or a clean import; got %r" % out[:300])
+        message = _norm_path(out)
+        self.assertIn("hooks/_project_paths.py", message, "the message names the hooks file: %r" % out[:400])
+        for name in LAUNCHER_NAMES:
+            self.assertIn(name, out, "and each missing name, %s: %r" % (name, out[:400]))
+
+    def test_the_doctors_plugin_root_lookup_gives_not_found_with_no_traceback(self):
+        proc = self.child(
+            "import sys; sys.path.insert(0, sys.argv[1]); import plugin_doctor; "
+            "r = plugin_doctor.find_plugin_root(); print('NOTFOUND' if r is None else 'FOUND ' + str(r))")
+        self.assertNotIn("Traceback", proc.stderr, "no traceback: %r" % proc.stderr[-400:])
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "NOTFOUND"),
+                         "the not-found result: %r" % proc.stderr[-300:])
+
+
 # ===========================================================================
 # Add-on drift (dedupe contract, Revision 3, block 16): the sync config's `addons` object and the presence rule
 # ===========================================================================
@@ -2398,6 +2469,52 @@ class TestDriftDanglingHookRow(DanglingCase):
         names = sorted(posixpath.basename(f["path"].split(":", 4)[4].replace("\\", "/")) for f in _dang(data))
         self.assertEqual(names, ["p1.py", "p2.py", "p3 x.py"],
                          "dangling reads the same file names, and keeps the spaces of the quoted path whole")
+
+
+class TestDanglingLauncherRows(DanglingCase):
+    """Revision 19, BF (gate 32 F4, Q27; block 56 writes these, block 57 makes them green).
+
+    ``_row_skipped`` skips every Project hook launcher row today, so a launcher row whose script is missing is
+    never reported. The reader must read it through ``project_hook_launcher_parts`` and report it as the same
+    ``dangling-hook-row`` finding as an old-form row, when the script is a file in none of the folders the
+    launcher tries (the project's ``.claude/hooks``, then the main checkout's, section L). The rows build their
+    own fixtures and read no installed plugin (the block 8 rule), so block 35 can vendor this file."""
+
+    def assert_one_finding_naming(self, event, hook_class):
+        self.add_row(event, launcher_row("gone-guard.py", hook_class), matcher="")
+        found = self.scan()
+        self.assertEqual([f.kind for f in found], [KIND_DANGLING],
+                         "one dangling-hook-row finding for the launcher row; got %r" % ([f.path for f in found],))
+        self.assertIn("gone-guard.py", _norm_path(found[0].path), "and its path names the script")
+        self.assertEqual(found[0].owner, "plugin", "owned by the plugin, like an old-form row")
+
+    def test_a_warn_launcher_row_whose_script_is_in_none_of_the_launchers_folders_is_one_finding_naming_it(self):
+        self.assert_one_finding_naming("UserPromptSubmit", "warn")
+
+    def test_a_block_launcher_row_whose_script_is_in_none_of_the_launchers_folders_is_one_finding_naming_it(self):
+        self.assert_one_finding_naming("PreToolUse", "block")
+
+    def test_a_launcher_row_whose_script_exists_in_the_projects_hooks_folder_gives_no_finding(self):
+        self.w.project_put(".claude/hooks/here-guard.py", "# here\n")
+        self.add_row("UserPromptSubmit", launcher_row("here-guard.py", "warn"), matcher="")
+        self.assertEqual(list(self.scan()), [], "the launcher finds the script, so nothing is dangling")
+
+    def test_a_script_that_exists_only_outside_the_hooks_folder_does_not_save_a_launcher_row(self):
+        # The launcher looks in <project>/.claude/hooks and the main checkout's, nowhere else.
+        self.w.project_put("elsewhere-guard.py", "# not in the hooks folder\n")
+        self.w.project_put(".claude/scripts/elsewhere-guard.py", "# not in the hooks folder either\n")
+        self.add_row("UserPromptSubmit", launcher_row("elsewhere-guard.py", "warn"), matcher="")
+        found = self.scan()
+        self.assertEqual([f.kind for f in found], [KIND_DANGLING], "dangling: %r" % ([f.path for f in found],))
+        self.assertIn("elsewhere-guard.py", _norm_path(found[0].path))
+
+    def test_an_old_form_row_for_a_missing_script_is_still_one_finding(self):
+        # Positive control: passes today. It shows the fixture reaches the scan, so the rows above fail for the
+        # launcher reading and not for a broken fixture.
+        self.add_row("UserPromptSubmit", self.exec_row("gone-old.py"), matcher="")
+        found = self.scan()
+        self.assertEqual([f.kind for f in found], [KIND_DANGLING])
+        self.assertIn("gone-old.py", _norm_path(found[0].path))
 
 
 class TestDanglingHookRowsFunction(DanglingCase):

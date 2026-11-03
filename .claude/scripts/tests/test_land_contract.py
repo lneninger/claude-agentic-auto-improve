@@ -4108,5 +4108,100 @@ class TestStageP3ReadsTheEffectiveReviewVerdict(StageCase):
         self.assertOutcome(st.run(), "blocked-verdict", "supersession needs a real target in the review folder")
 
 
+ATTR_TEST_FILE = "tests/test_mod.py"
+ATTR_FAIL = "test_x (tests.test_mod.TestA.test_x) ... FAIL\ntest_ok (tests.test_mod.TestA.test_ok) ... ok\n"
+ATTR_FAILURE_ID = "scripts::tests.test_mod.TestA::test_x"
+STEP_CHECK = {"id": "file-check", "suite": "checks", "command": ["py", "-3", "scripts/check_x.py"],
+              "results": {"format": "exit-code"}, "timeout_minutes": 5, "environment_signatures": []}
+Q1_ADVICE = "every new failure is attributed outside the contract's diff"
+
+
+class TestStageFailureAttributionReachesTheReport(StageCase):
+    """The attribution facts travel from the P8 halt through make_report into report.json's next_command."""
+
+    def named_test_world(self, *, contract_changes_file, subdir=""):
+        parent_files = dict(self.src_change())
+        if contract_changes_file:
+            parent_files[ATTR_TEST_FILE] = "# the contract edits the test file\n"
+        st = self.stage(subdir=subdir, parent_files=parent_files)
+        st.step_outputs["py-unit"] = ATTR_FAIL
+        st.kit.commit_remote("master", {ATTR_TEST_FILE if not contract_changes_file else "master-note.txt":
+                                        "# the default branch moved\n"})
+        return st
+
+    def step_world(self, *, contract_changes_file, subdir=""):
+        parent_files = dict(self.src_change())
+        if contract_changes_file:
+            parent_files["scripts/check_x.py"] = "# the contract edits the checker\n"
+        st = self.stage(subdir=subdir, config=landing_config(steps=[STEP_CHECK]), parent_files=parent_files)
+        st.long_rc = {"check_x.py": 1}
+        st.kit.commit_remote("master", {"master-note.txt": "x\n"} if contract_changes_file
+                             else {"scripts/check_x.py": "# the default branch edits the checker\n"})
+        return st
+
+    def test_a_named_test_regression_outside_the_diff_carries_the_advice_and_the_rerecord_command(self):
+        st = self.named_test_world(contract_changes_file=False)
+        report = st.run()
+        self.assertOutcome(report, "verification-not-ready", "a named test fails")
+        attributed = report["verification"]["new_failures_attributed"]
+        self.assertEqual([(a["unit"], a["attribution"]) for a in attributed], [(ATTR_FAILURE_ID, "outside-diff")])
+        nc = report["next_command"]
+        self.assertIs(nc["outside_diff"], True)
+        self.assertIn(Q1_ADVICE, nc["reason"])
+        self.assertTrue(nc["commands"][0].startswith("/task Re-record the failing-test baseline"),
+                        "the re-record command stays for a named regression")
+        self.assertEqual(nc["commands"][-1], "/advance %s" % SLUG)
+        self.assertIn("outside it: " + ATTR_FAILURE_ID, report["detail"], "the detail names the split")
+
+    def test_control_an_in_diff_named_test_failure_carries_neither_advice(self):
+        st = self.named_test_world(contract_changes_file=True)
+        report = st.run()
+        self.assertOutcome(report, "verification-not-ready", "a named test fails")
+        self.assertEqual(report["verification"]["new_failures_attributed"][0]["attribution"], "in-diff")
+        nc = report["next_command"]
+        self.assertIs(nc["outside_diff"], False)
+        self.assertNotIn(Q1_ADVICE, nc["reason"])
+        self.assertNotIn("default branch fails the same step", nc["reason"])
+        self.assertTrue(nc["commands"][0].startswith("/task Re-record"))
+
+    def test_an_exit_code_step_failing_outside_the_diff_points_to_the_default_branch_and_drops_the_rerecord(self):
+        st = self.step_world(contract_changes_file=False)
+        report = st.run()
+        self.assertOutcome(report, "verification-not-ready", "the step exits 1")
+        self.assertEqual([(a["unit"], a["unit_kind"], a["attribution"])
+                          for a in report["verification"]["new_failures_attributed"]],
+                         [("step file-check", "step", "outside-diff")])
+        nc = report["next_command"]
+        self.assertIs(nc["outside_diff"], False)
+        self.assertEqual(nc["commands"], ["/advance %s" % SLUG], "no re-record line")
+        self.assertIn("check whether the default branch fails the same step", nc["reason"])
+        self.assertIn("file-check", nc["reason"])
+        self.assertNotIn(Q1_ADVICE, nc["reason"])
+
+    def test_control_an_exit_code_step_failing_in_the_diff_gets_the_same_step_advice_and_no_q1_advice(self):
+        st = self.step_world(contract_changes_file=True)
+        report = st.run()
+        self.assertEqual(report["verification"]["new_failures_attributed"][0]["attribution"], "in-diff")
+        self.assertEqual(report["next_command"]["commands"], ["/advance %s" % SLUG])
+        self.assertNotIn(Q1_ADVICE, report["next_command"]["reason"])
+
+    def test_the_repeat_after_a_rerecord_keeps_precedence_and_shows_no_advice(self):
+        st = self.named_test_world(contract_changes_file=False)
+        seed = st.kit.landing_dir() / SLUG
+        seed.mkdir(parents=True, exist_ok=True)
+        (seed / "report.json").write_text(json.dumps({
+            "run_id": "run-0", "contract": SLUG, "outcome": "verification-not-ready", "gate": "P8",
+            "verification": {"new_failures": [ATTR_FAILURE_ID],
+                             "baseline": {"path": BASELINE_FILE, "measured_at_commit": sha40("1")}}}),
+            encoding="utf-8")
+        report = st.run()
+        self.assertOutcome(report, "verification-not-ready", "the same test fails again")
+        self.assertEqual(report["verification"]["new_failures_attributed"][0]["attribution"], "outside-diff")
+        nc = report["next_command"]
+        self.assertTrue(nc["repeat_after_rerecord"])
+        self.assertEqual(nc["commands"], ["/design-first %s" % SLUG])
+        self.assertNotIn(Q1_ADVICE, nc["reason"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

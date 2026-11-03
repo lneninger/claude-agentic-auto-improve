@@ -289,7 +289,7 @@ Who uses it, exactly:
 - `/design-first` appends to `JOURNAL.md` only the critic findings the user confirmed (Steps 3 and 5).
 - `fullstack-code-reviewer` appends on a justified contract divergence and, as janitor, to `MECHANISMS.md` and `VOCABULARY.md`.
 - `/journal-add` appends a manual lesson.
-- The `contract-critic` reads it and never appends.
+- The contract-critic appends only its Critique section to the contract under review, and never writes a registry.
 
 Tell the user to commit these files and never to delete, gitignore or bypass them. The Central Memory System, when a project switches it on through the `memory.*` profile slots, only supplements them: it never replaces or hides them, and a local entry wins a conflict until the user decides.
 
