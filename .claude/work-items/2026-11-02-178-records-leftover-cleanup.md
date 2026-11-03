@@ -13,9 +13,9 @@ branch: feature/178-records-leftover-cleanup
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261102-infra-178-records-leftover-cleanup
 north_stars: none
 contract: .claude/concepts/2026-11-02-pr-merged-records-leftover-cleanup.md
-pr: UNKNOWN
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/208
+issue_link: closes
+status: shipped
 created: 2026-11-02
 ---
 
