@@ -317,6 +317,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a feature reads data another change's writer produces
 - **Tags:** merge, row-shape, round-trip, coverage-claim, hook-row
 
+### 2026-11-02 — A skill written around an adapter refusal hides a contract divergence
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When a later block's skill text says a refusal "is expected" for a case the contract says must succeed, stop and report the divergence; do not document around it. Name a test after only what it asserts.
+- **Apply when:** a handoff block writes skill text that calls a subcommand an earlier block delivered, for a state the contract's Commands table does not list as a refusal.
+- **Tags:** contract-divergence, refusal, skill-text, test-name, adapter
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

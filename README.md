@@ -631,10 +631,10 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 28 skills | yes | yes | yes |
-| 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
+| 33 skills | yes | yes | yes |
+| 15 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
 | 13 hooks | yes | no | no |
-| 6 working agreements, delivered by a hook | yes | no | no |
+| 7 working agreements, delivered by a hook | yes | no | no |
 | scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
 
 **Corrected 2026-09-13.** This row used to read `vendoring only`, and that was wrong. An
@@ -696,10 +696,10 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          32 generic skills          (plugin root -- all three providers)
-agents/          14 generic agents          (plugin root -- Claude and Cursor)
+skills/          33 generic skills          (plugin root -- all three providers)
+agents/          15 generic agents          (plugin root -- Claude and Cursor)
 .claude/
-  agreements/    6 shipped working agreements, delivered at session start
+  agreements/    7 shipped working agreements, delivered at session start
   addons/        3 opt-in add-ons (addon.json + hook files), never registered by hooks.json
   hooks/         13 generic hooks, a gate launcher, 7 shared helper modules, 6 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
@@ -737,7 +737,8 @@ first; ignore the second.
 data-architect, contract-critic, fullstack-code-reviewer, senior-test-engineer,
 test-strategy-critic, migration-safety-reviewer, security-auditor,
 sql-performance-reviewer, api-contract-reviewer, ui-ux-designer,
-dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scout.
+dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scout,
+cloud-engineer.
 
 ### Skills
 
@@ -748,7 +749,7 @@ validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-i
 auto-improve-angular-tailwind-install, auto-improve-angular-tailwind-uninstall,
 auto-improve-codegraph-install, auto-improve-codegraph-uninstall,
 auto-improve-strict-shell-gate-install, auto-improve-strict-shell-gate-uninstall,
-angular-ui-rules, unit-testing, application-design, website-design.
+angular-ui-rules, unit-testing, application-design, website-design, cloud-engineering.
 
 A skill or agent that mentions a skill owned by another plugin follows the rule in
 [CONTRIBUTING.md](CONTRIBUTING.md) → "Referencing another plugin's skill".
@@ -833,10 +834,14 @@ Never copy the soft choice to a guard that blocks.
 
 A working agreement is one standing rule about how the assistant works with you, written in
 plain words in its own markdown file. When a session opens, `working-agreements.py` reads
-the files and hands their text to the assistant before its first reply. The plugin ships six
+the files and hands their text to the assistant before its first reply. The plugin ships seven
 in `.claude/agreements/`: plain language, one worktree per change, shared repository changes
-through pull requests, one-line commands for the user, stop means stop, and
-recommendations instead of question batches.
+through pull requests, one-line commands for the user, stop means stop,
+recommendations instead of question batches, and use the project history record. The
+seventh tells the assistant that the registries and the concept contracts are the project's
+memory and design history, to be read and used, and that a central memory system, when a
+project switches one on, only supplements them (see
+[Memory client and cloud engineering](#memory-client-and-cloud-engineering)).
 
 - **Add your own** by writing a markdown file in your project's `.claude/agreements/`. The
   first line is a level-one heading, and some text follows it. Project files arrive after the
@@ -870,9 +875,167 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 308 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 313 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
+
+## Memory client and cloud engineering
+
+Two optional capabilities. Each is **off until a project switches it on** in its project
+profile. With both off, every brief, every flow and every printed line is what it was before
+they existed.
+
+### The Project history record
+
+A project's own file-based record of its design history, committed in its repository. It
+holds the registries under `.claude/registries/` (`MECHANISMS.md`, `VOCABULARY.md`,
+`JOURNAL.md`, and `INTEGRATION.md` where the project keeps one), the concept contracts and
+follow-up stubs under `.claude/concepts/`, and the Work Item Briefs under
+`.claude/work-items/`. It is not the `memory: project` agent memory under
+`.claude/agent-memory/`.
+
+- **Who reads it.** `/design-first` and the data-architect read it on every design, in every
+  memory state, including when memory is off.
+- **Who appends to it, and only after something was confirmed.** `/task` writes the brief and
+  the data-architect writes the contract. `/design-first` Steps 3 and 5 append to `JOURNAL.md`
+  only the critic findings you confirmed. `fullstack-code-reviewer` appends on a justified
+  contract divergence and, as janitor, to `MECHANISMS.md` and `VOCABULARY.md`. `/journal-add`
+  appends a manual lesson. The contract-critic reads it and never appends.
+- **Who does neither.** A route with no design step (a direct edit of an extra-small or small
+  change, `/debug`, `/git-commit`, `/ship`) neither reads nor appends it. Not every flow
+  touches it.
+- **The Central Memory System only supplements it.** A memory item never replaces, hides or
+  skips a read of it, and a local entry wins a conflict until you decide.
+- **Where you meet it.** The seventh shipped working agreement states it at every session
+  start. `/auto-improve-finish-install` has a section for it, runs the doctor in report mode,
+  lists exactly what `--fix` would create, and runs `--fix` only after you say yes. Every line
+  `/design-first` Step 1.5 prints, in any state but `disabled`, ends with
+  `; design continues from the project history record (registries and concept contracts)`.
+
+### Architecture
+
+The memory capability makes the plugin a careful *client* of a **Central Memory System**: a
+separate product, in another repository, that holds engineering knowledge across projects and
+is reached only over MCP (Model Context Protocol). The plugin stores no memory, runs nothing
+in the background and adds no hook. It touches that system at two call sites only.
+
+```
+/flow  (or /task directly)
+  |
+  +-- /task               Work Item Brief      .claude/work-items/
+  |
+  +-- /design-first
+  |     Step 1.5   MEMORY CALL SITE 1: retrieve
+  |                status -> one retrieve call -> normalise -> you mark which items apply
+  |                -> the data-architect receives only the items you marked
+  |     Step 2..5  the data-architect drafts; you approve the concept contract
+  |
+  +-- /tdd-first, reviewers, /verify-before-done, /git-commit, /ship
+  |
+  (you merge the pull request)
+  |
+  +-- /pr-merged  (or /flow, at its Step 8)
+        records confirmation -> ONE writing run -> verdict "flipped"
+              |
+              +-- MEMORY CALL SITE 2: capture (its own separate question)
+                  asked only after the writing run returned flipped
+                  candidates -> you untick what not to send -> one send each
+                  -> receipts written to the linked brief -> records pull request
+```
+
+The two sites are different moments with different questions. Retrieval happens before the
+draft and is bound to non-trivial design. Capture happens after the delivery's writing run
+returned `flipped`, is **never** folded into the earlier records confirmation and is never
+built from the dry run. Under `/flow`, Step 8's single confirmation is unchanged and the
+capture question follows the writing run.
+
+**The memory boundary.** One file knows the Central Memory System's tool names and shapes:
+`.claude/scripts/memory_boundary.py`, the *Memory adapter*, with its tests in
+`.claude/scripts/tests/test_memory_boundary.py`. Everything else, the skills, the agents and
+the registries, says only "the configured retrieve tool" and "the configured capture tool". A
+scan in `test_plugin_text_scans.py` fails when any other shipped file names a memory tool.
+Every field the server returns is untrusted: the adapter validates it, caps it and strips
+anything that could pass as markup before an item is shown or written anywhere.
+
+**The configuration slots.** Nine rows in `.claude/project-profile.md`, all starting as
+placeholders, which read as off:
+
+| Slot | Meaning |
+|---|---|
+| `memory.server` | MCP server name. Unset turns memory off |
+| `memory.retrieve-tool` | tool name on that server that retrieves items |
+| `memory.capture-tool` | tool name that stores a captured item. Unset turns capture off |
+| `memory.shape` | which request and response shape the adapter speaks (`v0` is the first) |
+| `memory.project-key` | key that scopes memory to this project, or `none` |
+| `cloud.providers` | `azure`, `aws`, `gcp`, or `none`. `none` turns the cloud capability off |
+| `cloud.iac` | `terraform`, `bicep`, `docker`, `kubernetes`, or `none` |
+| `cloud.roots` | infrastructure source roots, or `none` |
+| `cloud.mcp-server` | external cloud-management MCP server name; a slot only, no adapter yet |
+
+Memory has three states. `disabled` (no server): nothing is printed and nothing is written.
+`unconfigured` (a server, but a missing retrieve tool or an unknown shape): one line is
+printed and recorded in the brief. `enabled`: retrieval runs, and capture runs only if the
+capture tool is also set.
+
+**MCP integration.**
+
+- **Main session only.** A configured MCP server is called from the main session, never from
+  a subagent. A plugin agent's tool line is fixed text and cannot name a server a project
+  chooses. Subagents receive results as findings passed to them.
+- **Tool names live in the slots**, not in any skill or agent.
+- **The shapes live in one script**, `memory_boundary.py`. A new response shape is one new
+  profile inside it plus a `memory.shape` value.
+- **One attempt, bounded by the host's MCP timeout.** There is no retry and no polling. An
+  error, a timeout or an absent tool is recorded as `unavailable`, printed as one line, and
+  design goes on. If a send fails during capture, sending stops and every remaining confirmed
+  candidate is recorded as not sent.
+
+**Lifecycle separation.** The Central Memory System owns an item's lifecycle (`proposed`,
+`validated`, `superseded`, `conflicting`). The plugin never changes an item's status. When it
+captures, it only claims `proposed`, at the weakest provenance the evidence supports
+(`user-decision` or `source-code-fact`; a manual or post-approval journal entry is never
+sent). A captured item is `global` or `project` scope: the registry tier gives the starting
+scope, and the project-name check can lower `global` to `project`, never the reverse. The
+brief records every item used and every item sent, with ids and versions, in its
+`## Memory used` section. It is also separate from three other things named "memory": agent
+memory under `.claude/agent-memory/`, the memory pager, and your private auto-memory.
+
+**Cloud engineering.** When `cloud.providers` names at least one provider, the plugin adds
+the `cloud-engineering` skill (provider references are read only for the providers you
+selected), the `cloud-engineer` agent, an infrastructure-as-code checklist in the security
+auditor, and deployment validation through the existing verification steps. The scope rule:
+they design, review, validate with non-mutating commands only, and troubleshoot. They **never
+run a deploy, apply, create, update or destroy command against a live environment**. They
+write it out, in a block labelled "for the user to run", and hand it to you. The plugin adds
+**no permission mechanism**: your normal Claude Code permission prompts and the existing
+destructive-operation guards apply to those commands unchanged.
+
+### Known limitations
+
+- **Shape `v0` is provisional.** It is a guess at what the Central Memory System returns, and
+  it can change when that system's interface is final.
+- **There is no capture retry.** A candidate recorded as not sent is not offered again
+  automatically.
+- **A changed item is found only when it is re-returned.** The change check compares retrieved
+  items with the briefs in the current worktree, which are a snapshot of the branch base.
+  An item that changed but is not returned by a later retrieval is not noticed, and briefs
+  merged later are not seen.
+- **An empty project-name token list keeps all capture project-scoped.**
+  `.claude/.project-tokens.json` ships with `"tokens": []`, and an empty or missing list fails
+  closed: every candidate is lowered to `project`. Fill the list to let a candidate stay
+  `global`.
+- **Cursor and Codex MCP naming is untested.** Only the Claude Code form of the tool id is
+  assumed, and not yet checked (next item).
+- **The tool id form and the host timeout are unverified.** The `mcp__<server>__<tool>` id form
+  and the host's MCP timeout returning an error are assumptions. The block 3 stub-server
+  trials, one with a stub server and one with a server that never answers, left no recorded
+  evidence (review item I3 of the t5 review). **A project should not set `memory.shape` until
+  that trial is run.**
+- **The cloud scope rule is enforced in text only.** The enforcement is the skill and agent
+  text, a text scan (`test_cloud_text_scans.py`), your own permission prompts and the existing
+  guards. Nothing in the plugin blocks a live-changing command by itself.
+- **A cloud-management MCP server is deferred.** `cloud.mcp-server` is a slot with no adapter;
+  nothing calls it.
 
 ## Quick start in a new project
 
@@ -936,7 +1099,7 @@ would ship the part that can be wrong and leave behind the part that would say s
    you wrote.
 
    *By hand instead:* the profile is the only file you must author to make the
-   fourteen agents correct, and it is required under a plugin install too. A generic agent
+   fifteen agents correct, and it is required under a plugin install too. A generic agent
    cites a slot by name rather than a literal path, so every slot must be present, and an
    empty slot reads `none`.
 
