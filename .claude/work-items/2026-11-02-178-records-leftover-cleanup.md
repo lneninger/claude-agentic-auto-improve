@@ -64,3 +64,6 @@ M — changes a script, its tests and three skill documents, and needs a release
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-11-03: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/208); contract 2026-11-02-pr-merged-records-leftover-cleanup flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #178: the whole test_pr_merged.py run on the merged tree (the system killed it twice for low memory; the last whole-file green was 744 tests, before the final fix round and the merge of master) | updating the test counts in skills/advance/SKILL.md and skills/pr-merged/SKILL.md (they still say 744; about 760 is expected)
