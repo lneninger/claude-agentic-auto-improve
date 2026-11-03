@@ -302,12 +302,26 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
-**Changed in 0.13.1 (tests only):** the installer suite's insertion-point rule is narrower: a changed
+**Changed in 0.14.1 (tests only):** the installer suite's insertion-point rule is narrower: a changed
 line passes only when one inserted run is a bare comma or holds a whole added row, so a script name
 already on a line no longer vouches for a whitespace re-layout of it. New rows (red until the next
 release) pin that the settings writer refuses without the Project hook launcher, that `_claude_paths`
 raises `ImportError` for a hooks folder from an older release, and that the dangling-row reader reads
-launcher rows. No shipped behaviour changed. The manifests read 0.13.1.
+launcher rows. No shipped behaviour changed. The manifests read 0.14.1.
+
+**Changed in 0.14.0 (issue #178):** `/pr-merged` no longer leaves its completion records behind as
+untracked files in the tree it ran from. After the records are pushed to the stable branch
+`docs/<contract-slug>-records`, the new `pr_merged.py --sweep-records` deletes each starting-tree
+copy that is identical to a copy on `origin/<default>` (or on that branch's tip while its pull
+request is open), and keeps and names every other copy. The records step is
+`/pr-merged --records <contract-slug>`; every records push to the stable branch now runs without a
+prompt, and a closed or merged records pull request is re-opened as a draft from the same branch.
+`--status --json` gains `records_reading`, `records_unpushed`, `records_differing`,
+`records_stranded` and `records_untracked`; the Next Command puts the records step first, and
+`--dispatch` refuses with exit 12 while records are unpushed or cannot be read, so `/advance` never
+dispatches on top of them. Both skills end with one `tree <root>: clean` line per tree touched.
+**A project that vendors `pr_merged.py` must sync it (`tools/sync-plugin.cmd`)**, or the skills halt
+with "this `pr_merged.py` predates 0.14.0". The manifests read 0.14.0.
 
 **Changed in 0.12.5 (tests only):** the installer, guard-deference and launcher test files now pin the
 Project hook launcher row form (`py -3 -c <source> <class> <script>`) that 0.12.3 started writing, and
@@ -916,7 +930,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 337 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 344 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
