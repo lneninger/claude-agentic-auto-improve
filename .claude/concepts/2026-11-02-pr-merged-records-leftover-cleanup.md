@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-11-02
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-11-03, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/208; 0 checklist items from review reports, 7 with no structured evidence; not performed (disclosed on #178): the whole test_pr_merged.py run on the merged tree (the system killed it twice for low memory; the last whole-file green was 744 tests, before the final fix round and the merge of master) | updating the test counts in skills/advance/SKILL.md and skills/pr-merged/SKILL.md (they still say 744; about 760 is expected); owner confirmed resolved: none
 **Work Item Brief:** .claude/work-items/2026-11-02-178-records-leftover-cleanup.md
 **Tracking issue:** #178
 **Budget:** 12,000 tokens
@@ -662,11 +663,11 @@ PRIOR_FINDINGS:
 
 ## Review checklist (filled in after implementation)
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [ ] Implementation matches Data Shapes exactly — no structured evidence
+- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced) — no structured evidence
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — no structured evidence
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — no structured evidence
+- [ ] Integration surfaces reflected on both backend and frontend sides — no structured evidence
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — no structured evidence
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — no structured evidence
+- [x] `Status` flipped to `implemented`
