@@ -47,6 +47,34 @@ def squash(text: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def records_step_labels(text: str) -> list[str]:
+    """Labels of the top-level steps in the "### The records pull request" section, in file order.
+
+    Takes the file's text, not a path, so a reviewer can run it on a `git show` copy of an older file.
+    Works line by line on the raw text, never through squash/flat/section (those would merge step 5a's
+    indented sub-steps into the list). Only column-0 lines such as "6. **" or "5a. **" count; indented
+    sub-steps and anything inside a fenced code block do not.
+    """
+    labels: list[str] = []
+    in_section = False
+    in_fence = False
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if not in_section:
+            in_section = line == "### The records pull request"
+            continue
+        if line.startswith("### "):
+            break
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = re.match(r"^(\d+a?)\. \*\*", line)
+        if match:
+            labels.append(match.group(1))
+    return labels
+
+
 class TextCase(unittest.TestCase):
 
     def read(self, rel: str) -> str:
@@ -379,7 +407,7 @@ class CaptureAtDeliveryTextTests(TextCase):
                       self.flat("skills/flow/SKILL.md"))
 
     def test_step_5a_is_after_the_flip_never_from_a_dry_run_and_never_blocks(self):
-        step = self.section(self.CC, "5a. **Capture", "6. **Cut the branch")
+        step = self.section(self.CC, "5a. **Capture", "6. **Put the stable branch")
         self.assertMatches(r"never built from a dry run", step, "capture is never built from a dry run")
         self.assertMatches(r"never folded into step 3", step, "capture never joins the records confirmation")
         self.assertIn("capture-candidates", step)
@@ -388,6 +416,22 @@ class CaptureAtDeliveryTextTests(TextCase):
         self.assertMatches(r"No outcome of this step blocks the records pull request", step, "capture never blocks")
         self.assertMatches(r"before step 7 copies the files", step, "receipts are recorded before the copy")
         self.assertIn("../design-first/references/central-memory.md", step)
+
+    EXPECTED_STEPS = ["1", "2", "3", "4", "5", "5a", "6", "7", "8", "9"]
+
+    def test_the_records_steps_are_one_to_nine_with_5a_each_exactly_once_in_order(self):
+        self.assertEqual(records_step_labels(self.read(self.CC)), self.EXPECTED_STEPS)
+
+    def test_records_step_labels_control_reports_a_planted_duplicate_and_skips_sub_steps(self):
+        # records_step_labels takes text, not a path, so a reviewer can run it on a `git show` copy of an older file.
+        fixture = "\n".join([
+            "### Before", "1. **Not in the section**", "### The records pull request", "1. **One**",
+            "5a. **Capture**", "   1. **Read the candidates**", "```", "1. **inside a fence**", "```",
+            "   6. **No outcome**", "6. **Six**", "### After", "7. **Not in the section**", ""])
+        self.assertEqual(records_step_labels(fixture), ["1", "5a", "6"], "indented and fenced lines are not counted")
+        planted = fixture.replace("### After", "6. **Six again**\n### After")
+        self.assertEqual(records_step_labels(planted), ["1", "5a", "6", "6"])
+        self.assertNotEqual(records_step_labels(planted), ["1", "5a", "6"], "a planted second 6 is reported")
 
     def test_flow_lists_the_capture_question_and_commits_the_brief_after_the_receipts(self):
         flat = self.flat("skills/flow/SKILL.md")
