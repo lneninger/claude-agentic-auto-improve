@@ -426,6 +426,49 @@ def _real_landing_block():
         return None
 
 
+TIMEOUT_HEADROOM_FACTOR = 1.5   # a step's timeout_minutes must be >= measured_minutes * this
+
+
+def _timeout_shortfalls(steps, factor=TIMEOUT_HEADROOM_FACTOR):
+    """Diagnostics for steps whose timeout_minutes is below measured_minutes * factor."""
+    found = []
+    for s in steps:
+        measured = s.get("measured_minutes")
+        if not isinstance(measured, (int, float)) or isinstance(measured, bool):
+            continue   # test_every_step_records_a_positive_numeric_measured_minutes owns this
+        timeout = float(s.get("timeout_minutes") or 30)   # same resolution as land_contract.py
+        if measured * factor > timeout:
+            found.append("step %r: measured_minutes=%s, timeout_minutes=%s, needs >= %s"
+                         % (s.get("id"), measured, timeout, measured * factor))
+    return found
+
+
+class TimeoutShortfallHelperTests(unittest.TestCase):
+
+    def test_a_too_low_timeout_is_flagged_and_an_adequate_one_is_not(self):
+        steps = [{"id": "slow", "measured_minutes": 10, "timeout_minutes": 12},
+                 {"id": "fine", "measured_minutes": 10, "timeout_minutes": 15},
+                 {"id": "roomy", "measured_minutes": 2, "timeout_minutes": 30}]
+        found = _timeout_shortfalls(steps)
+        self.assertEqual(len(found), 1, "only the step under measured * factor is flagged: %s" % found)
+        self.assertIn("'slow'", found[0], "the diagnostic names the step id")
+
+    def test_a_missing_or_zero_timeout_is_judged_as_the_runtime_default_of_30(self):
+        for label, extra in (("missing", {}), ("zero", {"timeout_minutes": 0})):
+            with self.subTest(timeout=label):
+                ok = _timeout_shortfalls([dict({"id": "ok", "measured_minutes": 10}, **extra)])
+                self.assertEqual(ok, [], "10 * 1.5 fits the default 30: %s" % ok)
+                bad = _timeout_shortfalls([dict({"id": "long", "measured_minutes": 25}, **extra)])
+                self.assertEqual(len(bad), 1, "25 * 1.5 exceeds the default 30: %s" % bad)
+                self.assertIn("'long'", bad[0], "the diagnostic names the step id")
+
+    def test_a_string_timeout_is_converted_like_the_runtime_does(self):
+        ok = _timeout_shortfalls([{"id": "ok", "measured_minutes": 20, "timeout_minutes": "40"}])
+        self.assertEqual(ok, [], "20 * 1.5 fits a string '40': %s" % ok)
+        bad = _timeout_shortfalls([{"id": "short", "measured_minutes": 30, "timeout_minutes": "40"}])
+        self.assertEqual(len(bad), 1, "30 * 1.5 exceeds a string '40': %s" % bad)
+
+
 class RealProjectConfigTests(VerCase):
 
     def setUp(self):
@@ -435,6 +478,22 @@ class RealProjectConfigTests(VerCase):
 
     def steps(self):
         return list((self.block.get("verification") or {}).get("steps") or [])
+
+    def test_every_step_records_a_positive_numeric_measured_minutes(self):
+        for s in self.steps():
+            m = s.get("measured_minutes")
+            self.assertTrue(isinstance(m, (int, float)) and not isinstance(m, bool) and m > 0,
+                            "step %r must carry numeric measured_minutes > 0, got %r" % (s.get("id"), m))
+
+    def test_every_timeout_covers_the_measured_duration_with_headroom(self):
+        steps = self.steps()
+        self.assertTrue(steps, "the block configures verification steps")
+        self.assertEqual([s.get("id") for s in steps],
+                         ["version-bump", "loop-script-tests", "hook-registration-tests", "hook-tests"],
+                         "the configured steps changed: a new or renamed step needs a measured_minutes "
+                         "entry too, then update this list")
+        self.assertEqual(_timeout_shortfalls(steps), [],
+                         "timeout_minutes must be >= measured_minutes * %s" % TIMEOUT_HEADROOM_FACTOR)
 
     def test_generated_drift_is_the_last_step_and_lists_the_three_sentinel_keys(self):
         steps = self.steps()

@@ -865,7 +865,9 @@ class ConventionsTests(unittest.TestCase):
         ids = [s["id"] for s in steps]
         self.assertEqual(ids.count("hook-registration-tests"), 1)
         self.assertEqual(ids.index("hook-registration-tests"), ids.index("loop-script-tests") + 1)
-        self.assertEqual(steps[ids.index("hook-registration-tests")], {
+        # measured_minutes is re-measured over time and pinned by test_land_contract_verification.py.
+        step = {k: v for k, v in steps[ids.index("hook-registration-tests")].items() if k != "measured_minutes"}
+        self.assertEqual(step, {
             "id": "hook-registration-tests",
             "command": ["py", "-3", ".claude/scripts/tests/test_check_hook_registrations.py"],
             "results": {"format": "exit-code"},
