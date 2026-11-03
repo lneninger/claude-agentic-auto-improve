@@ -1792,7 +1792,7 @@ TASK: On the sub-task branch (cut from origin/feature/memory-client-and-cloud-en
     whitespace, newlines included, and would merge step 5a's own sub-steps into the list. A top-level
     step is a line matching ^(\d+a?)\. \*\* in column 0 (no leading space). Step 5a's six sub-steps
     ("   1. **Read the candidates" to "   6. **No outcome of this step", after the code block) are
-    indented by three spaces, so they are excluded; so is anything inside the ``` code block. Normalise
+    indented by three spaces, so they are excluded; so is anything inside the fenced code block. Normalise
     "\r\n" to "\n" before splitting.
   - Add the step-order test in CaptureAtDeliveryTextTests: records_step_labels(self.read(self.CC))
     equals ["1", "2", "3", "4", "5", "5a", "6", "7", "8", "9"].
