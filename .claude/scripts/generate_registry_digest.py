@@ -82,11 +82,13 @@ def entry_blocks(text, pattern, per_domain=False):
     (1-based), ``tier`` (``Universal`` or ``Project``), ``text`` (the entry's own text, up to
     its first indented sub-bullet) and ``subs`` (each indented sub-bullet as ``line`` and
     ``text``, with any deeper continuation lines folded in). An entry ends at the next
-    top-level match or at a heading. Takes text, never a path, so a caller that already holds
-    the text (a hook) passes it through.
+    top-level match, at a heading, or at a blank line followed by a non-indented line that is
+    not a top-level match (a note paragraph after the last bullet is not part of it). Takes
+    text, never a path, so a caller that already holds the text (a hook) passes it through.
     """
     lines = text.splitlines()
     blocks, current, tier, sub_indent = [], None, None, None
+    after_blank = False
     for i, ln in enumerate(lines, 1):
         if ln.startswith('## '):
             tier = _tier_of(ln, tier)
@@ -96,12 +98,22 @@ def entry_blocks(text, pattern, per_domain=False):
                        'text': ln, 'subs': []}
             blocks.append(current)
             sub_indent = None
+            after_blank = False
             continue
         if HEADING_LINE.match(ln):
             current = None
+            after_blank = False
             continue
         if current is None:
             continue
+        if not ln.strip():
+            after_blank = True
+        else:
+            if after_blank and not ln[0].isspace():
+                current = None
+                after_blank = False
+                continue
+            after_blank = False
         sub = SUB_BULLET.match(ln)
         if sub and (sub_indent is None or len(sub.group(1)) <= sub_indent):
             sub_indent = len(sub.group(1))

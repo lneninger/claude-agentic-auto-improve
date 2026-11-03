@@ -164,6 +164,20 @@ class EntryBlocksTests(unittest.TestCase):
         self.assertEqual(beta["subs"], [])
         self.assertNotIn("Delta", self.by_title["Gamma"]["text"])
 
+    def test_own_text_ends_at_a_blank_line_followed_by_a_non_indented_line(self):
+        text = ("## Universal\n\n- **Last** bullet\n  wrapped line\n\nNote: see .claude/concepts/x.md\n\n"
+                "  indented after the note\n- **Next** bullet\n\n  indented after a blank line\n")
+        blocks = {b["title"]: b for b in grd.entry_blocks(text, grd.BULLET)}
+        self.assertIn("wrapped line", blocks["Last"]["text"])
+        self.assertNotIn("Note:", blocks["Last"]["text"])
+        self.assertNotIn("indented after the note", blocks["Last"]["text"])
+        self.assertIn("indented after a blank line", blocks["Next"]["text"],
+                      "a blank line followed by an indented line does not end the entry")
+
+    def test_a_note_paragraph_does_not_end_the_entry_before_it_when_a_top_level_match_follows(self):
+        text = "## Universal\n\n- **A** one\n\n- **B** two\n"
+        self.assertEqual([(b["title"], b["line"]) for b in grd.entry_blocks(text, grd.BULLET)], [("A", 3), ("B", 5)])
+
     def test_tier_follows_the_text_headings_and_a_pre_heading_entry_is_project(self):
         tiers = {b["title"]: b["tier"] for b in self.blocks}
         self.assertEqual(tiers, {"Early": "Project", "Alpha": "Universal", "Beta": "Universal",

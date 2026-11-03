@@ -34,8 +34,10 @@ Write the raw response, unedited, to a temporary file.
 
 ```bash
 py -3 "$MEM" normalise --project . --input <the response file>
-py -3 "$MEM" changed-items --project . --input <the response file>
+py -3 "$MEM" changed-items --project . --input <the normalised file>
 ```
+
+Write the `normalise` output to a second temporary file and pass that file to `changed-items`, so the comparison runs over neutralised items only.
 
 - `normalise` answers `{"items": [...], "rejected": {...}, "conflicts": [...]}`. Every field was neutralised and capped by the script. A `malformed-response` refusal records `unavailable (malformed-response)`, prints one line and goes to Step 2. An empty `items` list means an empty retrieval: print nothing, write nothing, go to Step 2.
 - When `rejected.total` is not zero, say so in one line (a count, never the rejected content).

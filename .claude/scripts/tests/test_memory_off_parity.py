@@ -130,9 +130,13 @@ class MemoryOffParityTests(unittest.TestCase):
                     code, _ = run("check-contract", "--project", project, "--brief", brief, "--contract", contract)
                     self.assertEqual(code, 0, name)
                     self.assertEqual(brief.read_bytes(), originals[name], "%s changed under %s" % (name, variant))
-                code, _ = run("normalise", "--project", project, "--input", response)
+                code, normalised = run("normalise", "--project", project, "--input", response)
                 self.assertEqual(code, 0)
-                code, _ = run("changed-items", "--project", project, "--input", response)
+                # The reference has the model write the normalise output to a second file outside the tree and
+                # pass that file to changed-items.
+                second = inputs / "normalised.json"
+                second.write_text(json.dumps(normalised), encoding="utf-8")
+                code, _ = run("changed-items", "--project", project, "--input", second)
                 self.assertEqual(code, 0)
 
                 after = snapshot(project)
@@ -160,6 +164,31 @@ class MemoryOffParityTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotEqual(brief.read_bytes(), original)
         self.assertIn(b"Retrieved: m-9@1", brief.read_bytes())
+
+    def test_positive_control_an_unconfigured_profile_does_write_its_one_line(self):
+        # Unconfigured is not disabled: Step 1.5 point 3 records it, so record must write there. Without this the
+        # disabled byte-identity could pass because record refuses everything.
+        tmp = Path(tempfile.mkdtemp(prefix="memory-unconfigured-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        slots = {"memory.server": "central", "memory.retrieve-tool": "recall", "memory.capture-tool": "remember",
+                 "memory.shape": "nope", "memory.project-key": "demo"}
+        rows = "\n".join("| `%s` | `%s` |" % kv for kv in slots.items())
+        (tmp / ".claude").mkdir()
+        (tmp / ".claude" / "project-profile.md").write_text(
+            "# P\n\n## Slots\n\n| Slot | Value |\n|---|---|\n%s\n\n## Worked shape\n" % rows, encoding="utf-8")
+        brief = tmp / "brief.md"
+        brief.write_bytes(FIXTURE_BRIEFS["fixture-lf.md"].replace("## Memory used\n", "## Memory used\nstale\n")
+                          .encode("utf-8"))
+        original = brief.read_bytes()
+        outcome = tmp / "outcome.json"
+        outcome.write_text(json.dumps({"state": "unconfigured", "date": "2026-11-02", "retrieved": [
+            {"id": "m-9", "version": "1", "scope": "project", "status": "validated", "title": "T",
+             "decision": "applies"}]}), encoding="utf-8")
+        code, _ = run("record", "--project", tmp, "--brief", brief, "--outcome", outcome)
+        self.assertEqual(code, 0)
+        self.assertNotEqual(brief.read_bytes(), original)
+        self.assertIn(b"Memory: unconfigured (shape-unknown) | 2026-11-02", brief.read_bytes())
+        self.assertNotIn(b"Retrieved:", brief.read_bytes())
 
 
 def read(rel: str) -> str:

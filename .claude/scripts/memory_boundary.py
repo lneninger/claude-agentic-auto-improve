@@ -22,7 +22,8 @@ Output is one JSON object on stdout. A refusal prints {"refused": "<name>", "det
 caller sees, a non-zero exit, a crash, a timeout or a missing script reads as "memory off".
 
 Only `record` writes, and only the one brief it is given (replace-then-rename). With memory disabled it refuses
-`not-enabled` and writes nothing, so a project that never switched memory on sees no change in any brief.
+`not-enabled` and writes nothing, so a project that never switched memory on sees no change in any brief. With
+memory unconfigured it writes the one `Memory: unconfigured (<reason>)` line, the reason read from the profile.
 
 The registry readers (entry_blocks, journal_entries), the profile slot reader (load_slot), the brief selector
 (select_linked_brief) and the shipped-path test (is_shipped) are other scripts' functions. They are bound fail-soft
@@ -55,7 +56,7 @@ def _bind(module_name: str, *names: str) -> Dict[str, Any]:
     return {name: getattr(module, name, None) for name in names}
 
 
-_PR = _bind("pr_merged", "load_slot", "select_linked_brief", "parse_brief_frontmatter")
+_PR = _bind("pr_merged", "load_slot", "select_linked_brief", "parse_brief_frontmatter", "default_branch_or_none")
 _GRD = _bind("generate_registry_digest", "entry_blocks", "journal_entries", "BULLET", "DOMAINS")
 _CVB = _bind("check_version_bump", "is_shipped")
 
@@ -326,63 +327,88 @@ def cmd_retrieve_request(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]
 
 
 # --- normalise -----------------------------------------------------------------------------------------------------
-def normalise(response: Any) -> Dict[str, Any]:
-    if not isinstance(response, dict) or not isinstance(response.get("items"), list):
-        raise Refusal("malformed-response", "expected an object with an items list")
+def new_rejections() -> Dict[str, int]:
     rejected: Dict[str, int] = {name: 0 for name in REJECTIONS}
     rejected["dropped-references"] = 0
     rejected["truncated-references"] = 0
+    return rejected
+
+
+def check_item(raw: Any, rejected: Dict[str, int]) -> Optional[Tuple[str, str]]:
+    """The per-item admission rules: (id, version) when the item may stay, else None with the rejection counted."""
+    if not isinstance(raw, dict):
+        rejected["not-an-object"] += 1
+        return None
+    item_id, version = safe_token(raw.get("id")), safe_token(raw.get("version"))
+    if item_id is None:
+        rejected["invalid-id"] += 1
+        return None
+    if version is None:
+        rejected["invalid-version"] += 1
+        return None
+    scope, status = raw.get("scope"), raw.get("status")
+    if not isinstance(scope, str) or scope not in SCOPES:
+        rejected["invalid-scope"] += 1
+        return None
+    if not isinstance(status, str) or status not in STATUSES:
+        rejected["invalid-status"] += 1
+        return None
+    return item_id, version
+
+
+def build_item(raw: Dict[str, Any], item_id: str, version: str, rejected: Dict[str, int]) -> Dict[str, Any]:
+    """The per-item neutralised shape of an item that passed check_item."""
+    superseded = split_reference(raw.get("superseded_by"))
+    if superseded is None:
+        rejected["dropped-references"] += 1
+        superseded = "none"
+    conflicts: List[str] = []
+    raw_conflicts = raw.get("conflicts_with")
+    if raw_conflicts is not None and not isinstance(raw_conflicts, list):
+        rejected["dropped-references"] += 1
+        raw_conflicts = []
+    for ref in raw_conflicts or []:
+        token = safe_token(ref)
+        if token is None:
+            rejected["dropped-references"] += 1
+        elif len(conflicts) >= MAX_CONFLICTS:
+            rejected["truncated-references"] += 1
+        else:
+            conflicts.append(token)
+    provenance = raw.get("provenance")
+    return {
+        "id": item_id, "version": version, "scope": raw["scope"], "status": raw["status"],
+        "title": clean_text(raw.get("title"), MAX_TITLE), "summary": clean_text(raw.get("summary"), MAX_SUMMARY),
+        "superseded_by": superseded, "conflicts_with": conflicts,
+        "provenance": provenance if isinstance(provenance, str) and provenance in PROVENANCES else "unknown",
+    }
+
+
+def normalise_item(raw: Any) -> Optional[Dict[str, Any]]:
+    """One item through the same rules normalise applies (without the duplicate and over-limit rules)."""
+    rejected = new_rejections()
+    checked = check_item(raw, rejected)
+    return build_item(raw, checked[0], checked[1], rejected) if checked else None
+
+
+def normalise(response: Any) -> Dict[str, Any]:
+    if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+        raise Refusal("malformed-response", "expected an object with an items list")
+    rejected = new_rejections()
     accepted: List[Dict[str, Any]] = []
     seen = set()
     for raw in response["items"]:
-        if not isinstance(raw, dict):
-            rejected["not-an-object"] += 1
+        checked = check_item(raw, rejected)
+        if checked is None:
             continue
-        item_id, version = safe_token(raw.get("id")), safe_token(raw.get("version"))
-        if item_id is None:
-            rejected["invalid-id"] += 1
-            continue
-        if version is None:
-            rejected["invalid-version"] += 1
-            continue
-        scope, status = raw.get("scope"), raw.get("status")
-        if not isinstance(scope, str) or scope not in SCOPES:
-            rejected["invalid-scope"] += 1
-            continue
-        if not isinstance(status, str) or status not in STATUSES:
-            rejected["invalid-status"] += 1
-            continue
-        if (item_id, version) in seen:
+        if checked in seen:
             rejected["duplicate"] += 1
             continue
-        seen.add((item_id, version))
+        seen.add(checked)
         if len(accepted) >= MAX_ITEMS:
             rejected["over-limit"] += 1
             continue
-        superseded = split_reference(raw.get("superseded_by"))
-        if superseded is None:
-            rejected["dropped-references"] += 1
-            superseded = "none"
-        conflicts: List[str] = []
-        raw_conflicts = raw.get("conflicts_with")
-        if raw_conflicts is not None and not isinstance(raw_conflicts, list):
-            rejected["dropped-references"] += 1
-            raw_conflicts = []
-        for ref in raw_conflicts or []:
-            token = safe_token(ref)
-            if token is None:
-                rejected["dropped-references"] += 1
-            elif len(conflicts) >= MAX_CONFLICTS:
-                rejected["truncated-references"] += 1
-            else:
-                conflicts.append(token)
-        provenance = raw.get("provenance")
-        accepted.append({
-            "id": item_id, "version": version, "scope": scope, "status": status,
-            "title": clean_text(raw.get("title"), MAX_TITLE), "summary": clean_text(raw.get("summary"), MAX_SUMMARY),
-            "superseded_by": superseded, "conflicts_with": conflicts,
-            "provenance": provenance if isinstance(provenance, str) and provenance in PROVENANCES else "unknown",
-        })
+        accepted.append(build_item(raw, checked[0], checked[1], rejected))
     rejected["total"] = sum(rejected[name] for name in REJECTIONS)
     versions: Dict[str, List[str]] = {}
     for item in accepted:
@@ -488,6 +514,24 @@ def _candidate(kind: str, key: str, rel: str, line: int, title: str, when: Optio
             "contract": slug, "text": text}
 
 
+#: A journal entry's Trigger, matched only as a whole value, maps to a provenance or to a skip reason.
+TRIGGER_PROVENANCE = {"pre-approval critic": "user-decision", "post-impl divergence": "source-code-fact"}
+TRIGGER_AI_HYPOTHESIS = ("manual", "post-approval")
+
+
+def trigger_mapping(trigger: Any) -> Tuple[Optional[str], Optional[str]]:
+    """(provenance, None) for an offered trigger, or (None, skip reason).
+
+    The whole value is compared, trimmed, case-folded and with surrounding backticks removed. A longer value that
+    merely mentions a canonical one ("manual (follow-up to a pre-approval critic finding)") is an unknown trigger,
+    never a guess.
+    """
+    value = trigger.strip().strip("`").strip().casefold() if isinstance(trigger, str) else ""
+    if value in TRIGGER_PROVENANCE:
+        return TRIGGER_PROVENANCE[value], None
+    return None, "ai-hypothesis" if value in TRIGGER_AI_HYPOTHESIS else "unknown-trigger"
+
+
 def select_candidates(project: Path, slug: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     entry_blocks, journal_entries, bullet = _GRD["entry_blocks"], _GRD["journal_entries"], _GRD["BULLET"]
     if entry_blocks is None or journal_entries is None or bullet is None:
@@ -515,15 +559,9 @@ def select_candidates(project: Path, slug: str) -> Tuple[List[Dict[str, Any]], L
         for entry in journal_entries(text, per_domain=per_domain):
             if not entry["source"] or not stem_names(entry["source"], slug):
                 continue
-            trigger = entry["trigger"]
-            if "pre-approval" in trigger:
-                provenance = "user-decision"
-            elif "post-impl" in trigger:
-                provenance = "source-code-fact"
-            else:
-                skipped.append({"title": entry["title"], "key": entry["sig"],
-                                "reason": "ai-hypothesis" if ("manual" in trigger or "post-approval" in trigger)
-                                else "unknown-trigger"})
+            provenance, reason = trigger_mapping(entry["trigger"])
+            if provenance is None:
+                skipped.append({"title": entry["title"], "key": entry["sig"], "reason": reason})
                 continue
             offered.append(_candidate("journal-entry", entry["sig"], rel, entry["line"], entry["title"],
                                       entry["date"], provenance, entry["tier"], entry["text"], slug))
@@ -552,7 +590,16 @@ def cmd_capture_candidates(args: argparse.Namespace) -> Tuple[int, Dict[str, Any
     report = _read_json(_resolve(project, args.run_report))
     if not _flipped(report, slug):
         raise Refusal("not-flipped", "the live writing run did not return flipped for %s" % slug)
-    brief_rel = linked_brief(project, slug, args.default_branch)
+    default_branch = args.default_branch
+    if default_branch is None:
+        # The project's own origin/HEAD, read in the project folder and never the process's working directory.
+        # pr_merged.default_branch() is never used: it falls back to "master" when origin/HEAD is unreadable.
+        reader = _PR["default_branch_or_none"]
+        default_branch = reader(cwd=str(project)) if reader else None
+    if not default_branch:
+        raise Refusal("default-branch-unknown",
+                      "origin/HEAD is unreadable in the project: pass --default-branch <name>")
+    brief_rel = linked_brief(project, slug, default_branch)
     if brief_rel is None or not _carried(brief_rel, report):
         raise Refusal("brief-not-carried", "no linked brief, or it is not in the run's written_files")
     offered, not_offered = select_candidates(project, slug)
@@ -566,6 +613,13 @@ def cmd_capture_candidates(args: argparse.Namespace) -> Tuple[int, Dict[str, Any
 
 
 # --- capture-request ---------------------------------------------------------------------------------------------
+def source_ref_text(value: Any) -> str:
+    """'<file>:<line>' from the source_ref object capture-candidates emits, or a cleaned string as given."""
+    if isinstance(value, dict):
+        return "%s:%s" % (clean_text(value.get("file"), 200), safe_token(value.get("line")) or "")
+    return clean_text(value, 200)
+
+
 def cmd_capture_request(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     project = Path(args.project)
     cfg = read_config(project)
@@ -587,7 +641,7 @@ def cmd_capture_request(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         "scope": cand.get("scope") if cand.get("scope") in SCOPES else "project",
         "status": "proposed",
         "provenance": provenance,
-        "source_ref": "%s:%s" % (clean_text(ref.get("file"), 200), safe_token(ref.get("line")) or ""),
+        "source_ref": source_ref_text(cand.get("source_ref")),
         "client_key": cand.get("key") if isinstance(cand.get("key"), str) and KEY_RE.fullmatch(cand["key"]) else "",
     }
     if cfg["project_key"]:
@@ -630,7 +684,7 @@ def receipt_line(entry: Any, already: set) -> Tuple[Optional[str], bool]:
         return None, True
     if key in already:
         return None, False
-    ref = clean_text(entry.get("source_ref"), 200)
+    ref = source_ref_text(entry.get("source_ref"))
     when = safe_date(entry.get("date"))
     if entry.get("captured") is True:
         item_id, version = safe_token(entry.get("id")), safe_token(entry.get("version"))
@@ -659,11 +713,17 @@ def _atomic_write(path: Path, text: str) -> None:
 def cmd_record(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     project = Path(args.project)
     cfg = read_config(project)
-    require_enabled(cfg)
+    # Only a disabled profile (I-M0) or a disabled outcome refuses. An unconfigured profile still records its one
+    # line (Step 1.5 point 3); receipts need an enabled memory.
+    if cfg["state"] == "disabled":
+        raise Refusal("not-enabled", "memory state is disabled")
+    if args.receipts:
+        require_enabled(cfg)
     outcome = _read_json(_resolve(project, args.outcome))
     outcome = outcome if isinstance(outcome, dict) else {}
     if outcome.get("state") == "disabled":
         raise Refusal("not-enabled", "the outcome says memory was disabled")
+    unconfigured = cfg["state"] == "unconfigured"
     brief_path = _resolve(project, args.brief)
     raw = _read_text(brief_path)
     if raw is None:
@@ -694,6 +754,10 @@ def cmd_record(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             if line:
                 new_lines.append(line)
                 existing_keys.add(entry["key"])
+    elif unconfigured:
+        # One line, the reason from the profile; whatever the outcome carries is ignored.
+        new_lines = [_unconfigured_line(cfg, outcome)]
+        new_lines += [l for l in existing if l.startswith(("Captured:", "Not sent:"))]
     else:
         new_lines = [_memory_line(cfg, outcome)]
         for item in outcome.get("retrieved") if isinstance(outcome.get("retrieved"), list) else []:
@@ -721,6 +785,11 @@ def cmd_record(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         raise Refusal("would-add-frontmatter", "the write would change the frontmatter")
     _atomic_write(brief_path, result.replace("\n", "\r\n") if crlf else result)
     return 0, {"written": True, "brief": _rel(project, brief_path), "lines": len(new_lines), "dropped": dropped}
+
+
+def _unconfigured_line(cfg: Dict[str, Any], outcome: Dict[str, Any]) -> str:
+    reason = cfg["reason"] if cfg["reason"] in REASONS else ""
+    return "Memory: unconfigured%s | %s" % (" (%s)" % reason if reason else "", safe_date(outcome.get("date")))
 
 
 def _memory_line(cfg: Dict[str, Any], outcome: Dict[str, Any]) -> str:
@@ -758,8 +827,11 @@ def cmd_changed_items(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     project = Path(args.project)
     data = _read_json(_resolve(project, args.input))
     returned: Dict[str, List[Dict[str, Any]]] = {}
-    for item in data.get("items", []) if isinstance(data, dict) and isinstance(data.get("items"), list) else []:
-        if isinstance(item, dict) and safe_token(item.get("id")) and safe_token(item.get("version")):
+    for raw in data.get("items", []) if isinstance(data, dict) and isinstance(data.get("items"), list) else []:
+        # The same per-item rules normalise applies: an item normalise would reject cannot raise a notice, and
+        # versions are compared as the normalised strings.
+        item = normalise_item(raw)
+        if item is not None:
             returned.setdefault(item["id"], []).append(item)
     recorded: Dict[Tuple[str, str], List[str]] = {}
     folder = project / ".claude" / "work-items"
@@ -800,7 +872,7 @@ def build_parser() -> argparse.ArgumentParser:
     add("retrieve-request", cmd_retrieve_request, ("--brief", True))
     add("normalise", cmd_normalise, ("--input", True))
     cc = add("capture-candidates", cmd_capture_candidates, ("--contract", True), ("--run-report", True))
-    cc.add_argument("--default-branch", default="master")
+    cc.add_argument("--default-branch", default=None)
     add("capture-request", cmd_capture_request, ("--candidate", True))
     rec = add("record", cmd_record, ("--brief", True), ("--outcome", True), ("--run-report", False))
     rec.add_argument("--receipts", action="store_true")
