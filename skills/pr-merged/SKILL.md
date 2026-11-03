@@ -70,16 +70,53 @@ py -3 "$PRM" --contract <slug|path> --status --json   # read-only
 **another** repository — the sibling plugin, for instance. A link is resolved by `gh` per call,
 never through a process-wide `--repo` flag or a `GH_REPO` environment variable.
 
+**The records step: `/pr-merged --records <contract-slug> [--discard-differing <path>]`.** Records
+that `/pr-merged` wrote stay in the starting tree until they are pushed to the stable records branch
+and the copy is swept. The Next Command names this step whenever `records_unpushed` or
+`records_stranded` of `--status --json` is not empty. It runs the procedure "The records pull
+request" in `references/contract-completion.md` and nothing else: no pull request is verified and no
+record is written. "Nothing to do" applies only when `records_reading` is `ok` and both lists are empty.
+`--discard-differing <path>` is the owner's exit for a copy that differs from origin; run it only when
+the owner names the path.
+
+```bash
+py -3 "$PRM" --contract <slug> --sweep-records --from "$START" [--removed <records worktree>] [--discard-differing <path>] --json
+```
+
+`--sweep-records` deletes a starting-tree copy only when it is identical to a copy on
+`origin/<default>`, or to the stable branch's tip while a pull request holds it; keeps and names every
+other copy; and prints one Tree-clean line per `--from` and `--removed` tree as its last lines
+(`tree_lines`). It reads `records_reading` first: `unverifiable` exits 10 and deletes nothing.
+`--local-evidence-only` skips deleting and pushing for this run (`records_action:
+skipped-by-owner`). It never changes the evidence, never lifts a hold and never unblocks `/advance`'s
+dispatch, which stays refused (exit 12) until a persistent read failure's named cause is fixed.
+
+**An older `pr_merged.py` halts these steps.** When a `--status --json` or `--sweep-records` report has
+no `records_reading` key, or any call exits 2 with `unrecognized arguments:` naming `--sweep-records`,
+`--from`, `--removed`, `--discard-differing` or `--local-evidence-only`, stop and say: "this
+`pr_merged.py` predates 0.13.0: sync the vendored copy (`tools/sync-plugin.cmd`)". An absent key never
+reads as "nothing pending". `--record-subtask`, `--preconditions`, `--locate-parent`, the dispatch
+packet and every JSON refusal carry no such keys and are never judged this way. Any other exit 2
+without a JSON `error` is printed verbatim and halts.
+
+**The scope gate.** The script takes the records reading only where it can work: when the working
+directory is a git tree root (it has a `.git` entry of its own) that has an `origin` remote. This gate
+exists for in-process callers written before 0.13.0, which call `main()` from a folder with no repository
+metadata or with a process runner that refuses, and which behave exactly as they did. It never looks at
+where the contract file sits: a path-form `--contract` that points at another tree's concepts folder still
+carries the `records_*` keys, and `--dispatch` still exits 12 on unpushed records.
+
 This follows the pattern already used here: `/ship` shells out to `verify_issue_link.py`, and
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 530 cases over
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 744 cases over
 identity, parsing, block classification, verdicts, records, releases, conflict detection, the
 Hand-Resolved Summary (including the unread-commit count and its single-fetch walk), the
 cross-repository pull-request path, the `GH_REPO` refusal, the Next Command and the Sub-Task
-Cycle. Measured by running `py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own
-`unittest` summary line: `Ran 530 tests ... OK` (exit code 0). They were mutation-probed: disabling the
+Cycle, plus the records leftover sweep, the evidence rule and the re-run guard. Measured by running
+`py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own
+`unittest` summary line: `Ran 744 tests ... OK` (exit code 0). They were mutation-probed: disabling the
 verification check, reading a missing dependency line as none, and counting scope notes as
 sub-tasks each turn the suite red.
 
@@ -320,10 +357,12 @@ carrying Step 2.5's outcome (`already-closed` | `closed` | `close-failed` | `unv
 key is **omitted entirely** when no closure was attempted — a sub-task with no sub-issue, or a
 merge that never reached Step 2.5 — exactly as `review_verdict` is omitted when nothing was read.
 
-**A completion record is append-only in spirit.** If one already exists for that sub-task,
-do not silently overwrite it. Show both and ask. Two different commits claiming to finish the
-same sub-task means either the work shipped twice or the mapping is wrong, and both need a
-person.
+**A completion record is append-only in spirit.** A `completed` record replaces a `failed` one
+only through the sweep's `update` state (a re-delivery). A differing `completed` record is never
+overwritten: show both and ask, because the owner decides (`--discard-differing`). Two different
+commits claiming to finish the same sub-task means either the work shipped twice or the mapping is
+wrong, and both need a person. A re-run for a pull request the evidence already holds as `completed`
+writes nothing and lists the sub-task under `already_recorded`.
 
 Then update the state store to mark that sub-task completed, so the live position agrees with
 the evidence. The script does this in the same run: a confirmed merge writes `status:
@@ -335,10 +374,13 @@ into the sub-task's state entry, and writes nothing for a pull request that maps
 **One stable branch, added to and never re-cut.** Fetch `origin/docs/<contract-slug>-records` first.
 - **It exists on origin:** check it out from that fetched ref, commit on top and push without force. Never re-cut it while it exists, because a re-cut drops the records already on it.
 - **It is absent:** cut it from freshly fetched `origin/master`, push it and open a draft pull request.
+- **It exists and no pull request has it as its head** (the last one merged or was closed): after the push, open a new draft pull request from the same branch.
 
-When `/flow` is running this phase, pass the list of files to Step 8 of `/flow` instead of committing here, with the one exception below. Pushing is outward-facing, so name the branch and the files in your report and confirm once. Never leave the records uncommitted in the starting tree.
+When `/flow` is running this phase, pass the list of files to Step 8 of `/flow` instead of committing here, with the one exception below. Name the branch and the files in your report. The push itself asks nothing (Q1, answered 2026-11-02): it carries only docs files, goes to the one stable records branch, never forces, and merging stays with the person. The evidence confirmation before a flipping run (`references/contract-completion.md`, step 3) stays.
 
-**Exception: the completion hand-off push.** When this run leaves every sub-task with a completion record and the contract has a parent branch (the script's `next_command` for this run is `/advance <slug>`), commit and push the records draft BEFORE handing to `/advance`, even when `/flow` is running. Do not defer it to `/flow` Step 8. The landing reads records only from the remote, so a record that is still on this disk is invisible to it. This one push asks no confirmation (operator decision 2026-10-05, Open Question 1: "no prompt"); name the branch and the files in the report. Every other records push keeps its confirmation.
+**After a successful push, sweep.** Run `--sweep-records --from "$START" --removed <records worktree>` (and `--removed` for any other tree this run removed), then print `tree_lines` verbatim. The sweep deletes a copy only when its twin is on origin, so a failed or declined push deletes nothing. Report what it kept and why: a copy that differs is named with its two blob ids and the `--discard-differing` remedy. Never delete a starting-tree copy by hand.
+
+**The completion hand-off push.** When this run leaves every sub-task with a completion record and the contract has a parent branch (the script's `next_command` for this run is `/advance <slug>`), commit and push the records draft BEFORE handing to `/advance`, even when `/flow` is running. Do not defer it to `/flow` Step 8. The landing reads records only from the remote, so a record that is still on this disk is invisible to it.
 
 ## Step 4: Recompute which sub-tasks are released
 
@@ -513,6 +555,8 @@ empty, `"none — " + report["next_command"]["reason"]`.
 - Contract defects: <block id — reason (files-but-no-recognised-agent | no-files-but-names-an-agent), one line each | none>
 - Hand-resolved: <sub-task[ #pr] — <entry's own `reading` field, printed verbatim>, one line each | none>
 - Completion records written: <paths>
+- Records left in starting tree: <the report's records_untracked paths, each with its state (unpushed | update | differs | unsafe) and reason, or "none"; "unverifiable — <records_reading_cause>" when records_reading is unverifiable>
+- Trees: <the sweep's tree_lines, printed verbatim, one per tree touched: the starting tree and the records worktree>
 - Review verdicts: <sub-task — pass | pass-with-findings | blocked | unreadable | unfetched | cross-repository, one line each | none read this run>
 - Released: <sub-tasks now unblocked, and what released them>
 - Still blocked: <sub-task — waiting on X>
@@ -599,7 +643,8 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
 - **Treating an unresolvable dependency as satisfied.** That is the orchestrator's own defect.
 - **Computing a release from the live state instead of completion records.** State goes stale.
 - **Overwriting an existing completion record silently.** Two commits for one sub-task needs a
-  person.
+  person. A differing `completed` record is never overwritten; only the sweep's `update` (a
+  `completed` record over a `failed` one) is pushed over an existing record.
 - **Inventing a sub-task graph** when the contract has no decomposition. Report it instead.
 - **Deriving a dependency from overlapping file lists.** Overlap means two writers could
   clash. It does not mean one needs the other first.
@@ -615,9 +660,13 @@ ever wrote. That mismatch is the whole reason its plan store stayed empty.
 - **Handing to `/advance` on the completion move before the records draft is pushed.** The landing
   reads records from the remote only, so an unpushed record reads as `not-complete`.
 - **Re-cutting `docs/<contract-slug>-records` while it exists on origin.** Fetch it, commit on top
-  and push without force. Cut it from `origin/master` only when it is absent.
-- **Moving the completion hand-off push's no-prompt rule to other pushes.** It covers that one push
-  only. Every other records push confirms once.
+  and push without force. Cut it from `origin/master` only when it is absent. A `-2` or `-3` suffix
+  names the records worktree folder only, never the branch.
+- **Asking before a records push to the stable branch, or pushing anywhere else without asking.** Every
+  records push to `docs/<contract-slug>-records` runs without a prompt (Q1). Only the evidence
+  confirmation before a flipping run stays, and a push to any other branch still confirms.
+- **Deleting a starting-tree record copy by hand, or sweeping before the push succeeded.** The sweep
+  deletes only a copy whose twin is on origin; a copy that differs is kept for the owner.
 - **Launching the landing from this phase.** `/advance` starts it, in the background.
 - **Hand-running `git branch -d` or `git branch -D`,** or removing a worktree with a manual line.
   The cleanup script checks that the tip is in `origin/<default>` before it deletes anything.

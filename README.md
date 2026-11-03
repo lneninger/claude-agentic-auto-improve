@@ -302,6 +302,20 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.13.0 (issue #178):** `/pr-merged` no longer leaves its completion records behind as
+untracked files in the tree it ran from. After the records are pushed to the stable branch
+`docs/<contract-slug>-records`, the new `pr_merged.py --sweep-records` deletes each starting-tree
+copy that is identical to a copy on `origin/<default>` (or on that branch's tip while its pull
+request is open), and keeps and names every other copy. The records step is
+`/pr-merged --records <contract-slug>`; every records push to the stable branch now runs without a
+prompt, and a closed or merged records pull request is re-opened as a draft from the same branch.
+`--status --json` gains `records_reading`, `records_unpushed`, `records_differing`,
+`records_stranded` and `records_untracked`; the Next Command puts the records step first, and
+`--dispatch` refuses with exit 12 while records are unpushed or cannot be read, so `/advance` never
+dispatches on top of them. Both skills end with one `tree <root>: clean` line per tree touched.
+**A project that vendors `pr_merged.py` must sync it (`tools/sync-plugin.cmd`)**, or the skills halt
+with "this `pr_merged.py` predates 0.13.0". The manifests read 0.13.0.
+
 **Changed in 0.12.4 (issue #71, follow-up 1):** `plugin_doctor.py --drift` warns about a project
 hook row that launches a file that is not there, such as a row for a hook the plugin no longer
 ships. The finding kind is `dangling-hook-row`. It covers rows written before 0.12.3 (the old

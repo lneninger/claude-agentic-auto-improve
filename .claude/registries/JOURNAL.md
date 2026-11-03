@@ -317,6 +317,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a feature reads data another change's writer produces
 - **Tags:** merge, row-shape, round-trip, coverage-claim, hook-row
 
+### 2026-11-02 — A sweep that deletes every proven file in a folder must route EVERY local reader of that folder through the remote evidence, not only the one the contract was about
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-02-pr-merged-records-leftover-cleanup.md
+- **Lesson:** Before a contract deletes local copies "because origin holds them", grep every reader of that folder (`load_records`, `load_delivery`, review gates, anything under `RESULTS_DIR`) and route each one through the remote-backed evidence; I-7 listed only the sub-task record readers, so the swept Contract Delivery Record (`contract-delivery.yaml`) left `delivery = load_delivery(slug)` at None, which un-delivers parent-branch contracts, bypasses G-5 and re-suggests `--record-delivery`.
+- **Apply when:** a contract adds a deleter, mover or sweep over a folder that one or more local loaders read, and its evidence rule names only some of those loaders
+- **Tags:** sweep, delete, evidence, local-reader, delivery-record
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
