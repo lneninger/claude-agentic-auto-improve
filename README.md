@@ -302,7 +302,7 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
-**Changed in 0.13.0 (issue #178):** `/pr-merged` no longer leaves its completion records behind as
+**Changed in 0.14.0 (issue #178):** `/pr-merged` no longer leaves its completion records behind as
 untracked files in the tree it ran from. After the records are pushed to the stable branch
 `docs/<contract-slug>-records`, the new `pr_merged.py --sweep-records` deletes each starting-tree
 copy that is identical to a copy on `origin/<default>` (or on that branch's tip while its pull
@@ -314,7 +314,12 @@ prompt, and a closed or merged records pull request is re-opened as a draft from
 `--dispatch` refuses with exit 12 while records are unpushed or cannot be read, so `/advance` never
 dispatches on top of them. Both skills end with one `tree <root>: clean` line per tree touched.
 **A project that vendors `pr_merged.py` must sync it (`tools/sync-plugin.cmd`)**, or the skills halt
-with "this `pr_merged.py` predates 0.13.0". The manifests read 0.13.0.
+with "this `pr_merged.py` predates 0.14.0". The manifests read 0.14.0.
+
+**Changed in 0.12.5 (tests only):** the installer, guard-deference and launcher test files now pin the
+Project hook launcher row form (`py -3 -c <source> <class> <script>`) that 0.12.3 started writing, and
+one new pair of rows pins the earlier-form fallback when no launcher is available. No shipped behaviour
+changed. The manifests read 0.12.5.
 
 **Changed in 0.12.4 (issue #71, follow-up 1):** `plugin_doctor.py --drift` warns about a project
 hook row that launches a file that is not there, such as a row for a hook the plugin no longer
@@ -392,6 +397,40 @@ parts.
   Disabled add-on hook, Rule ID, Post-edit view and Accepted guard limit, plus amendments to
   Placeholder slot and Vendored-asset drift. `MECHANISMS.md` gains Disabled add-on hook and an
   amendment to CodeGraph that replaces its bypass clause. Existing entries are not edited.
+
+**Hook registration checks (issue #148).** A hook registration is one handler row under
+`hooks` in a project's `.claude/settings.json`. The tests that guard those rows used to live in
+one consuming project, so a registration change on the default branch broke an unrelated
+contract's landing. The plugin now owns the checks. What it adds:
+
+- **The check.** `.claude/scripts/check_hook_registrations.py` is read-only. It judges the
+  settings file against the project's **hook registration profile**, a committed record of the
+  rows the project expects (`.claude/hook-registration-profile.json`). It applies five named
+  rules: the row count is unchanged; rows are unchanged apart from `if`; the `if` values are
+  unchanged; every row is recorded or deliberately excluded; every exclusion still matches a row.
+  It exits 0 on a pass, 1 when a rule fails, and 2 when it could not check. Exit 2 is never a
+  pass: a missing, unreadable or unimportable input is refused by name.
+- **The recorder.** `auto_improve_finish_install.py record-registrations` previews the hook
+  registration profile, then writes it with `--apply --expect-sha256 <plan hash>`. It keeps every
+  exclusion you wrote by hand. An unchanged re-record writes nothing.
+- **Failure attribution in the landing report.** When verification stops a landing, the report
+  now says for each new failure whether it comes from the contract's diff (`in-diff`), from the
+  default branch's diff (`outside-diff`), or cannot be told (`undetermined`), with a one-line
+  reason. Only a file the failure itself names can decide a side. This is advice only: it never
+  changes the verdict, a gate or an exit code.
+- **What the advice says (the answer to the question of where "check the default branch before
+  re-recording" belongs).** It sits in the landing report's `next_command`, not in the checker.
+  The re-record advice appears only when every new failure is an `outside-diff` named test
+  regression, because only a named regression can change after a baseline re-record. A step that
+  is read by its exit code is not covered by the baseline. For those steps the report tells you to
+  check whether the default branch fails the same step, and it never suggests a re-record.
+- **This repository's own step.** The `hook-registration-tests` landing step runs the checker's
+  test suite and names only that test file. A break in `check_hook_registrations.py` itself
+  therefore reads `undetermined` here, with the reason "no file the failure names is in either
+  diff", because the suite reaches the checker by import and not as a step argument.
+- **Registries.** `VOCABULARY.md` gains Registration row, Hook registration profile,
+  Registration rule and Failure attribution. `MECHANISMS.md` gains Hook registration check and a
+  correction line under Preview-hash apply. Existing entries are not edited.
 
 ### Retired hooks, and how to restore one
 
@@ -884,7 +923,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 308 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 337 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
@@ -1079,6 +1118,54 @@ enforcement on, and that is your decision rather than a script's. When you are r
 run `/auto-improve-finish-install`: it shows the exact change, asks, and only then writes
 it, with a backup. That skill also fills in the profile slots the doctor left as
 placeholders.
+
+## Checking your hook registrations
+
+A hook registration is one handler row under `hooks` in your project's `.claude/settings.json`.
+The plugin can check that nobody added, removed or changed such a row by accident. The check
+compares the settings file with your **hook registration profile**, a file you commit that lists
+the rows you expect. Follow these steps in your project.
+
+1. **Record your hook registration profile.** Preview first, then apply with the hash the preview
+   prints:
+
+   ```powershell
+   py -3 -B .claude/scripts/auto_improve_finish_install.py record-registrations --project .
+   py -3 -B .claude/scripts/auto_improve_finish_install.py record-registrations --project . --apply --expect-sha256 <plan hash>
+   ```
+
+   This writes `.claude/hook-registration-profile.json`. Commit it. Whenever a pull request
+   changes a registration on purpose, run the two commands again in that same pull request. To
+   exempt a row on purpose, add an exclusion with a reason to the file by hand. A re-record keeps it.
+
+2. **Vendor five files.** List these files in your `.claude/.sync-config.json`, so the sync tool
+   copies them into your `.claude/scripts/` folder: `check_hook_registrations.py`,
+   `auto_improve_finish_install.py`, `pr_merged.py`, `plugin_doctor.py` and
+   `check_version_bump.py`. The checker imports the other four. With only the checker present it
+   exits 2 with `checker-dependency-missing` and names the files. Vendoring is the only supported
+   way, because the landing step must name the checker at a path inside your repository.
+
+3. **Add a landing step.** In your landing verification steps, add one that runs exactly this
+   command, with no `when_paths`:
+
+   ```powershell
+   py -3 -B .claude/scripts/check_hook_registrations.py --settings .claude/settings.json --hook-registration-profile .claude/hook-registration-profile.json
+   ```
+
+   The step reads its result from the exit code. Run the same line yourself before you push.
+
+Why the step looks like this:
+
+- `-B`, together with the checker's own setting, keeps Python from writing a `__pycache__`
+  folder. A cache folder in the tree would halt the landing on "the steps changed the worktree".
+  A harness that imports the checker as a module without `-B` can still cache the checker itself.
+- The step passes the settings file and the hook registration profile as arguments, so the
+  landing can see which files the failure names. It can then say whether a failure came from the
+  contract or from the default branch. A failure caused only by one of the four dependency
+  scripts reads as `undetermined`, because the step does not name them.
+
+When you adopt this, delete your own hook-registration tests and their baseline entries. The
+plugin's check replaces them.
 
 ## Documentation
 

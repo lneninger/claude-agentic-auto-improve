@@ -516,6 +516,12 @@ class UnknownClassTests(LauncherCase):
         main = self.checkout("main")
         (main / "sub").mkdir()
         (main / "sub" / "probe.py").write_text(PROBE, encoding="utf-8")
+        # The probe also sits where the relative names resolve against the hooks folder, so a launcher that
+        # stops refusing them runs it and the row fails: "sub/probe.py" and "sub\\probe.py" name
+        # .claude/hooks/sub/probe.py, "../probe.py" names .claude/probe.py.
+        (main / ".claude" / "hooks" / "sub").mkdir()
+        (main / ".claude" / "hooks" / "sub" / "probe.py").write_text(PROBE, encoding="utf-8")
+        (main / ".claude" / "probe.py").write_text(PROBE, encoding="utf-8")
         for script in ("sub/probe.py", "sub\\probe.py", "../probe.py", str(main / "sub" / "probe.py"), "probe"):
             for hook_class, code in (("block", 2), ("warn", 1)):
                 with self.subTest(script=script, hook_class=hook_class):

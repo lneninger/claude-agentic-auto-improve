@@ -165,7 +165,7 @@ Not applicable. Reason: no persisted entity is added. Completion records keep th
     - Over a `completed` record for another pull request, it is `differs`, as the code behaves (second post-implementation amendment). It is not pushed and not swept. The Next Command reason names the resolution: `--discard-differing <path>` keeps origin's record; otherwise the owner keeps the local one by committing it to the stable branch by hand.
 - **I-9 (dispatch refuses).** Right after the `unknown-sub-task` check and before `advance()` (~4519), `--dispatch` (including `--dry-run`) prints one JSON refusal, as its others do, and exits **12**: `records-unpushed` (non-empty `records_unpushed` or `records_stranded`, remedy `/pr-merged --records <slug>`) or `records-unverifiable` (the cause, and I-5's remedy). `--local-evidence-only` never lifts either refusal. The script's `--dispatch` uses exits 2–7, and nothing in it uses 12. A `differs` copy never refuses. `/advance` reads exit 12 together with the `error` key.
 - **I-10 (tree-clean lines).** `--sweep-records` re-reads each tree's status after deleting and prints one Tree-clean line per `--from`/`--removed` tree as its final lines. The skills pass every tree they touched — the starting tree, the records worktree (`--removed`) and, under `/advance`, the `--dispatch` worktree — and print the lines verbatim.
-- **I-11 (an older vendored script).** The skills halt the records step and dispatch with "this `pr_merged.py` predates 0.13.0: sync the vendored copy (`tools/sync-plugin.cmd`)" when either:
+- **I-11 (an older vendored script).** The skills halt the records step and dispatch with "this `pr_merged.py` predates 0.14.0: sync the vendored copy (`tools/sync-plugin.cmd`)" when either:
   - a `--status --json` or `--sweep-records` report has no `records_reading` key. This applies only to the modes documented to carry the keys; the exempt modes in Value Objects are never judged this way;
   - any call exits 2 with `unrecognized arguments:` naming `--sweep-records`, `--from`, `--removed`, `--discard-differing` or `--local-evidence-only`.
 
@@ -177,9 +177,9 @@ Not applicable. Reason: no persisted entity is added. Completion records keep th
   - **How it is read.** The delivery record is therefore read as evidence exactly like completion records: the local copy, else the stable-branch tip, else `origin/<base>`, under the same failure-aware reading. Any failed read makes the reading `unverifiable` (I-3).
   - **Readers added to I-7's list:** `load_delivery`; the `delivery` argument of `is_delivered`; G-5; and `write_delivery`'s precondition.
   - **Rule.** A delivery record read from evidence never causes a new local delivery write. `--record-delivery` treats it as already recorded, G-5 compares against it, and a contract delivered through the parent-branch layout reads delivered in a swept tree.
-- **I-13 (the scope gate; declared divergence).** The implementation runs the records reading only where it can work. This gate exists for in-process drivers written before 0.13.0 (tests and callers that call `main()` from a folder with no repository metadata).
+- **I-13 (the scope gate; declared divergence).** The implementation runs the records reading only where it can work. This gate exists for in-process drivers written before 0.14.0 (tests and callers that call `main()` from a folder with no repository metadata).
   - **What it may test.** Only whether the working directory is a git tree carrying the repository metadata the reading needs. It runs `git remote get-url origin`:
-    - **Exit 2** means no `origin` remote. The gate is off, and the run behaves as before 0.13.0.
+    - **Exit 2** means no `origin` remote. The gate is off, and the run behaves as before 0.14.0.
     - **Any other failure** while a `.git` entry exists makes the reading `unverifiable`, never "no reading".
   - **What it must not test.** Where the contract file sits. A path-form `--contract` that points at another tree's concepts folder still carries the keys and still gets exit 12 on `--dispatch`.
   - **Required.** A test pins this. `skills/pr-merged/SKILL.md` names the gate and what it is for.
@@ -284,9 +284,9 @@ None. Everything is an extension:
    - For orchestrator result records of a contract, the follow-up branch is always the stable `docs/<contract-slug>-records`, single-sub-task contracts included, under the same rule as line 516. A kept copy is then judged against that branch and is not pushed twice.
    - After Step 8's push, run `--sweep-records --from <starting tree>` (plus `--removed` for any tree it removed) and print its Tree-clean lines verbatim.
    - The sweep is the deleter for result records. Step 8's own "prove before deleting" rule still covers every other file.
-8. `README.md`: a "Changed in 0.13.0 (issue #178)" note. A project that vendors `pr_merged.py` must sync it, or the skills halt per I-11.
+8. `README.md`: a "Changed in 0.14.0 (issue #178)" note. A project that vendors `pr_merged.py` must sync it, or the skills halt per I-11.
 9. `.claude/registries/VOCABULARY.md`: append the seven terms. It is a shipped registry, so it rides this raise.
-10. Version 0.12.4 → 0.13.0 in all five manifest places.
+10. Version 0.13.0 → 0.14.0 in all five manifest places.
 
 ## Integration Surfaces
 
@@ -363,7 +363,7 @@ Confidence: Medium. High on the deletion and failure rules: Delivery cleanup's t
 - `VERIFIED via cleanup_delivered.py:268-270`: Delivery cleanup's gate reads `origin/<default>` only.
 - `VERIFIED via the main session's scan`: no adjacent area above the threshold.
 - `ASSUMED`: the lazy `import cleanup_delivered` works when `pr_merged.py` runs as `__main__`. If not, the implementer moves the three helpers to a shared module and amends this contract.
-- `ASSUMED`: a minor raise (0.13.0) is right, because a new script mode is a new capability.
+- `ASSUMED`: a minor raise (0.14.0) is right, because a new script mode is a new capability.
 
 ## Failure Modes & Mitigations
 
@@ -423,17 +423,17 @@ The fourth amendment fixes round 4's BLOCKER: one stable branch, no `-2` branch,
 
 ### Findings
 
-- **[BLOCKER] `--local-evidence-only` brings back re-dispatch of finished work in any swept tree, and the contract calls it "exactly the pre-0.13.0 behaviour"**
+- **[BLOCKER] `--local-evidence-only` brings back re-dispatch of finished work in any swept tree, and the contract calls it "exactly the pre-0.14.0 behaviour"**
   - **What is wrong:** with the flag on, `evidence` is "today's (local records, plus `origin/<default>` where the existing code already reads it)".
     - Today `advance()` and `delivery_candidates` read only local `records` (`pr_merged.py:4483`, `:4520`). `origin/<default>` is read only by G-7 (`:4237`) and the layout block (`:4727`).
     - `compute_released` treats a sub-task with no record as open work (`pr_merged.py:604-606`).
-    - So in a tree an earlier 0.13.0 run has already swept, every swept sub-task reads as open again. That holds both before and after its records pull request merges.
+    - So in a tree an earlier 0.14.0 run has already swept, every swept sub-task reads as open again. That holds both before and after its records pull request merges.
     - I-9 lifts the dispatch refusal under the flag ("neither refusal applies"), and I-8's re-run guard also reads that local-only `evidence`.
-    - Before 0.13.0 the same tree still held the untracked copy, so the behaviour is not the pre-0.13.0 one.
+    - Before 0.14.0 the same tree still held the untracked copy, so the behaviour is not the pre-0.14.0 one.
     - I-5's `unverifiable` reason names `/advance <slug> --local-evidence-only` for every failure, transient ones included. The TASK block pins "holds nothing and refuses nothing" as the tested behaviour.
     - The owner's way out therefore leads straight into Failure Mode 1, and only the prose backstop at `skills/advance/SKILL.md:113` stands in front of it.
   - **Prior artifact ignored:** `JOURNAL.md` 2026-10-30 "A rule that refuses must give already-delivered work a named way out" (the exit must not lead the loop to redo delivered work); `JOURNAL.md` 2026-10-30 "A delivery rule must name every route into delivery, not only the one the author had in mind".
-  - **Where in this contract:** `I-3`: "That is exactly the pre-0.13.0 behaviour, and the report says so"; `I-9`: "Under `--local-evidence-only` neither refusal applies"; `## Failure Modes`: "a swept tree re-dispatches finished work", whose mitigation does not name this flag.
+  - **Where in this contract:** `I-3`: "That is exactly the pre-0.14.0 behaviour, and the report says so"; `I-9`: "Under `--local-evidence-only` neither refusal applies"; `## Failure Modes`: "a swept tree re-dispatches finished work", whose mitigation does not name this flag.
 - **[WARN] Records stranded and I-4's "open a draft pull request when none is open" depend on a reader that cannot see past 200 open pull requests**
   - **What is wrong:** `open_records_pull_requests` runs `gh pr list --state open --limit 200` with no `--head`, then filters by prefix (`pr_merged.py:2826-2838`).
     - When a repository has more than 200 open pull requests and the records pull request is not among them, the reader returns an empty list instead of failing.
@@ -575,7 +575,7 @@ The fourth amendment fixes round 4's BLOCKER: one stable branch, no `-2` branch,
 **Pre-written TASK block:**
 ```
 TASK: Implement the records leftover sweep and its evidence, re-run and dispatch rules (I-1 to I-11);
-update the four skill documents (pr-merged, contract-completion, advance, flow Step 8), the README note, the VOCABULARY.md appends and the version (0.13.0,
+update the four skill documents (pr-merged, contract-completion, advance, flow Step 8), the README note, the VOCABULARY.md appends and the version (0.14.0,
 all five places).
 CONTEXT: concept contract at .claude/concepts/2026-11-02-pr-merged-records-leftover-cleanup.md
 FILES: the Files to touch list above

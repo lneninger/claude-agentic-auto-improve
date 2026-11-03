@@ -3022,7 +3022,7 @@ def records_scope() -> Tuple[bool, str]:
 
     ``read`` says the directory is a git tree root that has an ``origin`` to read. It tests the working
     directory only, never where the contract file sits, so a path-form ``--contract`` that points at another
-    tree's concepts folder still carries the keys. A caller written before 0.13.0 (a folder with no
+    tree's concepts folder still carries the keys. A caller written before 0.14.0 (a folder with no
     repository metadata, or a repository with no ``origin``) gets no reading and behaves exactly as it did.
 
     Two different "cannot tell" answers, told apart on purpose. Git exits 2 for "No such remote": there is
@@ -4519,7 +4519,7 @@ def main() -> int:
     _origin_cache: List[Optional[Dict[str, Dict[str, Any]]]] = []
 
     #: The Records reading (I-3), taken once per run; None for a contract that is not this project's own
-    #: in a worktree root, which has no origin to read (those runs behave exactly as before 0.13.0).
+    #: in a worktree root, which has no origin to read (those runs behave exactly as before 0.14.0).
     reading: Optional[Dict[str, Any]] = None
 
     def _origin() -> Optional[Dict[str, Dict[str, Any]]]:

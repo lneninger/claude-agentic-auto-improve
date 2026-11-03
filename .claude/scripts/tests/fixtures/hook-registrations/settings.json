@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/session-start.py"] }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/edit-gate.py"],
+            "if": "Edit(src/**)"
+          },
+          {
+            "type": "command",
+            "command": "py",
+            "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/launch.py", "${CLAUDE_PROJECT_DIR}/.claude/hooks/shared-gate.py"],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "echo checking" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "py -3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-summary.py", "async": true },
+          { "type": "prompt", "prompt": "Summarise the session" }
+        ]
+      }
+    ]
+  }
+}

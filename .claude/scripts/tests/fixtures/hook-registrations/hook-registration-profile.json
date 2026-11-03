@@ -1,0 +1,80 @@
+{
+  "format": 1,
+  "settings_path": ".claude/settings.json",
+  "row_count": 6,
+  "registrations": [
+    {
+      "event": "SessionStart",
+      "matcher": "",
+      "identity": "SessionStart|session-start.py",
+      "occurrence": 1,
+      "row": {
+        "type": "command",
+        "command": "py",
+        "args": [
+          "-3",
+          "${CLAUDE_PROJECT_DIR}/.claude/hooks/session-start.py"
+        ]
+      }
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Edit|Write",
+      "identity": "PreToolUse|edit-gate.py",
+      "occurrence": 1,
+      "row": {
+        "type": "command",
+        "command": "py",
+        "args": [
+          "-3",
+          "${CLAUDE_PROJECT_DIR}/.claude/hooks/edit-gate.py"
+        ]
+      },
+      "if": "Edit(src/**)"
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Edit|Write",
+      "identity": "PreToolUse|launch.py|shared-gate.py",
+      "occurrence": 1,
+      "row": {
+        "type": "command",
+        "command": "py",
+        "args": [
+          "-3",
+          "${CLAUDE_PROJECT_DIR}/.claude/hooks/launch.py",
+          "${CLAUDE_PROJECT_DIR}/.claude/hooks/shared-gate.py"
+        ],
+        "timeout": 10
+      }
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "identity": "command:echo checking",
+      "occurrence": 1,
+      "row": {
+        "type": "command",
+        "command": "echo checking"
+      }
+    },
+    {
+      "event": "Stop",
+      "matcher": "",
+      "identity": "Stop|stop-summary.py",
+      "occurrence": 1,
+      "row": {
+        "type": "command",
+        "command": "py -3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-summary.py",
+        "async": true
+      }
+    }
+  ],
+  "excluded": [
+    {
+      "event": "Stop",
+      "identity": "prompt:{\"prompt\":\"Summarise the session\",\"type\":\"prompt\"}",
+      "reason": "advisory prompt, deliberately not pinned"
+    }
+  ]
+}

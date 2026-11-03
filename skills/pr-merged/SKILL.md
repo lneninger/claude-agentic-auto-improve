@@ -94,14 +94,14 @@ dispatch, which stays refused (exit 12) until a persistent read failure's named 
 **An older `pr_merged.py` halts these steps.** When a `--status --json` or `--sweep-records` report has
 no `records_reading` key, or any call exits 2 with `unrecognized arguments:` naming `--sweep-records`,
 `--from`, `--removed`, `--discard-differing` or `--local-evidence-only`, stop and say: "this
-`pr_merged.py` predates 0.13.0: sync the vendored copy (`tools/sync-plugin.cmd`)". An absent key never
+`pr_merged.py` predates 0.14.0: sync the vendored copy (`tools/sync-plugin.cmd`)". An absent key never
 reads as "nothing pending". `--record-subtask`, `--preconditions`, `--locate-parent`, the dispatch
 packet and every JSON refusal carry no such keys and are never judged this way. Any other exit 2
 without a JSON `error` is printed verbatim and halts.
 
 **The scope gate.** The script takes the records reading only where it can work: when the working
 directory is a git tree root (it has a `.git` entry of its own) that has an `origin` remote. This gate
-exists for in-process callers written before 0.13.0, which call `main()` from a folder with no repository
+exists for in-process callers written before 0.14.0, which call `main()` from a folder with no repository
 metadata or with a process runner that refuses, and which behave exactly as they did. It never looks at
 where the contract file sits: a path-form `--contract` that points at another tree's concepts folder still
 carries the `records_*` keys, and `--dispatch` still exits 12 on unpushed records.

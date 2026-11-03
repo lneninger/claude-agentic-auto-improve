@@ -54,7 +54,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
@@ -1345,6 +1345,155 @@ def required_coverage(rows: Sequence[Dict[str, Any]], contract_diff: Iterable[st
     return out
 
 
+# ---------------------------------------------------------------------------
+# Failure attribution (advisory: it never changes a verdict, a gate or an exit code)
+# ---------------------------------------------------------------------------
+class AttributionSides(NamedTuple):
+    """The three sides a failure is read against, kept apart (never a union).
+
+    ``contract``: merge-base(default, parent)..parent. ``default``: the P7 merge's diff, captured before
+    P7b reassigns ``merge_diff``, minus the hand-resolved paths. ``landing``: what the landing itself
+    changes (the P7b commit's paths, the hand-resolved paths and every version file).
+    """
+    contract: List[str]
+    default: List[str]
+    landing: List[str]
+
+
+def failure_units(readings: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """One unit per named new failure of a regression step; a regression naming none is ``step <id>``."""
+    units: List[Dict[str, str]] = []
+    for reading in readings:
+        if reading.get("reading") != "regression":
+            continue
+        names = list(reading.get("new_failures") or [])
+        if names:
+            units.extend({"unit": n, "unit_kind": "test", "step_id": str(reading.get("id"))} for n in names)
+        else:
+            units.append({"unit": "step %s" % reading.get("id"), "unit_kind": "step",
+                          "step_id": str(reading.get("id"))})
+    return units
+
+
+def _command_arguments(step: Dict[str, Any]) -> List[Tuple[int, str]]:
+    """``(index, argument)`` of a step's command, the code after ``-c`` left out, ``\\`` read as ``/``."""
+    out: List[Tuple[int, str]] = []
+    skip = False
+    for index, arg in enumerate(step.get("command") or []):
+        arg = str(arg)
+        if skip:
+            skip = False
+            continue
+        if arg == "-c":
+            skip = True
+            continue
+        out.append((index, arg.replace("\\", "/")))
+    return out
+
+
+def _named_files(unit: Dict[str, str], step: Dict[str, Any], all_paths: Sequence[str]) -> List[str]:
+    """The diff paths a unit names (Files a unit names); only these can decide a side."""
+    known = set(all_paths)
+    fmt = (step.get("results") or {}).get("format", "exit-code")
+    if unit["unit_kind"] == "step":
+        return sorted({arg for _, arg in _command_arguments(step) if not arg.startswith("-") and arg in known})
+    parts = unit["unit"].split("::", 2)
+    where = parts[1] if len(parts) == 3 else ""
+    if fmt == "vitest-json":
+        return [where] if where in known else []
+    if fmt == "unittest-text":
+        segments = where.split(".")[:-1]
+        if not segments or segments[0] == "__main__":
+            return []
+        suffix = "/".join(segments) + ".py"
+        matches = sorted({p for p in known if p == suffix or p.endswith("/" + suffix)})
+        return matches if len(matches) == 1 else []
+    return []
+
+
+def _step_names_no_file(step: Dict[str, Any]) -> bool:
+    """A step command with no path-like argument after the program (an inline ``-c`` command, say)."""
+    return not any(("/" in arg or "." in arg) and not arg.startswith("-") and "{" not in arg
+                   for index, arg in _command_arguments(step) if index > 0)
+
+
+def attribute_failure(unit: Dict[str, str], step: Dict[str, Any], sides: AttributionSides,
+                      expand: Optional[Callable[[List[str]], List[str]]] = None) -> Dict[str, str]:
+    """The Failure attribution of one unit (FA-1 to FA-5, first match wins). Pure and advisory."""
+    contract, default, landing = (set(p.replace("\\", "/") for p in side) for side in sides)
+    named = _named_files(unit, step, sorted(contract | default | landing))
+
+    def result(attribution: str, reason: str) -> Dict[str, str]:
+        return {"unit": unit["unit"], "unit_kind": unit["unit_kind"], "attribution": attribution,
+                "reason": reason}
+
+    by_landing = [f for f in named if f in landing]
+    if by_landing:
+        return result("undetermined", "the landing itself changes %s (version raise or hand-resolved merge)"
+                      % ", ".join(by_landing))
+    in_contract = [f for f in named if f in contract]
+    in_default = [f for f in named if f in default]
+    if in_contract and in_default:
+        return result("undetermined", "both the contract's diff and the default branch's diff change files "
+                      "the failure names: %s" % ", ".join(sorted(set(in_contract) | set(in_default))))
+    if in_contract:
+        return result("in-diff", "only the contract's diff changes %s, which the failure names"
+                      % ", ".join(in_contract))
+    if in_default:
+        return result("outside-diff", "only the default branch's diff changes %s, which the failure names"
+                      % ", ".join(in_default))
+    if unit["unit_kind"] == "step" and _step_names_no_file(step):
+        return result("undetermined", "the step names no file, so a failure cannot be traced to a diff")
+    wanted = list(step.get("when_paths") or [])
+    if wanted and expand is not None:
+        wanted = list(expand(wanted))
+    matched = [label for label, side in (("the contract's diff", contract), ("the default branch's diff", default))
+               if wanted and any(path_matches(p, wanted) for p in side)]
+    if matched:
+        return result("undetermined", "the step's when_paths match %s, which shows only why the step ran, "
+                      "not what failed" % " and ".join(matched))
+    return result("undetermined", "no file the failure names is in either diff")
+
+
+def build_attribution(readings: Sequence[Dict[str, Any]], steps: Sequence[Dict[str, Any]],
+                      sides: AttributionSides, reasons: Sequence[str],
+                      expand: Optional[Callable[[List[str]], List[str]]] = None
+                      ) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """``(new_failures_attributed, attribution_note)`` of a NOT-READY verdict; the note is None when unneeded."""
+    by_id = {str(s.get("id")): s for s in steps}
+    attributed = [attribute_failure(u, by_id.get(u["step_id"], {}), sides, expand) for u in failure_units(readings)]
+    parts: List[str] = []
+    if not attributed:
+        if reasons:
+            parts.append("no step regressed, so there is nothing to attribute; the verdict comes from: %s"
+                         % "; ".join(reasons))
+    else:
+        if reasons:
+            parts.append("the verdict also comes from: %s" % "; ".join(reasons))
+        if not any(a["attribution"] in ("in-diff", "outside-diff") for a in attributed):
+            distinct = list(dict.fromkeys(a["reason"] for a in attributed))
+            parts.append("no failure could be placed in or outside the contract's diff: %s" % "; ".join(distinct))
+    return attributed, "; ".join(parts) or None
+
+
+def attribution_split(attributed: Sequence[Dict[str, str]]) -> str:
+    """The detail text that names the units by side."""
+    def names(kind: str) -> str:
+        return ", ".join(a["unit"] for a in attributed if a["attribution"] == kind) or "none"
+    return "in the contract's diff: %s; outside it: %s; undetermined: %s" % (
+        names("in-diff"), names("outside-diff"), names("undetermined"))
+
+
+def advice_facts(reasons: Sequence[str], attributed: Sequence[Dict[str, str]]) -> Dict[str, bool]:
+    """The two facts the next command reads; both false unless there are no reasons and at least one unit."""
+    none = {"all_outside_diff": False, "step_failures_only": False}
+    if reasons or not attributed:
+        return none
+    return {"all_outside_diff": all(a["attribution"] == "outside-diff" for a in attributed)
+            and any(a["unit_kind"] == "test" for a in attributed),
+            "step_failures_only": all(a["unit_kind"] == "step" for a in attributed)}
+
+
 def check_configuration(config: Any, worktree: Any, results_dir: Any) -> Optional[Dict[str, str]]:
     """``landing-not-configured`` when the block is absent, has no steps, or a result path is inside the tree."""
     fail = lambda detail: {"outcome": "landing-not-configured", "detail": detail}  # noqa: E731
@@ -1503,11 +1652,23 @@ def next_command_for_outcome(outcome: str, slug: str, **facts: Any) -> Dict[str,
             return {"commands": ["/design-first %s" % slug], "repeat_after_rerecord": True,
                     "reason": "every new failure was also new last time and the baseline was re-recorded "
                               "in between, so it is a real regression, not a missed flake"}
+        if facts.get("step_failures_only"):
+            # Every unit is an exit-code step: the baseline is never read for it, so a re-record cannot help.
+            ids = ", ".join(facts.get("suite_ids") or ["<step ids>"])
+            return {"commands": [advance_line], "repeat_after_rerecord": False, "outside_diff": False,
+                    "reason": "the failing steps are read by exit code, which the baseline does not cover, so "
+                              "re-recording cannot change the result: check whether the default branch fails "
+                              "the same step (%s); if it does, fix it there, then rerun" % ids}
         suites = ", ".join(facts.get("suite_ids") or ["<suite ids>"])
+        outside = bool(facts.get("all_outside_diff"))
+        reason = ("new failures: a flake the recording missed is caught by a fresh recording on the "
+                  "default branch, which never runs this contract's code")
+        if outside:
+            reason = ("every new failure is attributed outside the contract's diff (the default branch changed "
+                      "what the failing test names): first check whether the default branch fails the same "
+                      "test, and re-record only if it does. " + reason)
         return {"commands": ["/task Re-record the failing-test baseline for %s" % suites, advance_line],
-                "repeat_after_rerecord": False,
-                "reason": "new failures: a flake the recording missed is caught by a fresh recording on the "
-                          "default branch, which never runs this contract's code"}
+                "repeat_after_rerecord": False, "outside_diff": outside, "reason": reason}
     if outcome in ("blocked-verdict", "unresolvable-conflict", "regeneration-failed"):
         return {"commands": ["/design-first %s" % slug],
                 "reason": "the fix is a remedy sub-task on the parent branch: %s"
@@ -1738,7 +1899,8 @@ def make_report(run_id: str, contract: Optional[str], outcome: str, gate: str, d
                 **extra: Any) -> Dict[str, Any]:
     next_facts = {k: extra.pop(k) for k in list(extra) if k in (
         "new_failures", "previous_new_failures", "suite_ids", "baseline_commit_now",
-        "baseline_commit_previous", "open_children", "live", "dry_run", "live_kind", "verify_here")}
+        "baseline_commit_previous", "open_children", "live", "dry_run", "live_kind", "verify_here",
+        "all_outside_diff", "step_failures_only")}
     if "manual_landing" in extra:  # a fact for the next command AND a field a dry run records (L-18)
         next_facts["manual_landing"] = extra["manual_landing"]
     report: Dict[str, Any] = {
@@ -2161,6 +2323,12 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
                                                     parent, slug, facts, details, notes)
     gate_check("P7")
 
+    # The attribution sides, captured before P7b reassigns merge_diff: the default branch's own diff
+    # (hand-resolved paths are the landing's) and the HEAD the landing's own commit is measured from.
+    resolved_set = set(resolved or [])
+    default_branch_diff = [p for p in merge_diff if p not in resolved_set]
+    head_before_p7b = rev_parse(wt, "HEAD")
+
     # ---- P7b the Landing version raise (R-1, R-2) -------------------------------------------------
     # After the default branch is merged in: minor + 1, patch 0, relative to origin/<default>, committed
     # on the parent branch and checked with --exact. It runs whether or not P7 merged anything, and a
@@ -2178,8 +2346,13 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     phase("p8", merge_commit=head)
 
     # ---- P8 verification --------------------------------------------------------------------------
+    # Landing's own paths: P7b's commit (empty when it committed nothing), the hand-resolved paths and
+    # every version file the raise manages, whether or not this run committed one.
+    p7b_paths = diff_names(wt, head_before_p7b, head) if head_before_p7b and head != head_before_p7b else []
+    landing_paths = sorted(set(p7b_paths) | resolved_set | set(MANIFESTS))
     summary = _p8_verify(wt, head, config, baseline, baseline_note, baseline_fingerprint, contract_diff,
-                         merge_diff, resolved, records, classification.sub_tasks, logs, contract_dir, run_id, default_ref)
+                         merge_diff, resolved, records, classification.sub_tasks, logs, contract_dir, run_id,
+                         default_ref, default_branch_diff=default_branch_diff, landing_paths=landing_paths)
     facts["p8_verification_verdict"] = summary["verdict"]
     shared = {"verification": summary, "merge_commit": head, "hand_resolved_in_merge": resolved}
     new_failures = summary.get("new_failures") or []
@@ -2187,8 +2360,15 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     prev_verification = previous.get("verification") if previous.get("outcome") == "verification-not-ready" else None
     prev_new = (prev_verification or {}).get("new_failures") or []
     prev_fp = _previous_measured_commit(prev_verification)
+    attributed = summary.get("new_failures_attributed") or []
     details["verification-not-ready"] = "verification is not READY: " + (
-        "; ".join(summary.get("reasons") or []) or "new failures: " + ", ".join(new_failures))
+        "; ".join(summary.get("reasons") or []) or "new failures: " + ", ".join(
+            new_failures or [a["unit"] for a in attributed]))
+    if attributed:
+        details["verification-not-ready"] += ". " + attribution_split(attributed)
+    advice = advice_facts(summary.get("reasons") or [], attributed)
+    if advice["step_failures_only"]:  # the ids the next command names: the failing steps
+        suite_ids = sorted(a["unit"][len("step "):] for a in attributed)
     details["environment-failure"] = "verification could not run: " + "; ".join(
         "%s: %s" % (s["id"], s.get("environment_reason")) for s in summary["steps"]
         if s.get("reading") == "environment")
@@ -2196,7 +2376,8 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     if outcome:
         raise halt(outcome, "P8", details[outcome], new_failures=new_failures, suite_ids=suite_ids,
                    previous_new_failures=prev_new, baseline_commit_now=baseline_fingerprint,
-                   baseline_commit_previous=prev_fp, **shared)
+                   baseline_commit_previous=prev_fp, all_outside_diff=advice["all_outside_diff"],
+                   step_failures_only=advice["step_failures_only"], **shared)
 
     def stop(outcome: str, gate: str, detail: str) -> "_Halt":
         return halt(outcome, gate, detail, **shared)
@@ -2516,8 +2697,14 @@ def _p8_verify(wt: Path, head: str, config: Dict[str, Any], baseline: Dict[str, 
                baseline_fingerprint: Optional[str], contract_diff: List[str], merge_diff: List[str],
                resolved: List[str], records: Dict[str, Dict[str, Any]], tasks: Sequence[Any],
                logs: Path, contract_dir: Path, run_id: str,
-               default_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Gate 1: the Landing Verification of H. A READY record for H is reused while the worktree is clean."""
+               default_ref: Optional[str] = None, default_branch_diff: Optional[List[str]] = None,
+               landing_paths: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Gate 1: the Landing Verification of H. A READY record for H is reused while the worktree is clean.
+
+    ``default_branch_diff`` and ``landing_paths`` are the attribution sides (the P7 merge diff before P7b,
+    minus hand-resolved paths; what the landing itself changes). Their defaults suit a caller that has
+    no P7b: ``merge_diff`` minus ``resolved``, and ``resolved`` plus the version files.
+    """
     cached = _read_json(contract_dir / "verification.yaml")
     if isinstance(cached, dict) and cached.get("head") == head and cached.get("verdict") == "READY" \
             and not status_snapshot(wt).strip():
@@ -2562,6 +2749,17 @@ def _p8_verify(wt: Path, head: str, config: Dict[str, Any], baseline: Dict[str, 
         reasons.append("no passing review artefact for: " + ", ".join(missing))
     if reasons:
         verdict = "NOT-READY"
+    attributed: List[Dict[str, str]] = []
+    attribution_note: Optional[str] = None
+    if verdict == "NOT-READY":
+        resolved_set = set(resolved)
+        sides = AttributionSides(
+            list(contract_diff),
+            list(default_branch_diff) if default_branch_diff is not None
+            else [p for p in merge_diff if p not in resolved_set],
+            sorted(set(landing_paths if landing_paths is not None else resolved) | resolved_set | set(MANIFESTS)))
+        attributed, attribution_note = build_attribution(
+            readings, steps, sides, reasons, lambda entries: expand_paths(entries, wt, default_ref))
     new_failures = sorted({f for r in readings for f in r["new_failures"]})
     summary = {
         "head": head, "verdict": verdict, "reasons": reasons, "contract_diff": contract_diff,
@@ -2575,7 +2773,10 @@ def _p8_verify(wt: Path, head: str, config: Dict[str, Any], baseline: Dict[str, 
                    "environment_reason": e["environment_reason"], "log": e.get("log")} for e in entries],
         "review_coverage": [{"reviewer": r, "satisfied": r in satisfied} for r in needed],
         "hygiene": {"tree_unchanged_by_steps": tree_unchanged, "forbidden_paths": forbidden},
+        "new_failures_attributed": attributed,
     }
+    if attribution_note:
+        summary["attribution_note"] = attribution_note
     if verdict == "READY" and not any(s["applicable"] for s in summary["steps"]):
         summary["reasons"] = ["configured, but no step applies"]
     summary = _readable_summary(summary)

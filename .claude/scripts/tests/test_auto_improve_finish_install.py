@@ -404,6 +404,12 @@ def launcher_row(script, hook_class, *extras, python3=False):
     return {"type": "command", "command": "py", "args": ["-3"] + args}
 
 
+def is_launcher_form(row):
+    """True for a launcher-form row: command is py and args begin -3, -c, <the constant>. No other reading."""
+    args = row.get("args")
+    return row.get("command") == "py" and isinstance(args, list) and args[:3] == ["-3", "-c", launcher_text()]
+
+
 def assert_launcher_row(case, entry, script, event, why):
     """The launcher row shape: args is [-3, -c, <source>, <class>, <script>, ...] (python3: without -3),
     the source equals the constant, and the class follows L2."""
@@ -1726,9 +1732,17 @@ class TestMerge(Base):
             self.assertEqual(hook.get("type"), "command", msg="a command hook")
             self.assertEqual(hook.get("command"), "py", msg="command + args form: the launcher alone")
             args = hook.get("args")
-            self.assertEqual(args[:2], ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + name],
-                             msg="-3 first, then the braced project path of %s" % name)
-            self.assertEqual(tuple(reduce_arg(a) for a in args[2:]), extras, msg="arguments after the file are kept")
+            # rule changed: args[:2] == [-3, ${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>] and args[2:] reduce to
+            # the extras -> assert_launcher_row holds; args[5:] reduce to the extras through reduce_arg; for
+            # gate-launch.py args[5:] == ["concept-gate.py"] compared raw. Reason: Revision 9, section K, and
+            # block 29's writer constraint (the writer writes the launcher row).
+            assert_launcher_row(self, hook, name, event, "the written row of %s on %s" % (name, event))
+            if name == "gate-launch.py":
+                self.assertEqual(args[5:], ["concept-gate.py"],
+                                 msg="the gate argument is the bare name, compared raw: %r" % (args,))
+            else:
+                self.assertEqual(tuple(reduce_arg(a) for a in args[5:]), extras,
+                                 msg="arguments after the script are kept")
 
     def test_each_registration_keeps_its_matcher(self):
         self.apply_to_fresh()
@@ -1975,14 +1989,16 @@ class TestMerge(Base):
 
 
 class TestLauncherGateArgument(Base):
-    """Contract 2026-10-07-worktree-isolation-by-default, block 6: the gate launcher's second argument.
+    """Contract 2026-10-07-worktree-isolation-by-default, block 6, in the launcher form of Revision 9 (block 29).
 
     The plugin registers the concept gate as ``gate-launch.py <plugin path of concept-gate.py>``. A vendored
-    consumer's written row must carry the project path for BOTH, or the launcher blocks every edit (I-3).
+    consumer's written row is a Project hook launcher row, ``py -3 -c <source> block gate-launch.py
+    concept-gate.py``: the gate argument is the BARE name, which the launcher resolves in the project's own
+    hooks folder, so no project or plugin variable survives in the row (I-3). A gate argument that stays a
+    path, or is dropped, makes the launcher block every edit.
     The plugin has no bash-gate row (round-7: bash-gate stays cut by 2026-09-28-hook-server-modes, INV-O1).
     """
 
-    GATE_ARG_PROJECT = "${CLAUDE_PROJECT_DIR}/.claude/hooks/concept-gate.py"
     LAUNCHER_PROJECT = "${CLAUDE_PROJECT_DIR}/.claude/hooks/gate-launch.py"
 
     def real_launcher_project(self):
@@ -2019,9 +2035,16 @@ class TestLauncherGateArgument(Base):
         self.assertEqual(result.get("status"), "applied", msg="got %r" % result)
         rows = self.launcher_rows()
         self.assertEqual(len(rows), 1, msg="exactly one launcher row: the concept gate (the plugin has no bash-gate row)")
-        self.assertEqual(rows[0].get("args"), ["-3", self.LAUNCHER_PROJECT, self.GATE_ARG_PROJECT],
-                         msg="both script paths name the project's hooks folder, never ${CLAUDE_PLUGIN_ROOT}")
-        self.assertNotIn("CLAUDE_PLUGIN_ROOT", json.dumps(rows[0]), msg="the plugin variable is gone from the row")
+        # rule changed: args == [-3, LAUNCHER_PROJECT, GATE_ARG_PROJECT] -> assert_launcher_row(row,
+        # gate-launch.py, PreToolUse) holds; args[5:] == ["concept-gate.py"] exactly; no argument holds
+        # ${CLAUDE_PROJECT_DIR} or CLAUDE_PLUGIN_ROOT; the written row, launched with CLAUDE_PROJECT_DIR set,
+        # prints GATE RAN, exits 0 and never says "launcher misregistered". Reason: Revision 9, K.
+        assert_launcher_row(self, rows[0], "gate-launch.py", "PreToolUse", "the written launcher row")
+        self.assertEqual(rows[0]["args"][5:], ["concept-gate.py"],
+                         msg="the gate argument is the bare name, nothing else follows it: %r" % (rows[0]["args"],))
+        for arg in rows[0]["args"]:
+            self.assertNotIn("${CLAUDE_PROJECT_DIR}", arg, msg="no argument holds the project variable")
+            self.assertNotIn("CLAUDE_PLUGIN_ROOT", arg, msg="no argument holds the plugin variable")
         names = [n for _e, _m, n, _x, _h in flat_registrations(self.read_settings())]
         self.assertNotIn("bash-gate.py", [a for h in self.launcher_rows() for a in h["args"]],
                          msg="no bash-gate argument anywhere in the launcher rows")
@@ -2041,8 +2064,15 @@ class TestLauncherGateArgument(Base):
         plan2 = self.plan()
         self.assertEqual(plan2.get("to-add"), [],
                          msg="the rewritten launcher row is found by its file-name key: nothing to add")
-        self.assertIn(self.GATE_ARG_PROJECT, [a for h in self.launcher_rows() for a in h["args"]],
-                      msg="and what was found is the REWRITTEN row, not a copy of the plugin path")
+        # rule changed: GATE_ARG_PROJECT is among the launcher rows' args -> the found row's args[5] is the bare
+        # concept-gate.py and no extra holds ${CLAUDE_PROJECT_DIR}. Reason: Revision 9, K.
+        found = self.launcher_rows()
+        self.assertEqual(len(found), 1, msg="exactly one launcher row is found: %r" % (found,))
+        self.assertEqual(found[0]["args"][5:6], ["concept-gate.py"],
+                         msg="and what was found is the REWRITTEN row, with the bare gate argument: %r"
+                             % (found[0]["args"],))
+        for extra in found[0]["args"][5:]:
+            self.assertNotIn("${CLAUDE_PROJECT_DIR}", extra, msg="no extra argument holds the project variable")
         result = self.apply(self.need(plan2, "plan-sha256"))
         self.assertEqual(result.get("status"), "nothing-to-do", msg="got %r" % result)
         self.assertEqual(path.read_bytes(), data, msg="settings.json is byte-identical")
@@ -2081,6 +2111,83 @@ class TestLauncherGateArgument(Base):
         self.assertIn("launcher misregistered", proc.stderr, msg="the banner names the cause")
         self.assertIn("auto_improve_finish_install.py", proc.stderr, msg="and the fix")
         self.assertNotIn("GATE RAN", proc.stdout, msg="the gate is never run silently from the wrong folder")
+
+
+class TestLauncherFallbackNote(Base):
+    """Gate 30, finding F4: the writer's fallback when the Project hook launcher is not available.
+
+    Both rows PIN THE WRITER'S BEHAVIOUR AT 217f97e, they do not endorse it. Revision 18's Open Question 26
+    and gate 32's item (h) decide whether the fallback (the earlier ${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>
+    form, with a note) stays; when it goes, row (i) goes with it and row (ii) stays.
+
+    The seam for row (i) is a child process on a copied tree, because ``_claude_paths`` loads
+    ``_project_paths`` from the hooks folder beside the scripts folder and a module stays loaded once
+    imported, so a stub installed in this process never reaches it. The copy holds .claude/scripts/ beside a
+    .claude/hooks/ whose only file is a ``_project_paths.py`` that raises ImportError: it must not call
+    sys.exit and must not import cleanly, because plugin_doctor catches only ImportError.
+    """
+
+    NOTE = "the Project hook launcher is not available beside this script"
+
+    def child_cli(self, scripts_root, argv):
+        """Run the copied script as a child process; returns (returncode, parsed json or None, stderr)."""
+        fake_bin = self.tmp / "fakebin"
+        fake_bin.mkdir(exist_ok=True)
+        for name in ("py", "py.exe", "python3", "python3.exe"):   # the interpreter lookup finds something
+            (fake_bin / name).write_text("", encoding="utf-8")
+            (fake_bin / name).chmod(0o755)
+        env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                   PYTHONDONTWRITEBYTECODE="1")
+        proc = subprocess.run([sys.executable, str(scripts_root / ".claude" / "scripts" /
+                                                   "auto_improve_finish_install.py")] + argv,
+                              capture_output=True, text=True, env=env, timeout=120, cwd=str(self.tmp))
+        try:
+            parsed = json.loads(proc.stdout)
+        except ValueError:
+            parsed = None
+        return proc.returncode, parsed, proc.stderr
+
+    def argv(self, apply_sha=None):
+        argv = ["hooks", "--project", str(self.project), "--json", "--claude-home", str(self.home),
+                "--platform", "win32"]
+        return argv + ["--apply", "--expect-sha256", apply_sha] if apply_sha else argv
+
+    def test_i_without_a_usable_launcher_the_plan_says_so_and_the_rows_are_the_earlier_form(self):
+        copy = self.tmp / "scripts-copy"
+        shutil.copytree(SCRIPT_ROOT / ".claude" / "scripts", copy / ".claude" / "scripts",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        (copy / ".claude" / "hooks").mkdir()
+        (copy / ".claude" / "hooks" / "_project_paths.py").write_text(
+            'raise ImportError("a stub _project_paths: the launcher surface is missing")\n', encoding="utf-8")
+        self.make_vendored()
+        rc, plan, err = self.child_cli(copy, self.argv())
+        self.assertEqual(rc, 0, msg="a preview is exit 0: %r %r" % (plan, err[-400:]))
+        self.assertEqual((plan or {}).get("status"), "plan", msg="got %r" % (plan,))
+        self.assertTrue(any(self.NOTE in n for n in plan.get("notes", [])),
+                        msg="the plan's notes hold the fixed phrase %r: %r" % (self.NOTE, plan.get("notes")))
+        rc2, applied, err2 = self.child_cli(copy, self.argv(apply_sha=plan["plan-sha256"]))
+        self.assertEqual((rc2, (applied or {}).get("status")), (0, "applied"),
+                         msg="the apply writes: %r %r" % (applied, err2[-400:]))
+        regs = flat_registrations(self.read_settings())
+        self.assertEqual(len(regs), 17, msg="all registrations written")
+        for _e, _m, name, _x, hook in regs:
+            self.assertFalse(is_launcher_form(hook), msg="%s: no launcher row without a launcher: %r" % (name, hook))
+            self.assertEqual(hook.get("command"), "py", msg="%s: the interpreter is the command" % name)
+            self.assertEqual(hook.get("args")[:2], ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + name],
+                             msg="%s: the earlier project-path form" % name)
+
+    def test_ii_with_the_real_hooks_folder_there_is_no_note_and_the_rows_are_launcher_form(self):
+        self.make_vendored()
+        plan = self.plan()
+        notes = [n for n in plan.get("notes", []) if self.NOTE in n]
+        self.assertEqual(notes, [], msg="the launcher is available beside this script, so no such note")
+        result = self.apply(self.need(plan, "plan-sha256"))
+        self.assertEqual(result.get("status"), "applied", msg="got %r" % (result,))
+        regs = flat_registrations(self.read_settings())
+        self.assertEqual(len(regs), 17, msg="all registrations written")
+        for event, _m, name, _x, hook in regs:
+            assert_launcher_row(self, hook, name, event, "the written row of %s" % name)
+            self.assertTrue(is_launcher_form(hook), msg="%s: a launcher-form row" % name)
 
 
 class TestInterpreterSwap(Base):
@@ -4215,8 +4322,15 @@ def _holds_insertion_point(old_line, new_line, hook_paths):
 
 
 def row_hook_paths(rows):
-    """The hook paths (as bytes) in the args of the rows a plan adds."""
-    return [a.encode("utf-8") for row in rows for a in row.get("args", []) if "/hooks/" in a]
+    """The hook paths (as bytes) in the args of the rows a plan adds.
+
+    rule changed: the arguments holding /hooks/ -> the same, plus each launcher row's script (the argument
+    after the class) as its JSON string, quotes included. Reason: Revision 9, K; a launcher row holds the
+    bare script name, not a path."""
+    paths = [a.encode("utf-8") for row in rows for a in row.get("args", []) if "/hooks/" in a]
+    paths += [json.dumps(row["args"][4]).encode("utf-8") for row in rows
+              if is_launcher_form(row) and len(row["args"]) > 4]
+    return paths
 
 
 def lines_kept_by_insertions_only(old, new, rows=()):
@@ -4466,7 +4580,12 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                         lines_kept_by_insertions_only(raw, new, rows),
                         msg="line by line: every old line must appear in order, changed only by insertions "
                             "(a whitespace-only re-layout of a line fails this)")
-                    self.assertLessEqual(len(new) - len(raw), 700 * len(rows),
+                    # rule changed: len(new) - len(raw) <= 700 * len(rows) -> <= sum(700 + L(row)), L(row) =
+                    # len(json.dumps(launcher_text())) for a launcher-form row, 0 otherwise. Reason: Revision 9,
+                    # K, and block 29's writer constraint (a launcher row carries the program text once).
+                    cap = sum(700 + (len(json.dumps(launcher_text())) if is_launcher_form(row) else 0)
+                              for row in rows)
+                    self.assertLessEqual(len(new) - len(raw), cap,
                                          msg="and the insertion is small: no layout changes were added")
                     self.assertEqual(new.count(b"\\u"), raw.count(b"\\u"),
                                      msg="the escape count is unchanged (a guard reads these bytes)")
@@ -5348,6 +5467,390 @@ class TestAddonStylesheet(AddonHarness):
         self.cli(["addon-remove", "--name", "angular-tailwind", "--project", str(self.project), "--json",
                   "--claude-home", str(self.home)])
         self.assertEqual(self.styles.read_bytes(), appended, msg="Q7: the removal never takes the snippet out")
+
+
+# --------------------------------------------------------------------------------------
+# record-registrations: the Hook registration profile recorder
+# --------------------------------------------------------------------------------------
+
+SCRIPTS_DIR = Path(fi.__file__).resolve().parent
+HRP_REL = ".claude/hook-registration-profile.json"
+BARE_PROFILE = re.compile(r"(?<![\w-])(?<!registration )profile\b", re.I)
+
+RECORD_SETTINGS = {
+    "permissions": {"allow": ["Bash(git status)"]},
+    "hooks": {
+        "PreToolUse": [
+            {"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "py",
+                 "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.py"], "if": "Bash(git *)"},
+                {"type": "command", "command": "py -3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/other.py"}]}],
+        "Stop": [
+            {"hooks": [{"type": "command", "command": "echo done"}]},
+            {"hooks": [{"type": "http", "url": "https://example.invalid/hook", "if": "x"}]}],
+    },
+}
+
+
+def checker():
+    import importlib
+    return importlib.import_module("check_hook_registrations")
+
+
+class TestRecordRegistrations(Base):
+    def setUp(self):
+        super().setUp()
+        self.settings = self.project / ".claude" / "settings.json"
+        self.hrp = self.project / HRP_REL
+        self.messages = []
+
+    # --- helpers -------------------------------------------------------------------
+    def put_settings(self, obj=None, raw=None):
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        if raw is not None:
+            self.settings.write_bytes(raw)
+        else:
+            write_json(self.settings, RECORD_SETTINGS if obj is None else obj)
+
+    def argv(self, apply=False, sha=None):
+        out = ["record-registrations", "--project", str(self.project), "--json"]
+        if apply:
+            out += ["--apply", "--expect-sha256", sha if sha is not None else ""]
+        return out
+
+    def preview(self):
+        rc, out, parsed = self.cli(self.argv())
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "plan"), msg="a plan: %r" % (parsed or out,))
+        return parsed
+
+    def apply(self, plan_or_sha):
+        sha = plan_or_sha["plan-sha256"] if isinstance(plan_or_sha, dict) else plan_or_sha
+        return self.cli(self.argv(apply=True, sha=sha))
+
+    def record(self):
+        plan = self.preview()
+        rc, out, parsed = self.apply(plan)
+        self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg="%r" % (parsed or out,))
+        return plan
+
+    def refused(self, rc, parsed, code, why, own_text_only=False):
+        self.assertRefused(parsed, code, why)
+        self.assertEqual(rc, 2, msg="exit class 2: " + why)
+        message = parsed["message"]
+        if own_text_only:  # the tail quotes the checker's own wording, which this sub-task does not own
+            message = message.split(":", 1)[0]
+        self.assertIsNone(BARE_PROFILE.search(message),
+                          msg="a message says 'hook registration profile' in full: %r" % message)
+
+    def write_hrp(self, obj):
+        write_json(self.hrp, obj)
+
+    # --- preview and apply -----------------------------------------------------------
+    def test_the_preview_writes_nothing_and_the_apply_writes_a_profile_the_check_accepts(self):
+        self.put_settings()
+        before = snapshot(self.tmp)
+        plan = self.preview()
+        self.assertTreeSame(before, "a preview writes nothing")
+        self.assertEqual(plan["target"], str(self.hrp))
+        self.assertFalse(plan["existed"])
+        self.assertFalse(plan["nothing-to-write"])
+        self.assertEqual(plan["row-count"], 4)
+        rc, out, parsed = self.apply(plan)
+        self.assertEqual((rc, parsed["status"]), (0, "applied"))
+        chk = checker()
+        raw = self.hrp.read_bytes()
+        profile = chk.load_hook_registration_profile(raw)
+        self.assertEqual(profile["row_count"], 4)
+        self.assertEqual(raw, chk.serialise(profile), msg="RP-2: the bytes are the fixed serialisation")
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertTrue(raw.endswith(b"\n"))
+        results = chk.check(chk.load_settings(self.settings.read_bytes()), profile)
+        self.assertEqual([r.status for r in results], ["pass"] * 5)
+
+    def test_two_previews_agree_and_the_hash_covers_every_input(self):
+        self.put_settings()
+        self.assertEqual(self.preview()["plan-sha256"], self.preview()["plan-sha256"])
+        digests = {self.preview()["plan-sha256"]}
+        changed = copy.deepcopy(RECORD_SETTINGS)
+        changed["permissions"]["allow"].append("Bash(git log)")  # settings bytes change, rows do not
+        self.put_settings(changed)
+        digests.add(self.preview()["plan-sha256"])
+        self.assertEqual(len(digests), 2, msg="the settings bytes are part of the plan hash")
+
+    def test_an_unchanged_rerecord_reports_nothing_to_write_and_keeps_the_bytes(self):
+        self.put_settings()
+        self.record()
+        first = self.hrp.read_bytes()
+        before = snapshot(self.tmp)
+        plan = self.preview()
+        self.assertTrue(plan["existed"])
+        self.assertTrue(plan["nothing-to-write"])
+        rc, out, parsed = self.apply(plan)
+        self.assertEqual((rc, parsed["status"]), (0, "nothing-to-do"))
+        self.assertEqual(self.hrp.read_bytes(), first)
+        self.assertTreeSame(before, "no write and no backup")
+
+    def test_apply_after_a_settings_change_is_changed_since_preview(self):
+        self.put_settings()
+        plan = self.preview()
+        changed = copy.deepcopy(RECORD_SETTINGS)
+        changed["hooks"]["Stop"].append({"hooks": [{"type": "command", "command": "echo more"}]})
+        self.put_settings(changed)
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply(plan)
+        self.refused(rc, parsed, "changed-since-preview", "the plan hash covers the settings bytes")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_apply_after_the_profile_changed_is_changed_since_preview(self):
+        self.put_settings()
+        self.record()
+        stale = self.preview()
+        self.hrp.write_bytes(self.hrp.read_bytes() + b"\n")
+        rc, out, parsed = self.apply(stale)
+        self.refused(rc, parsed, "changed-since-preview", "the plan hash covers the existing file bytes")
+
+    def test_a_wrong_or_missing_hash_is_changed_since_preview(self):
+        self.put_settings()
+        for sha in ("0" * 64, ""):
+            rc, out, parsed = self.apply(sha)
+            self.refused(rc, parsed, "changed-since-preview", "hash %r" % sha)
+        self.assertFalse(self.hrp.exists())
+
+    def test_a_changed_row_is_rerecorded_with_a_backup_of_the_old_file(self):
+        self.put_settings()
+        self.record()
+        old = self.hrp.read_bytes()
+        changed = copy.deepcopy(RECORD_SETTINGS)
+        changed["hooks"]["Stop"][0]["hooks"][0]["command"] = "echo changed"
+        self.put_settings(changed)
+        plan = self.preview()
+        self.assertFalse(plan["nothing-to-write"])
+        self.assertIn("echo changed", plan["unified-diff"])
+        rc, out, parsed = self.apply(plan)
+        self.assertEqual((rc, parsed["status"]), (0, "applied"))
+        self.assertNotEqual(self.hrp.read_bytes(), old)
+        backups = list(self.hrp.parent.glob("hook-registration-profile.json.bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), old)
+
+    # --- Exclusions (RP-8) -------------------------------------------------------------
+    def test_existing_exclusions_are_kept_verbatim_and_stale_ones_are_listed(self):
+        self.put_settings()
+        chk = checker()
+        live = {"event": "Stop", "identity": "command:echo done", "reason": "ad hoc, owned by the team"}
+        stale = {"event": "PreToolUse", "matcher": "Edit", "identity": "PreToolUse|gone.py",
+                 "reason": "removed upstream"}
+        self.write_hrp({"format": 1, "settings_path": ".claude/settings.json", "row_count": 0,
+                        "registrations": [], "excluded": [live, stale]})
+        plan = self.preview()
+        self.assertEqual([s["identity"] for s in plan["stale-exclusions"]], ["PreToolUse|gone.py"])
+        self.apply(plan)
+        profile = chk.load_hook_registration_profile(self.hrp.read_bytes())
+        self.assertEqual(profile["excluded"], [live, stale], msg="RP-8: verbatim, stale one included")
+        self.assertNotIn("command:echo done", [r["identity"] for r in profile["registrations"]])
+        self.assertEqual(profile["row_count"], 4, msg="RP-3: excluded rows are counted")
+
+    def test_the_text_rendering_names_the_hook_registration_profile_and_stale_exclusions(self):
+        self.put_settings()
+        self.write_hrp({"format": 1, "settings_path": ".claude/settings.json", "row_count": 0,
+                        "registrations": [], "excluded": [
+                            {"event": "Stop", "identity": "command:nothing", "reason": "r"}]})
+        argv = self.argv()
+        argv.remove("--json")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(fi.main(argv), 0)
+        text = out.getvalue()
+        self.assertIn("hook registration profile", text)
+        self.assertIn("command:nothing", text)
+        self.assertIsNone(BARE_PROFILE.search(text), msg=text)
+
+    # --- refusals ---------------------------------------------------------------------------
+    def test_missing_settings_is_registration_settings_missing(self):
+        for label, setup in (("no .claude folder", lambda: None),
+                             ("folder without the file", lambda: (self.project / ".claude").mkdir())):
+            with self.subTest(case=label):
+                setup()
+                for argv in (self.argv(), self.argv(apply=True, sha="0" * 64)):
+                    rc, out, parsed = self.cli(argv)
+                    self.refused(rc, parsed, "registration-settings-missing", label)
+                self.assertFalse(self.hrp.exists())
+
+    def test_an_unreadable_project_is_project_unreadable(self):
+        rc, out, parsed = self.cli(["record-registrations", "--project", str(self.tmp / "nope"), "--json"])
+        self.assertRefused(parsed, "project-unreadable", "not a directory")
+        self.assertEqual(rc, 3)
+
+    def test_each_unreadable_hook_registration_profile_is_refused_and_never_overwritten(self):
+        self.put_settings()
+        good = {"format": 1, "settings_path": ".claude/settings.json", "row_count": 0,
+                "registrations": [], "excluded": []}
+        row = {"event": "Stop", "matcher": "", "identity": "command:echo done", "occurrence": 1,
+               "row": {"type": "command", "command": "echo done"}}
+        cases = {
+            "invalid JSON": b"{not json",
+            "UTF-16": json.dumps(good).encode("utf-16"),
+            "unknown format": json.dumps(dict(good, format=2)).encode(),
+            "missing field": json.dumps({k: v for k, v in good.items() if k != "excluded"}).encode(),
+            "RP-4 duplicate identity": json.dumps(dict(good, registrations=[row, row])).encode(),
+            "RP-5 empty reason": json.dumps(dict(good, excluded=[
+                {"event": "Stop", "identity": "x", "reason": " "}])).encode(),
+            "RP-6 excluded and expected": json.dumps(dict(good, registrations=[row], excluded=[
+                {"event": "Stop", "identity": "command:echo done", "reason": "r"}])).encode(),
+            "RP-7 overlapping exclusions": json.dumps(dict(good, excluded=[
+                {"event": "Stop", "identity": "x", "reason": "r"},
+                {"event": "Stop", "identity": "x", "matcher": "m", "reason": "r"}])).encode(),
+        }
+        for label, raw in cases.items():
+            with self.subTest(case=label):
+                self.hrp.write_bytes(raw)
+                for argv in (self.argv(), self.argv(apply=True, sha="0" * 64)):
+                    rc, out, parsed = self.cli(argv)
+                    self.refused(rc, parsed, "hook-registration-profile-unreadable", label, own_text_only=True)
+                self.assertEqual(self.hrp.read_bytes(), raw, msg="never overwritten")
+
+    def test_a_hook_registration_profile_that_is_a_folder_is_unreadable(self):
+        self.put_settings()
+        self.hrp.mkdir()
+        rc, out, parsed = self.cli(self.argv())
+        self.refused(rc, parsed, "hook-registration-profile-unreadable", "a folder")
+
+    def test_malformed_settings_are_refused_malformed_settings(self):
+        handler = '{"type": "command", "command": "echo"%s}'
+        cases = {
+            "invalid JSON": b"{ nope",
+            "UTF-16": json.dumps(RECORD_SETTINGS).encode("utf-16"),
+            "duplicate key at the top": b'{"hooks": {}, "hooks": {}}',
+            "duplicate key at handler level": ('{"hooks": {"Stop": [{"hooks": [%s]}]}}'
+                                               % (handler % ', "command": "again"')).encode(),
+            "not an object": b"[]",
+        }
+        for label, raw in cases.items():
+            with self.subTest(case=label):
+                self.put_settings(raw=raw)
+                for argv in (self.argv(), self.argv(apply=True, sha="0" * 64)):
+                    rc, out, parsed = self.cli(argv)
+                    self.refused(rc, parsed, "malformed-settings", label)
+        self.assertFalse(self.hrp.exists())
+
+    def test_each_malformed_level_is_unexpected_settings_shape(self):
+        def hooks(value):
+            return {"hooks": value}
+
+        def group(value):
+            return hooks({"Stop": [value]})
+
+        def handler(value):
+            return group({"hooks": [value]})
+
+        cases = {
+            "hooks not an object": hooks([]),
+            "event value not a list": hooks({"Stop": {}}),
+            "group not an object": group("x"),
+            "group matcher not a string": group({"matcher": 1, "hooks": []}),
+            "group with no hooks key": group({"matcher": "Bash"}),
+            "group hooks not a list": group({"hooks": {}}),
+            "handler not an object": handler("x"),
+            "handler with no type": handler({"command": "echo"}),
+            "command not a string": handler({"type": "command", "command": 3}),
+            "args not a list": handler({"type": "command", "command": "py", "args": "x"}),
+            "an arg not a string": handler({"type": "command", "command": "py", "args": ["a", 2]}),
+        }
+        for label, obj in cases.items():
+            with self.subTest(case=label):
+                self.put_settings(obj)
+                for argv in (self.argv(), self.argv(apply=True, sha="0" * 64)):
+                    rc, out, parsed = self.cli(argv)
+                    self.refused(rc, parsed, "unexpected-settings-shape", label)
+        self.assertFalse(self.hrp.exists())
+
+    def test_a_settings_file_with_no_hooks_key_records_zero_rows(self):
+        self.put_settings({"permissions": {}})
+        plan = self.preview()
+        self.assertEqual(plan["row-count"], 0)
+        self.apply(plan)
+        self.assertEqual(checker().load_hook_registration_profile(self.hrp.read_bytes())["row_count"], 0)
+
+    def test_a_symbolic_link_target_is_refused(self):
+        self.put_settings()
+        real = self.tmp / "elsewhere.json"
+        real.write_bytes(b"{}")
+        try:
+            os.symlink(str(real), str(self.hrp))
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symbolic links are not available here")
+        plan_sha = "0" * 64
+        rc, out, parsed = self.cli(self.argv())
+        code = (parsed or {}).get("code")
+        self.assertIn(code, ("hook-registration-profile-unreadable", "write-failed", None))
+        if code is None:  # the link resolves to a readable but wrong file: only the apply must refuse
+            plan_sha = parsed["plan-sha256"]
+        before = real.read_bytes()
+        rc, out, parsed = self.cli(self.argv(apply=True, sha=plan_sha))
+        self.assertIsNotNone(parsed.get("code"), msg="refused: %r" % parsed)
+        self.assertEqual(real.read_bytes(), before, msg="nothing is written through the link")
+
+    def test_the_new_codes_are_in_the_closed_set_with_exit_class_two(self):
+        for code in ("registration-settings-missing", "hook-registration-profile-unreadable"):
+            self.assertIn(code, REFUSAL_CODES)
+            self.assertEqual(EXIT_CLASS[code], 2)
+
+    # --- _parse_settings and the other subcommands are untouched ---------------------------------
+    def test_parse_settings_still_accepts_what_the_recorder_refuses(self):
+        for label, obj in (
+                ("a group with no hooks key", {"hooks": {"Stop": [{"matcher": "Bash"}]}}),
+                ("a handler with no type", {"hooks": {"Stop": [{"hooks": [{"command": "echo"}]}]}})):
+            with self.subTest(case=label):
+                raw = json.dumps(obj).encode()
+                problem, parsed = fi._parse_settings(raw, self.settings)
+                self.assertIsNone(problem, msg="_parse_settings is unchanged")
+                self.assertEqual(parsed, obj)
+                self.put_settings(raw=raw)
+                rc, out, refusal_ = self.cli(self.argv())
+                self.refused(rc, refusal_, "unexpected-settings-shape", label)
+
+    # --- the import chain ------------------------------------------------------------------------
+    def run_python(self, *args):
+        return subprocess.run([sys.executable, "-B", *args], capture_output=True, text=True, cwd=str(self.tmp))
+
+    def test_each_module_imports_first_in_a_fresh_process(self):
+        self.put_settings()
+        pre = "import sys; sys.path.insert(0, %r); " % str(SCRIPTS_DIR)
+        orders = {
+            "checker first": "import check_hook_registrations as c; import auto_improve_finish_install as f",
+            "installer first": "import auto_improve_finish_install as f; import check_hook_registrations as c",
+        }
+        for label, imports in orders.items():
+            with self.subTest(order=label):
+                done = self.run_python("-c", pre + imports + "; print('ok')")
+                self.assertEqual((done.returncode, done.stdout.strip()), (0, "ok"), msg=done.stderr)
+        done = self.run_python("-c", pre + (
+            "import auto_improve_finish_install as f; "
+            "assert 'check_hook_registrations' not in sys.modules, 'imported at module level'; "
+            "r = f.propose_hook_registration_profile(%r); assert r['status'] == 'plan', r; "
+            "a = f.apply_hook_registration_profile(%r, r['plan-sha256']); assert a['status'] == 'applied', a; "
+            "print('ok')" % (str(self.project), str(self.project))))
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, "ok"), msg=done.stderr)
+        self.assertTrue(self.hrp.is_file())
+
+    def test_the_subcommand_runs_as_a_script_with_a_second_installer_copy(self):
+        self.put_settings()
+        script = str(SCRIPTS_DIR / "auto_improve_finish_install.py")
+        done = self.run_python(script, "record-registrations", "--project", str(self.project), "--json")
+        self.assertEqual(done.returncode, 0, msg=done.stdout + done.stderr)
+        plan = json.loads(done.stdout)
+        self.assertEqual(plan["status"], "plan")
+        self.assertFalse(self.hrp.exists())
+        done = self.run_python(script, "record-registrations", "--project", str(self.project), "--json",
+                               "--apply", "--expect-sha256", plan["plan-sha256"])
+        self.assertEqual(done.returncode, 0, msg=done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["status"], "applied")
+        profile = checker().load_hook_registration_profile(self.hrp.read_bytes())
+        self.assertEqual(profile["row_count"], 4)
+
+    def test_the_module_docstring_documents_the_subcommand(self):
+        self.assertIn("record-registrations --project", fi.__doc__)
+        self.assertIn("--expect-sha256", fi.__doc__.split("record-registrations", 1)[1])
 
 
 class TestDanglingRowsReadBackWriter(unittest.TestCase):

@@ -15291,7 +15291,7 @@ class RecordsDispatchAndKeysTests(RecordsCase):
     def test_the_owner_flag_is_accepted_so_that_only_an_older_script_answers_unrecognized_arguments(self):
         # The skills read `unrecognized arguments: --local-evidence-only` as an older vendored script (I-11).
         proc = self.cli("--status", "--local-evidence-only")
-        self.assertEqual(proc.rc, 0, msg="the flag exists in 0.13.0: " + proc.describe())
+        self.assertEqual(proc.rc, 0, msg="the flag exists in 0.14.0: " + proc.describe())
         self.assertEqual(self.key(self.report(proc, "status"), "records_action"), "skipped-by-owner")
 
 
@@ -15791,7 +15791,7 @@ class RecordsSkillTextTests(unittest.TestCase):
 
     def test_pr_merged_skill_documents_the_records_step_the_flags_and_the_older_script_halt(self):
         text = _rs_text("skills", "pr-merged", "SKILL.md")
-        for needle in ("--records", "--local-evidence-only", "--sweep-records", "Records left in starting tree", "predates 0.13.0",
+        for needle in ("--records", "--local-evidence-only", "--sweep-records", "Records left in starting tree", "predates 0.14.0",
                        "sync the vendored copy"):
             self.assertIn(needle, text, msg="skills/pr-merged/SKILL.md should mention %r" % needle)
         self.assertNotIn("Moving the completion hand-off push's no-prompt rule to other pushes", text,
