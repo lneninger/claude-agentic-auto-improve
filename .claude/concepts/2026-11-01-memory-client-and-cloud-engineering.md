@@ -4,7 +4,7 @@
 **Date:** 2026-11-01
 **Requested by:** user
 **Status:** approved
-**Revision:** 8 (2026-11-03; needs the user's re-approval at `/design-first` Step 3, see block 17). Revision 8 appends a remedy block 17 and its review 18 after the landing halted at gate P7. Revision 7 (2026-11-02): Revisions 2-4 answered three critique rounds and Open Questions 1-21. Revision 5 removes the deployment-authorization mechanism at the user's instruction (Decision note in Business Concept) and renumbers the handoff blocks. Revisions 6 and 7 (2026-11-02, notes under Handoff 11) append fix and re-review blocks after two blocked reviews; Revision 7 also adds the user's Project history record requirement, and was amended after the `## Critique (Revision 7)` round with the user's answers to Open Questions 22 and 23.
+**Revision:** 9 (2026-11-03). Revision 9 is approved by the user on 2026-11-03, including Question 33. The user answered Open Questions 29-32 and asked for the `## Critique (Revision 9)` warnings to be folded in; both are written into blocks 19 and 20 (see block 19). Revision 9 appends a fix block 19 and its re-review 20 after the landing halted at gate P3 on block 18's `blocked` review. Revision 8 (2026-11-03) appends a remedy block 17 and its review 18 after the landing halted at gate P7. Revision 7 (2026-11-02): Revisions 2-4 answered three critique rounds and Open Questions 1-21. Revision 5 removes the deployment-authorization mechanism at the user's instruction (Decision note in Business Concept) and renumbers the handoff blocks. Revisions 6 and 7 (2026-11-02, notes under Handoff 11) append fix and re-review blocks after two blocked reviews; Revision 7 also adds the user's Project history record requirement, and was amended after the `## Critique (Revision 7)` round with the user's answers to Open Questions 22 and 23.
 **Work Item Brief:** .claude/work-items/2026-11-01-memory-client-and-cloud-engineering.md
 **Tracking issue:** #161
 **Budget:** 20,000 tokens. This is raised from the template's 12,000 because the brief asks for the full audit to sit inside the contract. Open Question 14 offers to move the appendices out.
@@ -365,6 +365,7 @@ Confidence: Medium. High on reuse mapping and degradation (verified against `loa
 - `VERIFIED via .claude/area-mapping.json:14`: the area map is empty.
 - `VERIFIED via glob`: `.claude/.scout-cache/registry-digest.md` and `.claude/registries/INTEGRATION.md` do not exist here.
 - `ASSUMED` (Revision 8): `master` is at 8ea2dd4, with version 0.14.x, as fetched on 2026-11-03. The conflict list in block 17 was computed against that commit. Matters because a later `master` can add conflicts, or reach 0.15 and move the landing raise to 0.16.0. Verification path: block 17 lists git's own conflicts before resolving and aborts on an unlisted one; the landing's `--raise` always reads `origin/master` at landing time.
+- `VERIFIED via the t18 review` (Revision 9): block 17 merged `master` at 274bf1e (#219, version 0.14.2), a descendant of 8ea2dd4, and git's conflict list was the five files block 17 named. `ASSUMED` (Revision 9): `origin/master` is at 0061212 (0.14.3), and its two commits after 274bf1e touch the four manifests, two test files, `.claude/work-item-conventions.json` and a brief, none of them a registry, `README.md`, a file block 17 resolved by hand, or a file block 17 text-fixed after the merge (`CONTRIBUTING.md`, `skills/auto-improve-finish-install/SKILL.md`) (t18 review I2, extended to the text-fix files). Matters because a file that both those commits and the parent branch changed after 274bf1e would make the landing's second merge conflict. Verification path: block 19 quotes `git diff --name-only 274bf1e origin/master` before editing and stops on an overlap with its stop list; block 20 runs `git merge-tree --write-tree --name-only <block 19 head> origin/master` and quotes the result.
 
 ---
 
@@ -408,6 +409,14 @@ Confidence: Medium. High on reuse mapping and degradation (verified against `loa
   - **Mitigation:** the landing's P7 gate (`land_contract.py`) reports it with the same remedy. A further remedy block on the same pattern merges again; nothing reaches `master` in a broken state.
 - **FM (Revision 8):** README counts are wrong after the merge (each side's count is copied, or the two are added).
   - **Mitigation:** block 17 rewrites every count from the merged tree and from each suite's own output (journal 2026-11-01, "After merging a base..."). Block 18 re-checks the counts, and `test_plugin_manifests.py` checks the README counts it pins.
+- **FM (Revision 9):** deleting the stale steps 6-9 silently widens a pinned test. `test_parent_branch_rule_text.py` (class `CaptureAtDeliveryTextTests`, the step 5a test) ends step 5a's section at the heading `6. **Cut the branch`, which block 19 deletes. Its `section` helper then runs to the end of the file and still passes, so it stops pinning step 5a alone.
+  - **Mitigation:** block 19 moves the end marker to master's step 6 heading (`6. **Put the stable branch`) and adds a pin that each numbered step of the records procedure appears exactly once and in order (journal 2026-10-15, "A skill that edits a block pinned by a lookup-block test must name that test").
+- **FM (Revision 9):** a `master` commit after 274bf1e changes a file the parent branch changed after 274bf1e (block 19's files, the three registries, or block 17's text-fix files `CONTRIBUTING.md` and `skills/auto-improve-finish-install/SKILL.md`), so the landing's second merge conflicts.
+  - **Mitigation:** block 19 checks the overlap against that stop list before editing and stops on one; block 20 quotes `git merge-tree` against `origin/master`; the landing's P7 gate (`land_contract.py`) remains the backstop, with the Revision 8 remedy pattern.
+- **FM (Revision 9):** the re-review passes, but the landing still reads block 18's `blocked` artefact as effective and halts at P3 again.
+  - **Mitigation:** the review layer's supersession edge (`read_review_set` in `pr_merged.py`, the Gate Output `supersedes` field), used by blocks 13 and 16. Block 20's Gate Output lists the t18 artefact in `supersedes`.
+- **FM (Revision 9):** a review artefact is committed with a placeholder evidence row (the t18 artefact's `SUITES_PENDING`), so a reader cannot tell a suite that passed from one that never ran.
+  - **Mitigation:** block 20's constraints forbid placeholder rows: every suite gets a row with its exit code and case count, and a suite that could not finish gets a row stating that, reported as a finding.
 
 ---
 
@@ -456,6 +465,24 @@ Revision 8 adds five questions. The user answered all five on 2026-11-03, and th
   → Addressed by: block 17's I3 bullet and Files to touch; "Deferred review leftovers" names `.claude/concepts/followups/2026-11-03-memory-boundary-review-leftovers.followup.md`, `**Issue:** pending`.
 - [x] **28. The version after the remedy.** Answered: accepted (user, 2026-11-03). The remedy pull requests keep merged `master`'s 0.14.x, no version file is edited by hand, and the landing raises to 0.15.0 while `master` is on 0.14.
   → Addressed by: block 17, "Version".
+
+Revision 9 adds five questions. The user answered 29-32 on 2026-11-03, accepting each recommendation, and the answers are written into blocks 19 and 20. Question 33 was added when the `## Critique (Revision 9)` warnings were folded in, and the user answered it the same day: one small pull request to `master` after the landing.
+
+- [x] **29. What happens to the t18 review artefact, which still holds the placeholder row `SUITES_PENDING` and a stale "hook suites: see Evidence" bullet?** Recommendation: leave it unedited, as the recorded `blocked` verdict it is. Block 20's new artefact supersedes it through its Gate Output, the way block 16 superseded block 5 and block 13 superseded block 8. Block 20's Evidence carries the full suite table, and the Revision 9 note under block 19 keeps the rows the t18 reviewer reported in its hand-back. Why not edit it: a review artefact is the loop's record of what one gate saw at one commit, and rewriting it after the fact makes "reviewed" and "patched later" indistinguishable. The alternative is to add the t18 file to block 19's Files to touch and replace the two lines.
+  Answered: no edit. Leave the t18 review file untouched as the recorded `blocked` verdict; block 20's new review supersedes it (user, 2026-11-03).
+  → Written into: block 20 (Supersedes, Gate Output `supersedes`, "do not edit the t18 artefact"); block 19 CONSTRAINTS.
+- [x] **30. Pinning the README folder-tree counts in `test_repo_consistency.py` (the t18 reviewer's F2).** Recommendation: a follow-up stub, not a block. Block 19 rewrites the four wrong counts. The pin is a new check with design choices of its own: which tree lines it reads, how it tells a helper module from a workflow script, and whether every future pull request that adds a test must edit the README. It also does not fix anything the review blocked on (journal 2026-11-02, "Keep a review-fix block to the review's findings"). Stub: `.claude/concepts/followups/2026-11-03-readme-tree-counts-and-step-pins.followup.md`, `**Issue:** pending`. Its file name is kept as first written; the step pin itself is delivered by block 19 (Question 31), and the stub says so.
+  Answered: a follow-up stub, not a block (user, 2026-11-03).
+  → Written into: block 19 (no `test_repo_consistency.py` change); the stub.
+- [x] **31. Add a pin for the records-procedure step order in block 19 (t18 Disposition 1).** Recommendation: yes. Block 19 already has to edit `test_parent_branch_rule_text.py`, because the step 5a test ends its section at the heading block 19 deletes. A test that each of steps 1-9 and 5a appears exactly once and in order, plus a control with a planted duplicate step, is what would have caught B1. No suite caught it, because every line master added was present. The alternative is to fix only the end marker and add the pin to the Question 30 stub.
+  Answered: yes, block 19 adds the step-order test (user, 2026-11-03).
+  → Written into: block 19 TASK, "Test" bullet.
+- [x] **32. The B1 journal entry (J12).** Recommendation: append it in block 19, verbatim from the t18 artefact's Disposition item 4, as Trigger `post-impl divergence`. It rides in the sub-task commit for the reasons block 17 gave for J1-J11: an entry appended after the landing's flip is never offered for capture, and the landing's raise commit carries only the manifests. No version file is touched; the landing raises once (Parent Branch Delivery Rule). The alternative is to leave it to the main session at the landing.
+  Answered: yes, block 19 appends J12 word for word (user, 2026-11-03).
+  → Written into: block 19 TASK, "J12" bullet, and Files to touch.
+- [x] **33. Who corrects the manifest descriptions, which still say "28 skills" (and 14 agents) while the tree has 33 skills and 15 agents (t18 I1)?** Block 11 and Open Question 15 say the landing corrects them, but the landing's only manifest write is `check_version_bump.py` `raise_manifests`, which rewrites the `"version"` fields alone (Critique Revision 9). No sub-task may list a version file, so no block of this contract can fix them either. Recommendation: one small pull request to `master` after the landing, which corrects the description strings in `plugin.json`, `.claude-plugin/plugin.json`, `.cursor-plugin/plugin.json` and `.claude-plugin/marketplace.json` from the tree's own counts and takes the patch raise the version rule requires (0.15.1 if the landing raises to 0.15.0). It is recorded in the stub (`2026-11-03-readme-tree-counts-and-step-pins.followup.md`), so it has a tracking issue. Alternatives: under `landing: manual`, the operator edits the descriptions in the landing's raise commit, which saves one release but is a hand edit no gate reviews; or the landing script gains a description rewrite, which is a change to `land_contract.py` and its own contract. Blocks 19 and 20 are the same under every answer; this question does not hold up their dispatch.
+  Answered: one small pull request to `master` after the landing, as recommended (user, 2026-11-03).
+  → Written into: the stub; the Revision 9 pointer under block 11; block 19's Revision 9 note.
 
 Revision 7 also took one decision outside the numbered questions: "Yes, add a session-start agreement" (user, 2026-11-02), in answer to the critic's WARN on reach. → Addressed by: Extension Points bullet "Shipped agreements"; Alternatives Considered Options I, J and K; block 15 TASK point 5. The user also renamed the proposed term "Project memory" to **Project history record** and narrowed its definition. → Addressed by: Business Concept, and every Revision 7 mention in this contract outside the critique sections, which keep the old name as history.
 
@@ -764,19 +791,26 @@ The critic checked each revision-2 finding against the contract body and the cod
 - **2026-11-01 — After merging a base that changes the row shape a feature reads, re-check every coverage claim and round-trip test against the merged writer** — heeded in Revision 8: block 17 re-runs the suites on the merged tree and rewrites every README count from what the merged tree and suites report, never by adding the two sides.
 - **2026-10-17 — Judge "identical to master" by git's view, not raw bytes, on Windows** — heeded in Revision 8: block 18 checks the master side of each registry with `git show origin/master:<path>`, not a copy on disk.
 - **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — heeded in Revision 8. The user's answers to Open Questions 24-28 (2026-11-03) are written into blocks 17 and 18, which keep no conditional branch. Each Revision 8 critic finding carries its `→ Addressed by:` line.
+- **2026-11-02 — Keep a review-fix block to the review's findings** — heeded in Revision 9: block 19 carries only B1, W1 and the J12 entry the t18 review proposed, plus the test edit that B1's own fix forces. The README tree-count pin (F2) goes to a follow-up stub (Open Question 30).
+- **2026-10-15 — A skill that edits a block pinned by a lookup-block test must name that test** — heeded in Revision 9: block 19 names `test_parent_branch_rule_text.py`, whose step 5a test ends its section at the heading block 19 deletes, and fixes the end marker.
+- **2026-11-02 — A revision that adds a path adds its failure modes** and **2026-11-02 — After amending a contract, update every summary of the block graph** — heeded in Revision 9: four Revision 9 Failure Modes entries and one Uncertain Assumptions line; the header Revision line, the Handoff intro, its graph, the block 11 pointer and Appendix C row P10 are updated.
+- **2026-10-17 — Judge "identical to master" by git's view, not raw bytes, on Windows** — heeded in Revision 9: block 19 checks the kept steps 6-9 with `git diff 274bf1e -- <path>` (git's view, not raw bytes), and block 20 judges them with the same `git diff`.
+- **2026-11-01 — After merging a base that changes the row shape a feature reads, re-check every coverage claim ...** — heeded in Revision 9: block 19 re-measures each tree count from the tree it edits; the numbers this contract quotes are a measurement, not the value to write.
+- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — heeded in Revision 9: blocks 19 and 20 are already written to the recommendations of Open Questions 29-32 and keep no conditional branch.
 - Orthogonal to north-stars: none active (`.claude/north-stars/` does not exist, matching the brief's intake grade).
 
 ---
 
 ## Implementation Handoff
 
-This contract has seventeen mergeable blocks plus one scope note (eighteen numbered blocks; Revision 8 added the remedy 17 and its review 18, graph 9,10→17→18), so it is delivered through the parent branch `feature/memory-client-and-cloud-engineering` (Parent Branch Delivery Rule). No block touches a version file; the landing raises the version once. Block 1 holds the profile slots, blocks 2-5 the memory boundary, 6-8 the cloud capability and 9-10 the documentation; block 11 is the scope note. Revision 6 added the cloud fix 12 and its re-review 13; Revision 7 added the memory-boundary fixes 14, the Project history record block 15 and their re-review 16. The true graph, with no cycle:
+This contract has nineteen mergeable blocks plus one scope note (twenty numbered blocks; Revision 8 added the remedy 17 and its review 18, graph 9,10→17→18; Revision 9 added the fix 19 and its re-review 20, graph 17→19→20; block 19 does not depend on block 18, because the loop withholds any dependent of a `blocked` review, and block 18 is the blocked review of block 17), so it is delivered through the parent branch `feature/memory-client-and-cloud-engineering` (Parent Branch Delivery Rule). No block touches a version file; the landing raises the version once. Block 1 holds the profile slots, blocks 2-5 the memory boundary, 6-8 the cloud capability and 9-10 the documentation; block 11 is the scope note. Revision 6 added the cloud fix 12 and its re-review 13; Revision 7 added the memory-boundary fixes 14, the Project history record block 15 and their re-review 16. The true graph, with no cycle:
 - 1→2→3→4→5 (5 also waits for 2 and 3); 2,3,4→14→15; 2,3,4,14,15→16.
 - 1→6→7→8 (8 also waits for 6); 7→12; 6,7,12→13.
 - 13,14,15,16→9; 9,14,15,16→10.
 - 9,10→17→18 (Revision 8).
+- 17→19; 17,19→20 (Revision 9). Block 19 does not list block 18: it needs the merge it fixes (17), and the blocked review of 17 would withhold it.
 
-Blocks 5 and 8 keep their recorded `blocked` reviews; 16 supersedes 5 and 13 supersedes 8, so 9 waits for the re-reviews, not the originals. Revision 5 removed the old block 8 (deployment authorization) and the conditional block 13 of that older numbering, and renumbered the rest; today's block 13 is the Revision 6 re-review.
+Blocks 5 and 8 keep their recorded `blocked` reviews; 16 supersedes 5 and 13 supersedes 8, so 9 waits for the re-reviews, not the originals. Block 18 keeps its recorded `blocked` review too; 20 supersedes it (Revision 9). Revision 5 removed the old block 8 (deployment authorization) and the conditional block 13 of that older numbering, and renumbered the rest; today's block 13 is the Revision 6 re-review.
 
 ### 1. Profile slots (`python-ai-developer`)
 
@@ -1202,6 +1236,8 @@ No block raises the version. The landing raises it once, and corrects the manife
 - Budget: this contract is over the template's budget rule (critique Revision 7 NIT). The superseded critique rounds and the appendices stay inline; at the user's instruction this amendment only notes it and trims nothing. Moving them to `.claude/contract-history/` (Open Question 14) is still owed and has no block yet.
 
 **Revision 8 (2026-11-03).** The landing halted at gate P7; the remedy and its review are blocks 17 and 18, and the Revision 8 note opens block 17.
+
+**Revision 9 (2026-11-03).** The landing halted at gate P3 on block 18's `blocked` review; the fix and its re-review are blocks 19 and 20, and the Revision 9 note opens block 19. Correction to the first paragraph of this note: the landing does not correct the manifest description counts. Its only manifest write is `raise_manifests`, which rewrites the `"version"` fields alone. Who corrects them is Open Question 33.
 
 ### 12. Cloud agent skill-load fix (`python-ai-developer`)
 
@@ -1667,6 +1703,217 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
+### 19. Fix merged records steps and tree counts (`python-ai-developer`)
+
+*Revision 9 (2026-11-03), a fix sub-task.* Revision 9 is approved by the user on 2026-11-03, including Question 33. The user accepted the recommendations of Open Questions 29-32 and asked for the eight `## Critique (Revision 9)` warnings to be folded in; blocks 19 and 20 carry both. Question 33 (the manifest descriptions) changes neither block. `Status` stays `approved` in the header for the blocks already delivered. It adds no data shape, mechanism or term. Blocks 1-18 keep their identities and records, and block 18's `blocked` artefact stays as recorded.
+
+**Why.** Block 17 merged (#223), and its review, block 18 (#224, `.claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t18-review-merge-and-text-fixes-fullstack-code-reviewer.md`), returned `**Verdict:** blocked`. The landing (`land_contract.py`) then halted at gate P3. The review found the merge otherwise exact, with one blocker and one warning:
+- **B1 (blocker).** In `skills/pr-merged/references/contract-completion.md`, the hand resolution kept both sides of the conflict hunk whole. The parent side was step 5a followed by the base's unchanged steps 6-9; the `master` side was master's rewritten steps 6-9. So the merged file holds the base's old steps 6-9 (first line "6. **Cut the branch in a flat worktree.**", last line "9. **Remove the records worktree.** Then name the copies left in the starting tree ...") right after step 5a, then master's steps 6-9 (first line "6. **Put the stable branch in a flat worktree.**"). The old step 6 cuts the records branch from `origin/<default>`, which master's step 6 and `skills/pr-merged/SKILL.md` ("One stable branch, added to and never re-cut") forbid. Confirmed on 2026-11-03 in the landing worktree, at lines 89-92 then 93-96; the line numbers are not the locator.
+- **W1 (warning).** Four folder-tree counts in `README.md` are false against the merged tree. The merge did not cause them; both sides and the merge base had them already. Measured on 2026-11-03 in the landing worktree:
+
+  | Tree line | README says | Tree has |
+  |---|---|---|
+  | `hooks/tests/` | 9 hook test suites | 23 `test_*.py` files |
+  | `scripts/` | 15 workflow scripts, 3 shared helper modules | 23 workflow scripts and 3 helper modules (`_claude_paths.py`, `_contract_files.py`, `_contract_index.py`) |
+  | `scripts/tests/` | 11 suites | 36 `test_*.py` files |
+  | `references/` | 2 reference documents | 3 files |
+
+- **Found while drafting this revision.** `test_parent_branch_rule_text.py` (class `CaptureAtDeliveryTextTests`, the step 5a test) ends step 5a's section at the heading `6. **Cut the branch`, which is the line B1 deletes. The test's `section` helper runs to the end of the file when the end heading is absent, so the test would still pass but would no longer pin step 5a alone. The end marker has to move.
+
+**Decided, not fixed here (Critique Revision 9).**
+- **The other tree counts.** Block 19 changes only the four counts W1 names, and block 20 judges only those four (critic WARN 5). The tree's other counts are reported by block 20 as information, never as a finding against block 19. Why not widen block 19 instead: the next suspect, "6 generic data files" in `.claude/hooks/`, depends on whether `hooks.json` counts as a data file. The folder holds six `.json` files, but `hooks.json` has its own tree line, which leaves five. That is a counting rule to decide, not a fact to correct, so it goes to the follow-up stub with the tree-count pin.
+- **t18 I1, the manifest descriptions** ("28 skills", 14 agents; the tree has 33 and 15). Neither block can fix them, because a sub-task never lists a version file. The landing does not fix them either, despite what block 11 says (see the Revision 9 correction there). Who fixes them is Open Question 33; the stub records it.
+- **Pull request #223's description**, which t18 did not check. Dropped by decision: no gate reads it, it does not ship, and the record of what block 17 did is its commits and the t18 artefact. Block 20 lists it under What was NOT checked.
+
+**What the t18 review recorded beyond its artefact (Open Question 29).** The t18 artefact was committed with the placeholder row `SUITES_PENDING` in Evidence and the bullet "The hook suites under `.claude/hooks/tests/`: see Evidence for what finished" under What was NOT checked. The reviewer's hand-back gave the missing rows: `test_skill_script_lookup.py` 29 OK; `test_cleanup_delivered.py` 126 OK (1 skipped); `test_pr_merged.py` 761 OK; `test_auto_improve_finish_install.py` 344 run with 5 failures (`TestLauncherFallbackNote` 1, `TestLauncherSurfaceMissingRefusal` 4), which also fail on `origin/master` and so are pre-existing; and 22 hook suites exited 0. They are recorded here. The t18 artefact is not edited: block 20's artefact supersedes it and carries the full table.
+
+**A second hand merge is not planned.** After block 17, the parent branch's manifests equal 274bf1e's, so master's version change in 0061212 is a one-sided change and merges without a conflict. The t18 review (I2) found that master's commits after 274bf1e touch no registry, no `README.md` and no file block 17 resolved by hand. The same must hold for the two files block 17 text-fixed after the merge, `CONTRIBUTING.md` and `skills/auto-improve-finish-install/SKILL.md`. That fact is unverified by this contract (no shell), so block 19 checks it before editing, and block 20 runs `git merge-tree` against `origin/master`. If either finds an overlap, the contract is amended first, with the Revision 8 remedy pattern. The landing then merges `master` again and raises the version to **0.15.0** while `master` is on 0.14.
+
+**Deferred (Open Question 30).** Pinning the README folder-tree counts in `test_repo_consistency.py` (F2) goes to `.claude/concepts/followups/2026-11-03-readme-tree-counts-and-step-pins.followup.md`, `**Issue:** pending`.
+
+**Main-session actions, outside any block:**
+- Fast-forward the parent worktree to `origin/feature/memory-client-and-cloud-engineering` before committing this amendment. The local branch was at fdd7640 when Revision 9 was drafted and did not yet hold #223 or #224. The amendment touches only the contract and the new stub, and neither of those merges changed them.
+- Append the t18 reviewer-verdict line (t18 Disposition item 5) to `~/.claude/logs/reviewer-verdicts.jsonl`.
+- Open the tracking issue for the new stub (`/design-first` Step 3.4), and the two sub-issues and briefs for blocks 19 and 20, as commit fdd7640 did for Revision 8.
+- `contract-critic` ran on Revision 9 (`## Critique (Revision 9)`, warnings only). The user had its eight warnings folded in on 2026-11-03.
+
+**Depends on:** 17
+
+**Files to touch:**
+- `skills/pr-merged/references/contract-completion.md`
+- `README.md`
+- `.claude/registries/JOURNAL.md`
+- `.claude/scripts/tests/test_parent_branch_rule_text.py`
+
+No version file is listed: the landing raises once (Parent Branch Delivery Rule). `JOURNAL.md` is a shipped registry, and its append rides here for the same reasons as J1-J11 in block 17.
+
+**Pre-written TASK block:**
+```
+TASK: On the sub-task branch (cut from origin/feature/memory-client-and-cloud-engineering, which holds
+  #223 and #224), fix the t18 review's B1 and W1, fix the step 5a test's end marker, pin the step order,
+  and append the journal entry J12. One commit.
+  Pre-check (before any edit):
+  - git fetch origin, then git diff --name-only 274bf1e origin/master, and quote the output (274bf1e is
+    the master commit block 17 merged). Stop list: any file in Files to touch; JOURNAL.md, MECHANISMS.md,
+    VOCABULARY.md; CONTRIBUTING.md and skills/auto-improve-finish-install/SKILL.md (block 17 text-fixed
+    them after the merge). If the output lists a file on the stop list, stop and report it, editing
+    nothing: the contract must be amended first (a second hand merge may be needed).
+  B1, skills/pr-merged/references/contract-completion.md, section "The records pull request":
+  - Delete the four lines of the first steps 6-9 that follow step 5a. Locate them by text, not by line
+    number: they start with "6. **Cut the branch in a flat worktree.**", "7. **Copy exactly that union
+    of `written_files` there**", "8. **Open a draft pull request**" (the FIRST such line, the one
+    without "when no open pull request has") and "9. **Remove the records worktree.** Then name the
+    copies left in the starting tree". Delete nothing else.
+  - Afterwards: the section's top-level steps read 1, 2, 3, 4, 5, 5a, 6, 7, 8, 9, each exactly once and
+    in that order. Steps 6-9 equal master's, judged by git's view, never by raw bytes on disk (journal
+    2026-10-17; this worktree is Windows and line ends differ):
+    git diff 274bf1e -- skills/pr-merged/references/contract-completion.md shows no added or removed
+    line that starts with "6. **", "7. **", "8. **" or "9. **". Every line that diff does show belongs
+    to this contract's side (step 5a, its sub-steps and code block, and the capture-question sentences
+    in the records-step paragraph and the "Under /flow" paragraph). The commit's own diff
+    (git diff HEAD~1 -- <same path>) removes exactly the four lines above and adds none. The phrase
+    "Cut the branch in a flat worktree" appears nowhere in the file.
+  W1, README.md, the folder tree (the block that lists skills/, agents/ and .claude/):
+  - Rewrite the four counts by measuring the tree you are editing, not by copying the contract:
+    "hooks/tests/" = number of test_*.py files in .claude/hooks/tests/; "scripts/" = number of .py files
+    directly in .claude/scripts/ not starting with "_" (workflow scripts) and number starting with "_"
+    (shared helper modules); "scripts/tests/" = number of test_*.py files in .claude/scripts/tests/
+    (keep ", including the path-resolution suite"); "references/" = number of files in
+    .claude/references/. On 2026-11-03 these measured 23; 23 and 3; 36; 3. If your measurement
+    differs, write yours and say so in the hand-back. Change no other README line, including the
+    tree's other counts (such as "6 generic data files"): they go to the follow-up stub.
+  Test, .claude/scripts/tests/test_parent_branch_rule_text.py, class CaptureAtDeliveryTextTests:
+  - In the step 5a test, change the section end heading from "6. **Cut the branch" to
+    "6. **Put the stable branch". Change none of its assertions.
+  - Add one module-level pure function, records_step_labels(text), which takes the file's text (a
+    string, not a path) and returns the labels of the top-level steps in the section that starts at the
+    line "### The records pull request" and ends at the next line starting "### ", in file order. It
+    works on the raw text, line by line, and NEVER through squash, flat or section: those squash all
+    whitespace, newlines included, and would merge step 5a's own sub-steps into the list. A top-level
+    step is a line matching ^(\d+a?)\. \*\* in column 0 (no leading space). Step 5a's six sub-steps
+    ("   1. **Read the candidates" to "   6. **No outcome of this step", after the code block) are
+    indented by three spaces, so they are excluded; so is anything inside the ``` code block. Normalise
+    "\r\n" to "\n" before splitting.
+  - Add the step-order test in CaptureAtDeliveryTextTests: records_step_labels(self.read(self.CC))
+    equals ["1", "2", "3", "4", "5", "5a", "6", "7", "8", "9"].
+  - Add a control test that calls the same function on a short fixture string held in the test: a
+    copy of the section's shape with a planted second "6. **" line is reported (the list is not equal),
+    and the same fixture with an indented "   1. **" sub-step is NOT counted. A comment says the
+    function takes text so that a reviewer can run it on a git show copy of an older file.
+  - Run the function on the pre-fix file and quote the result. In PowerShell, from the worktree root:
+    git show HEAD~1:skills/pr-merged/references/contract-completion.md | py -3 -I -c "import sys; sys.path.insert(0, '.claude/scripts/tests'); import test_parent_branch_rule_text as t; print(t.records_step_labels(sys.stdin.read()))"
+    The pre-fix result lists 6, 7, 8 and 9 twice; the same command with HEAD lists each once.
+  J12, .claude/registries/JOURNAL.md:
+  - Append after the last entry (J11, "A \"fails the build\" claim must name the workflow that runs the
+    check") and before the closing "---" and comment, verbatim from the t18 artefact's Disposition
+    item 4:
+    ### 2026-11-03 — When resolving a conflict hunk by keeping both sides, drop the base lines the other side rewrote
+    - **Trigger:** post-impl divergence
+    - **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+    - **Lesson:** Before keeping both sides of a conflict hunk, diff each side against the merge base; lines one side left unchanged and the other side rewrote belong to the rewrite only, or the merge restores deleted text beside its replacement.
+    - **Apply when:** a merge resolves a prose or procedure conflict "keeping both behaviours", especially numbered steps
+    - **Tags:** merge, conflict-resolution, base-text, duplicate-steps
+CONTEXT: concept contract, block 19 (Revision 9 note); the t18 review
+  .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t18-review-merge-and-text-fixes-fullstack-code-reviewer.md
+  (B1, W1, Disposition items 1, 2 and 4).
+FILES: as listed.
+CONSTRAINTS:
+  - Edit only the four files listed. Do not edit the t18 review artefact or its .gate.json (Open
+    Question 29). Do not edit MECHANISMS.md or VOCABULARY.md (the t18 review owes no append there).
+  - Never edit plugin.json, .claude-plugin/plugin.json, .cursor-plugin/plugin.json or
+    .claude-plugin/marketplace.json. The branch keeps 0.14.2; the landing raises once.
+  - Registry text names no memory tool literally.
+  - Run, and report the exit code and case count of: test_parent_branch_rule_text.py,
+    test_skill_script_lookup.py, test_cleanup_delivered.py, test_pr_merged.py (on its own),
+    test_registry_entries.py, test_repo_consistency.py, test_plugin_text_scans.py,
+    test_plugin_manifests.py (one failure, "the version obeys the merge-base rule", is by design on a
+    parent branch, as the t10 and t18 reviews recorded), and
+    py -3 .claude/scripts/check_version_bump.py --base origin/feature/memory-client-and-cloud-engineering
+    --default-branch master --head-ref <this branch>. Report the pre-fix and head output of the
+    records_step_labels command above. A failure
+    that also fails on origin/master is reported as such, with the origin/master run quoted, and is not
+    fixed here.
+  - Every command in a form that runs in PowerShell.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
+
+### 20. Re-review merge fix (`fullstack-code-reviewer`)
+
+**Depends on:** 17, 19
+
+**Files to touch:**
+- `.claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t20-re-review-merge-fix-fullstack-code-reviewer.md`
+
+**Pre-written TASK block:**
+```
+TASK: Review blocks 17 and 19 together and write the review artefact. This review supersedes the block
+  18 review (t18-review-merge-and-text-fixes-fullstack-code-reviewer.md).
+CONTEXT: concept contract at .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  (Revision 9, block 19; Revision 8, block 17)
+FILES: .claude/reviews/2026-11-01-memory-client-and-cloud-engineering/t20-re-review-merge-fix-fullstack-code-reviewer.md
+CONSTRAINTS:
+  - Start from a cold context. Do not read the t18 review before forming your own findings. Read it
+    afterwards only to confirm B1 and W1 are cleared. Name base..head: the parent tip before block 17's
+    merge (fdd7640) and block 19's head; name block 19's own range separately.
+  - Block 17 again, on the current tree, judged by git blob ids, not bytes on disk: the checks of block
+    18's CONSTRAINTS (registries, conflict markers, files outside block 17's Files to touch, no name
+    defined twice). Block 19 adds to these checks exactly: one file outside block 17's Files to touch,
+    .claude/scripts/tests/test_parent_branch_rule_text.py; and, inside block 17's Files to touch, the
+    four-line deletion in contract-completion.md, the four README count lines and one appended JOURNAL.md
+    entry. MECHANISMS.md and VOCABULARY.md are unchanged by block 19.
+  - B1: in skills/pr-merged/references/contract-completion.md, section "The records pull request", the
+    top-level steps (column 0; step 5a's indented sub-steps 1-6 are not top-level) read 1, 2, 3, 4, 5,
+    5a, 6, 7, 8, 9, once each and in order. Steps 6-9 equal master's by git's view, never by raw bytes
+    on disk (journal 2026-10-17): git diff 274bf1e <block 19 head> -- <path> shows no added or removed
+    line that starts with "6. **", "7. **", "8. **" or "9. **", and every line it does show belongs to
+    this contract's side. Step 5a is unchanged (git diff <block 19 base> <block 19 head> -- <path>
+    removes exactly the four old step lines and adds none). "Cut the branch in a flat worktree"
+    appears nowhere. Then read skills/flow/SKILL.md and skills/pr-merged/SKILL.md end to end for any
+    other base text restored beside its rewrite (the t18 review did not), and report what you find.
+  - W1: the four counts block 19 may change ("hooks/tests/", "scripts/" workflow scripts and helper
+    modules, "scripts/tests/", "references/") are true against the tree, measured by you with block 19's
+    counting rules. No other README line changed. Any other tree count you find false (such as "6
+    generic data files", which depends on whether hooks.json counts) is reported as information and
+    pointed at the follow-up stub, never as a finding against block 19.
+  - Test: the step 5a test's section ends at "6. **Put the stable branch"; its assertions are
+    unchanged. records_step_labels(text) is a module-level function that takes text, reads raw lines
+    (not squash, flat or section) and counts only column-0 steps. The step-order test and the control
+    exist and pass on head. Show the test fails on the pre-fix file by running, in PowerShell from the
+    worktree root, with <block 19 base> = the parent tip block 19 was cut from:
+    git show <block 19 base>:skills/pr-merged/references/contract-completion.md | py -3 -I -c "import sys; sys.path.insert(0, '.claude/scripts/tests'); import test_parent_branch_rule_text as t; print(t.records_step_labels(sys.stdin.read()))"
+    Quote both outputs: the base lists 6, 7, 8 and 9 twice, so the step-order test's equality fails
+    there; the same command with <block 19 head> lists each once.
+  - J12: one entry appended after J11, before the closing lines, verbatim as block 19 states. No other
+    registry line changed.
+  - Scope: block 19's commits touch only its four files, plus the usual Work Item Brief bookkeeping
+    commit (the t19 brief's front matter: pr:, issue_link:, status:), which is not a shipped file and is
+    reported as a note, as t18 did for 4707150. Any other path is a finding. The t18 artefact and its
+    .gate.json are unchanged since #224 (git diff on them is empty).
+  - Not checked, by decision: the description of pull request #223 (no gate reads it and it does not
+    ship). List it under What was NOT checked.
+  - Second merge: run git fetch origin, then git merge-tree --write-tree --name-only <block 19 head>
+    origin/master, and quote it. Report whether the landing's merge conflicts, and on which files.
+  - Re-run, each as its own row with exit code and case count: test_pr_merged.py (alone); every
+    .claude/hooks/tests/test_*.py except test_gate_cost.py, one row per suite; test_plugin_text_scans.py,
+    test_registry_entries.py, test_repo_consistency.py, test_memory_boundary.py,
+    test_memory_off_parity.py, test_plugin_manifests.py, test_auto_improve_finish_install.py,
+    test_check_version_bump.py, test_parent_branch_rule_text.py, test_skill_script_lookup.py,
+    test_cleanup_delivered.py; and the parent-mode version check. A failure that also fails on
+    origin/master is reported as pre-existing, with the origin/master run quoted. No placeholder row:
+    a suite that could not finish gets a row saying so, and that is a finding.
+  - Six fixed sections; the file does not exist yet and you create it. The Scope section says
+    "Supersedes: t18-review-merge-and-text-fixes-fullstack-code-reviewer.md". Verdict line alone,
+    exactly one of: "**Verdict:** pass", "**Verdict:** pass-with-findings", "**Verdict:** blocked".
+    Write the Gate Output <artefact stem>.gate.json beside it, and set its supersedes field to
+    ["t18-review-merge-and-text-fixes-fullstack-code-reviewer.md"]. Do NOT edit the t18 artefact and do
+    NOT append to any registry yourself: report a missing append as a finding.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+  contract_status: approved
+```
+
 ---
 
 ## Review checklist (filled in after implementation)
@@ -1773,7 +2020,8 @@ At session start the host loads every skill and agent description. `working-agre
 | P7 | Cloud review gate | 8 | P5-P6 | none | verdict pass (block 8 recorded `blocked`; superseded by P7b) |
 | P7b | Cloud agent skill-load fix and its re-review (Revision 6) | 12, 13 | P6 | none | block 13 verdict pass |
 | P8 | Documentation, registry appends and their review | 9, 10 | P4b, P7b (blocks 13, 14, 15, 16) | documentation that disagrees with the code | reviewer checks each claim against the code |
-| P9 | Merge `master` into the parent branch by hand, the t10 text fixes and the W2 journal entries, and their review (Revision 8) | 17, 18 | P8 | dropping an entry of either side while resolving a registry | every entry of both sides present once; block 18 verdict pass; the landing reruns clean |
+| P9 | Merge `master` into the parent branch by hand, the t10 text fixes and the W2 journal entries, and their review (Revision 8) | 17, 18 | P8 | dropping an entry of either side while resolving a registry | every entry of both sides present once; block 18 verdict pass (recorded `blocked`; superseded by P10); the landing reruns clean |
+| P10 | Delete the restored base steps 6-9, correct four README tree counts, pin the step order, append J12, and the re-review (Revision 9) | 19, 20 | P9 | widening the step 5a test by deleting its end marker; a later `master` commit touching the same files | steps 1-9 and 5a once each, steps 6-9 identical to 274bf1e; block 20 verdict pass and its Gate Output supersedes t18; the landing passes P3 |
 | Later | Token-efficiency fixes; cloud-management MCP adapter | follow-up stub; a new contract | none | none | separate contracts |
 
 ---
@@ -1960,4 +2208,99 @@ At session start the host loads every skill and agent description. `working-agre
 - No shell in this session. I did not run `git merge-tree`, `pr_merged.py --contract <slug> --status --json` or any suite, so the conflict and auto-merge sets are the caller's, cross-checked only against this contract's block 3 and 4 file lists. The 0.14.x on `master` and the landing report under `.claude/state/landing/` (not present in this worktree) are unverified.
 - CodeGraph was not available. I checked symbols with Grep and Read.
 - North-star alignment: `.claude/north-stars/` does not exist.
+
+---
+
+## Critique (Revision 9)
+
+**Critic:** contract-critic
+**Date:** 2026-11-03
+**Verdict:** warnings-only
+**Scope:** Revision 9 only: blocks 19 and 20, the Revision 9 notes (block 19 preamble, block 11 pointer, Handoff intro and graph, Appendix C row P10, the Revision 9 Failure Modes and Uncertain Assumptions lines, the Revision 9 lines of `## Lessons referenced`), Open Questions 29-32 and `.claude/concepts/followups/2026-11-03-readme-tree-counts-and-step-pins.followup.md`. Checked against `pr_merged.py` `read_review_set` / `parse_gate_output`, `land_contract.py` P3, `check_version_bump.py`, the t18 artefact and its `.gate.json`, `contract-completion.md`, `test_parent_branch_rule_text.py`, `test_repo_consistency.py`, the README folder tree and the files on disk in this worktree.
+
+### Findings
+
+- **[WARN] The step-order test as specified collides with step 5a's own nested sub-steps 1-6.**
+  - **What is wrong:** inside "The records pull request", step 5a carries six indented sub-steps (`contract-completion.md:82-87`, "   1. **Read the candidates" ... "   6. **No outcome of this step"). Block 19 asks that "1. **" to "9. **" "at the start of a line each appear exactly once". That holds only if "start of a line" means column 0. The file's idiom is the opposite: `TextCase.section` and `flat` squash all whitespace, newlines included (`test_parent_branch_rule_text.py:46-47`, `:60-66`). An implementer who reuses `section` counts "1. **" to "6. **" twice and gets a test that fails on the fixed file. Neither block 19 nor block 20 mentions that the nested list exists.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-02, "Name the tests a fix may change by the state they guard, after reading them" (J4): read the target text before giving test instructions. `JOURNAL.md` 2026-11-02, "A rule titled 'every' must list every line it covers" (J10).
+  - **Where in this contract:** `### 19`, TASK, Test bullet, "the step headings "1. **" to "9. **" and "5a. **" at the start of a line each appear exactly once".
+  - → Addressed by: block 19's Test bullets define `records_step_labels(text)`. It reads raw lines bounded by "### The records pull request" and the next "### " line, never through `squash`, `flat` or `section`, and counts only column-0 steps. Step 5a's indented sub-steps 1-6 and the code block are excluded by name, and the control checks that an indented sub-step is not counted. Block 20's B1 bullet says the same.
+
+- **[WARN] Block 19 asks for a control "in the file's existing control style", and the file has no such style.**
+  - **What is wrong:** `test_parent_branch_rule_text.py` has no fixture-text controls. Its only controls are `positive_control` tests that "pass today by design: they pin text that must stay" on the real files (`:29-30`, `:191`). Every helper reads a file under `PLUGIN_ROOT` (`:52-66`). A check run "on a fixture text with a planted second "6. **" step" therefore needs a new pure function, and the TASK neither names nor allows one. The same gap affects "run the new step-order test against the file as it was before your edit (git show HEAD~1 or the base)". The test cannot read a `git show` blob without a temporary revert of a listed file or a text-taking entry point. Block 20 then requires that the test "fail on the pre-fix file", with no stated method.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-02, "Name the tests a fix may change by the state they guard, after reading them"; `test_parent_branch_rule_text.py:26-30` (the file's own "How the checks read").
+  - **Where in this contract:** `### 19`, TASK, "Add a control in the file's existing control style"; CONSTRAINTS, "Also run the new step-order test against the file as it was before your edit"; `### 20`, "pass on head and fail on the pre-fix file".
+  - → Addressed by: the text-taking module-level function `records_step_labels(text)` is named in block 19. The control calls it on a fixture string held in the test. The pre-fix run pipes `git show <rev>:<path>` into `py -3 -I -c` that imports the test module and prints the labels; that command is in block 19, and block 20 runs it against block 19's base and head and quotes both outputs.
+
+- **[WARN] "Byte-identical" contradicts the lesson the contract says it heeds.**
+  - **What is wrong:** block 19 requires steps 6-9 to be "byte-identical to the same four lines of git show 274bf1e:...". On this Windows worktree, a raw-byte comparison of the checked-out file against a `git show` blob fails on CRLF line ends even when the content is equal. `## Lessons referenced` says block 19 heeds 2026-10-17 by checking "against `git show 274bf1e:<path>`". The lesson says to compare by git's view, not by bytes. Block 20 says "identical", which is safer, so the two blocks state different tests.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-17, "Judge 'identical to master' by git's view, not raw bytes, on Windows" (`JOURNAL.md:215-220`).
+  - **Where in this contract:** `### 19`, TASK, "steps 6-9 are byte-identical to the same four lines of"; `## Lessons referenced`, the 2026-10-17 line marked "heeded in Revision 9".
+  - → Addressed by: "byte-identical" is removed. Blocks 19 and 20 both judge steps 6-9 with `git diff 274bf1e -- <path>`: no added or removed line starting "6. **" to "9. **". The commit's own diff removes exactly the four old lines. The 2026-10-17 line in `## Lessons referenced` now names `git diff`.
+
+- **[WARN] Block 19's pre-check stop list leaves out two files the parent branch changed after 274bf1e.**
+  - **What is wrong:** the pre-check stops only on the four Files to touch plus the three registries. After the 274bf1e merge, block 17's second commit also hand-edited `CONTRIBUTING.md` and `skills/auto-improve-finish-install/SKILL.md`. A `master` commit touching either one makes the landing's second merge conflict, and the pre-check would let it pass. The `ASSUMED` (Revision 9) line repeats the gap: it lists "a registry, `README.md` or a file block 17 resolved by hand", and those two files were text fixes, not conflict resolutions. Block 20's `merge-tree` and P7 are later backstops. The pre-check is meant to be the stop that edits nothing.
+  - **Prior artifact ignored:** this contract's block 17 Files to touch (`CONTRIBUTING.md`, `skills/auto-improve-finish-install/SKILL.md`); `JOURNAL.md` 2026-11-02, "A revision that adds a path adds its failure modes" (J6). The Revision 9 Failure Mode for a second-merge conflict names only "a file block 19 edits".
+  - **Where in this contract:** `### 19`, TASK, Pre-check, "If it lists any file in Files to touch, or JOURNAL.md, MECHANISMS.md or VOCABULARY.md, stop"; `## Uncertain Assumptions`, the Revision 9 `ASSUMED` line.
+  - → Addressed by: block 19's pre-check stop list now names `CONTRIBUTING.md` and `skills/auto-improve-finish-install/SKILL.md`. So do the Revision 9 `ASSUMED` line, the block 19 "second hand merge" note and the Revision 9 second-merge Failure Mode.
+
+- **[WARN] Block 20 checks every folder-tree count, but block 19 may change only four of them.**
+  - **What is wrong:** block 20 W1 says "every count in README.md's folder tree is true against the tree, measured by you". Block 19 says "Change no other README line". The tree holds more counts than the four. At least one looks false on disk: `README.md:764` says "6 generic data files" in `.claude/hooks/`. The folder has five data files (`architecture-guard.exceptions.json`, `architecture-guard.rules.json`, `db-destructive-guard.rules.json`, `integration-check.rules.json`, `working-agreements.rules.json`), and `hooks.json` has its own tree line at `:765`. If the reviewer counts it the same way, block 20 reports a finding block 19 was forbidden to fix. That is the setup for another revision loop.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-02, "A rule titled 'every' must list every line it covers" (J10); the t18 artefact W1 ("The review's TASK says every README count must be true"), which is how block 18 produced this same finding.
+  - **Where in this contract:** `### 19`, TASK, "Change no other README line."; `### 20`, "W1: every count in README.md's folder tree is true against the tree".
+  - → Addressed by: block 20 is aligned to the four counts block 19 may change. Any other false tree count is information that points at the stub, never a finding against block 19. Block 19 was not widened, because "6 generic data files" depends on an undecided counting rule (six `.json` files, or five once `hooks.json`, which has its own tree line, is left out). The stub takes that rule. The decision is recorded in block 19's "Decided, not fixed here".
+
+- **[WARN] Block 20's scope rules are false by construction.**
+  - **What is wrong:** block 20 requires "block 19's commits touch only its four files". The precedent t17 head (`4707150`) was a Work Item Brief front-matter commit (`pr:`, `issue_link:`, `status:`), which t18 recorded as "Met, with one note". Block 19's head will carry the same bookkeeping commit, so the literal rule fails. Block 20 also says "Block 19 changes none of those files except JOURNAL.md". "Those files" covers files outside block 17's Files to touch, and block 19 edits `test_parent_branch_rule_text.py`, which is outside that list.
+  - **Prior artifact ignored:** t18 artefact, Scope ("`4707150` touches the t17 Work Item Brief's front matter ... not a shipped file"); `## Critique (Revision 8)`, first BLOCKER (a review rule that cannot return `pass` by construction).
+  - **Where in this contract:** `### 20`, CONSTRAINTS, "Scope: block 19's commits touch only its four files" and "Block 19 changes none of those files except JOURNAL.md, by one appended entry."
+  - → Addressed by: block 20's Scope rule allows the t19 Work Item Brief's front-matter bookkeeping commit and reports it as a note. Its block 17 bullet now states exactly what block 19 adds: one file outside block 17's Files to touch (`test_parent_branch_rule_text.py`); inside them, the four-line deletion, four README count lines and one JOURNAL.md entry; MECHANISMS.md and VOCABULARY.md unchanged.
+
+- **[WARN] t18's I1 (manifest descriptions say "28 skills" and "14 agents") is dropped with no recorded decision, and the mechanism it relies on does not exist.**
+  - **What is wrong:** Revision 9 records B1, W1, I2, I3, `SUITES_PENDING` and the verdict line, but not I1. t18 says "The landing corrects them (Open Question 15)", and block 11 says the landing "corrects the manifest description counts". The landing's only manifest write is `check_version_bump.py` `raise_manifests` (`:111-126`), which rewrites `"version"` fields only. Its caller is `land_contract.py:2687-2689`. The tree has 33 skills and 15 agents, while `plugin.json:5`, `.claude-plugin/plugin.json:6`, `.cursor-plugin/plugin.json:4` and `.claude-plugin/marketplace.json:14` still say 28 (and 14 agents). Under the automatic landing, nothing corrects them, and block 19 forbids manifest edits.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-04, "Check a documented guard behaviour against the guard's code"; Open Question 15; t18 artefact I1 and Disposition 3.
+  - **Where in this contract:** `### 19`, "Why" (B1 and W1 only) and the Revision 9 note (no I1 line); `### 11`, "The landing raises it once, and corrects the manifest description counts".
+  - → Addressed by: new Open Question 33. It recommends one post-landing pull request to `master` that corrects the four description strings and takes a patch raise, recorded in the stub. Block 19's "Decided, not fixed here" records I1. The Revision 9 pointer under block 11 corrects the "corrects the manifest description counts" claim; the original sentence is left as written, with the correction beside it.
+
+- **[WARN] The header says `approved` while Open Questions 29-32 are open, so blocks 19 and 20 can be dispatched before the user answers.**
+  - **What is wrong:** this is the first half of the Revision 8 BLOCKER, still present. The dispatch path and `concept-gate.py` read only `Status`, which says `approved`. Questions 29-32 are unticked, and the header Revision line calls Revision 9 a "draft". The TASK blocks have no conditional branch this time, which removes the Revision 8 BLOCKER's second half. Nothing in the tooling enforces "awaits the user's answers".
+  - **Prior artifact ignored:** `## Critique (Revision 8)`, second BLOCKER ("The dispatch path reads only `Status`, and that already says `approved`"); `JOURNAL.md` 2026-10-22, "An accepted critic WARN or answered Open Question must amend the contract body before approval".
+  - **Where in this contract:** header, "**Status:** approved" with "**Revision:** 9 (2026-11-03, draft; needs the user's re-approval"; `## Open Questions for User` 29-32 `[ ]`.
+  - → Addressed by: the user answered Questions 29-32 on 2026-11-03, and they are ticked with the answers. The header Revision line and block 19's opening note say Revision 9 is approved by the user on 2026-11-03, except where Question 33 is open; Question 33 changes neither block. The header `Status` line is left to the main session.
+
+- **[NIT] Block 19's preamble will be stale on approval.** "It awaits the user's answers to Open Questions 29-32 and the final approval" has to be edited where it stands when the questions are ticked (`JOURNAL.md` 2026-11-02, "Edit a reversed sentence where it stands").
+  - → Addressed by: block 19's opening note is rewritten where it stands.
+- **[NIT] The stub's second paragraph is conditional on Open Question 31.** "If the user answers that question no, the step-order pin moves here" stays in a tracked stub after a "yes", and the slug `...-and-step-pins` then names work the stub does not hold.
+  - → Addressed by: the stub's second paragraph now states the answer: block 19 delivers the step pin. Its file name is kept, because the contract and the coordinator's records already cite it.
+- **[NIT] The t18 artefact's "What was NOT checked" item "Pull request #223's description" is not carried into block 20 or recorded as dropped.** Low impact.
+  - → Addressed by: dropped by decision. No gate reads the description and it does not ship. The decision is recorded in block 19's "Decided, not fixed here", and block 20 lists it under What was NOT checked.
+
+### Checked, no finding
+
+- **The supersedes mechanism really clears P3.** `land_contract.py:2274-2280` builds `review_files_by_task` from each sub-task's `.claude/reviews/` Files to touch. For t18 that is exactly the `.md` artefact, not its `.gate.json`. It then calls `pr_merged.read_review_set` on `parent_ref`. `read_review_set` (`pr_merged.py:3753-3790`) sets `effective: False` on every report that a readable Gate Output's `supersedes` names by basename, unless that Gate Output is in a loop. t18's own `.gate.json` has `"supersedes": []`, so there is no loop. `blocked_review_verdicts` (`land_contract.py:1287-1295`) skips a task whose report names are all superseded. Block 20's `.gate.json` uses only the keys `parse_gate_output` accepts (`:3693`). The precedent pairs t16→t5 and t13→t8 are on disk (`t16-...gate.json` names t5). The claim holds, provided block 20's verdict is a pass.
+- **Parent Branch Delivery Rule.** Neither block lists a version file. Block 19 forbids manifest edits. All five declarations read 0.14.2 (`.claude-plugin/marketplace.json:8,15`), which equals both the parent base and the 274bf1e merge base, so parent mode passes. The `**Work Item Brief:**` header is present, and both sub-tasks target the parent branch.
+- **Dependency graph.** The intro reads "17,18→19; 17,19→20". Block 19 depends on 17 and 18, and block 20 on 17 and 19. The intro says "nineteen mergeable blocks plus one scope note (twenty numbered blocks)". Appendix C P10 and the block 11 pointer agree.
+- **Files to touch.** Block 19's four files cover every edit its TASK makes. The JOURNAL.md tail ends at J11 (`JOURNAL.md:404`), then `---` and the comment (`:411-413`), as the J12 bullet assumes. J12 matches t18 Disposition 4 verbatim. Rewriting "9 hook test suites" cannot trip `test_repo_consistency.py`, whose hooks regex excludes it (`:72`, `:424`).
+- **W1 numbers.** Measured on disk: 23 `test_*.py` in `.claude/hooks/tests/`, 23 workflow scripts and 3 `_` helper modules in `.claude/scripts/`, 36 `test_*.py` in `.claude/scripts/tests/`, 3 files in `.claude/references/`.
+- **The B1 locators.** "Cut the branch in a flat worktree" and "name the copies left" appear only in `contract-completion.md:89,92`, the t18 artefact and `test_parent_branch_rule_text.py:382`. The step 5a end-marker fix is real: `section` runs to the end of the file when the end heading is absent (`:65-66`).
+- **Other t18 items.** B1 and W1 go to block 19, and the W1 pin (F2) goes to the stub. Disposition 1's suggested step pin is Open Question 31. I2 is in the Revision 9 note, the `ASSUMED` line and block 20's `merge-tree`. I3 is split into J12 and the main-session JSONL action. `SUITES_PENDING`, the stale bullet and the hand-back rows are Open Question 29. The stub exists on disk with `**Issue:** pending`.
+- **Hidden Open Questions.** None of the tell words appears in the Revision 9 text.
+
+### Applicable journal entries
+
+- **2026-11-02 — Keep a review-fix block to the review's findings** — heeded by block 19: B1, W1 and J12, plus the step pin that t18 Disposition 1 itself suggested. The README pin is deferred to the stub.
+- **2026-10-15 — A skill that edits a block pinned by a lookup-block test must name that test** — heeded by block 19's end-marker fix.
+- **2026-10-17 — Judge "identical to master" by git's view, not raw bytes, on Windows** — violated in wording by block 19's "byte-identical" (WARN above).
+- **2026-11-02 — A revision that adds a path adds its failure modes** — heeded by four Revision 9 Failure Modes entries. The second-merge entry is narrower than the parent's post-274bf1e changes (WARN above).
+- **2026-11-02 — After amending a contract, update every summary of the block graph** — heeded (intro, graph, block 11, Appendix C P10).
+- **2026-11-02 — Name the tests a fix may change by the state they guard, after reading them** — not heeded for the new step-order test and its control (two WARNs above).
+- **2026-11-02 — A rule titled 'every' must list every line it covers** — not heeded by block 20's "every count" against block 19's four counts (WARN above).
+- **2026-10-04 — Check a documented guard behaviour against the guard's code** — not heeded for the manifest-description correction attributed to the landing (WARN above).
+- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — heeded for the TASK text, which has no conditionals. The `Status` exposure remains (WARN above).
+
+### What the critic did not check
+
+- No shell in this session. I did not run `git diff --name-only 274bf1e origin/master`, `git merge-tree`, `git show 274bf1e:skills/pr-merged/references/contract-completion.md` or `pr_merged.py --contract <slug> --status --json`. So "steps 6-9 equal 274bf1e's" and t18's I2 file list (which "two test files"; whether one is `test_parent_branch_rule_text.py`, in which case block 19's pre-check stops) are unverified.
+- CodeGraph was not available. I checked symbols with Grep and Read.
+- `INTEGRATION.md`, the registry digest and `.claude/north-stars/` do not exist here, so items 7, 12 and 13 produce no findings. The End-User View and Adjacent Areas are unchanged by Revision 9.
 
