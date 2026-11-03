@@ -1758,6 +1758,13 @@ TASK: On the sub-task branch (cut from origin/feature/memory-client-and-cloud-en
     VOCABULARY.md; CONTRIBUTING.md and skills/auto-improve-finish-install/SKILL.md (block 17 text-fixed
     them after the merge). If the output lists a file on the stop list, stop and report it, editing
     nothing: the contract must be amended first (a second hand merge may be needed).
+    Amendment (2026-11-03, user-approved after the first run stopped here): master changed README.md
+    after 274bf1e, but only by adding the "Changed in 0.14.4 (tests only)" paragraph in the changelog
+    section; it did not touch the folder tree block that W1 edits. README.md is therefore cleared from
+    the stop list for this run, provided `git diff 274bf1e origin/master -- README.md` still shows
+    only that paragraph. Quote that diff. Any other README.md hunk, or any other stop-list file,
+    still means stop and report. The manifests (plugin.json, .claude-plugin/*, .cursor-plugin/*) also
+    differ on master (0.14.4); they are not on the stop list and the branch still keeps 0.14.2.
   B1, skills/pr-merged/references/contract-completion.md, section "The records pull request":
   - Delete the four lines of the first steps 6-9 that follow step 5a. Locate them by text, not by line
     number: they start with "6. **Cut the branch in a flat worktree.**", "7. **Copy exactly that union
