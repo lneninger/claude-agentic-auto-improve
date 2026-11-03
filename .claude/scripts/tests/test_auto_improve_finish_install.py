@@ -140,7 +140,12 @@ SCRIPT_ROOT = Path(fi.__file__).resolve().parents[2]
 # The contract's own copy of the exit-code split, independent of EXIT_CLASS. Exit codes are
 # asserted as the LITERALS 0, 2 and 3 everywhere; a constant imported from the module under
 # test would agree with a wrong implementation.
-ENVIRONMENT_CODES = {"project-unreadable", "template-missing", "hooks-json-missing"}
+# rule changed: {project-unreadable, template-missing, hooks-json-missing} -> the same plus
+# project-hook-launcher-missing (exit class 3: the hooks folder beside the scripts is the wrong release, an
+# environment problem the operator fixes by updating that folder). Reason: Revision 19, BE (gate 32 F1); block 57
+# adds the code. Until then assertRefused fails for it at the code, not here.
+ENVIRONMENT_CODES = {"project-unreadable", "template-missing", "hooks-json-missing",
+                     "project-hook-launcher-missing"}
 
 EVIDENCE_REASONS = {"manifest", "folder-name", "config-entry", "file-exists", "git-remote", "agent-file"}
 
@@ -2113,12 +2118,31 @@ class TestLauncherGateArgument(Base):
         self.assertNotIn("GATE RAN", proc.stdout, msg="the gate is never run silently from the wrong folder")
 
 
-class TestLauncherFallbackNote(Base):
-    """Gate 30, finding F4: the writer's fallback when the Project hook launcher is not available.
+LAUNCHER_MISSING = "project-hook-launcher-missing"
+LAUNCHER_FALLBACK_PHRASE = "the Project hook launcher is not available beside this script"
 
-    Both rows PIN THE WRITER'S BEHAVIOUR AT 217f97e, they do not endorse it. Revision 18's Open Question 26
-    and gate 32's item (h) decide whether the fallback (the earlier ${CLAUDE_PROJECT_DIR}/.claude/hooks/<name>
-    form, with a note) stays; when it goes, row (i) goes with it and row (ii) stays.
+
+def assert_launcher_missing_refusal(case, rc, parsed, project, why):
+    """The refusal of Revision 19, BE (gate 32 F1): exit 3, code project-hook-launcher-missing, a message naming
+    <project>/.claude/hooks/_project_paths.py and saying to bring the hooks folder to the scripts' release, and
+    the old fallback phrase nowhere in the output."""
+    case.assertEqual(rc, 3, msg="%s: the refusal is exit 3 (environment); got %r" % (why, parsed))
+    case.assertRefused(parsed, LAUNCHER_MISSING, why)
+    message = str(parsed.get("message", "")).replace("\\", "/")
+    named = (str(project).replace("\\", "/") + "/.claude/hooks/_project_paths.py")
+    case.assertIn(named, message, msg="%s: the message names the file to update, %s: %r" % (why, named, message))
+    case.assertIn("release", message.lower(),
+                  msg="%s: and says to bring the hooks folder to the same release as the scripts: %r" % (why, message))
+    case.assertNotIn(LAUNCHER_FALLBACK_PHRASE, json.dumps(parsed),
+                     msg="%s: the old fallback phrase appears nowhere" % why)
+
+
+class TestLauncherFallbackNote(Base):
+    """Gate 30, finding F4, as judged by gate 32 (item (h)) and decided in Revision 19, BE.
+
+    The writer no longer falls back to the earlier ${CLAUDE_PROJECT_DIR}/.claude/hooks/<name> form when the
+    Project hook launcher is not available beside the scripts: it refuses (the first row, renamed). The second
+    row, the real hooks folder gives launcher rows and no note, is unchanged.
 
     The seam for row (i) is a child process on a copied tree, because ``_claude_paths`` loads
     ``_project_paths`` from the hooks folder beside the scripts folder and a module stays loaded once
@@ -2152,7 +2176,14 @@ class TestLauncherFallbackNote(Base):
                 "--platform", "win32"]
         return argv + ["--apply", "--expect-sha256", apply_sha] if apply_sha else argv
 
-    def test_i_without_a_usable_launcher_the_plan_says_so_and_the_rows_are_the_earlier_form(self):
+    def test_i_without_a_usable_launcher_the_hooks_install_refuses_in_the_preview_and_the_apply_and_writes_nothing(self):
+        # rule changed: "the plan's notes hold the fixed phrase 'the Project hook launcher is not available beside
+        # this script', and the rows are the old ${CLAUDE_PROJECT_DIR}/.claude/hooks/<name> form" -> "the hooks
+        # install refuses in the preview and in the apply: exit 3, code project-hook-launcher-missing, a message
+        # naming <project>/.claude/hooks/_project_paths.py and saying to bring the hooks folder to the scripts'
+        # release; the settings file and its folder byte-unchanged; no backup; the old fixed phrase appears
+        # nowhere". Reason: Revision 19, BE, the owner's Q26 answer "pin" (it held today's behaviour until gate 32
+        # judged it) and gate 32's item (h), which judged "remove". The child-process seam and the second row stay.
         copy = self.tmp / "scripts-copy"
         shutil.copytree(SCRIPT_ROOT / ".claude" / "scripts", copy / ".claude" / "scripts",
                         ignore=shutil.ignore_patterns("tests", "__pycache__"))
@@ -2160,21 +2191,15 @@ class TestLauncherFallbackNote(Base):
         (copy / ".claude" / "hooks" / "_project_paths.py").write_text(
             'raise ImportError("a stub _project_paths: the launcher surface is missing")\n', encoding="utf-8")
         self.make_vendored()
-        rc, plan, err = self.child_cli(copy, self.argv())
-        self.assertEqual(rc, 0, msg="a preview is exit 0: %r %r" % (plan, err[-400:]))
-        self.assertEqual((plan or {}).get("status"), "plan", msg="got %r" % (plan,))
-        self.assertTrue(any(self.NOTE in n for n in plan.get("notes", [])),
-                        msg="the plan's notes hold the fixed phrase %r: %r" % (self.NOTE, plan.get("notes")))
-        rc2, applied, err2 = self.child_cli(copy, self.argv(apply_sha=plan["plan-sha256"]))
-        self.assertEqual((rc2, (applied or {}).get("status")), (0, "applied"),
-                         msg="the apply writes: %r %r" % (applied, err2[-400:]))
-        regs = flat_registrations(self.read_settings())
-        self.assertEqual(len(regs), 17, msg="all registrations written")
-        for _e, _m, name, _x, hook in regs:
-            self.assertFalse(is_launcher_form(hook), msg="%s: no launcher row without a launcher: %r" % (name, hook))
-            self.assertEqual(hook.get("command"), "py", msg="%s: the interpreter is the command" % name)
-            self.assertEqual(hook.get("args")[:2], ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + name],
-                             msg="%s: the earlier project-path form" % name)
+        before = snapshot(self.project)
+        before_home = snapshot(self.home)
+        rc, parsed, err = self.child_cli(copy, self.argv())
+        assert_launcher_missing_refusal(self, rc, parsed, self.project, "the preview (stderr %r)" % err[-300:])
+        rc2, parsed2, err2 = self.child_cli(copy, self.argv(apply_sha="0" * 64))
+        assert_launcher_missing_refusal(self, rc2, parsed2, self.project, "the apply (stderr %r)" % err2[-300:])
+        self.assertFalse(self.settings_path().exists(), msg="no settings file was created")
+        self.assertTreeSame(before, "a refusal writes nothing: no settings file, no folder, no backup", root=self.project)
+        self.assertTreeSame(before_home, "and nothing in the Claude home", root=self.home)
 
     def test_ii_with_the_real_hooks_folder_there_is_no_note_and_the_rows_are_launcher_form(self):
         self.make_vendored()
@@ -4212,7 +4237,20 @@ _OTHER_ONE_LINE_HOOK = ('{"type": "command", "command": "py", '
                         '"args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/theirs.py", "--quiet"]}')
 
 PLACEMENTS = ("same-matcher", "new-group", "new-event", "no-hooks", "empty-event-list", "one-line-container",
-              "lf-only")
+              "lf-only", "script-already-named")
+
+#: The placement "script-already-named" (Revision 19, BD; block 56). The old file's ``hooks`` object holds, on one
+#: line, a launcher-form row (the plugin's own launcher text, its class and its script) for ``bash-gate.py``,
+#: which the plan adds for both writer kinds, under the event ``Notification``, on which the plan adds nothing.
+#: The planner's identity is (event, file, extras) with no matcher, so another event leaves the planned row in
+#: to-add; the writer must add that row elsewhere and leave this line byte-unchanged.
+ALREADY_NAMED_EVENT = "Notification"
+ALREADY_NAMED_SCRIPT = "bash-gate.py"
+
+
+def already_named_line():
+    """The one-line event entry of ``script-already-named``: an event whose only row is a launcher row."""
+    return '    "%s": [{"hooks": [%s]}]' % (ALREADY_NAMED_EVENT, json.dumps(launcher_row(ALREADY_NAMED_SCRIPT, "warn")))
 
 
 def _escaped_first_letter(word):
@@ -4248,6 +4286,8 @@ def escaped_settings_text(placement, kind="hooks"):
         hooks = [_event_block(event, [(matcher, [_ONE_LINE_HOOK])]), stop]
     elif placement == "new-group":
         hooks = [_event_block(event, [("keep", [_ONE_LINE_HOOK])]), stop]
+    elif placement == "script-already-named":
+        hooks = [_event_block(event, [(matcher, [_ONE_LINE_HOOK])]), stop, already_named_line()]
     elif placement == "new-event":
         hooks = [stop]
     elif placement == "empty-event-list":
@@ -4313,24 +4353,54 @@ def _inserted_part(small, big):
     return bytes(left)
 
 
-def _holds_insertion_point(old_line, new_line, hook_paths):
-    """True when ``new_line`` is ``old_line`` plus an insertion at a point where a row goes: the inserted bytes
-    start with a comma (a row follows this element) or the line holds an inserted row's hook path. Added
-    whitespace alone (a deeper indent, padding inside a line) is neither."""
-    inserted = _inserted_part(old_line, new_line)
-    return inserted.startswith(b",") or any(path in new_line for path in hook_paths)
+def _holds_insertion_point(old_line, new_line, markers):
+    """True when ``new_line`` is ``old_line`` plus ONE insertion at a point where a row goes.
+
+    rule changed: old "the greedily extracted inserted bytes start with a comma, or a hook path or quoted
+    script name of a row being added appears anywhere in the new line" -> new "all of: (1) k is the length of
+    the two lines' longest common prefix, the new line is longer, X is the next len(new_line) - len(old_line)
+    bytes of the new line from k, and the new line's bytes after X equal the old line's bytes from k (no other
+    k is tried); (2) the old line's bytes before k, trailing spaces and tabs removed, do not end in a comma;
+    (3) X is exactly ',' with only nothing or one carriage return after k in the old line, or X starts with
+    ',' and wholly holds one added row's full marker, or X does not start with ',' and wholly holds one added
+    row's full marker; (4) the full marker of a launcher-form row (is_launcher_form and no other reading) is
+    both json.dumps(launcher_text()) and json.dumps(args[4]) as UTF-8 bytes, and of any other row an
+    argument holding /hooks/". Reason: Revision 19, BD, gate 55's F7 and round twenty's blocker.
+
+    ``markers`` is what ``row_hook_paths`` returns: one list of byte strings per added row, all of which must
+    lie inside X. Only X is read, so a marker already on the old line counts for nothing, and added
+    whitespace is none of the three forms."""
+    if len(new_line) <= len(old_line):
+        return False
+    k = 0
+    while k < len(old_line) and old_line[k] == new_line[k]:
+        k += 1
+    added = len(new_line) - len(old_line)
+    x = new_line[k:k + added]
+    if new_line[k + added:] != old_line[k:]:
+        return False
+    if old_line[:k].rstrip(b" \t").endswith(b","):
+        return False
+    if x == b"," and old_line[k:] in (b"", b"\r"):
+        return True
+    return any(row and all(marker in x for marker in row) for row in markers)
 
 
 def row_hook_paths(rows):
-    """The hook paths (as bytes) in the args of the rows a plan adds.
+    """The full markers (as bytes) of the rows a plan adds, grouped per row (one list per row).
 
-    rule changed: the arguments holding /hooks/ -> the same, plus each launcher row's script (the argument
-    after the class) as its JSON string, quotes included. Reason: Revision 9, K; a launcher row holds the
-    bare script name, not a path."""
-    paths = [a.encode("utf-8") for row in rows for a in row.get("args", []) if "/hooks/" in a]
-    paths += [json.dumps(row["args"][4]).encode("utf-8") for row in rows
-              if is_launcher_form(row) and len(row["args"]) > 4]
-    return paths
+    A launcher-form row (``is_launcher_form``, no other reading) has two, and both must be inserted:
+    ``json.dumps(launcher_text())`` and ``json.dumps(args[4])`` (the quoted script). Any other row has the
+    first argument holding /hooks/ (none when it holds none). Reason: Revision 19, BD, step (4); the earlier
+    flat list could not tell a script name that was inserted from one that was already on the line."""
+    grouped = []
+    for row in rows:
+        args = row.get("args", [])
+        if is_launcher_form(row) and len(args) > 4:
+            grouped.append([json.dumps(launcher_text()).encode("utf-8"), json.dumps(args[4]).encode("utf-8")])
+        else:
+            grouped.append([a.encode("utf-8") for a in args if "/hooks/" in a][:1])
+    return grouped
 
 
 def lines_kept_by_insertions_only(old, new, rows=()):
@@ -4407,6 +4477,85 @@ def make_directory_link(link, target):
     except (OSError, ImportError, AttributeError, NotImplementedError) as exc:
         raise AssertionError("the directory link %s -> %s could not be made (%s); this row cannot pass without "
                              "it and is never skipped" % (link, target, exc))
+
+
+LAUNCHER_NAMES = ("PROJECT_HOOK_LAUNCHER_SOURCE", "HOOK_CLASS_BLOCK", "HOOK_CLASS_WARN",
+                  "project_hook_launcher_parts", "project_hook_launcher_row")
+
+
+def older_release_project_paths():
+    """The text of an older release's ``_project_paths.py``: it imports cleanly, serves everything
+    ``_claude_paths`` re-exports except the five launcher names, and so is the file gate 32 measured. Built from
+    this release's own file by deleting those five names at the end of the module."""
+    real = (SCRIPT_ROOT / ".claude" / "hooks" / "_project_paths.py").read_text(encoding="utf-8")
+    return real + "\n\ndel " + ", ".join(LAUNCHER_NAMES) + "\n"
+
+
+class TestLauncherSurfaceMissingRefusal(Base):
+    """Revision 19, BE, B2 (gate 32 F1): the same refusal when the hooks folder beside the scripts holds a
+    ``_project_paths.py`` that imports cleanly and lacks the five launcher names, for the hooks install and for
+    an add-on install that writes a row. Same child-process seam as TestLauncherFallbackNote (a module stays
+    loaded once imported, so a stub installed in this process never reaches ``_claude_paths``)."""
+
+    child_cli = TestLauncherFallbackNote.child_cli
+
+    def setUp(self):
+        super().setUp()
+        build_fake_addons(self.plugin)
+
+    def scripts_copy(self):
+        copy = self.tmp / "scripts-copy"
+        shutil.copytree(SCRIPT_ROOT / ".claude" / "scripts", copy / ".claude" / "scripts",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        (copy / ".claude" / "hooks").mkdir()
+        (copy / ".claude" / "hooks" / "_project_paths.py").write_text(older_release_project_paths(), encoding="utf-8")
+        return copy
+
+    def test_the_fixture_stub_imports_cleanly_and_lacks_exactly_the_five_names(self):
+        # Positive control: passes today. Without it a stub that failed to import would make the rows below pass
+        # for the wrong reason.
+        copy = self.scripts_copy()
+        code = ("import sys, importlib.util; spec = importlib.util.spec_from_file_location('pp', sys.argv[1]); "
+                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+                "print(sorted(n for n in sys.argv[2:] if hasattr(m, n)), hasattr(m, 'claude_roots'))")
+        proc = subprocess.run([sys.executable, "-B", "-c", code, str(copy / ".claude" / "hooks" / "_project_paths.py"),
+                               *LAUNCHER_NAMES], capture_output=True, text=True, timeout=60)
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "[] True"),
+                         msg="imports cleanly, keeps claude_roots, lacks all five names: %r" % proc.stderr[-300:])
+
+    def run_case(self, kind, settings_bytes):
+        copy = self.scripts_copy()
+        if kind == "hooks":
+            self.make_vendored()
+            argv = ["hooks", "--project", str(self.project), "--json", "--claude-home", str(self.home),
+                    "--platform", "win32"]
+        else:
+            argv = ["addon", "--name", "strict-shell-gate", "--project", str(self.project), "--json",
+                    "--claude-home", str(self.home), "--platform", "win32"]
+        if settings_bytes is not None:
+            self.settings_path().parent.mkdir(parents=True, exist_ok=True)
+            self.settings_path().write_bytes(settings_bytes)
+        before, before_home = snapshot(self.project), snapshot(self.home)
+        rc, parsed, err = self.child_cli(copy, argv)
+        assert_launcher_missing_refusal(self, rc, parsed, self.project, "the %s preview (stderr %r)" % (kind, err[-300:]))
+        rc2, parsed2, err2 = self.child_cli(copy, argv + ["--apply", "--expect-sha256", "0" * 64])
+        assert_launcher_missing_refusal(self, rc2, parsed2, self.project,
+                                        "the %s apply (stderr %r)" % (kind, err2[-300:]))
+        self.assertTreeSame(before, "a refusal writes nothing: no file, no folder, no backup", root=self.project)
+        self.assertTreeSame(before_home, "and nothing in the Claude home", root=self.home)
+
+    # One test per case, so each has a fresh project and a fresh scripts copy.
+    def test_the_hooks_install_refuses_without_the_five_names_when_there_is_no_settings_file(self):
+        self.run_case("hooks", None)
+
+    def test_the_hooks_install_refuses_without_the_five_names_over_an_existing_settings_file(self):
+        self.run_case("hooks", escaped_settings_bytes("same-matcher", "hooks"))
+
+    def test_an_add_on_install_that_writes_a_row_refuses_without_the_five_names_when_there_is_no_settings_file(self):
+        self.run_case("addon", None)
+
+    def test_an_add_on_install_that_writes_a_row_refuses_without_the_five_names_over_an_existing_settings_file(self):
+        self.run_case("addon", escaped_settings_bytes("same-matcher", "addon"))
 
 
 class TestLauncherRowIdentity(AddonHarness):
@@ -4653,6 +4802,67 @@ class TestSettingsWriterKeepsEveryByte(WriterHarness):
                                  msg="diff rule on %s" % label)
         self.assertNotEqual(diff_rule_violations("@@ -1,2 +1,2 @@\n-a\n-b\n+a1\n+b1\n", 1), [],
                             msg="two removed lines for one row fail")
+
+    def test_the_script_already_named_placement_adds_the_planned_row_and_leaves_that_line_byte_unchanged(self):
+        # Revision 19, BD. The old file already holds a launcher row for bash-gate.py under another event. The
+        # planner's identity is (event, file, extras), so the planned row is still added elsewhere, and the
+        # named line is neither touched nor re-laid out. A writer that plans nothing here is a HALT of block 56.
+        line = already_named_line().encode("utf-8")
+        for kind in ("addon", "hooks"):
+            with self.subTest(kind=kind):
+                raw = escaped_settings_bytes("script-already-named", kind)
+                self.assertEqual(raw.count(line), 1, msg="fixture: the old file holds the one-line launcher row once")
+                self.prepare(kind, raw)
+                plan = self.preview_ok(kind)
+                added = [r for r in plan["to-add"] if r.get("file") == ALREADY_NAMED_SCRIPT
+                         or ALREADY_NAMED_SCRIPT in r.get("args", [])]
+                self.assertEqual(len(added), 1, msg="the plan still adds the row for %s: %r" % (
+                    ALREADY_NAMED_SCRIPT, [r.get("args") for r in plan["to-add"]]))
+                rc, out, applied = self.apply_cli(kind, plan["plan-sha256"])
+                self.assertEqual((rc, (applied or {}).get("status")), (0, "applied"), msg="%r" % (applied or out,))
+                new = self.settings_path().read_bytes()
+                self.assertEqual(new.count(line), 1, msg="the named line is in the new file once, byte for byte")
+                rows = [h for e, _m, n, _x, h in flat_registrations(parsed_settings(new))
+                        if n == ALREADY_NAMED_SCRIPT and e == "PreToolUse"]
+                self.assertEqual(len(rows), 1, msg="and the planned PreToolUse row for it was written")
+
+    def test_the_narrowed_insertion_rule_refuses_the_known_bad_edits_and_keeps_a_real_insertion(self):
+        # Revision 19, BD (gate 55 F7, round twenty's blocker): the helpers alone, on the one placement that holds
+        # a launcher row. Each bad edit is accepted by the helper of block 54 (42fd2c0) and refused by this one;
+        # the mutant runs of block 56 show that against the real writer.
+        old = escaped_settings_bytes("script-already-named", "hooks")
+        row = launcher_row(ALREADY_NAMED_SCRIPT, "block")
+        named = already_named_line().encode("utf-8")
+        first_deny = b'"Bash(\\u0063at *)",'
+        self.assertEqual(old.count(first_deny), 1, msg="fixture: the first deny line is there once")
+        self.assertEqual(old.count(b'"permissions": {'), 1, msg="fixture: the permissions line is there once")
+        quoted = json.dumps(ALREADY_NAMED_SCRIPT).encode("utf-8")
+        genuine = old.replace(named, named + b',\r\n    "PreToolUse": [{"matcher": "Bash", "hooks": ['
+                              + json.dumps(row).encode("utf-8") + b"]}]", 1)
+        bad = {
+            "R5b2: a key that holds the script on the permissions line":
+                old.replace(b'"permissions": {', b'"permissions": {"zz": ' + quoted + b",", 1),
+            "R5b3 spelling 1: the quoted script after the deny line's own comma":
+                old.replace(first_deny, first_deny + quoted + b",", 1),
+            "R5b3 spelling 2: a whole row after the deny line's own comma":
+                old.replace(first_deny, first_deny + json.dumps(row).encode("utf-8") + b",", 1),
+            "W1: whitespace only, inside the line that already names the script":
+                old.replace(named, named.replace(b'{"hooks"', b'{  "hooks"', 1), 1),
+        }
+
+        def diff_of(a, b):
+            return "".join(difflib.unified_diff(a.decode().splitlines(True), b.decode().splitlines(True)))
+        self.assertTrue(lines_kept_by_insertions_only(old, genuine, [row]), msg="control: a comma and a new row pass")
+        self.assertEqual(diff_rule_violations(diff_of(old, genuine), 1, [row]), [], msg="control: and so does the diff")
+        for label, text in bad.items():
+            with self.subTest(edit=label):
+                self.assertNotEqual(text, old, msg="fixture: the edit changed the file")
+                self.assertTrue(only_insertions(old, text), msg="fixture: the byte rule alone accepts it")
+                self.assertFalse(lines_kept_by_insertions_only(old, text, [row]),
+                                 msg="line by line: this edit is not an insertion at a point where a row goes")
+                problems = diff_rule_violations(diff_of(old, text), 1, [row])
+                self.assertTrue(any("removed line not kept by an added line at an insertion point" in p
+                                    for p in problems), msg="the diff rule names the removed line: %r" % (problems,))
 
     def test_the_fixture_location_guard_fails_for_a_root_holding_a_claude_part(self):
         # GUARD SELF-TEST. Positive control first: the real fixture root passes.

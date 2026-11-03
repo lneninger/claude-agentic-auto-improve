@@ -302,6 +302,13 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.13.1 (tests only):** the installer suite's insertion-point rule is narrower: a changed
+line passes only when one inserted run is a bare comma or holds a whole added row, so a script name
+already on a line no longer vouches for a whitespace re-layout of it. New rows (red until the next
+release) pin that the settings writer refuses without the Project hook launcher, that `_claude_paths`
+raises `ImportError` for a hooks folder from an older release, and that the dangling-row reader reads
+launcher rows. No shipped behaviour changed. The manifests read 0.13.1.
+
 **Changed in 0.12.5 (tests only):** the installer, guard-deference and launcher test files now pin the
 Project hook launcher row form (`py -3 -c <source> <class> <script>`) that 0.12.3 started writing, and
 one new pair of rows pins the earlier-form fallback when no launcher is available. No shipped behaviour
