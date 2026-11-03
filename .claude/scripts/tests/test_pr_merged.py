@@ -12214,8 +12214,10 @@ class TestDispatchIntoAFlatWorktree(_WorktreeWorldCase):
                          "nothing is created inside the worktree --dispatch ran from")
 
     def test_dispatch_surfaces_helper_refusal_as_branch_failed(self):
-        # AC3: the helper refuses (origin is unreachable, so fetch-failed); the sub-task is not dispatched.
-        git(self.main, "remote", "set-url", "origin", str(self.tmp / "no-such-origin.git"))
+        # AC3: the helper refuses (the declared base is gone from a READABLE origin, so fetch-failed); the
+        # sub-task is not dispatched. Origin must stay readable: with an unreachable origin the records
+        # reading is unverifiable and --dispatch exits 12 records-unverifiable before the helper runs (I-9).
+        git(self.main, "push", "-q", "origin", "--delete", WT_PARENT)
         before = worktree_paths(self.main)
         proc = self.dispatch()
         payload = self.need_json(proc, "--dispatch with a refusing helper")
@@ -14326,6 +14328,1491 @@ class TestProtectedBranchesReaderIgnoresAMalformedValue(unittest.TestCase):
                         "`list(... or [default])` reader")
         self.assertIsNone(re.search(r'get\("protectedBranches"\)\s+or\s+\[', text),
                           "and no second reader of protectedBranches is left in land_contract.py")
+
+
+# ==========================================================================
+# Issue 178 -- the records leftover sweep (contract 2026-11-02-pr-merged-records-leftover-cleanup,
+# invariants I-1 to I-11). RED suite: the flag --sweep-records, the report keys, exit 12, the
+# evidence rule and the skill text do not exist yet.
+#
+# Real temporary git repositories (a bare origin, the main checkout, a linked worktree as the
+# starting tree, a clone that plays GitHub) and real child processes of pr_merged.py. Only `gh` is a
+# stub (a fake executable first on PATH) and, for the failed-read cases, a `git` wrapper that fails the
+# calls it is told to. A missing behaviour is always an assertion about a value (a parsed JSON key, an
+# exit code, a file that is still there), never a crash of the fixture.
+# ==========================================================================
+from test_flat_worktree import FAKE_GH_CODE as _RS_FAKE_GH, REAL_GIT as _RS_REAL_GIT, write_exe as _rs_write_exe  # noqa: E402
+
+RS_SLUG = "2026-11-02-sweep-fixture"
+RS_BRANCH = "docs/%s-records" % RS_SLUG
+RS_T1, RS_T2 = "t1-backend", "t2-frontend"
+RS_REMEDY = "/pr-merged --records %s --discard-differing" % RS_SLUG
+RS_SCRIPT = Path(__file__).resolve().parent.parent / "pr_merged.py"
+RS_REPO = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def rs_dir(slug=RS_SLUG):
+    return ".claude/orchestrator/results/%s" % slug
+
+
+def rs_contract(n_tasks=2):
+    lines = ["# Concept Contract - sweep fixture", "", "**Project:** Acme", "**Date:** 2026-11-02",
+             "**Status:** approved", "**Work Item Brief:** .claude/work-items/%s.md" % RS_SLUG, "",
+             "## Implementation Handoff", "", "### 1. Backend (`python-ai-developer`)", "", "**Depends on:** none", "",
+             "**Files to touch:**", "- src/Foo.cs", ""]
+    if n_tasks >= 2:
+        lines += ["### 2. Frontend (`python-ai-developer`)", "", "**Depends on:** 1", "",
+                  "**Files to touch:**", "- src/Bar.cs", ""]
+    return "\n".join(lines) + "\n"
+
+
+def rs_record(status="completed", n=61, commit="sha"):
+    return ("status: %s\ncommit: %s%d\ntests_passed: unknown\ntests_verified_by: none\n"
+            "completed_by: pr-merged\npull_request: %s\nmerged_at: '2026-11-01T00:00:00Z'\n"
+            "verified: github\nbase_ref: master\nbase_is_default: true\n" % (status, commit, n, _pr_url(n)))
+
+
+_RS_GH_SOURCE = "FAKE_SOURCE = " + repr(_RS_FAKE_GH) + r'''
+import json, os, sys
+HERE = os.path.dirname(os.path.abspath(sys.argv[0]))
+args = sys.argv[1:]
+cfg = json.load(open(os.path.join(HERE, "gh_config.json"), encoding="utf-8"))
+
+
+def opt(name):
+    for i, a in enumerate(args):
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
+def log():
+    with open(os.path.join(HERE, "gh_calls.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"args": args, "cwd": os.getcwd()}) + "\n")
+
+
+if not cfg.get("fail_all") and not any(" ".join(args).startswith(p) for p in cfg.get("fail_commands", [])):
+    if args[:2] == ["api", "user"]:
+        log()
+        print("tester")
+        sys.exit(0)
+    if args[:2] == ["pr", "list"]:
+        log()
+        prs = list(cfg.get("open_prs", []))
+        head = opt("--head") or opt("-H")
+        seq = cfg.get("pr_list_sequence")
+        if seq and head:  # the sequence counts the `--head` calls only
+            counter = os.path.join(HERE, "pr_list_count.txt")
+            n = int(open(counter).read()) if os.path.exists(counter) else 0
+            open(counter, "w").write(str(n + 1))
+            prs = seq[min(n, len(seq) - 1)]
+        if cfg.get("ignore_head"):  # a lookup that does not filter: only the caller's own filter can reject
+            prs = prs[:int(opt("--limit") or 30)]
+        elif head:
+            prs = [p for p in prs if p.get("headRefName") == head]
+        else:
+            prs = prs[:int(opt("--limit") or 30)]
+        print(json.dumps(prs))
+        sys.exit(0)
+exec(compile(FAKE_SOURCE, "fakegh", "exec"), {"__name__": "__main__", "__file__": sys.argv[0]})
+'''
+
+_RS_GIT_SOURCE = r'''
+import json, os, subprocess, sys
+HERE = os.path.dirname(os.path.abspath(sys.argv[0]))
+cfg = json.load(open(os.path.join(HERE, "git_fail.json"), encoding="utf-8"))
+args = sys.argv[1:]
+
+
+def subcommand(argv):
+    """The git subcommand: the first word that is neither an option nor the value of -C / -c."""
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("-C", "-c"):
+            i += 2
+        elif argv[i].startswith("-"):
+            i += 1
+        else:
+            return argv[i]
+    return ""
+
+
+sub = subcommand(args)
+for tokens in cfg.get("fail", []):
+    # the first token is the subcommand, matched exactly; the others may sit anywhere in the arguments
+    if sub == tokens[0] and all(any(t in a for a in args) for t in tokens[1:]):
+        sys.stderr.write("fatal: wrapper git failing on purpose %s\n" % (tokens,))
+        sys.exit(128)
+rw = cfg.get("rewrite")
+if rw and sub == rw["sub"]:
+    counter = os.path.join(HERE, "git_count_%s.txt" % sub)
+    n = (int(open(counter).read()) if os.path.exists(counter) else 0) + 1
+    open(counter, "w").write(str(n))
+    if n == rw["nth"]:
+        with open(rw["file"], "wb") as fh:
+            fh.write(rw["text"].encode("utf-8"))
+sys.exit(subprocess.call([cfg["real_git"]] + args))
+'''
+
+
+class RecordsCase(unittest.TestCase):
+    """A bare origin, the main checkout, a linked worktree as the starting tree, and a clone playing GitHub."""
+
+    n_tasks = 2
+
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="rs178_")))
+        self.addCleanup(rmtree_force, self.tmp)
+        self.git_only = None
+        self.world = make_world(self.tmp, files={
+            ".gitignore": ".claude/worktrees/\n.claude/orchestrator/state/\n",
+            ".claude/concepts/%s.md" % RS_SLUG: rs_contract(self.n_tasks),
+            ".claude/work-items/%s.md" % RS_SLUG: _build_brief(RS_SLUG, branch="feature/start", pr="none", ident="5").decode("utf-8")})
+        self.main = self.world.main
+        self.tools = Tools(self.tmp)
+        _rs_write_exe(self.tools.bin, "gh", _RS_GH_SOURCE)
+        self.tools.install_gh({"open_prs": []})
+        self.ghub = clone_of(self.world, "ghub")
+        self.start = add_worktree(self.main, self.main / ".claude" / "worktrees" / "20261102-start",
+                                  "-b", "feature/start", "master")
+
+    # -- the remote side ------------------------------------------------------------------------
+    def on_master(self, files):
+        git(self.ghub, "switch", "-q", "master")
+        git(self.ghub, "pull", "-q", "--ff-only", "origin", "master")
+        commit(self.ghub, files, "master edit")
+        git(self.ghub, "push", "-q", "origin", "master")
+
+    def on_branch(self, files, name=RS_BRANCH):
+        git(self.ghub, "fetch", "-q", "origin")
+        if git(self.ghub, "branch", "--list", name):
+            git(self.ghub, "switch", "-q", name)
+        else:
+            git(self.ghub, "switch", "-q", "-c", name, "origin/master")
+        commit(self.ghub, files, "branch edit")
+        git(self.ghub, "push", "-q", "origin", name)
+        git(self.ghub, "switch", "-q", "master")
+
+    def rel(self, name, slug=RS_SLUG):
+        return "%s/%s" % (rs_dir(slug), name)
+
+    def open_prs(self, *heads):
+        self.tools.set_gh(open_prs=[{"headRefName": h, "url": "https://github.com/example-owner/example-repo/pull/9%d" % i,
+                                     "baseRefName": "master"} for i, h in enumerate(heads)])
+
+    def fail_git(self, *token_lists, rewrite=None):
+        """Install the wrapper git. Each token list fails a call: the first token is the git subcommand
+        (matched exactly), the others must appear in its arguments. ``rewrite`` is
+        ``{"sub", "nth", "file", "text"}``: the nth call of that subcommand first rewrites ``file``."""
+        if not (self.tools.bin / ("git.exe" if os.name == "nt" else "git")).exists():
+            _rs_write_exe(self.tools.bin, "git", _RS_GIT_SOURCE)
+        (self.tools.bin / "git_fail.json").write_text(
+            json.dumps({"real_git": _RS_REAL_GIT, "fail": [list(t) for t in token_lists], "rewrite": rewrite}),
+            encoding="utf-8")
+
+    def no_gh(self):
+        """A PATH that holds the wrapper git and nothing else, so `gh` is not installed for the child."""
+        self.fail_git()
+        only = self.tmp / "git-only-bin"
+        _rs_write_exe(only, "git", _RS_GIT_SOURCE)
+        (only / "git_fail.json").write_text(json.dumps({"real_git": _RS_REAL_GIT, "fail": []}), encoding="utf-8")
+        self.git_only = only
+
+    def on_master_blob(self, rel, text, mode):
+        """Commit ``rel`` on origin/master as a blob with the given tree mode (100644, 100755 or 120000)."""
+        git(self.ghub, "switch", "-q", "master")
+        git(self.ghub, "pull", "-q", "--ff-only", "origin", "master")
+        scratch = self.ghub / "scratch-blob.tmp"
+        scratch.write_bytes(text.encode("utf-8"))
+        blob = git(self.ghub, "hash-object", "-w", "scratch-blob.tmp")
+        scratch.unlink()
+        git(self.ghub, "update-index", "--add", "--cacheinfo", "%s,%s,%s" % (mode, blob, rel))
+        git(self.ghub, "commit", "-q", "-m", "blob with mode %s" % mode)
+        git(self.ghub, "push", "-q", "origin", "master")
+
+    # -- the local side -------------------------------------------------------------------------
+    def put(self, name, text, tree=None, slug=RS_SLUG):
+        p = Path(tree or self.start) / rs_dir(slug) / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(text if isinstance(text, bytes) else text.encode("utf-8"))
+        return p
+
+    def results(self, tree=None, slug=RS_SLUG):
+        d = Path(tree or self.start) / rs_dir(slug)
+        return sorted(str(p.relative_to(d)).replace("\\", "/") for p in d.rglob("*") if p.is_file()) if d.is_dir() else []
+
+    # -- running the script ---------------------------------------------------------------------
+    def env(self, extra=None):
+        env = clean_env(extra, tools=self.tools)
+        if self.git_only is not None:
+            env["PATH"] = str(self.git_only)
+        return env
+
+    def cli(self, *args, cwd=None, slug=RS_SLUG, env_extra=None):
+        flags = ["--contract", slug, *args] + ([] if "--json" in args else ["--json"])
+        return run_py(RS_SCRIPT, *flags, cwd=cwd or self.start, env=self.env(env_extra))
+
+    def report(self, proc, what):
+        rep = proc.json()
+        self.assertIsInstance(rep, dict, msg="%s should print one JSON object; got %s" % (what, proc.describe()))
+        return rep
+
+    def sweep(self, *flags, trees=None, slug=RS_SLUG, cwd=None):
+        trees = trees or [self.start]
+        args = ["--sweep-records"] + [x for t in trees for x in ("--from", str(t))] + list(flags)
+        proc = self.cli(*args, slug=slug, cwd=cwd)
+        return proc, self.report(proc, "`--sweep-records`" + " (flag not built yet?)")
+
+    def status(self, *flags):
+        proc = self.cli("--status", *flags)
+        return proc, self.report(proc, "`--status --json`")
+
+    def key(self, rep, name):
+        self.assertIn(name, rep, msg="the report should carry the key %r (I-3); it has %s" % (name, sorted(rep)[:25]))
+        return rep[name]
+
+    def entry(self, rep, name):
+        leftover = rep.get("records_leftover")
+        self.assertIsInstance(leftover, dict, msg="the sweep report should carry `records_leftover` with `entries`; got keys %s" % sorted(rep)[:25])
+        for e in leftover.get("entries", []):
+            if str(e.get("path", "")).replace("\\", "/").endswith(name):
+                return e
+        self.fail("no entry for %s in records_leftover.entries %r" % (name, leftover.get("entries")))
+
+    def lines(self, rep):
+        tl = self.key(rep, "tree_lines")
+        return [str(x.get("line", "")) if isinstance(x, dict) else str(x) for x in tl]
+
+
+# ---------------------------------------------------------------------------
+# I-1 to I-4: the sweep itself
+# ---------------------------------------------------------------------------
+class RecordsSweepTests(RecordsCase):
+    def test_an_identical_copy_on_origin_default_is_proven_and_deleted(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        other = self.put("t1-backend.yaml", "status: completed\n", slug="2026-11-02-other-contract")
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("proven", "deleted"), msg="an identical copy is proven and deleted: %r" % e)
+        self.assertFalse(f.exists(), msg="the proven copy should be gone from the starting tree")
+        self.assertTrue(other.exists(), msg="only the contract's own results folder is touched")
+
+    def test_a_differing_copy_is_kept_with_both_blob_ids_and_the_remedy(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        f = self.put("t1-backend.yaml", rs_record(n=62))
+        proc, rep = self.sweep()
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("differs", "kept"), msg=repr(e))
+        self.assertEqual(e.get("local_blob"), git(self.start, "hash-object", str(f)), msg="local_blob is git's id of the local copy")
+        self.assertEqual(e.get("ref_blob"), git(self.ghub, "rev-parse", "HEAD:" + self.rel("t1-backend.yaml")),
+                         msg="ref_blob is the id of the compared copy")
+        self.assertTrue(str(e.get("remedy", "")).startswith(RS_REMEDY) and str(e.get("remedy", "")).endswith("t1-backend.yaml"),
+                        msg="remedy should be `%s <path>`; got %r" % (RS_REMEDY, e.get("remedy")))
+        self.assertTrue(f.exists(), msg="a differing copy is never deleted by the sweep")
+
+    def test_discard_differing_deletes_only_a_path_that_still_differs(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        f1 = self.put("t1-backend.yaml", rs_record(n=62))
+        f2 = self.put("t2-frontend.yaml", rs_record(n=63))  # unpushed, must survive
+        _, rep = self.sweep()
+        path = self.entry(rep, "t1-backend.yaml").get("path")
+        proc, rep2 = self.sweep("--discard-differing", str(path))
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertEqual(self.entry(rep2, "t1-backend.yaml").get("action"), "discarded", msg="the owner exit discards the differing copy")
+        self.assertFalse(f1.exists(), msg="origin wins: the discarded copy is deleted")
+        self.assertTrue(f2.exists(), msg="--discard-differing names one path; the unpushed copy is untouched")
+
+    def test_discard_differing_refuses_a_path_that_is_identical(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        proc, rep = self.sweep("--discard-differing", str(Path(rs_dir()) / "t1-backend.yaml"))
+        self.assertEqual((proc.rc, rep.get("error")), (2, "not-differing"), msg=proc.describe())
+        self.assertTrue(f.exists(), msg="the refusal deletes nothing: an identical copy is not the owner exit's to discard")
+
+    def test_an_unpushed_copy_is_kept(self):
+        f = self.put("t1-backend.yaml", rs_record())
+        proc, rep = self.sweep()
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("unpushed", "kept"), msg=repr(e))
+        self.assertTrue(f.exists(), msg="a copy that is nowhere on origin is never deleted (a failed push deletes nothing)")
+
+    def test_a_completed_copy_over_a_failed_record_is_an_update_and_is_kept(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record("failed", 61)})
+        f = self.put("t1-backend.yaml", rs_record("completed", 62))
+        _, rep = self.sweep()
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("update", "kept"), msg=repr(e))
+        self.assertTrue(f.exists())
+
+    def test_a_nested_file_under_the_results_folder_is_classified(self):
+        self.on_master({self.rel("nested/extra.yaml"): "a: 1\n"})
+        f = self.put("nested/extra.yaml", "a: 1\n")
+        _, rep = self.sweep()
+        e = self.entry(rep, "nested/extra.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("proven", "deleted"), msg="ls-tree -r sees nested paths: %r" % e)
+        self.assertFalse(f.exists())
+
+    def test_a_crlf_copy_of_an_lf_blob_is_proven_by_git_with_filters_on(self):
+        git(self.main, "config", "core.autocrlf", "true")
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record().replace("\n", "\r\n"))
+        _, rep = self.sweep()
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual(e.get("state"), "proven", msg="hash-object with filters on makes a CRLF copy equal to the LF blob: %r" % e)
+        self.assertFalse(f.exists())
+
+    def test_a_dry_run_reports_would_delete_and_deletes_nothing(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        _, rep = self.sweep("--dry-run")
+        self.assertEqual(self.entry(rep, "t1-backend.yaml").get("action"), "would-delete")
+        self.assertTrue(f.exists(), msg="--dry-run deletes nothing")
+
+    def test_sweep_records_refuses_to_ride_with_a_writing_flag(self):
+        proc = self.cli("--sweep-records", "--pr", "61")
+        self.assertEqual((proc.rc, (proc.json() or {}).get("error")), (2, "sweep-usage"), msg=proc.describe())
+
+    def test_sweep_works_without_a_local_contract_file(self):
+        slug = "2026-11-02-no-local-contract"
+        self.on_master({self.rel("t1-x.yaml", slug): rs_record()})
+        f = self.put("t1-x.yaml", rs_record(), slug=slug)
+        proc, rep = self.sweep(slug=slug)
+        self.assertEqual(proc.rc, 0, msg="no contract-not-found for the sweep: " + proc.describe())
+        self.assertFalse(f.exists(), msg="the sweep needs the slug, not a contract file")
+
+    # -- links ------------------------------------------------------------------------------------
+    def _link_dir(self, link, target):
+        """A directory link at ``link`` pointing at ``target`` (a junction on Windows); the test skips when none can be made."""
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if os.name == "nt":
+                import _winapi
+                _winapi.CreateJunction(str(target), str(link))
+            else:
+                os.symlink(str(target), str(link), target_is_directory=True)
+        except (OSError, ImportError, AttributeError, NotImplementedError) as exc:
+            self.skipTest("a directory link cannot be created here: %s" % exc)
+        self.addCleanup(self._unlink_dir, link)
+
+    @staticmethod
+    def _unlink_dir(link):
+        if os.path.lexists(link):
+            try:
+                os.rmdir(link)  # a junction or a Windows directory link: removes the link, never the target
+            except OSError:
+                os.unlink(link)
+
+    def _linked_results(self, linked):
+        """Origin holds t1; a copy byte-identical to it sits OUTSIDE the tree, reached through a link at ``linked``."""
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        outside = self.tmp / "outside-the-tree"
+        if linked == "slug folder":
+            copy = outside / RS_SLUG / "t1-backend.yaml"
+            link, target = self.start / rs_dir(), outside / RS_SLUG
+        else:
+            copy = outside / "results" / RS_SLUG / "t1-backend.yaml"
+            link, target = self.start / ".claude" / "orchestrator" / "results", outside / "results"
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(rs_record().encode("utf-8"))
+        self._link_dir(link, target)
+        return copy
+
+    def _assert_links_are_unsafe_and_kept(self, linked):
+        copy = self._linked_results(linked)
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        entries = (rep.get("records_leftover") or {}).get("entries", [])
+        self.assertTrue(entries, msg="the link is an untracked leftover and gets an entry: %r" % rep.get("records_untracked"))
+        for e in entries:
+            self.assertEqual((e.get("state"), e.get("action")), ("unsafe", "kept"),
+                             msg="a copy reached through a link (%s) is never proven, even when identical to origin's: %r" % (linked, e))
+        self.assertTrue(copy.exists(), msg="the file the link points at, outside the tree, is untouched")
+
+    def test_a_results_folder_that_is_a_link_to_a_folder_outside_the_tree_is_unsafe_and_kept(self):
+        self._assert_links_are_unsafe_and_kept("slug folder")
+
+    def test_a_parent_folder_of_the_results_that_is_a_link_outside_the_tree_is_unsafe_and_kept(self):
+        self._assert_links_are_unsafe_and_kept("parent folder")
+
+    # -- the last look before the delete ------------------------------------------------------------
+    def test_a_copy_rewritten_between_the_classification_and_the_delete_is_kept(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        changed = rs_record(n=99)
+        # the second `git hash-object` is the re-hash right before the delete; the wrapper rewrites the file just before it
+        self.fail_git(rewrite={"sub": "hash-object", "nth": 2, "file": str(f), "text": changed})
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual(e.get("action"), "kept", msg=repr(e))
+        self.assertIn("changed since it was classified", str(e.get("reason")), msg=repr(e))
+        self.assertEqual(f.read_text(encoding="utf-8"), changed, msg="the newer bytes are still there")
+
+    def test_a_copy_that_cannot_be_removed_is_kept_and_says_so(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        if os.name == "nt":
+            hold = open(f, "rb")  # Windows refuses to delete a file that is open without the delete share
+            self.addCleanup(hold.close)
+        else:
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                self.skipTest("root removes files from a read-only folder")
+            f.parent.chmod(0o555)
+            self.addCleanup(f.parent.chmod, 0o755)
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("proven", "kept"), msg=repr(e))
+        self.assertIn("could not be removed", str(e.get("reason")), msg=repr(e))
+        self.assertTrue(f.exists())
+
+    # -- the mode of the blob on origin ---------------------------------------------------------------
+    def test_a_symlink_blob_on_origin_whose_text_equals_the_copy_is_never_proof(self):
+        self.on_master_blob(self.rel("t1-backend.yaml"), rs_record(), "120000")
+        f = self.put("t1-backend.yaml", rs_record())
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertNotEqual(e.get("state"), "proven", msg="a mode-120000 blob is a link, not a copy of the file: %r" % e)
+        self.assertTrue(f.exists(), msg="nothing a link blob 'proved' is deleted")
+
+    def test_a_regular_or_an_executable_blob_on_origin_is_proof(self):
+        for mode in ("100644", "100755"):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.on_master_blob(self.rel("t1-backend.yaml"), rs_record(), mode)
+                f = self.put("t1-backend.yaml", rs_record())
+                _, rep = self.sweep()
+                self.assertEqual(self.entry(rep, "t1-backend.yaml").get("state"), "proven", msg="mode %s" % mode)
+                self.assertFalse(f.exists())
+
+    # -- which slug ------------------------------------------------------------------------------------
+    def test_a_partial_mistyped_empty_or_glob_slug_is_refused_and_never_reported_clean(self):
+        for bad in ("2026-11-02-sweep-fix", "2026-11-02-sweep-fixtures", "", "*", "2026-11-02-sweep-fixture*", "2026-1?-02-sweep-fixture"):
+            with self.subTest(slug=bad):
+                proc, rep = self.sweep(slug=bad)
+                self.assertEqual(proc.rc, 2, msg="a slug that names no contract and no results folder is a usage error: " + proc.describe())
+                self.assertTrue(rep.get("error"), msg=repr(rep))
+                self.assertFalse([l for l in rep.get("tree_lines", []) if "clean" in str(l)],
+                                 msg="no `tree <root>: clean` line for a slug that matched nothing: %r" % rep)
+
+    def test_the_real_slug_with_nothing_to_sweep_is_still_clean(self):
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertTrue(self.lines(rep)[0].endswith(": clean"), msg=self.lines(rep))
+
+    def test_the_sweep_cannot_ride_with_locate_parent(self):
+        proc = self.cli("--sweep-records", "--locate-parent")
+        self.assertEqual((proc.rc, (proc.json() or {}).get("error")), (2, "sweep-usage"),
+                         msg="--locate-parent would answer first and the sweep would never run: " + proc.describe())
+
+    def test_the_sweep_cannot_ride_with_record_subtask_resume_or_preconditions(self):
+        for extra in (("--record-subtask", RS_T1, "--issue", "5", "--base", "master", "--brief", "none"), ("--resume",), ("--preconditions",)):
+            with self.subTest(extra=extra):
+                proc = self.cli("--sweep-records", *extra)
+                self.assertEqual((proc.rc, (proc.json() or {}).get("error")), (2, "sweep-usage"),
+                                 msg="%s would answer instead of the sweep: %s" % (extra[0], proc.describe()))
+
+    def test_the_sweep_only_flags_are_refused_outside_the_sweep(self):
+        for extra in (("--from", "{start}"), ("--removed", "{tmp}/gone-tree"), ("--discard-differing", "{rel}")):
+            with self.subTest(flag=extra[0]):
+                value = extra[1].format(start=self.start, tmp=self.tmp, rel=self.rel("t1-backend.yaml"))
+                proc = self.cli("--status", extra[0], value)
+                self.assertEqual(proc.rc, 2, msg="%s means nothing without --sweep-records and is refused: %s" % (extra[0], proc.describe()))
+                self.assertTrue((proc.json() or {}).get("error"), msg=proc.describe())
+
+    def test_the_sweep_is_refused_like_every_mode_when_gh_repo_is_set_before_any_gh_read(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        proc = self.cli("--sweep-records", "--from", str(self.start), env_extra={"GH_REPO": "someone-else/other-repo"})
+        self.assertEqual((proc.rc, (proc.json() or {}).get("error")), (8, "gh-repo-set"), msg=proc.describe())
+        self.assertEqual(self.tools.gh_calls(), [], msg="the refusal comes before any gh read")
+        self.assertTrue(f.exists())
+
+
+# ---------------------------------------------------------------------------
+# The stable records branch (I-2, I-3, I-4, I-6)
+# ---------------------------------------------------------------------------
+class RecordsStableBranchTests(RecordsCase):
+    def test_a_tip_record_with_an_open_pull_request_is_proof(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        self.open_prs(RS_BRANCH)
+        f = self.put("t1-backend.yaml", rs_record())
+        _, rep = self.sweep()
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("proven", "deleted"), msg=repr(e))
+        self.assertIn(RS_BRANCH, str(e.get("ref")), msg="the entry's ref says the proof was the branch tip")
+        self.assertFalse(f.exists())
+
+    def test_a_tip_record_without_an_open_pull_request_is_never_proof_and_reads_stranded(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        _, rep = self.sweep()
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertNotEqual(e.get("state"), "proven", msg="a tip with no open pull request is not a compared ref: %r" % e)
+        self.assertTrue(f.exists())
+        self.assertTrue(any(str(p).endswith("t1-backend.yaml") for p in self.key(rep, "records_stranded")),
+                        msg="records on the tip that are not on origin/<default>, with no open pull request, are stranded")
+
+    def test_a_commit_pushed_after_the_last_pull_request_merged_reads_stranded(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record(), self.rel("t2-frontend.yaml"): rs_record(n=62)})
+        _, rep = self.status()
+        stranded = [str(p) for p in self.key(rep, "records_stranded")]
+        self.assertTrue(any(p.endswith("t2-frontend.yaml") for p in stranded) and not any(p.endswith("t1-backend.yaml") for p in stranded),
+                        msg="only the path that is not identical on origin/<default> is stranded: %r" % stranded)
+
+    def test_a_pull_request_closed_unmerged_after_the_sweep_holds_the_flip_and_names_the_records_step(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        self.open_prs(RS_BRANCH)
+        f = self.put("t1-backend.yaml", rs_record())
+        self.sweep()
+        self.assertFalse(f.exists(), msg="precondition: the sweep deleted the copy while the pull request was open")
+        self.open_prs()  # the pull request is closed unmerged
+        _, rep = self.status()
+        self.assertEqual(self.key(rep, "records_reading"), "ok")
+        self.assertTrue(any(str(p).endswith("t1-backend.yaml") for p in self.key(rep, "records_stranded")))
+        self.assertEqual((rep.get("next_move") or {}).get("held"), "records-stranded", msg="the flip is held: %r" % rep.get("next_move"))
+        self.assertNotIn(RS_T1, (rep.get("next_move") or {}).get("sub_tasks", []), msg="the record on the tip is still evidence: t1 is not re-dispatched")
+        self.assertEqual((rep.get("completion") or {}).get("verdict"), "pending")
+        self.assertEqual((rep.get("next_command") or {}).get("commands", [None])[0], "/pr-merged --records %s" % RS_SLUG)
+
+    def test_the_open_pull_request_lookup_uses_head_and_finds_it_beyond_200_open_pull_requests(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        prs = [{"headRefName": "feature/other-%d" % i, "url": "u%d" % i, "baseRefName": "master"} for i in range(205)]
+        prs.append({"headRefName": RS_BRANCH, "url": "https://github.com/example-owner/example-repo/pull/99", "baseRefName": "master"})
+        self.tools.set_gh(open_prs=prs)
+        f = self.put("t1-backend.yaml", rs_record())
+        _, rep = self.sweep()
+        self.assertEqual(self.entry(rep, "t1-backend.yaml").get("state"), "proven", msg="the --limit 200 cap must not hide the stable branch's pull request")
+        heads = [c["args"] for c in self.tools.gh_calls() if c["args"][:2] == ["pr", "list"] and "--head" in c["args"]]
+        self.assertTrue(any(RS_BRANCH in a for a in heads), msg="gh pr list --head %s should have been asked; calls: %r" % (RS_BRANCH, self.tools.gh_calls()))
+        self.assertFalse(f.exists())
+
+    def test_no_open_pull_request_at_the_moment_of_deletion_deletes_nothing_the_tip_proved(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        pr = [{"headRefName": RS_BRANCH, "url": "https://github.com/example-owner/example-repo/pull/99", "baseRefName": "master"}]
+        self.tools.set_gh(pr_list_sequence=[pr, []])  # open when first read, closed when read again
+        f = self.put("t1-backend.yaml", rs_record())
+        _, rep = self.sweep()
+        self.assertTrue(f.exists(), msg="the open pull request is re-read right before the first delete; none open -> nothing proven by the tip is deleted")
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("proven", "kept"), msg="the tip proved it; the re-read only stopped the delete: %r" % e)
+        self.assertEqual(e.get("ref"), "origin/" + RS_BRANCH, msg="the proof was the records branch tip: %r" % e)
+        self.assertIn("no open pull request holds", str(e.get("reason")), msg="the entry says why nothing was deleted: %r" % e)
+        heads = [c for c in self.tools.gh_calls() if c["args"][:2] == ["pr", "list"] and "--head" in c["args"]]
+        self.assertEqual(len(heads), 2, msg="one --head read for the reading, one re-read before the first delete: %r" % heads)
+
+    def test_a_prefix_similar_branch_of_another_contract_or_suffix_is_ignored(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        self.open_prs(RS_BRANCH + "-2")  # not the stable branch
+        self.tools.set_gh(ignore_head=True)  # the lookup returns the near miss whatever --head says: only the script's own filter can reject it
+        f = self.put("t1-backend.yaml", rs_record())
+        _, rep = self.sweep()
+        self.assertNotEqual(self.entry(rep, "t1-backend.yaml").get("state"), "proven", msg="only the exact head name docs/<slug>-records counts")
+        self.assertTrue(f.exists())
+
+    def _pr_entry(self, number, **extra):
+        return {"headRefName": RS_BRANCH, "url": "https://github.com/example-owner/example-repo/pull/%d" % number,
+                "baseRefName": "master", **extra}
+
+    def test_a_pull_request_from_a_fork_with_the_same_branch_name_is_not_the_stable_branchs_pull_request(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        for extra in ({"isCrossRepository": True},
+                      {"isCrossRepository": True, "headRepositoryOwner": {"login": "some-forker"}}):
+            with self.subTest(fork=extra):
+                self.tools.set_gh(open_prs=[self._pr_entry(77, **extra)])
+                f = self.put("t1-backend.yaml", rs_record())
+                _, rep = self.sweep()
+                e = self.entry(rep, "t1-backend.yaml")
+                self.assertNotEqual(e.get("state"), "proven", msg="a fork's pull request does not hold origin's branch: %r" % e)
+                self.assertTrue(f.exists(), msg="nothing is deleted on a fork's pull request")
+
+    def test_the_repositorys_own_pull_request_still_counts_beside_a_fork_with_the_same_branch_name(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        self.tools.set_gh(open_prs=[self._pr_entry(77, isCrossRepository=True, headRepositoryOwner={"login": "some-forker"}),
+                                    self._pr_entry(78, isCrossRepository=False, headRepositoryOwner={"login": "example-owner"})])
+        f = self.put("t1-backend.yaml", rs_record())
+        _, rep = self.sweep()
+        self.assertEqual(self.entry(rep, "t1-backend.yaml").get("state"), "proven")
+        self.assertFalse(f.exists())
+
+    def test_a_local_failed_copy_over_a_completed_tip_record_is_differs_and_is_not_offered_for_push(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record("completed", 61)})
+        self.open_prs(RS_BRANCH)
+        self.put("t1-backend.yaml", rs_record("failed", 62))
+        _, rep = self.sweep()
+        e = self.entry(rep, "t1-backend.yaml")
+        self.assertEqual(e.get("state"), "differs", msg="a failed copy is never pushed over a completed record: %r" % e)
+        self.assertFalse([p for p in self.key(rep, "records_unpushed") if str(p).endswith("t1-backend.yaml")],
+                         msg="a differing copy is not in records_unpushed")
+
+    def test_a_local_copy_identical_to_a_stranded_tip_is_listed_for_the_records_step(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        self.put("t1-backend.yaml", rs_record())
+        _, rep = self.status()
+        self.assertTrue(any(str(p).endswith("t1-backend.yaml") for p in self.key(rep, "records_unpushed")),
+                        msg="without an open pull request the tip is not compared, so the copy reads unpushed")
+        self.assertTrue(any(str(p).endswith("t1-backend.yaml") for p in self.key(rep, "records_stranded")))
+
+    # -- W1: a tip that origin/<default> already contains is never stranded ---------------------------------
+    def _merged_tip_then_edited_on_master(self):
+        """The records pull request merged (its tip is an ancestor of origin/master), the branch was kept, and the
+        same record path was later changed on master through another route."""
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        git(self.ghub, "fetch", "-q", "origin")
+        git(self.ghub, "switch", "-q", "master")
+        git(self.ghub, "pull", "-q", "--ff-only", "origin", "master")
+        git(self.ghub, "merge", "--no-ff", "-q", "-m", "records pull request merged", RS_BRANCH)
+        git(self.ghub, "push", "-q", "origin", "master")
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=99)})  # another route changes the record afterwards
+        self.assertEqual(git(self.ghub, "rev-parse", "origin/" + RS_BRANCH), git(self.ghub, "rev-parse", RS_BRANCH),
+                         msg="precondition: the kept branch still has its tip on origin")
+        git(self.ghub, "merge-base", "--is-ancestor", "origin/" + RS_BRANCH, "origin/master")  # raises if it is not an ancestor
+
+    def test_a_kept_records_branch_whose_tip_was_merged_is_not_stranded_when_a_path_later_changed_on_master(self):
+        self._merged_tip_then_edited_on_master()
+        _, rep = self.status()
+        self.assertEqual(self.key(rep, "records_reading"), "ok")
+        self.assertEqual(self.key(rep, "records_stranded"), [],
+                         msg="a tip that is an ancestor of origin/<default> was merged: its blobs differing from master's now are not stranded")
+        self.assertNotEqual((rep.get("next_move") or {}).get("held"), "records-stranded", msg="the flip is not held: %r" % rep.get("next_move"))
+        commands = list((rep.get("next_command") or {}).get("commands", []))
+        self.assertNotIn("/pr-merged --records %s" % RS_SLUG, commands, msg="no records step is named for a merged tip: %r" % commands)
+        self.assertNotEqual((rep.get("completion") or {}).get("next", {}).get("commands", [None])[:1], ["/pr-merged --records %s" % RS_SLUG])
+
+    def test_dispatch_is_not_refused_with_exit_12_for_a_merged_records_tip(self):
+        self._merged_tip_then_edited_on_master()
+        proc = self.cli("--dispatch", RS_T2, "--dry-run")
+        self.assertNotEqual(proc.rc, 12, msg="a merged tip is not stranded, so dispatch is not refused as records-unpushed: " + proc.describe())
+
+    def test_a_tip_that_is_not_an_ancestor_of_master_with_no_open_pull_request_is_still_stranded(self):
+        # the guard of the genuine case beside W1: master moved on, but the tip was never merged into it
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=99)})
+        self.on_branch({self.rel("t2-frontend.yaml"): rs_record(n=62)})
+        _, rep = self.status()
+        self.assertTrue(any(str(p).endswith("t2-frontend.yaml") for p in self.key(rep, "records_stranded")),
+                        msg="a tip that origin/<default> does not contain, with no open pull request, is stranded: %r" % rep.get("records_stranded"))
+        self.assertEqual((rep.get("next_move") or {}).get("held"), "records-stranded")
+
+
+# ---------------------------------------------------------------------------
+# I-3, I-5, I-7, I-9: a failed read is seen, and an unreadable reading holds the loop
+# ---------------------------------------------------------------------------
+class RecordsUnverifiableTests(RecordsCase):
+    def _cases(self):
+        path = self.rel("t1-backend.yaml")
+        return [
+            ("ls-remote", lambda: self.fail_git(["ls-remote"]), RS_BRANCH, ("transient",)),
+            ("fetch", lambda: self.fail_git(["fetch"]), "origin/master", ("transient",)),
+            ("ls-tree", lambda: self.fail_git(["ls-tree"]), "origin/master", ("transient",)),
+            ("blob", lambda: self.fail_git(["show", "t1-backend.yaml"], ["cat-file", "t1-backend.yaml"]),
+             "origin/master:" + path, ("transient",)),
+            # gh answers but the lookup fails while gh is signed in: worth a retry
+            ("gh", lambda: self.tools.set_gh(fail_commands=["pr list"]), "gh", ("transient",)),
+            # gh is not installed: no retry helps
+            ("gh-missing", self.no_gh, "gh", ("persistent",)),
+        ]
+
+    def test_every_failed_read_makes_the_reading_unverifiable_names_its_cause_and_deletes_nothing(self):
+        for name, inject, cause_has, failures in self._cases():
+            with self.subTest(read=name):
+                self.setUp()  # a fresh world per read (addCleanup keeps the earlier ones until the end)
+                self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+                f = self.put("t1-backend.yaml", rs_record())
+                inject()
+                proc, rep = self.sweep()
+                self.assertEqual(proc.rc, 10, msg="an unverifiable sweep exits 10: " + proc.describe())
+                self.assertEqual(rep.get("records_reading"), "unverifiable", msg=repr(sorted(rep)))
+                self.assertIn(cause_has, str(rep.get("records_reading_cause")), msg="the cause names the exact failing ref or <ref>:<path>")
+                self.assertEqual((rep.get("records_failure"),), failures, msg="the failure class of a failed %s read" % name)
+                self.assertTrue(f.exists(), msg="nothing is deleted on an unreadable reading")
+                self.assertEqual((rep.get("records_leftover") or {}).get("entries", []), [], msg="no entry is classified when a read failed")
+
+    def test_gh_that_is_present_but_not_signed_in_is_a_persistent_failure_whose_cause_says_to_authenticate(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        self.tools.set_gh(fail_commands=["pr list", "api user"])  # gh is installed and answers nothing: not signed in
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 10, msg=proc.describe())
+        self.assertEqual((rep.get("records_reading"), rep.get("records_failure")), ("unverifiable", "persistent"),
+                         msg="a retry cannot fix a gh that is not authenticated: %r" % sorted(rep))
+        self.assertIn("authenticate", str(rep.get("records_reading_cause")).lower(),
+                      msg="the cause tells the owner to authenticate gh: %r" % rep.get("records_reading_cause"))
+        self.assertTrue(f.exists(), msg="nothing is deleted on an unreadable reading")
+
+    def test_a_read_of_the_contract_delivery_record_that_fails_makes_the_reading_unverifiable(self):
+        # The delivery is evidence (C-B1): reading it is one more read, and a failed one is seen, never read as "absent".
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(), self.rel("contract-delivery.yaml"): "status: delivered\n"})
+        f = self.put("t1-backend.yaml", rs_record())
+        g = self.put("contract-delivery.yaml", "status: delivered\n")
+        self.fail_git(["show", "contract-delivery.yaml"], ["cat-file", "contract-delivery.yaml"])
+        proc, rep = self.sweep()
+        self.assertEqual((proc.rc, rep.get("records_reading")), (10, "unverifiable"), msg=proc.describe())
+        self.assertIn("contract-delivery.yaml", str(rep.get("records_reading_cause")), msg="the cause names the exact <ref>:<path>")
+        self.assertTrue(f.exists() and g.exists(), msg="nothing is deleted on an unreadable reading")
+
+    def test_a_record_that_does_not_parse_is_a_persistent_failure_naming_its_path(self):
+        self.on_master({self.rel("t1-backend.yaml"): "{ not: [yaml"})
+        f = self.put("t1-backend.yaml", "{ not: [yaml")
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 10, msg=proc.describe())
+        self.assertEqual((rep.get("records_reading"), rep.get("records_failure")), ("unverifiable", "persistent"), msg=repr(sorted(rep)))
+        self.assertIn("origin/master:" + self.rel("t1-backend.yaml"), str(rep.get("records_reading_cause")))
+        self.assertTrue(f.exists())
+
+    def test_an_unreadable_reading_empties_released_builds_no_packet_and_holds_the_verdict_even_with_zero_leftovers(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        self.put("t1-backend.yaml", rs_record())
+        self.fail_git(["fetch"])
+        proc, rep = self.status()
+        self.assertEqual(self.key(rep, "records_reading"), "unverifiable")
+        self.assertEqual(rep.get("released"), [], msg="nothing is released on missing evidence")
+        self.assertFalse(rep.get("dispatch"), msg="no dispatch packet is built")
+        self.assertEqual((rep.get("next_move") or {}).get("held"), "records-unverifiable")
+        self.assertEqual((rep.get("completion") or {}).get("verdict"), "unverifiable")
+        self.assertEqual(rep["next_command"]["commands"], [])
+        # zero leftovers: the same hold
+        (self.start / rs_dir() / "t1-backend.yaml").unlink()
+        _, rep0 = self.status()
+        self.assertEqual(rep0.get("records_reading"), "unverifiable", msg="the reading does not depend on having leftovers")
+
+    def test_dispatch_exits_12_and_never_10_on_an_unreadable_reading_also_as_a_dry_run(self):
+        self.fail_git(["fetch"])
+        for extra in ((), ("--dry-run",)):
+            with self.subTest(extra=extra):
+                proc = self.cli("--dispatch", RS_T1, *extra)
+                self.assertEqual((proc.rc, (proc.json() or {}).get("error")), (12, "records-unverifiable"), msg=proc.describe())
+
+    def test_a_writing_pr_run_with_an_unreadable_reading_writes_nothing_and_exits_10(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        self.tools.set_gh(pr_view={"61": _pr(61, "task/%s/%s" % (RS_SLUG, RS_T1))})
+        self.fail_git(["ls-remote"])
+        proc = self.cli("--pr", "61")
+        self.assertEqual(proc.rc, 10, msg="a --pr writing run whose reading is unverifiable exits 10: " + proc.describe())
+        self.assertEqual(self.results(), [], msg="and writes no record")
+
+    def test_a_record_delivery_writing_run_with_an_unreadable_reading_writes_nothing_and_exits_10(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=50)})
+        self.tools.set_gh(pr_view={"50": _pr(50, "feature/start")})
+        self.fail_git(["ls-remote"])
+        proc = self.cli("--pr", "50", "--record-delivery")
+        self.assertEqual(proc.rc, 10, msg="a --record-delivery writing run whose reading is unverifiable exits 10: " + proc.describe())
+        self.assertEqual(self.results(), [], msg="and writes neither a record nor the delivery record")
+        self.assertFalse((self.start / ".claude/orchestrator/state").is_dir() and list((self.start / ".claude/orchestrator/state").rglob("*.yaml")),
+                         msg="and no state store")
+
+    def test_local_evidence_only_skips_deleting_and_changes_no_decision(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        proc, rep = self.sweep("--local-evidence-only")
+        self.assertEqual(rep.get("records_action"), "skipped-by-owner")
+        self.assertEqual(rep.get("records_reading"), "ok", msg="the flag never changes the reading")
+        self.assertTrue(f.exists(), msg="skipped-by-owner deletes nothing")
+        # an `ok` reading with something released: the flag changes neither the reading, nor released, nor the verdict
+        _, plain_ok = self.status()
+        _, flagged_ok = self.status("--local-evidence-only")
+        self.assertEqual(plain_ok.get("released"), [RS_T2], msg="precondition: t1 is on origin, so t2 is released: %r" % plain_ok.get("released"))
+        self.assertEqual(flagged_ok.get("released"), plain_ok.get("released"))
+        self.assertEqual(flagged_ok.get("records_reading"), "ok")
+        self.assertEqual(flagged_ok.get("records_action"), "skipped-by-owner")
+        self.assertEqual((flagged_ok.get("completion") or {}).get("verdict"), (plain_ok.get("completion") or {}).get("verdict"))
+        self.assertEqual((flagged_ok.get("next_move") or {}).get("action"), (plain_ok.get("next_move") or {}).get("action"))
+        self.fail_git(["fetch"])
+        _, plain = self.status()
+        _, flagged = self.status("--local-evidence-only")
+        self.assertEqual(flagged.get("records_action"), "skipped-by-owner")
+        for k in ("records_reading", "released"):
+            self.assertEqual(flagged.get(k), plain.get(k), msg="--local-evidence-only leaves %s unchanged" % k)
+        self.assertEqual((flagged.get("completion") or {}).get("verdict"), (plain.get("completion") or {}).get("verdict"))
+        self.assertEqual(flagged.get("records_reading"), "unverifiable", msg="and never lifts the hold")
+        proc = self.cli("--dispatch", RS_T1, "--local-evidence-only")
+        self.assertEqual(proc.rc, 12, msg="--local-evidence-only never lifts the dispatch refusal: " + proc.describe())
+
+
+# ---------------------------------------------------------------------------
+# I-5: the Next Command
+# ---------------------------------------------------------------------------
+class RecordsNextCommandTests(RecordsCase):
+    BASE = ["/clear", "/advance %s" % RS_SLUG]
+
+    def test_unpushed_records_put_the_records_step_first_and_before_clear(self):
+        self.put("t1-backend.yaml", rs_record())
+        _, rep = self.status()
+        self.key(rep, "records_unpushed")
+        nc = rep["next_command"]
+        self.assertEqual(nc["commands"], ["/pr-merged --records %s" % RS_SLUG] + self.BASE, msg=repr(nc))
+        self.assertTrue(nc["reason"].startswith("records not on their way to origin (1 files); "), msg=nc["reason"])
+
+    def test_stranded_records_also_put_the_records_step_first(self):
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record()})
+        _, rep = self.status()
+        self.key(rep, "records_stranded")
+        self.assertEqual(rep["next_command"]["commands"][:1], ["/pr-merged --records %s" % RS_SLUG], msg=repr(rep["next_command"]))
+
+    def test_a_transient_failure_says_retry_and_never_suggests_the_owner_flag(self):
+        self.fail_git(["fetch"])
+        _, rep = self.status()
+        nc = rep["next_command"]
+        self.assertEqual(self.key(rep, "records_failure"), "transient")
+        self.assertEqual(nc["commands"], [])
+        self.assertTrue(nc["reason"].startswith("records could not be read (") and nc["reason"].endswith("); retry once git and GitHub answer"), msg=nc["reason"])
+        self.assertNotIn("--local-evidence-only", nc["reason"])
+
+    def test_a_persistent_failure_names_the_cause_and_the_fix(self):
+        self.on_master({self.rel("t1-backend.yaml"): "{ not: [yaml"})
+        _, rep = self.status()
+        nc = rep["next_command"]
+        self.assertEqual(self.key(rep, "records_failure"), "persistent")
+        self.assertEqual(nc["commands"], [])
+        self.assertTrue(nc["reason"].startswith("records cannot be read: "), msg=nc["reason"])
+        self.assertIn(self.rel("t1-backend.yaml"), nc["reason"])
+        self.assertIn("dispatch stays refused until then", nc["reason"])
+        self.assertNotIn("--local-evidence-only", nc["reason"])
+
+    def test_a_blocked_move_with_records_to_push_names_the_records_step_alone(self):
+        # t1's record on origin is neither completed nor failed, so t2 (which depends on t1) is blocked and no sub-task is released.
+        self.on_master({self.rel("t1-backend.yaml"): rs_record("pending", 61)})
+        self.put("notes.yaml", "a: 1\n")  # an unpushed file in the results folder
+        _, rep = self.status()
+        self.assertEqual((rep.get("next_move") or {}).get("action"), "blocked", msg=repr(rep.get("next_move")))
+        nc = rep["next_command"]
+        self.assertEqual(nc["commands"], ["/pr-merged --records %s" % RS_SLUG],
+                         msg="a blocked move has no command of its own, so the records step stands alone: %r" % nc)
+        self.assertTrue(nc["reason"].startswith("records not on their way to origin (1 files); nothing is ready to dispatch"), msg=nc["reason"])
+
+    def test_a_differing_copy_only_names_the_remedy_and_leaves_the_commands_alone(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        self.put("t1-backend.yaml", rs_record(n=62))
+        _, rep = self.status()
+        self.assertTrue([p for p in self.key(rep, "records_differing")], msg="the differing copy is listed")
+        self.assertEqual(rep["next_command"]["commands"], self.BASE, msg=repr(rep["next_command"]))
+        self.assertIn("--discard-differing", rep["next_command"]["reason"])
+
+    def test_a_completed_redelivery_from_another_pull_request_differs_is_kept_and_the_reason_says_how_to_resolve_it(self):
+        # W6, decision pinned (authoritative): a completed record for pull request B over a completed record for A on origin
+        # is NOT an update. A person decides: it is not pushed, not deleted by the sweep, and the reason names both exits.
+        self.on_master({self.rel("t1-backend.yaml"): rs_record("completed", 61)})
+        f = self.put("t1-backend.yaml", rs_record("completed", 62))
+        proc, swept = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        e = self.entry(swept, "t1-backend.yaml")
+        self.assertEqual((e.get("state"), e.get("action")), ("differs", "kept"), msg="a re-delivery is a person's decision: %r" % e)
+        self.assertTrue(f.exists(), msg="the sweep never deletes a differing copy")
+        self.assertEqual(f.read_bytes(), rs_record("completed", 62).encode("utf-8"), msg="and never rewrites it")
+        _, rep = self.status()
+        self.assertTrue([p for p in self.key(rep, "records_differing") if str(p).endswith("t1-backend.yaml")], msg="listed as differing")
+        self.assertFalse([p for p in rep["records_unpushed"] if str(p).endswith("t1-backend.yaml")],
+                         msg="a differing copy is not offered for the push")
+        nc = rep["next_command"]
+        self.assertNotIn("/pr-merged --records %s" % RS_SLUG, nc["commands"], msg="nothing is pushed: %r" % nc)
+        reason = nc["reason"]
+        self.assertIn("--discard-differing", reason, msg="the reason names the discard exit: %s" % reason)
+        self.assertIn("origin's record", reason, msg="and says that discarding keeps origin's record: %s" % reason)
+        self.assertIn("by hand", reason, msg="and that the owner keeps the local one by hand: %s" % reason)
+        self.assertTrue(f.exists(), msg="reading the status deletes nothing either")
+
+    def test_nothing_left_leaves_the_next_command_byte_identical_to_today(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        _, rep = self.status()
+        self.assertEqual(self.key(rep, "records_reading"), "ok")
+        self.assertEqual(rep["next_command"], {
+            "commands": self.BASE,
+            "reason": "a sub-task is ready to dispatch; the next move is a fresh /advance, and "
+                      "clearing keeps this session's context out of it"})
+
+
+# ---------------------------------------------------------------------------
+# I-9 and the report keys (I-3, I-11)
+# ---------------------------------------------------------------------------
+class RecordsDispatchAndKeysTests(RecordsCase):
+    def test_dispatch_refuses_with_exit_12_on_unpushed_records_also_as_a_dry_run(self):
+        self.put("t1-backend.yaml", rs_record())
+        for extra in ((), ("--dry-run",)):
+            with self.subTest(extra=extra):
+                proc = self.cli("--dispatch", RS_T2, *extra)
+                rep = proc.json() or {}
+                self.assertEqual((proc.rc, rep.get("error")), (12, "records-unpushed"), msg=proc.describe())
+                self.assertIn("/pr-merged --records %s" % RS_SLUG, json.dumps(rep), msg="the refusal carries the remedy")
+
+    def test_a_differing_copy_alone_does_not_refuse_dispatch(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        self.put("t1-backend.yaml", rs_record(n=62))
+        proc = self.cli("--dispatch", RS_T2, "--dry-run")
+        self.assertNotEqual(proc.rc, 12, msg="a differs copy never refuses: " + proc.describe())
+        _, rep = self.status()
+        self.assertTrue(self.key(rep, "records_differing"))
+
+    def test_status_never_refuses_on_unpushed_or_unverifiable_records(self):
+        self.put("t1-backend.yaml", rs_record())
+        proc, rep = self.status()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertEqual(self.key(rep, "records_reading"), "ok")
+        self.fail_git(["fetch"])
+        proc, rep = self.status()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertEqual(self.key(rep, "records_reading"), "unverifiable")
+
+    def test_the_keyed_modes_all_carry_the_records_keys(self):
+        f = self.put("t1-backend.yaml", rs_record())
+        for flags in (("--status",), ("--resume",), ("--dry-run",), ()):
+            with self.subTest(flags=flags):
+                rep = self.report(self.cli(*flags), "the %s report" % (flags or "plain"))
+                for k in ("records_reading", "records_action", "records_untracked", "records_unpushed", "records_differing", "records_stranded"):
+                    self.key(rep, k)
+                self.assertTrue(any(str(p).endswith("t1-backend.yaml") for p in rep["records_untracked"]),
+                                msg="records_untracked lists every untracked results-folder path, always")
+                self.assertEqual(rep["records_action"], "normal")
+
+    def test_the_exempt_modes_carry_no_records_keys(self):
+        for flags in (("--preconditions",), ("--locate-parent",)):
+            with self.subTest(flags=flags):
+                rep = self.report(self.cli(*flags), str(flags))
+                self.assertNotIn("records_reading", rep, msg="%s prints its own JSON and is exempt (I-11 never judges it)" % (flags,))
+        proc = self.cli("--record-subtask", RS_T1, "--issue", "5", "--base", "master", "--brief", "none", "--dry-run")
+        self.assertNotIn("records_reading", proc.json() or {})
+
+    def test_refusals_and_the_dispatch_packet_are_exempt_and_carry_no_records_keys(self):
+        cases = [("a usage refusal", self.cli("--status", "--record-delivery")),
+                 ("contract-not-found", self.cli("--status", slug="2026-11-02-no-such-contract-anywhere")),
+                 ("the dispatch packet", self.cli("--dispatch", RS_T1, "--dry-run"))]
+        for what, proc in cases:
+            with self.subTest(what=what):
+                rep = self.report(proc, what)
+                self.assertNotIn("records_reading", rep, msg="%s prints its own JSON and is exempt: %s" % (what, proc.describe()))
+
+    def test_discard_differing_deletes_nothing_under_a_dry_run_or_the_owner_flag(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        for flag in ("--dry-run", "--local-evidence-only"):
+            with self.subTest(flag=flag):
+                f = self.put("t1-backend.yaml", rs_record(n=62))
+                proc, rep = self.sweep("--discard-differing", self.rel("t1-backend.yaml"), flag)
+                self.assertEqual(proc.rc, 0, msg=proc.describe())
+                self.assertTrue(f.exists(), msg="%s: the differing copy is still there" % flag)
+                self.assertNotEqual(self.entry(rep, "t1-backend.yaml").get("action"), "discarded")
+
+    def test_the_owner_flag_is_accepted_so_that_only_an_older_script_answers_unrecognized_arguments(self):
+        # The skills read `unrecognized arguments: --local-evidence-only` as an older vendored script (I-11).
+        proc = self.cli("--status", "--local-evidence-only")
+        self.assertEqual(proc.rc, 0, msg="the flag exists in 0.14.0: " + proc.describe())
+        self.assertEqual(self.key(self.report(proc, "status"), "records_action"), "skipped-by-owner")
+
+
+# ---------------------------------------------------------------------------
+# I-6, I-7: one evidence rule
+# ---------------------------------------------------------------------------
+def _me(origin, records, stored, tip):
+    try:
+        return pr_merged.merge_evidence(origin, records, stored, branch_heads=tip)
+    except TypeError as exc:
+        raise AssertionError("merge_evidence must take branch_heads= (I-6): %s" % exc)
+
+
+class RecordsEvidencePureTests(unittest.TestCase):
+    def rec(self, status, commit):
+        return {"status": status, "commit": commit}
+
+    def test_a_completed_tip_record_beats_a_failed_origin_record(self):
+        out = _me({RS_T1: self.rec("failed", "o")}, {}, {}, {RS_T1: self.rec("completed", "t")})
+        self.assertEqual(out.get(RS_T1), self.rec("completed", "t"))
+
+    def test_a_stored_completed_record_beats_a_failed_origin_record_in_a_redelivery(self):
+        stored = {RS_T1: self.rec("completed", "s")}
+        out = _me({RS_T1: self.rec("failed", "o")}, dict(stored), stored, {})
+        self.assertEqual(out.get(RS_T1), self.rec("completed", "s"))
+
+    def test_on_equal_status_origin_beats_the_tip_which_beats_the_stored_copy(self):
+        stored = {RS_T1: self.rec("completed", "s")}
+        out = _me({RS_T1: self.rec("completed", "o")}, dict(stored), stored, {RS_T1: self.rec("completed", "t")})
+        self.assertEqual(out.get(RS_T1)["commit"], "o")
+        out = _me({}, dict(stored), stored, {RS_T1: self.rec("completed", "t")})
+        self.assertEqual(out.get(RS_T1)["commit"], "t")
+
+    def test_a_record_written_by_this_run_wins_even_when_it_is_failed(self):
+        written = {RS_T1: self.rec("failed", "w")}
+        out = _me({RS_T1: self.rec("completed", "o")}, written, {}, {RS_T1: self.rec("completed", "t")})
+        self.assertEqual(out.get(RS_T1), self.rec("failed", "w"), msg="rule 1: a failed record this run writes still escalates")
+
+    def test_the_inputs_are_never_mutated(self):
+        origin, records, stored, tip = ({RS_T1: self.rec("failed", "o")}, {RS_T2: self.rec("completed", "r")},
+                                        {}, {RS_T1: self.rec("completed", "t")})
+        before = json.dumps([origin, records, stored, tip], sort_keys=True)
+        _me(origin, records, stored, tip)
+        self.assertEqual(json.dumps([origin, records, stored, tip], sort_keys=True), before)
+
+
+class RecordsEvidenceRunTests(RecordsCase):
+    def test_a_completed_tip_record_over_a_failed_origin_record_does_not_escalate_and_releases_the_dependent(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record("failed", 61)})
+        self.on_branch({self.rel("t1-backend.yaml"): rs_record("completed", 62)})
+        self.open_prs(RS_BRANCH)
+        _, rep = self.status()
+        move = rep.get("next_move") or {}
+        self.assertEqual((move.get("action"), move.get("sub_tasks")), ("dispatch", [RS_T2]), msg="completed beats failed: %r" % move)
+
+    def test_a_swept_tree_releases_the_dependents_of_a_sub_task_recorded_on_origin(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        _, rep = self.status()
+        self.assertEqual(rep.get("released"), [RS_T2], msg="the record is read from origin/<default>, not from a local copy")
+
+    def test_a_failed_record_written_by_this_run_still_escalates_over_a_completed_origin_record(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        self.tools.set_gh(pr_view={"99": _pr(99, "task/%s/%s" % (RS_SLUG, RS_T1), state="CLOSED")})
+        proc = self.cli("--pr", "99")
+        rep = self.report(proc, "`--pr 99`")
+        self.assertEqual(proc.rc, 0, msg="a swept tree must not be refused (G-7) for records origin already holds: " + proc.describe())
+        self.assertEqual((rep.get("next_move") or {}).get("action"), "escalate", msg=repr(rep.get("next_move")))
+
+    def test_no_verdict_names_a_pr_merged_pull_request_command_for_a_recorded_sub_task(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(), self.rel("t2-frontend.yaml"): rs_record(n=62)})
+        _, rep = self.status()
+        self.assertEqual(self.key(rep, "records_reading"), "ok")
+        cmds = list((rep.get("completion") or {}).get("next", {}).get("commands", [])) + list(rep["next_command"]["commands"])
+        self.assertFalse([c for c in cmds if re.match(r"/pr-merged\s+(\d+|<)", c)], msg="I-8 would skip it: %r" % cmds)
+
+
+# ---------------------------------------------------------------------------
+# I-8: re-run guard
+# ---------------------------------------------------------------------------
+class RecordsRerunTests(RecordsCase):
+    def setUp(self):
+        super().setUp()
+        self.tools.set_gh(pr_view={"61": _pr(61, "task/%s/%s" % (RS_SLUG, RS_T1))})
+
+    def test_a_pr_rerun_after_the_sweep_writes_no_record_and_lists_it_as_already_recorded(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        proc = self.cli("--pr", "61")
+        rep = self.report(proc, "`--pr 61`")
+        self.assertEqual(self.results(), [], msg="the sub-task is already completed on origin for this pull request: nothing is written")
+        entries = rep.get("already_recorded")
+        self.assertTrue(isinstance(entries, list) and any(e.get("sub_task") == RS_T1 for e in entries),
+                        msg="report['already_recorded'] should list t1-backend: %r" % entries)
+
+    def test_a_pr_rerun_with_the_local_copy_leaves_its_bytes_alone(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        f = self.put("t1-backend.yaml", rs_record(n=61))
+        before = f.read_bytes()
+        self.cli("--pr", "61")
+        self.assertEqual(f.read_bytes(), before, msg="a re-run rewrites nothing")
+        self.assertFalse(list((self.start / ".claude/orchestrator/state").rglob("*.yaml")) if (self.start / ".claude/orchestrator/state").is_dir() else [],
+                         msg="and writes no state")
+
+    def test_record_delivery_in_a_swept_tree_is_not_refused_and_writes_only_what_is_missing(self):
+        self.tools.set_gh(pr_view={"50": _pr(50, "feature/start")})
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=50)})  # on origin since the records pull request merged
+        proc = self.cli("--pr", "50", "--record-delivery")
+        rep = self.report(proc, "`--record-delivery`")
+        self.assertEqual(proc.rc, 0, msg="G-7 reads the evidence: a record origin holds is not 'missing locally': " + proc.describe())
+        self.assertNotIn("t1-backend.yaml", self.results(), msg="the sub-task origin already holds for this pull request is not rewritten")
+        self.assertIn("t2-frontend.yaml", self.results(), msg="only what is missing is written")
+        self.assertTrue(any(e.get("sub_task") == RS_T1 for e in rep.get("already_recorded") or []), msg=repr(rep.get("already_recorded")))
+
+    def test_a_record_delivery_rerun_writes_no_completion_record_again(self):
+        self.tools.set_gh(pr_view={"50": _pr(50, "feature/start")})
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=50), self.rel("t2-frontend.yaml"): rs_record(n=50)})
+        proc = self.cli("--pr", "50", "--record-delivery")
+        rep = self.report(proc, "`--record-delivery`")
+        self.assertEqual([n for n in self.results() if n.startswith("t")], [], msg="both sub-tasks are held by origin for this pull request: " + proc.describe())
+        self.assertEqual(sorted(e.get("sub_task") for e in rep.get("already_recorded") or []), [RS_T1, RS_T2])
+
+    def _issue_closes(self):
+        return [c["args"] for c in self.tools.gh_calls() if c["args"][:2] == ["issue", "close"]]
+
+    def test_a_pr_rerun_closes_no_issue(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61)})
+        proc = self.cli("--pr", "61")
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertEqual(self._issue_closes(), [], msg="the sub-task was closed by the run that recorded it; a re-run closes nothing")
+
+    def test_a_record_delivery_rerun_closes_no_issue(self):
+        self.tools.set_gh(pr_view={"50": _pr(50, "feature/start")})
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=50), self.rel("t2-frontend.yaml"): rs_record(n=50)})
+        proc = self.cli("--pr", "50", "--record-delivery")
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertEqual(self._issue_closes(), [], msg="every sub-task is already recorded: nothing to close")
+
+    def test_a_record_delivery_rerun_with_the_local_copies_present_rewrites_none_of_them(self):
+        self.tools.set_gh(pr_view={"50": _pr(50, "feature/start")})
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=50), self.rel("t2-frontend.yaml"): rs_record(n=50)})
+        files = {n: self.put(n, rs_record(n=50)) for n in ("t1-backend.yaml", "t2-frontend.yaml")}
+        before = {n: f.read_bytes() for n, f in files.items()}
+        proc = self.cli("--pr", "50", "--record-delivery")
+        rep = self.report(proc, "`--record-delivery`")
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        for n, f in files.items():
+            self.assertEqual(f.read_bytes(), before[n], msg="%s is rewritten by a re-run" % n)
+        self.assertEqual(rep.get("closed"), [], msg="no completion record is written again")
+        self.assertEqual(sorted(e.get("sub_task") for e in rep.get("already_recorded") or []), [RS_T1, RS_T2])
+
+    def test_a_record_delivery_rerun_that_finds_every_record_already_held_writes_no_state_store(self):
+        self.tools.set_gh(pr_view={"50": _pr(50, "feature/start")})
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=50), self.rel("t2-frontend.yaml"): rs_record(n=50)})
+        proc = self.cli("--pr", "50", "--record-delivery")
+        rep = self.report(proc, "`--record-delivery`")
+        self.assertEqual(sorted(e.get("sub_task") for e in rep.get("already_recorded") or []), [RS_T1, RS_T2],
+                         msg="precondition: every record is already held: " + proc.describe())
+        state_dir = self.start / ".claude/orchestrator/state"
+        self.assertEqual(sorted(str(p) for p in state_dir.rglob("*")) if state_dir.is_dir() else [], [],
+                         msg="a re-run that records nothing writes no state store (I-8), --record-delivery included")
+
+    def test_a_different_pull_request_is_still_recorded_as_a_redelivery(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record("failed", 55)})
+        proc = self.cli("--pr", "61")
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertEqual(self.results(), ["t1-backend.yaml"], msg="a failed record is re-recorded as an update")
+        self.assertEqual(self.key(self.report(proc, "`--pr 61`"), "records_reading"), "ok")
+
+
+# ---------------------------------------------------------------------------
+# I-1, I-10: which trees, and the Tree-clean lines
+# ---------------------------------------------------------------------------
+class RecordsTreeTests(RecordsCase):
+    def test_one_line_per_tree_and_a_missing_removed_tree_prints_gone(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        self.put("t1-backend.yaml", rs_record())
+        gone = self.tmp / "records-worktree-removed"
+        proc, rep = self.sweep("--removed", str(gone))
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        lines = self.lines(rep)
+        self.assertEqual(len(lines), 2, msg="one Tree-clean line per --from/--removed tree: %r" % lines)
+        self.assertTrue(lines[0].startswith("tree ") and lines[0].endswith(": clean"), msg=lines)
+        self.assertTrue(lines[1].endswith(": gone") and "records-worktree-removed" in lines[1], msg=lines)
+
+    def test_a_tree_with_a_kept_copy_reports_its_entries_left(self):
+        self.put("t1-backend.yaml", rs_record())
+        _, rep = self.sweep()
+        self.assertRegex(self.lines(rep)[0], r"^tree .*: 1 entries left", msg="a kept copy is counted in the line")
+
+    def test_a_missing_from_tree_is_refused_not_skipped(self):
+        proc, rep = self.sweep(trees=[self.tmp / "no-such-tree"])
+        self.assertEqual((proc.rc, rep.get("error")), (2, "tree-not-found"), msg=proc.describe())
+
+    def test_a_subfolder_is_not_a_tree_root(self):
+        proc, rep = self.sweep(trees=[self.start / "src"])
+        self.assertEqual((proc.rc, rep.get("error")), (2, "not-a-tree-root"), msg=proc.describe())
+
+    def test_a_tree_of_another_repository_is_refused(self):
+        other = self.tmp / "other-repo"
+        other.mkdir()
+        git(other, "init", "-q", "-b", "master")
+        commit(other, {"a.txt": "a\n"}, "x")
+        proc, rep = self.sweep(trees=[other])
+        self.assertEqual((proc.rc, rep.get("error")), (2, "not-this-repository"), msg=proc.describe())
+
+    def test_a_half_removed_tree_prints_gone_partial_and_the_other_trees_are_still_swept(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record())
+        half = self.tmp / "half-removed"
+        half.mkdir()
+        proc, rep = self.sweep("--removed", str(half))
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertTrue(any(l.endswith(": gone-partial") or "gone-partial" in l for l in self.lines(rep)), msg=self.lines(rep))
+        self.assertFalse(f.exists(), msg="the starting tree is still swept")
+
+    def test_the_main_checkout_is_never_swept(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record()})
+        f = self.put("t1-backend.yaml", rs_record(), tree=self.main)
+        proc, rep = self.sweep(trees=[self.main], cwd=self.main)
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertTrue(f.exists(), msg="nothing is deleted in the main checkout")
+        line = self.lines(rep)[0]
+        self.assertTrue("main checkout" in line and "not swept" in line and "(1 leftovers kept)" in line, msg=line)
+
+
+# ---------------------------------------------------------------------------
+# The Contract Delivery Record is evidence too, whether or not a copy of it is still in the starting tree
+# ---------------------------------------------------------------------------
+def rs_parent_record(n=61):
+    """A completion record of a sub-task merged into a parent branch, not the default branch."""
+    return rs_record(n=n).replace("base_ref: master\nbase_is_default: true\n", "base_ref: feature/parent\nbase_is_default: false\n")
+
+
+RS_DELIVERY = ("status: delivered\npull_request: %s\nnumber: 70\nhead_ref: feature/parent\nbase_ref: master\n"
+               "base_is_default: true\ncommit: sha70\nmerged_at: '2026-11-01T00:00:00Z'\nverified: github\n"
+               "recorded_by: pr-merged --record-delivery\n" % _pr_url(70))
+
+
+class RecordsDeliveryEvidenceTests(RecordsCase):
+    def records_on_origin(self, delivery_on="master"):
+        files = {self.rel("t1-backend.yaml"): rs_parent_record(61), self.rel("t2-frontend.yaml"): rs_parent_record(62)}
+        self.on_master(files)
+        if delivery_on == "master":
+            self.on_master({self.rel("contract-delivery.yaml"): RS_DELIVERY})
+        else:
+            self.on_branch({self.rel("contract-delivery.yaml"): RS_DELIVERY})
+            self.open_prs(RS_BRANCH)
+
+    def put_all(self):
+        return [self.put(n, t) for n, t in (("t1-backend.yaml", rs_parent_record(61)), ("t2-frontend.yaml", rs_parent_record(62)),
+                                            ("contract-delivery.yaml", RS_DELIVERY))]
+
+    def delivered(self, rep):
+        return ((rep.get("completion") or {}).get("conditions") or {}).get("delivered")
+
+    def test_a_swept_delivery_record_still_reads_the_contract_as_delivered(self):
+        self.records_on_origin()
+        files = self.put_all()
+        _, before = self.status()
+        self.assertEqual(self.delivered(before), "met", msg="precondition: with the local delivery record the contract reads delivered")
+        proc, rep = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertFalse([f for f in files if f.exists()], msg="precondition: the sweep proved and deleted all three copies")
+        _, after = self.status()
+        self.assertEqual(self.delivered(after), "met",
+                         msg="the delivery on origin/master is evidence once the local copy is swept: %r" % (after.get("completion") or {}).get("reasons"))
+        self.assertEqual(self.results(), [], msg="reading the delivery writes no local contract-delivery.yaml")
+
+    def test_a_delivery_record_on_the_stable_branch_tip_with_an_open_pull_request_reads_as_delivered(self):
+        self.records_on_origin(delivery_on="branch")
+        self.put_all()
+        proc, _ = self.sweep()
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        _, after = self.status()
+        self.assertEqual(self.delivered(after), "met",
+                         msg="the stable branch's tip is evidence while its pull request is open: %r" % (after.get("completion") or {}).get("reasons"))
+        self.assertEqual(self.results(), [])
+
+    def test_a_swept_delivery_still_refuses_the_delivery_of_another_pull_request(self):
+        self.records_on_origin()
+        self.put_all()
+        self.sweep()
+        self.tools.set_gh(pr_view={"51": _pr(51, "feature/start")})
+        proc = self.cli("--pr", "51", "--record-delivery")
+        rep = proc.json() or {}
+        self.assertEqual((proc.rc, rep.get("error"), rep.get("guard")), (9, "delivery-refused", "G-5"),
+                         msg="this contract has one delivery, swept or not: " + proc.describe())
+        self.assertEqual(self.results(), [], msg="the refusal writes no contract-delivery.yaml and no record")
+
+    def test_a_status_run_lists_a_local_unpushed_delivery_record_for_the_records_step_and_writes_nothing(self):
+        self.on_master({self.rel("t1-backend.yaml"): rs_parent_record(61), self.rel("t2-frontend.yaml"): rs_parent_record(62)})
+        self.put("contract-delivery.yaml", RS_DELIVERY)
+        contract = self.start / ".claude" / "concepts" / (RS_SLUG + ".md")
+        before = contract.read_bytes()
+        _, rep = self.status()
+        self.assertTrue(any(str(p).endswith("contract-delivery.yaml") for p in self.key(rep, "records_unpushed")),
+                        msg="a delivery record that is nowhere on origin is unpushed: %r" % rep.get("records_unpushed"))
+        self.assertEqual(rep.get("written_files"), [], msg="--status writes nothing")
+        self.assertEqual(contract.read_bytes(), before, msg="--status is read-only, so the contract is untouched")
+        self.assertNotEqual((rep.get("completion") or {}).get("verdict"), "flipped")
+
+    def test_a_writing_run_in_the_starting_tree_may_flip_on_its_local_delivery_record_and_then_names_the_records_push(self):
+        # Designed behaviour, pinned both ways: only a read-only --status flips nothing. A same-session writing run in the
+        # starting tree with no open records pull request flips on the local delivery record (it IS evidence), and the
+        # Next Command then puts the records step (the push) first because that record is still not on origin.
+        self.on_master({self.rel("t1-backend.yaml"): rs_parent_record(61), self.rel("t2-frontend.yaml"): rs_parent_record(62)})
+        self.put("contract-delivery.yaml", RS_DELIVERY)
+        contract = self.start / ".claude" / "concepts" / (RS_SLUG + ".md")
+        before = contract.read_bytes()
+        proc = self.cli()
+        rep = self.report(proc, "a plain writing run")
+        self.assertEqual(proc.rc, 0, msg=proc.describe())
+        self.assertEqual((rep.get("completion") or {}).get("verdict"), "flipped",
+                         msg="no open records pull request and every condition holds: the writing run flips: %r" % rep.get("completion"))
+        self.assertNotEqual(contract.read_bytes(), before, msg="the flip is written into the starting tree's contract")
+        self.assertEqual(rep["next_command"]["commands"][:1], ["/pr-merged --records %s" % RS_SLUG],
+                         msg="the delivery record is still unpushed, so the push is named first: %r" % rep["next_command"])
+
+
+# ---------------------------------------------------------------------------
+# The scope gate: the records keys do not depend on where the contract file sits
+# ---------------------------------------------------------------------------
+class RecordsScopeGateTests(RecordsCase):
+    def concept(self, tree):
+        return Path(tree) / ".claude" / "concepts" / (RS_SLUG + ".md")
+
+    def test_every_form_of_the_contract_in_every_tree_carries_the_records_keys(self):
+        rel = ".claude/concepts/%s.md" % RS_SLUG
+        cases = [
+            ("bare slug", self.start, RS_SLUG),
+            ("relative path", self.start, rel),
+            ("absolute path of the tree's own copy", self.start, str(self.concept(self.start))),
+            ("absolute path of the main checkout's copy", self.start, str(self.concept(self.main))),
+            ("bare slug", self.main, RS_SLUG),
+            ("relative path", self.main, rel),
+            ("absolute path of the tree's own copy", self.main, str(self.concept(self.main))),
+            ("absolute path of the worktree's copy", self.main, str(self.concept(self.start))),
+        ]
+        for what, cwd, contract in cases:
+            with self.subTest(what=what, cwd="worktree" if cwd == self.start else "main checkout"):
+                proc = run_py(RS_SCRIPT, "--contract", contract, "--status", "--json", cwd=cwd, env=self.env())
+                rep = self.report(proc, "--status with %s" % what)
+                self.key(rep, "records_reading")
+
+    def test_dispatch_given_another_trees_contract_path_still_exits_12_on_unpushed_records(self):
+        self.put("t1-backend.yaml", rs_record())
+        proc = self.cli("--dispatch", RS_T2, "--dry-run", slug=str(self.concept(self.main)))
+        rep = proc.json() or {}
+        self.assertEqual((proc.rc, rep.get("error")), (12, "records-unpushed"), msg=proc.describe())
+
+    def test_a_folder_with_no_git_entry_of_its_own_is_gated_off_as_before_0_13_0(self):
+        sub = self.start / "subfolder-without-a-git-entry"
+        (sub / ".claude" / "concepts").mkdir(parents=True)
+        (sub / ".claude" / "concepts" / (RS_SLUG + ".md")).write_text(rs_contract(self.n_tasks), encoding="utf-8")
+        proc = run_py(RS_SCRIPT, "--contract", RS_SLUG, "--status", "--json", cwd=sub, env=self.env())
+        rep = self.report(proc, "--status in a folder that has no .git entry")
+        self.assertNotIn("records_reading", rep, msg="pinned: a folder with no .git entry of its own is not a tree root, so no records reading")
+
+    # -- W2: "no origin" (gate off) is not "the probe failed" (unverifiable) -------------------------------
+    def test_a_checkout_with_no_origin_remote_is_gated_off_as_before_0_13_0(self):
+        git(self.main, "remote", "remove", "origin")  # the remote list is shared by the linked worktree
+        self.assertEqual(git_rc(self.start, "remote", "get-url", "origin").rc, 2, msg="precondition: git answers exit 2 (No such remote)")
+        proc = run_py(RS_SCRIPT, "--contract", RS_SLUG, "--status", "--json", cwd=self.start, env=self.env())
+        rep = self.report(proc, "--status in a checkout with no origin remote")
+        self.assertNotIn("records_reading", rep, msg="pinned: exit 2 of the probe means no origin, so the gate stays off")
+
+    def _probe_fails(self):
+        self.fail_git(["remote", "get-url"])  # the wrapper answers exit 128 to `git remote get-url ...`
+
+    def test_a_probe_of_origin_that_fails_for_another_reason_makes_the_reading_unverifiable_and_names_the_probe(self):
+        self._probe_fails()
+        proc = run_py(RS_SCRIPT, "--contract", RS_SLUG, "--status", "--json", cwd=self.start, env=self.env())
+        rep = self.report(proc, "--status when `git remote get-url origin` fails")
+        self.assertEqual(self.key(rep, "records_reading"), "unverifiable",
+                         msg="a failed probe must not turn the reading off silently: %r" % sorted(rep)[:30])
+        self.assertIn("get-url", str(rep.get("records_reading_cause")), msg="the cause names the probe: %r" % rep.get("records_reading_cause"))
+        self.assertEqual((rep.get("next_move") or {}).get("held"), "records-unverifiable")
+
+    def test_dispatch_exits_12_when_the_origin_probe_fails_for_another_reason(self):
+        self._probe_fails()
+        proc = self.cli("--dispatch", RS_T1, "--dry-run")
+        self.assertEqual((proc.rc, (proc.json() or {}).get("error")), (12, "records-unverifiable"), msg=proc.describe())
+
+    def test_a_writing_pr_run_exits_10_and_writes_nothing_when_the_origin_probe_fails_for_another_reason(self):
+        self.tools.set_gh(pr_view={"61": _pr(61, "task/%s/%s" % (RS_SLUG, RS_T1))})
+        self._probe_fails()
+        proc = self.cli("--pr", "61")
+        self.assertEqual(proc.rc, 10, msg="the reading cannot be taken, so the writing run exits 10: " + proc.describe())
+        self.assertEqual(self.results(), [], msg="and writes no record")
+
+
+# ---------------------------------------------------------------------------
+# W3: the two listings of origin/<default> agree
+# ---------------------------------------------------------------------------
+class RecordsParityTests(RecordsCase):
+    def _readers(self):
+        """``origin_records`` and the Records reading, in-process, for the same tree."""
+        path = self.env()["PATH"]
+        here = os.getcwd()
+        os.chdir(str(self.start))
+        try:
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                alone = pr_merged.origin_records("master", RS_SLUG)
+                reading = pr_merged.read_records_state("master", RS_SLUG)
+        finally:
+            os.chdir(here)
+        return alone, reading
+
+    def _tree(self, link_text=None):
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(), self.rel("nested/extra.yaml"): "a: 1\n",
+                        self.rel("contract-delivery.yaml"): RS_DELIVERY})
+        if link_text is not None:
+            self.on_master_blob(self.rel("t2-frontend.yaml"), link_text, "120000")
+
+    def _assert_they_agree(self):
+        alone, reading = self._readers()
+        self.assertIsNotNone(reading, msg="the reading is a dict")
+        read_ok = reading["reading"] == "ok"
+        self.assertEqual(alone is not None, read_ok,
+                         msg="one listing says unverifiable and the other does not: origin_records=%r, reading=%s (%s)"
+                             % (alone, reading["reading"], reading["cause"]))
+        if read_ok:
+            self.assertEqual(alone, reading["origin"], msg="the two listings return different records for the same tree")
+        return alone, reading
+
+    def test_both_listings_return_the_same_records_for_a_tree_with_a_nested_file_and_a_delivery_record(self):
+        self._tree()
+        alone, reading = self._assert_they_agree()
+        self.assertEqual(sorted(reading["origin"]), ["t1-backend"], msg="nested files and contract-delivery.yaml are not sub-task records")
+
+    def test_both_listings_agree_on_a_link_blob_whose_text_parses_as_a_record(self):
+        self._tree(link_text=rs_record())
+        self._assert_they_agree()
+
+    def test_both_listings_agree_on_a_link_blob_whose_text_is_a_path(self):
+        self._tree(link_text="t1-backend.yaml")
+        self._assert_they_agree()
+
+
+# ---------------------------------------------------------------------------
+# W5: the brief-link read asks the evidence, not the local copies
+# ---------------------------------------------------------------------------
+class RecordsBriefLinkTests(RecordsCase):
+    def _linked_brief_and_swept_tree(self):
+        brief = self.start / ".claude" / "work-items" / (RS_SLUG + ".md")
+        brief.write_bytes(_build_brief(RS_SLUG, branch="feature/start", pr=_pr_url(50), ident="5"))
+        # every sub-task is recorded on origin/master (base_is_default true); the tree holds no local record: a swept tree
+        self.on_master({self.rel("t1-backend.yaml"): rs_record(n=61), self.rel("t2-frontend.yaml"): rs_record(n=62)})
+        self.assertEqual(self.results(), [], msg="precondition: a swept tree")
+
+    def _brief_reads(self):
+        return [c["args"] for c in self.tools.gh_calls() if c["args"][:2] == ["pr", "view"]
+                and any(a in ("50", _pr_url(50)) for a in c["args"])]
+
+    def test_a_swept_tree_makes_no_extra_pull_request_read_for_sub_tasks_recorded_on_origin(self):
+        self.tools.set_gh(pr_view={"50": _pr(50, "feature/start")})
+        self._linked_brief_and_swept_tree()
+        _, rep = self.status()
+        self.assertEqual(self.key(rep, "records_reading"), "ok")
+        self.assertEqual(self._brief_reads(), [], msg="origin already holds every record on the default branch: the brief's link is not read")
+        self.assertEqual(rep.get("delivery_candidates"), [], msg="and no candidate is offered")
+        self.assertNotIn(rep["next_move"].get("action"), ("delivery-unrecorded",), msg=repr(rep["next_move"]))
+        self.assertIsNone(rep["next_move"].get("held"), msg="the move is not withheld: %r" % rep["next_move"])
+
+    def test_a_failed_brief_link_read_adds_no_unknown_candidate_for_sub_tasks_evidenced_on_origin(self):
+        self.tools.set_gh(fail_commands=["pr view"])
+        self._linked_brief_and_swept_tree()
+        _, rep = self.status()
+        self.assertEqual(self.key(rep, "records_reading"), "ok")
+        self.assertEqual([c for c in rep.get("delivery_candidates", []) if c.get("known") is False], [],
+                         msg="no `known: false` candidate for a contract whose sub-tasks origin evidences: %r" % rep.get("delivery_candidates"))
+        self.assertNotEqual(rep["next_move"].get("action"), "delivery-unrecorded", msg=repr(rep["next_move"]))
+
+
+class RecordsCleanEnvTests(unittest.TestCase):
+    def test_clean_env_drops_git_config_global_so_the_crlf_test_is_isolated_from_the_user_config(self):
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": "/somewhere/.gitconfig", "GIT_CONFIG_SYSTEM": "/x", "GIT_DIR": "/y"}):
+            env = clean_env()
+        self.assertEqual([k for k in env if k.startswith("GIT_")], [], msg="no GIT_* variable reaches a child")
+
+
+# ---------------------------------------------------------------------------
+# Skill text (I-4, I-11, Extension Points 5 to 7a). Kept here: test_plugin_text_scans.py has no
+# matching pattern for per-step wording of these skills.
+# ---------------------------------------------------------------------------
+def _rs_text(*parts):
+    return (RS_REPO.joinpath(*parts)).read_text(encoding="utf-8")
+
+
+class RecordsSkillTextTests(unittest.TestCase):
+    def test_flow_step_8_names_the_stable_branch_for_result_records_and_runs_the_sweep(self):
+        text = _rs_text("skills", "flow", "SKILL.md")
+        start = text.index("## Step 8")
+        end = text.find("\n## ", start + 5)
+        step8 = text[start:end if end != -1 else None]
+        self.assertIn("docs/<contract-slug>-records", step8)
+        self.assertIn("--sweep-records", step8, msg="Step 8 runs the sweep after its push and prints the Tree-clean lines")
+
+    def test_pr_merged_skill_documents_the_records_step_the_flags_and_the_older_script_halt(self):
+        text = _rs_text("skills", "pr-merged", "SKILL.md")
+        for needle in ("--records", "--local-evidence-only", "--sweep-records", "Records left in starting tree", "predates 0.14.0",
+                       "sync the vendored copy"):
+            self.assertIn(needle, text, msg="skills/pr-merged/SKILL.md should mention %r" % needle)
+        self.assertNotIn("Moving the completion hand-off push's no-prompt rule to other pushes", text,
+                         msg="Q1 answered yes: that anti-pattern is rewritten")
+
+    def test_contract_completion_reference_describes_the_records_step_end_to_end(self):
+        text = _rs_text("skills", "pr-merged", "references", "contract-completion.md")
+        low = text.lower()
+        for needle in ("--sweep-records", "--removed", "no new content", "draft pull request"):
+            self.assertIn(needle, low, msg="contract-completion.md should describe %r" % needle)
+        self.assertRegex(text, r"worktree folder", msg="the -2/-3 suffix names the worktree folder only, never the branch")
+
+    def test_advance_skill_branches_on_the_records_keys_and_exit_12(self):
+        text = _rs_text("skills", "advance", "SKILL.md")
+        for needle in ("records_reading", "records_unpushed", "records_stranded", "12", "--sweep-records"):
+            self.assertIn(needle, text, msg="skills/advance/SKILL.md should mention %r" % needle)
 
 
 if __name__ == "__main__":

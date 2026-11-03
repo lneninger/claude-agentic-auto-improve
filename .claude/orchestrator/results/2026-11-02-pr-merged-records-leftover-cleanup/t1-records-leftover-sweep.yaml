@@ -1,0 +1,32 @@
+status: completed
+commit: 43d7d123b2dedbe0206158ae26c485521c6ff8d6
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/208
+merged_at: '2026-11-03T00:49:52Z'
+verified: github
+hand_resolved:
+  files:
+  - .claude-plugin/marketplace.json
+  - .claude-plugin/plugin.json
+  - .claude/concepts/2026-11-02-pr-merged-records-leftover-cleanup.md
+  - .claude/registries/MECHANISMS.md
+  - .claude/registries/VOCABULARY.md
+  - .claude/scripts/pr_merged.py
+  - .claude/scripts/tests/test_pr_merged.py
+  - .cursor-plugin/plugin.json
+  - README.md
+  - plugin.json
+  - skills/advance/SKILL.md
+  - skills/pr-merged/SKILL.md
+  merge_commits: 1
+  commits_inspected: 3
+  commits_unread: 0
+base_ref: master
+base_is_default: true
+delivered_by: contract-delivery
