@@ -932,7 +932,7 @@ cite scripts in `.claude/scripts/`, and every concept contract is a copy of
 `templates/concept-contract.md`. The contract sub-task loop is the newest of these:
 `pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
 both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
-`scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
+`scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
 and `scripts/tests/test_auto_improve_finish_install.py` holds its 344 cases. `scripts/tests/test_script_path_resolution.py` is the
@@ -942,8 +942,8 @@ would ship the part that can be wrong and leave behind the part that would say s
 ## Memory client and cloud engineering
 
 Two optional capabilities. Each is **off until a project switches it on** in its project
-profile. With both off, every brief, every flow and every printed line is what it was before
-they existed.
+profile. With both off, every brief, every Step 1.5 run and every capture step is what
+it was before they existed. The Project history record rule below applies whatever the switches say.
 
 ### The Project history record
 
@@ -960,7 +960,7 @@ follow-up stubs under `.claude/concepts/`, and the Work Item Briefs under
   the data-architect writes the contract. `/design-first` Steps 3 and 5 append to `JOURNAL.md`
   only the critic findings you confirmed. `fullstack-code-reviewer` appends on a justified
   contract divergence and, as janitor, to `MECHANISMS.md` and `VOCABULARY.md`. `/journal-add`
-  appends a manual lesson. The contract-critic reads it and never appends.
+  appends a manual lesson. The contract-critic appends only its Critique section to the contract under review, and never writes a registry.
 - **Who does neither.** A route with no design step (a direct edit of an extra-small or small
   change, `/debug`, `/git-commit`, `/ship`) neither reads nor appends it. Not every flow
   touches it.
@@ -1228,7 +1228,7 @@ project ships an empty `contractLanding` block in `.claude/work-item-conventions
 stops with `landing-not-configured` until the project declares its own verification steps.
 
 The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
-neither can drift from the other. It carries 575 tests.
+neither can drift from the other. It carries 761 tests.
 
 ### What it will refuse to do
 
