@@ -149,6 +149,23 @@ worktree workflow.
   project heading can never reach this repository, so filing one there silently guarantees
   no other project sees it. Three entries were misfiled that way until 2026-09-12.
 
+## Naming a memory tool
+
+**No shipped file but `.claude/scripts/memory_boundary.py` names a memory tool.** "Shipped"
+means what `check_version_bump.is_shipped` says: the files the plugin delivers, such as skills,
+agents, hooks, scripts, templates, references, agreements, add-ons and the registries. The
+Central Memory System's
+tool names and shapes belong to the one adapter and to the profile slots it reads
+(`memory.retrieve-tool`, `memory.capture-tool`, `memory.shape`). Everywhere else, say "the
+configured retrieve tool" and "the configured capture tool".
+
+- A scan in `.claude/scripts/tests/test_plugin_text_scans.py` enforces it, and fails the build
+  on a shipped file that names a memory tool.
+- **The registries are shipped and get no exemption.** A mechanism entry, a vocabulary term or
+  a journal lesson about memory must not use the literal tool names.
+- This file, the README, contracts, work-item briefs and `.claude/scripts/tests/` are not
+  shipped by that definition, so they may name the tools.
+
 ## Proposing a new generic asset
 
 1. Satisfy yourself it is genuinely generic, not domain-specific wearing a general name.
