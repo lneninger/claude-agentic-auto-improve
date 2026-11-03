@@ -295,5 +295,91 @@ class Step15TextTests(unittest.TestCase):
             self.assertIsNone(re.search(r"mcp__[A-Za-z0-9_-]+__memory", text), rel)
 
 
+class ProjectHistoryRecordTextTests(unittest.TestCase):
+    """Revision 7: the Project history record is stated in host onboarding and on every Step 1.5 printed line."""
+
+    FI = "skills/auto-improve-finish-install/SKILL.md"
+    DF = "skills/design-first/SKILL.md"
+    REF = "skills/design-first/references/central-memory.md"
+    AGREEMENT = ".claude/agreements/use-the-project-history-record.md"
+    SUFFIX = "; design continues from the project history record (registries and concept contracts)"
+
+    def fi_section(self) -> str:
+        return section(read(self.FI), "## The project history record", "## Add-ons")
+
+    def point(self, n: int) -> str:
+        step = section(read(self.DF), "## Step 1.5", "## Step 2:")
+        m = re.search(r"(?ms)^%d\. .*?(?=^\d+\. |\Z)" % n, step)
+        self.assertIsNotNone(m, "Step 1.5 point %d" % n)
+        return m.group(0)
+
+    def test_the_section_sits_after_stage_2_and_before_add_ons(self):
+        text = read(self.FI)
+        self.assertLess(text.index("## Stage 2:"), text.index("## The project history record"))
+        self.assertLess(text.index("## The project history record"), text.index("## Add-ons"))
+
+    def test_the_section_names_every_part_of_the_record(self):
+        sec = self.fi_section()
+        for needle in (".claude/registries/MECHANISMS.md", "VOCABULARY.md", "JOURNAL.md", "INTEGRATION.md",
+                       ".claude/concepts/", ".claude/work-items/"):
+            self.assertIn(needle, sec)
+
+    def test_the_central_memory_system_only_supplements(self):
+        flat = re.sub(r"\s+", " ", self.fi_section())
+        self.assertRegex(flat, r"(?i)Central Memory System.{0,200}only supplements")
+        self.assertRegex(flat, r"(?i)never replaces or hides")
+
+    def test_the_doctor_runs_in_report_mode_and_fix_waits_for_a_yes(self):
+        sec = self.fi_section()
+        self.assertRegex(sec, r"plugin_doctor\.py\" --project \.")
+        flat = re.sub(r"\s+", " ", sec)
+        hits = [m.start() for m in re.finditer(r"--fix", flat)]
+        self.assertTrue(hits, "the section must mention --fix")
+        for i in hits:
+            before = flat[:i]
+            self.assertRegex(before, r"(?i)(asks?|ask|only after|says yes|agree|confirm)",
+                             "a --fix mention must come after a confirmation sentence")
+        self.assertRegex(flat, r"(?i)ask(s)? before .{0,40}--fix|only after the user says yes")
+
+    def test_nothing_appends_on_every_run(self):
+        flat = re.sub(r"\s+", " ", self.fi_section())
+        self.assertIsNone(re.search(r"(?i)on every run.{0,80}append|append.{0,80}on every run", flat))
+
+    def test_step_1_5_lead_sentence(self):
+        step = section(read(self.DF), "## Step 1.5", "## Step 2:")
+        flat = re.sub(r"\s+", " ", step)
+        self.assertRegex(flat, r"(?i)design history is its Project history record")
+        self.assertRegex(flat, r"(?i)in every memory state, including disabled")
+        self.assertRegex(flat, r"(?i)only supplements it")
+        self.assertRegex(flat, r"(?i)never replace, hide or skip a registry read")
+
+    def test_point_1_still_prints_and_writes_nothing_on_disabled(self):
+        p1 = self.point(1)
+        self.assertRegex(p1, r"(?is)disabled.{0,300}print(s)? nothing.{0,200}writ(e|es) nothing")
+        self.assertRegex(p1, r"(?i)Project history record is read as always")
+        self.assertRegex(p1, r"(?i)Nothing is printed or written on disabled")
+        self.assertNotIn(self.SUFFIX, p1)
+
+    def test_every_printed_line_in_other_states_ends_with_the_suffix(self):
+        self.assertIn(self.SUFFIX, self.point(2))
+        p3 = re.sub(r"\s+", " ", self.point(3))
+        self.assertGreaterEqual(p3.count(self.SUFFIX), 2, "status line and the skipped-for-want-of-a-brief line")
+        self.assertIn(self.SUFFIX, self.point(4))
+
+    def test_the_reference_ground_rule(self):
+        ref = read(self.REF)
+        ground = section(ref, "## Ground rules", "## 1.")
+        flat = re.sub(r"\s+", " ", ground)
+        self.assertRegex(flat, r"(?i)Project history record")
+        self.assertRegex(flat, r"(?i)only supplements")
+        self.assertIn(self.SUFFIX, flat)
+
+    def test_the_shipped_agreement(self):
+        text = read(self.AGREEMENT)
+        self.assertTrue(text.startswith("# Use the Project History Record"))
+        self.assertLess(len(text), 400)
+        self.assertNotRegex(text, r"(?i)memory_|mcp__")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
