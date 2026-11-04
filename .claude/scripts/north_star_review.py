@@ -54,7 +54,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from _claude_paths import first_populated_dir, north_stars_roots, project_matches, registry
+from _claude_paths import first_populated_dir, north_stars_roots, project_matches, registry, registry_files
 
 # Windows consoles default to cp1252, which cannot encode the arrows and
 # dashes that appear in titles and registry excerpts. Applied to the whole
@@ -78,6 +78,29 @@ def journal_path() -> Path:
 
 def mechanisms_path() -> Path:
     return registry("MECHANISMS.md")
+
+
+def journal_files() -> list[Path]:
+    """Every journal file: the root file, then ``JOURNAL/*.md`` (one ``.claude`` root, never a union)."""
+    return registry_files("JOURNAL.md")
+
+
+def mechanisms_files() -> list[Path]:
+    """Every mechanisms file: the root file, then ``MECHANISMS/*.md``."""
+    return registry_files("MECHANISMS.md")
+
+
+def registry_text(files: list[Path]) -> str:
+    """The text of the given registry files, joined in order; an unreadable file is skipped."""
+    parts: list[str] = []
+    for path in files:
+        try:
+            parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+    return "".join(parts)
+
+
 def default_repo_root(project: str) -> Path:
     """Repo root to scan for a project's anti-patterns.
 
