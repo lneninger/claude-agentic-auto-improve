@@ -408,6 +408,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** documentation or a contract states that a scan or test suite enforces a rule
 - **Tags:** ci, enforcement-claim, readme-drift, text-scan
 
+### 2026-11-03 — When resolving a conflict hunk by keeping both sides, drop the base lines the other side rewrote
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before keeping both sides of a conflict hunk, diff each side against the merge base; lines one side left unchanged and the other side rewrote belong to the rewrite only, or the merge restores deleted text beside its replacement.
+- **Apply when:** a merge resolves a prose or procedure conflict "keeping both behaviours", especially numbered steps
+- **Tags:** merge, conflict-resolution, base-text, duplicate-steps
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
