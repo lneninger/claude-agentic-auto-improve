@@ -61,7 +61,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _contract_files import extract_files_from_contract, matches_path
 from derive_area import FALLBACK_AREA, derive_areas, load_area_mapping
 
-from _claude_paths import area_mapping_path, cache_dir as _cache_root, registry
+import _registry_layout as rl
+from _claude_paths import area_mapping_path, cache_dir as _cache_root, registry, registry_files
 
 # Windows consoles default to cp1252, which cannot encode the arrows and
 # dashes that appear in titles and registry excerpts. Applied to the whole
@@ -86,6 +87,16 @@ def journal_path() -> Path:
 def mechanisms_path() -> Path:
     """The mechanism registry, project-local first."""
     return registry("MECHANISMS.md")
+
+
+def journal_files() -> list[Path]:
+    """Every journal file: the root file, then ``JOURNAL/*.md`` (one ``.claude`` root, never a union)."""
+    return registry_files("JOURNAL.md")
+
+
+def mechanisms_files() -> list[Path]:
+    """Every mechanisms file: the root file, then ``MECHANISMS/*.md``."""
+    return registry_files("MECHANISMS.md")
 
 
 def journal_repo_root() -> Path:
@@ -230,16 +241,14 @@ def journal_signal(primary_areas: set[str], mapping: dict[str, list[str]]) -> li
 
     Returns list of (area_slug, weight_added, signal_label).
     """
-    if not journal_path().exists():
-        return []
-
-    try:
-        text = journal_path().read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return []
-
-    # Split into entries: each entry starts with `### YYYY-MM-DD`.
-    entries = re.split(r"(?m)^### \d{4}-\d{2}-\d{2}", text)[1:]
+    # One body per entry across the root file and every domain file. The shared reader owns the
+    # grammar, so legacy `## YYYY-MM-DD` and bulleted entries are read too. The body keeps the title,
+    # as the old heading split did, because a title can name an area.
+    entries = [
+        e.title + "\n" + e.text
+        for path in journal_files()
+        for e in rl.parse_file(path, "JOURNAL").entries
+    ]
     contributions: list[tuple[str, int, str]] = []
 
     for entry_body in entries:
@@ -298,7 +307,7 @@ def mechanisms_signal(
 
     Returns list of (area_slug, weight_added, signal_label).
     """
-    if not mechanisms_path().exists():
+    if not mechanisms_files():
         return []
 
     # Extract Reused Mechanisms section.
@@ -320,10 +329,13 @@ def mechanisms_signal(
     if not mechanism_names:
         return []
 
-    try:
-        mech_text = mechanisms_path().read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return []
+    # One text per file, so a mention's window never spans two files.
+    mech_texts: list[str] = []
+    for path in mechanisms_files():
+        try:
+            mech_texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
 
     # Split mechanisms into bullet-blocks. Each block typically starts with `- **Name**` or `### Name`.
     contributions: list[tuple[str, int, str]] = []
@@ -331,23 +343,24 @@ def mechanisms_signal(
         # Find each mention of this mechanism in MECHANISMS.md, take the surrounding
         # ~500-char window as the "description", grep paths from it.
         pattern = re.compile(rf"\b{re.escape(name)}\b")
-        for match in pattern.finditer(mech_text):
-            start = max(0, match.start() - 200)
-            end = min(len(mech_text), match.end() + 500)
-            window = mech_text[start:end].lower()
-            # Crude path extraction: forward-slash sequences with at least one segment.
-            path_tokens = re.findall(r"[a-z0-9_./*-]+/[a-z0-9_./*-]+", window)
-            seen_areas_for_this_mention: set[str] = set()
-            for token in path_tokens:
-                token_norm = token.strip("`'\"<>").rstrip(",;.")
-                for slug, patterns in mapping.items():
-                    if slug in primary_areas or slug in seen_areas_for_this_mention:
-                        continue
-                    for pat in patterns:
-                        if matches_path(pat.lower(), token_norm):
-                            contributions.append((slug, WEIGHT_MECHANISMS, f"mechanism:{name}"))
-                            seen_areas_for_this_mention.add(slug)
-                            break
+        for mech_text in mech_texts:
+            for match in pattern.finditer(mech_text):
+                start = max(0, match.start() - 200)
+                end = min(len(mech_text), match.end() + 500)
+                window = mech_text[start:end].lower()
+                # Crude path extraction: forward-slash sequences with at least one segment.
+                path_tokens = re.findall(r"[a-z0-9_./*-]+/[a-z0-9_./*-]+", window)
+                seen_areas_for_this_mention: set[str] = set()
+                for token in path_tokens:
+                    token_norm = token.strip("`'\"<>").rstrip(",;.")
+                    for slug, patterns in mapping.items():
+                        if slug in primary_areas or slug in seen_areas_for_this_mention:
+                            continue
+                        for pat in patterns:
+                            if matches_path(pat.lower(), token_norm):
+                                contributions.append((slug, WEIGHT_MECHANISMS, f"mechanism:{name}"))
+                                seen_areas_for_this_mention.add(slug)
+                                break
 
     return contributions
 
