@@ -13,9 +13,9 @@ branch: docs/codegraph-no-mark-dirty
 worktree: .claude/worktrees/20261104-docs-codegraph-no-mark-dirty
 north_stars: none
 contract: none
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/239
+issue_link: none
+status: shipped
 created: 2026-11-04
 ---
 
