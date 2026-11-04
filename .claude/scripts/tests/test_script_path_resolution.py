@@ -2297,6 +2297,67 @@ def _case11_compare_from_both(repo: Path, second: Path) -> None:
               same, detail)
 
 
+def case12_registry_files(env) -> None:
+    """``registry_files(name, domains=None)``: the root file, then ``general``,
+    then the other domain files alphabetically; existing files only; one
+    ``.claude`` root, never a union (I-3); ``domains`` restricts but keeps
+    ``general``. ``_claude_paths`` re-exports it and ``checkout_equivalent_path``.
+    """
+    print("\ncase 12 -- registry_files: root, general, domain files; one root, never a union")
+    sandbox, home = env["sandbox"], env["empty_home"]
+    proj = sandbox / "RegFilesProject"
+    reg_dir = proj / ".claude" / "registries"
+    _write_text(reg_dir / "MECHANISMS.md", "# m\n")
+    for leaf in ("zeta", "alpha", "general"):
+        _write_text(reg_dir / "MECHANISMS" / f"{leaf}.md", "x\n")
+    _write_text(reg_dir / "MECHANISMS" / "notes.txt", "not markdown\n")
+    (reg_dir / "MECHANISMS" / "nested").mkdir(parents=True, exist_ok=True)
+    _write_text(reg_dir / "INTEGRATION.md", "# i\n")
+    (reg_dir / "INTEGRATION").mkdir(parents=True, exist_ok=True)
+    _write_text(reg_dir / "INTEGRATION" / "stray.md", "x\n")
+    other_cwd = sandbox / "RegFilesCwd"
+    _write_text(other_cwd / ".claude" / "registries" / "MECHANISMS.md", "# other\n")
+    _write_text(other_cwd / ".claude" / "registries" / "MECHANISMS" / "cwd-only.md", "x\n")
+
+    check("case12: _project_paths.registry_files exists", pp is not None and callable(getattr(pp, "registry_files", None)))
+    check("case12: _claude_paths re-exports registry_files",
+          _claude_paths is not None and getattr(_claude_paths, "registry_files", None) is getattr(pp, "registry_files", 0))
+    check("case12: _claude_paths re-exports checkout_equivalent_path",
+          _claude_paths is not None
+          and getattr(_claude_paths, "checkout_equivalent_path", None) is getattr(pp, "checkout_equivalent_path", 0))
+    check("case12: both names are in _claude_paths.__all__",
+          _claude_paths is not None and {"registry_files", "checkout_equivalent_path"} <= set(getattr(_claude_paths, "__all__", ())))
+
+    with claude_roots_seam(project_root=proj, home_root=home, cwd=other_cwd):
+        assert_seam_isolated("case12")
+
+        def names(*args, **kw):
+            try:
+                got, err = pp.registry_files(*args, **kw), None
+            except BaseException as exc:  # noqa: BLE001
+                got, err = None, f"RAISED {type(exc).__name__}: {exc}"
+            return ([p.name for p in got] if got is not None else None), err
+
+        got, err = names("MECHANISMS.md")
+        check("case12: root, general, then alphabetical (nested dir and non-.md ignored; no union with cwd)",
+              got == ["MECHANISMS.md", "general.md", "alpha.md", "zeta.md"], err or f"got {got!r}")
+        got, err = names("MECHANISMS.md", domains=["zeta"])
+        check("case12: domains= restricts and keeps general",
+              got == ["MECHANISMS.md", "general.md", "zeta.md"], err or f"got {got!r}")
+        got, err = names("MECHANISMS.md", domains=[])
+        check("case12: domains=[] keeps the root and general only",
+              got == ["MECHANISMS.md", "general.md"], err or f"got {got!r}")
+        got, err = names("JOURNAL.md")
+        check("case12: existing files only -- an absent registry yields []", got == [], err or f"got {got!r}")
+        got, err = names("INTEGRATION.md")
+        check("case12: INTEGRATION.md is outside the layout -- its folder is never read",
+              got == ["INTEGRATION.md"], err or f"got {got!r}")
+        files, err = call_or_none(pp, "registry_files", ("MECHANISMS.md",))
+        check("case12: every file comes from the project's .claude root",
+              err is None and all(Path(p).resolve().is_relative_to(proj.resolve()) for p in files or []),
+              err or f"got {files!r}")
+
+
 def case_inv10_no_real_writes(before: dict) -> None:
     print("\nINV-10 -- no real data tree was READ, modified or written")
 
@@ -2630,6 +2691,7 @@ def main() -> int:
         case9_validate_registries(env)
         case10_project_alias_matching(env)
         case11_same_answer_from_any_directory()
+        case12_registry_files(env)
         case_inv10_no_real_writes(before)
         case_inv10c_accuracy_sentinel_watches_and_fires()
 

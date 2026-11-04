@@ -8,85 +8,102 @@ first is the reason the mechanism exists at all:
   1. The index is COMPLETE. Every entry in every registry appears, always.
      A digest that omits a title hides exactly the entry the Data-First
      protocol exists to surface, and the architect then writes a parallel
-     implementation of something that already existed.
+     implementation of something that already existed. Legacy entries
+     (a ``## YYYY-MM-DD`` heading, a dated journal bullet) are indexed too.
 
   2. Only bodies are elided. A reader who wants one takes the file and line
      reference and reads that entry alone.
 
+The files come from the resolver: each registry's root file, then its domain
+files (general first, the rest alphabetical), exactly as `registry_files`
+lists them. There is no hard-coded domain list. Every group carries its tier:
+``Universal``, ``project:<name>`` (layout 1) or ``domain:<slug>`` (layout 2).
+The digest records ``<!-- registry-sources-sha256: ... -->`` over every file it
+read, so `validate_registries.py --check-structure` (R6) can tell a stale digest.
+
 Run after editing any registry:
 
-    py -3 .claude/scripts/generate_registry_digest.py
+    py -3 .claude/scripts/generate_registry_digest.py [--project <root>]
 
-Exits non-zero if any emitted reference does not resolve, so a stale digest
-fails loudly rather than misdirecting a reader.
+Exits 1 when a reference does not resolve, or when the registries hold a
+body-less entry (R1) or a duplicate title (R2); the full index is written first
+either way, so a failed run still leaves a complete digest.
 """
 from __future__ import annotations
 
-import os
+import argparse
 import re
 import sys
+from pathlib import Path
 
-REG = '.claude/registries'
-OUT = '.claude/.scout-cache/registry-digest.md'
-DOMAINS = ['backend', 'frontend', 'data', 'trading', 'general']
+import _registry_layout as rl
+from _claude_paths import registry
 
-BULLET = re.compile(r'^- \*\*(.+?)\*\*')          # MECHANISMS / VOCABULARY
-DATED = re.compile(r'^#{2,3} (\d{4}-\d{2}-\d{2} .+)$')  # JOURNAL
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
+
 HEADING = re.compile(r'^(#{2,3}) (.+)$')          # INTEGRATION
+SECTION_TITLES = {"MECHANISMS": "Mechanisms", "VOCABULARY": "Vocabulary", "JOURNAL": "Journal (lessons)"}
 
 
-def read(path):
-    if not os.path.exists(path):
-        return []
-    with open(path, encoding='utf-8') as fh:
-        return fh.read().splitlines()
+def rel_of(file: str) -> str:
+    return file[len('.claude/'):] if file.startswith('.claude/') else file
 
 
-def entries(path, pattern, group=1):
-    """Return (title, line_number) for every match, line numbers 1-based."""
-    out = []
-    for i, ln in enumerate(read(path), 1):
-        m = pattern.match(ln)
-        if m:
-            out.append((m.group(group).strip(), i))
-    return out
+def alnum(text: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', text.lower())
 
 
-def tier_split(path, pattern):
-    """Split a two-tier registry into (universal, project) entry lists."""
-    uni, proj, tier = [], [], None
-    for i, ln in enumerate(read(path), 1):
-        if ln.startswith('## Universal'):
-            tier = 'U'
-            continue
-        if ln.startswith('## Project:'):
-            tier = 'P'
-            continue
-        m = pattern.match(ln)
-        if m:
-            (uni if tier == 'U' else proj).append((m.group(1).strip(), i))
-    return uni, proj
-
-
-def clean(title, limit=96):
-    t = re.sub(r'\s+', ' ', title).strip()
-    return t if len(t) <= limit else t[:limit - 1] + '…'
-
-
-def emit_group(out, label, path, items, refs):
+def emit_group(out: list, label: str, rel: str, items: list, refs: list) -> None:
     if not items:
         return
-    rel = path[len('.claude/'):]
     out.append(f'### {label} — `{rel}` ({len(items)} entries)')
     out.append('')
-    for title, line in items:
-        out.append(f'- {clean(title)} [{rel}:{line}]')
-        refs.append((path, line, title))
+    for title, line, source in items:
+        out.append(f'- {rl.clean_title(title)} [{rel}:{line}]')
+        refs.append((source, line, title))
     out.append('')
 
 
-def main():
-    out, refs = [], []
+def integration_headings(path: Path, display: str) -> list:
+    lines = rl.read_lines(path)
+    mask = rl.fence_mask(lines)
+    heads = []
+    for i, ln in enumerate(lines, 1):
+        if mask[i - 1]:
+            continue
+        m = HEADING.match(ln)
+        if m:
+            prefix = '' if len(m.group(1)) == 2 else '  '
+            heads.append((prefix + m.group(2), i, display))
+    return heads
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Generate the registry digest.")
+    parser.add_argument("--project", help="The project root (the folder holding .claude); default: the resolver")
+    args = parser.parse_args(argv)
+
+    if args.project:
+        base = Path(args.project).resolve()
+        if not base.is_dir():
+            print(f'[registry-digest] --project {args.project} is not a directory', file=sys.stderr)
+            return 2
+        reg_dir = base / '.claude' / 'registries'
+    else:
+        reg_dir = registry('MECHANISMS.md').parent
+        base = reg_dir.parent.parent
+    out_path = reg_dir.parent / rl.DIGEST_RELATIVE
+
+    files = rl.parsed_files(reg_dir, project_root=base)
+    entries = [e for pf in files for e in pf.entries]
+    lines_of = {pf.file: pf.lines for pf in files}
+
+    out: list = []
+    refs: list = []
     out += [
         '# Registry Digest',
         '',
@@ -99,75 +116,59 @@ def main():
         '**The index is never trimmed.** Every entry appears. Only bodies are elided — a digest',
         'that omitted a title would hide the very entry an architect needed to extend.',
         '',
+        rl.SOURCES_LINE.format(digest=rl.sources_sha256(reg_dir)),
+        '',
         '---',
         '',
     ]
 
-    # ---- MECHANISMS -------------------------------------------------------
-    out += ['## Mechanisms', '']
-    uni, proj = tier_split(f'{REG}/MECHANISMS.md', BULLET)
-    emit_group(out, 'Universal', f'{REG}/MECHANISMS.md', uni, refs)
-    if proj:
-        emit_group(out, 'Project (top level)', f'{REG}/MECHANISMS.md', proj, refs)
-    for d in DOMAINS:
-        p = f'{REG}/MECHANISMS/{d}.md'
-        emit_group(out, d.capitalize(), p, entries(p, BULLET), refs)
+    for index, name in enumerate(rl.REGISTRIES):
+        out += (['---', ''] if index else []) + [f'## {SECTION_TITLES[name]}', '']
+        for pf in (f for f in files if f.registry == name):
+            groups: dict = {}
+            for e in pf.entries:
+                groups.setdefault(rl.tier_label(e), []).append((rl.digest_title(e), e.line, pf.file))
+            for label, items in groups.items():
+                emit_group(out, label, rel_of(pf.file), items, refs)
 
-    # ---- VOCABULARY -------------------------------------------------------
-    out += ['---', '', '## Vocabulary', '']
-    uni, proj = tier_split(f'{REG}/VOCABULARY.md', BULLET)
-    emit_group(out, 'Universal', f'{REG}/VOCABULARY.md', uni, refs)
-    if proj:
-        emit_group(out, 'Project (top level)', f'{REG}/VOCABULARY.md', proj, refs)
-    for d in DOMAINS:
-        p = f'{REG}/VOCABULARY/{d}.md'
-        emit_group(out, d.capitalize(), p, entries(p, BULLET), refs)
-
-    # ---- JOURNAL ----------------------------------------------------------
-    out += ['---', '', '## Journal (lessons)', '']
-    p = f'{REG}/JOURNAL.md'
-    j = entries(p, DATED) or entries(p, BULLET)
-    emit_group(out, 'Universal', p, j, refs)
-    for d in DOMAINS:
-        p = f'{REG}/JOURNAL/{d}.md'
-        emit_group(out, d.capitalize(), p, entries(p, DATED), refs)
-
-    # ---- INTEGRATION ------------------------------------------------------
     out += ['---', '', '## Integration surfaces', '']
-    p = f'{REG}/INTEGRATION.md'
-    heads = []
-    for i, ln in enumerate(read(p), 1):
-        m = HEADING.match(ln)
-        if m:
-            prefix = '' if len(m.group(1)) == 2 else '  '
-            heads.append((prefix + m.group(2), i))
-    emit_group(out, 'Sections', p, heads, refs)
+    integration = reg_dir / 'INTEGRATION.md'
+    if integration.is_file():
+        display = rl.display_for(reg_dir, base)(integration)
+        heads = integration_headings(integration, display)
+        lines_of[display] = rl.read_lines(integration)
+        emit_group(out, 'Sections', rel_of(display), heads, refs)
 
     body = '\n'.join(out).rstrip() + '\n'
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, 'w', encoding='utf-8', newline='\n') as fh:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, 'w', encoding='utf-8', newline='\n') as fh:
         fh.write(body)
 
     # ---- verification -----------------------------------------------------
     bad = []
-    for path, line, title in refs:
-        lines = read(path)
-        if line < 1 or line > len(lines):
-            bad.append((path, line, title, '<out of range>'))
+    for source, line, title in refs:
+        src = lines_of.get(source, [])
+        if line < 1 or line > len(src):
+            bad.append((source, line, title, '<out of range>'))
             continue
-        key = re.sub(r'[^a-z0-9]', '', title.lower())[:12]
-        target = re.sub(r'[^a-z0-9]', '', lines[line - 1].lower())
-        if key and key not in target:
-            bad.append((path, line, title, lines[line - 1][:60]))
+        # Journal titles in the index start with the date; the source heading holds both.
+        key = alnum(title)[:12]
+        if key and key not in alnum(src[line - 1]):
+            bad.append((source, line, title, src[line - 1][:60]))
+
+    findings = rl.rule_r1(entries) + rl.rule_r2(entries)
 
     approx_tokens = len(body) // 4
-    print(f'wrote {OUT}')
-    print(f'  entries indexed : {len(refs)}')
+    print(f'wrote {out_path}')
+    print(f'  entries indexed : {len(entries)}')
     print(f'  characters      : {len(body)}  (~{approx_tokens} tokens)')
     print(f'  bad references  : {len(bad)}')
     for p, l, t, a in bad[:10]:
         print(f'    {p}:{l} expected "{t[:40]}" got "{a}"')
-    return 1 if bad else 0
+    print(f'  R1/R2 findings  : {len(findings)}')
+    for f in findings:
+        print(f'    finding: {f.rule} {f.file}:{f.line} {f.message}')
+    return 1 if (bad or findings) else 0
 
 
 if __name__ == '__main__':
