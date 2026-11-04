@@ -324,6 +324,97 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract adds a deleter, mover or sweep over a folder that one or more local loaders read, and its evidence rule names only some of those loaders
 - **Tags:** sweep, delete, evidence, local-reader, delivery-record
 
+### 2026-11-02 — A skill written around an adapter refusal hides a contract divergence
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When a later block's skill text says a refusal "is expected" for a case the contract says must succeed, stop and report the divergence; do not document around it. Name a test after only what it asserts.
+- **Apply when:** a handoff block writes skill text that calls a subcommand an earlier block delivered, for a state the contract's Commands table does not list as a refusal.
+- **Tags:** contract-divergence, refusal, skill-text, test-name, adapter
+
+### 2026-11-02 — A rule every session needs goes in a shipped agreement, not a once-run step
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before putting a standing instruction in an onboarding skill or one design step, check Session-start context delivery and list the routes (direct edit, `/debug`, `/journal-add`, sessions that never design) that would never see it.
+- **Apply when:** a contract adds a standing instruction to `/auto-improve-finish-install`, one skill step or any once-run path
+- **Tags:** agreements, session-start, standing-guidance, reach
+
+### 2026-11-02 — Search a proposed term against agent frontmatter and host docs before adding it
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** If the words already name something else (`memory: project`, the host's "project memory"), rename the term instead of adding "it is not X" to its definition.
+- **Apply when:** a contract proposes a VOCABULARY term that reuses a word the repository or host already uses
+- **Tags:** vocabulary, term-collision, naming, agent-memory
+
+### 2026-11-02 — Describe a fixer a skill runs by everything it writes, and keep the skill's confirm-first promise
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Describe `plugin_doctor.py --fix` (or any list-driven fixer) from its own requirement list (`REQUIREMENTS`, `apply_fixes`), and run it only after the user confirms the listed set.
+- **Apply when:** a contract triggers `--fix` or another fixer that creates every missing item
+- **Tags:** plugin-doctor, fix-scope, confirmation, side-effects
+
+### 2026-11-02 — Name the tests a fix may change by the state they guard, after reading them
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before telling an implementer to change tests "around" given lines, read each one; a test that guards a neighbouring invariant (here `disabled`, I-M0) is named as unchangeable.
+- **Apply when:** a fix block's CONSTRAINTS tell the implementer to change or relax tests by line number
+- **Tags:** tests, invariant, fix-scope, line-reference
+
+### 2026-11-02 — A path that calls a command must say how it finds the command's input
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When a step calls a command that needs an input (`record --brief`), state on that same path how the input is found and what happens when it is absent; a rule that lives only on a sibling path turns a normal case into a reported failure.
+- **Apply when:** one branch of a skill step (unconfigured, disabled, error) calls a command whose argument is resolved only on another branch
+- **Tags:** skill-steps, missing-input, brief-linkage, degradation
+
+### 2026-11-02 — A revision that adds a path adds its failure modes
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** For each new script call, fixer run or degraded path a revision adds, add a Failure Modes entry whose mitigation cites a mechanism.
+- **Apply when:** a contract revision adds blocks or Extension Points and leaves `## Failure Modes & Mitigations` unchanged
+- **Tags:** failure-modes, amendment, revision, completeness
+
+### 2026-11-02 — After amending a contract, update every summary of the block graph
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Re-check the header Revision line, the Handoff intro's block count and graph, and the prioritised plan's Depends on against the new blocks.
+- **Apply when:** a revision adds, removes or re-links handoff blocks
+- **Tags:** amendment, summary-drift, handoff-graph
+
+### 2026-11-02 — Edit a reversed sentence where it stands
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When an amendment reverses an earlier claim, edit that sentence; do not keep it and add a later bullet that contradicts it.
+- **Apply when:** a revision changes a claim made earlier in the same section
+- **Tags:** amendment, self-contradiction, scope-note
+
+### 2026-11-02 — Keep a review-fix block to the review's findings
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Put text for a new requirement in the block that owns the requirement, so each block's review judges one thing.
+- **Apply when:** one revision adds both review fixes and a new user requirement
+- **Tags:** block-scope, review-fix, separation
+
+### 2026-11-02 — A rule titled 'every' must list every line it covers
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** A rule for "every state" or "every printed line" names each line, including failure and skipped lines, and a test pins each.
+- **Apply when:** a contract adds text to every output line or state of a step
+- **Tags:** every-claim, printed-lines, coverage
+
+### 2026-11-02 — A "fails the build" claim must name the workflow that runs the check
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before documenting that a test "fails the build" or "is enforced", find the CI workflow or hook that runs it; if none does, say "run it before committing" instead.
+- **Apply when:** documentation or a contract states that a scan or test suite enforces a rule
+- **Tags:** ci, enforcement-claim, readme-drift, text-scan
+
+### 2026-11-03 — When resolving a conflict hunk by keeping both sides, drop the base lines the other side rewrote
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before keeping both sides of a conflict hunk, diff each side against the merge base; lines one side left unchanged and the other side rewrote belong to the rewrite only, or the merge restores deleted text beside its replacement.
+- **Apply when:** a merge resolves a prose or procedure conflict "keeping both behaviours", especially numbered steps
+- **Tags:** merge, conflict-resolution, base-text, duplicate-steps
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

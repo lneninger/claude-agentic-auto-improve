@@ -52,19 +52,135 @@ def entries(path, pattern, group=1):
     return out
 
 
-def tier_split(path, pattern):
-    """Split a two-tier registry into (universal, project) entry lists."""
-    uni, proj, tier = [], [], None
-    for i, ln in enumerate(read(path), 1):
-        if ln.startswith('## Universal'):
-            tier = 'U'
-            continue
-        if ln.startswith('## Project:'):
-            tier = 'P'
-            continue
+HEADING_LINE = re.compile(r'^#{1,6}\s')            # any heading ends an entry
+SUB_BULLET = re.compile(r'^(\s+)[-*]\s')           # an indented bullet under an entry
+JOURNAL_HEADER = re.compile(r'^###\s+(\d{4}-\d{2}-\d{2})\s+(?:—|--|-)\s+(.+?)\s*$')
+TRIGGER_LINE = re.compile(r'^\s*-\s*\*\*Trigger:\*\*[ \t]*(.*?)\s*$')
+SOURCE_LINE = re.compile(r'^\s*-\s*\*\*Source contract:\*\*[ \t]*(.*?)\s*$')
+_UNSET_SOURCES = ('', 'none', 'n/a', 'na', 'unknown', 'tbd')
+
+
+def _tier_of(line, tier):
+    """The tier a heading line switches to, or the current one unchanged."""
+    if line.startswith('## Universal'):
+        return 'Universal'
+    if line.startswith('## Project:'):
+        return 'Project'
+    return tier
+
+
+def _tier_name(tier, per_domain):
+    # An entry before any tier heading is filed as Project (what tier_split always did);
+    # a per-domain file holds only Project entries.
+    return 'Universal' if (tier == 'Universal' and not per_domain) else 'Project'
+
+
+def entry_blocks(text, pattern, per_domain=False):
+    """Every top-level entry of a registry TEXT, with its full shape.
+
+    One dict per line matching ``pattern`` (group 1 is the title): ``title``, ``line``
+    (1-based), ``tier`` (``Universal`` or ``Project``), ``text`` (the entry's own text, up to
+    its first indented sub-bullet) and ``subs`` (each indented sub-bullet as ``line`` and
+    ``text``, with any deeper continuation lines folded in). An entry ends at the next
+    top-level match, at a heading, or at a blank line followed by a non-indented line that is
+    not a top-level match (a note paragraph after the last bullet is not part of it). Takes
+    text, never a path, so a caller that already holds the text (a hook) passes it through.
+    """
+    lines = text.splitlines()
+    blocks, current, tier, sub_indent = [], None, None, None
+    after_blank = False
+    for i, ln in enumerate(lines, 1):
+        if ln.startswith('## '):
+            tier = _tier_of(ln, tier)
         m = pattern.match(ln)
         if m:
-            (uni if tier == 'U' else proj).append((m.group(1).strip(), i))
+            current = {'title': m.group(1).strip(), 'line': i, 'tier': _tier_name(tier, per_domain),
+                       'text': ln, 'subs': []}
+            blocks.append(current)
+            sub_indent = None
+            after_blank = False
+            continue
+        if HEADING_LINE.match(ln):
+            current = None
+            after_blank = False
+            continue
+        if current is None:
+            continue
+        if not ln.strip():
+            after_blank = True
+        else:
+            if after_blank and not ln[0].isspace():
+                current = None
+                after_blank = False
+                continue
+            after_blank = False
+        sub = SUB_BULLET.match(ln)
+        if sub and (sub_indent is None or len(sub.group(1)) <= sub_indent):
+            sub_indent = len(sub.group(1))
+            current['subs'].append({'line': i, 'text': ln.strip()})
+        elif current['subs']:
+            current['subs'][-1]['text'] += '\n' + ln.strip() if ln.strip() else ''
+        else:
+            current['text'] += '\n' + ln
+    for block in blocks:
+        block['text'] = block['text'].rstrip()
+    return blocks
+
+
+def _source_value(raw):
+    """A Source contract value: the rest of the line, backticks and padding trimmed; unset forms read empty."""
+    value = raw.strip().strip('`').strip()
+    if value.lower() in _UNSET_SOURCES or value.startswith('<'):
+        return ''
+    return value
+
+
+def journal_entries(text, per_domain=False):
+    """Every ``### YYYY-MM-DD — title`` entry of a journal TEXT.
+
+    One dict per entry: ``sig`` (sha1 of ``date|title``), ``date``, ``title``, ``line``,
+    ``tier`` (``## Universal`` / ``## Project:`` headings; Project before any heading or
+    when ``per_domain``), ``trigger`` (lower-cased), ``source`` (the Source contract value,
+    empty when unset) and ``text`` (the whole block, to the next entry or a ``##`` heading).
+    """
+    import hashlib
+    lines = text.splitlines()
+    heads, tier = [], None
+    for i, ln in enumerate(lines):
+        if ln.startswith('## '):
+            tier = _tier_of(ln, tier)
+        m = JOURNAL_HEADER.match(ln)
+        if m:
+            heads.append((i, m.group(1), m.group(2).strip(), _tier_name(tier, per_domain)))
+    entries = []
+    for n, (start, date, title, tier_name) in enumerate(heads):
+        end = heads[n + 1][0] if n + 1 < len(heads) else len(lines)
+        for j in range(start + 1, end):
+            if lines[j].startswith('## '):
+                end = j
+                break
+        block = lines[start:end]
+        trigger = source = ''
+        for ln in block[1:]:
+            tm = TRIGGER_LINE.match(ln)
+            if tm and not trigger:
+                trigger = tm.group(1).strip().lower()
+            sm = SOURCE_LINE.match(ln)
+            if sm and not source:
+                source = _source_value(sm.group(1))
+        entries.append({
+            'sig': hashlib.sha1(f'{date}|{title}'.encode('utf-8', errors='ignore')).hexdigest(),
+            'date': date, 'title': title, 'line': start + 1, 'tier': tier_name,
+            'trigger': trigger, 'source': source, 'text': '\n'.join(block),
+        })
+    return entries
+
+
+def tier_split(path, pattern):
+    """Split a two-tier registry into (universal, project) entry lists."""
+    uni, proj = [], []
+    for block in entry_blocks('\n'.join(read(path)), pattern):
+        (uni if block['tier'] == 'Universal' else proj).append((block['title'], block['line']))
     return uni, proj
 
 

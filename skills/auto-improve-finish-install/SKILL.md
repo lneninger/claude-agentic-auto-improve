@@ -281,6 +281,43 @@ with the script's named reason. Say the reason in plain words. Write nothing. Fo
 every hook would run twice, so the user must remove one of the two registrations. That is
 their decision, not this skill's.
 
+## The project history record
+
+The project's record of its design history is its **Project history record**. It is made of:
+
+- the three registries the doctor seeds: `.claude/registries/MECHANISMS.md`, `VOCABULARY.md` and `JOURNAL.md`;
+- `INTEGRATION.md` in the same folder, where the project keeps one (no seed exists for it, so the doctor never creates it);
+- the concept contracts and follow-up stubs under `.claude/concepts/`;
+- the Work Item Briefs under `.claude/work-items/`.
+
+Who uses it, exactly:
+
+- `/design-first` and the `data-architect` read it on every design.
+- `/task` writes the brief, and the `data-architect` writes the contract.
+- `/design-first` appends to `JOURNAL.md` only the critic findings the user confirmed (Steps 3 and 5).
+- `fullstack-code-reviewer` appends on a justified contract divergence and, as janitor, to `MECHANISMS.md` and `VOCABULARY.md`.
+- `/journal-add` appends a manual lesson.
+- The contract-critic appends only its Critique section to the contract under review, and never writes a registry.
+
+Tell the user to commit these files and never to delete, gitignore or bypass them. The Central Memory System, when a project switches it on through the `memory.*` profile slots, only supplements them: it never replaces or hides them, and a local entry wins a conflict until the user decides.
+
+**The check: report first, then ask before the doctor writes anything.** Run the doctor in report mode, which writes nothing:
+
+```bash
+$PY "<dir of FI>/plugin_doctor.py" --project .
+```
+
+- If `plugin_doctor.py` prints `plugin:  NOT FOUND - pass --plugin`, say in one line that the registries cannot be seeded and ask for the plugin path. Offer `plugin_doctor.py --fix` only together with `--plugin <path>`.
+- If `plugin_doctor.py` lists any `missing` entry, show the user that whole list as exactly what the fix would create. The fix creates every missing requirement in the doctor's list, not only the registries (for example `.claude/north-stars`, `.claude/orchestrator/results`, the contract template, `.claude/area-mapping.json` and `.claude/work-item-conventions.json`). It never overwrites a file and leaves `.claude/settings.json` alone.
+- Ask the user once whether to go ahead. Only after the user says yes, run:
+
+  ```bash
+  $PY "<dir of FI>/plugin_doctor.py" --fix
+  ```
+
+  Never run it on its own.
+- If nothing is missing, say so and write nothing.
+
 ## Add-ons (opt-in, installed by their own skills)
 
 Three optional add-ons ship with the plugin. None is registered by the plugin, and this skill
@@ -298,8 +335,9 @@ Only name them. Do not start one of them unless the user asks.
 
 End with a short summary:
 
-- what was written (the profile slots, the settings change and the backup path), and
-- what was **not** written, and why.
+- what was written (the profile slots, the settings change and the backup path),
+- what was **not** written, and why, and
+- which Project history record files exist and which the doctor created, if the user agreed.
 
 Then give the **first-session check**. In a NEW session, ask for an edit to a source file
 that has no approved contract. The concept gate should block it. If it does not, the hooks
@@ -320,6 +358,7 @@ settings file that already has every registration is not rewritten.
   mistake in `settings.json` can switch every check off, or block every action.
 - **Asking one question per slot.** Show one table. Ask once.
 - **Overwriting an authored slot.** Show the difference and ask. The script will refuse anyway.
+- **Treating the Central Memory System as the project's record, skipping the registries, or running the doctor's fix (`plugin_doctor.py --fix`) without asking.** The registries and the concept contracts are the record; the memory system only supplements them, and the doctor writes only after the user says yes.
 - **Skipping the new-session warning.** The user will otherwise test in this session and
   conclude the hooks do nothing.
 

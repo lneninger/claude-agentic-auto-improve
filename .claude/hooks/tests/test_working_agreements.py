@@ -54,7 +54,7 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-# INV-14: the six required file names, spelled out. Never loop over whatever exists.
+# INV-14: the seven required file names, spelled out. Never loop over whatever exists.
 REQUIRED = [
     "plain-language.md",
     "one-worktree-per-change.md",
@@ -62,6 +62,7 @@ REQUIRED = [
     "one-line-commands-for-the-user.md",
     "stop-means-stop.md",
     "recommendations-not-question-batches.md",
+    "use-the-project-history-record.md",
 ]
 
 # The seven bold labels of the plain-language agreement.
@@ -476,11 +477,11 @@ def case_real_recommendations_agreement_defers_to_gates():
           "W10: the agreement must never claim to win over a skill gate")
 
 
-def case_real_shipped_folder_is_exactly_the_six_required_files():
+def case_real_shipped_folder_is_exactly_the_seven_required_files():
     check(REAL_AGREEMENTS.is_dir(), "the plugin must ship the folder %s" % REAL_AGREEMENTS)
     present = sorted(p.name for p in REAL_AGREEMENTS.glob("*.md") if p.name.lower() != "readme.md" and not p.name.startswith(("_", ".")))
     check(present == sorted(REQUIRED),
-          "INV-14: the shipped agreements must be exactly the six required files; found %r" % present)
+          "INV-14: the shipped agreements must be exactly the seven required files; found %r" % present)
 
 
 def case_real_rules_file_ships_with_default_9000():
@@ -1803,6 +1804,7 @@ SHIPPED_PHRASES = {
     "stop-means-stop.md": ["halt completely", "not a redirect", "keep it or revert it"],
     "recommendations-not-question-batches.md": ["lead with a recommendation", "never hand the user a batch",
                                                 "one question at a time"],
+    "use-the-project-history-record.md": ["project's memory", "only supplements", "concept contracts"],
 }
 
 
@@ -1816,7 +1818,7 @@ def _make_phrase_case(name):
     return case
 
 
-def case_s3_the_phrase_table_covers_exactly_the_six_required_files():
+def case_s3_the_phrase_table_covers_exactly_the_seven_required_files():
     check(sorted(SHIPPED_PHRASES) == sorted(REQUIRED), "S3: one phrase check per required file")
     box = Box()
     try:
@@ -2040,7 +2042,7 @@ def build_cases():
     add("plain-language claims no checker exists and closes with the new sentence", case_real_plain_language_claims_no_checker_exists)
     add("INV-13 the opening paragraph states precedence", case_opening_paragraph_states_precedence_inv13)
     add("recommendations agreement defers to gates and asks one question at a time", case_real_recommendations_agreement_defers_to_gates)
-    add("INV-14 the shipped folder is exactly the six required files", case_real_shipped_folder_is_exactly_the_six_required_files)
+    add("INV-14 the shipped folder is exactly the seven required files", case_real_shipped_folder_is_exactly_the_seven_required_files)
     add("rules file ships with max_characters 9000", case_real_rules_file_ships_with_default_9000)
     add("the real shipped set fits the default limit with nothing dropped", case_real_shipped_set_fits_default_limit_with_nothing_dropped)
     add("INV-6 real delivery order, plain-language first", case_real_agreements_in_delivery_order_plain_language_first)
@@ -2103,7 +2105,7 @@ def build_cases():
     add("missing helper module logs where the helper would have", case_missing_helper_module_logs_where_the_helper_would_have)
     for _n in REQUIRED:
         add("S3 required phrases in %s" % _n, _make_phrase_case(_n))
-    add("S3 the required phrases reach the envelope", case_s3_the_phrase_table_covers_exactly_the_six_required_files)
+    add("S3 the required phrases reach the envelope", case_s3_the_phrase_table_covers_exactly_the_seven_required_files)
     for _label, _name in BAD_NAMES.items():
         add("a file name that is not printable never reaches the text: %s" % _label, _make_bad_name_case(_label, _name))
     add("an ordinary printable project file name is still delivered", case_an_ordinary_printable_project_file_name_is_still_delivered)

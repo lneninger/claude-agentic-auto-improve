@@ -96,6 +96,23 @@ profile is missing, say so and halt — never guess a path from a project name.
 - **A09 Logging Failures** — log secrets, or fail to log auth events
 - **A10 SSRF** — outbound HTTP calls with user-controlled URLs
 
+### Infrastructure as code (active when `cloud.providers` is set)
+
+Read `cloud.providers` and `cloud.iac` from `.claude/project-profile.md`. When `cloud.providers` is unset, skip this section. Review the files under `cloud.roots`. You read and report only; you run no command that changes a live environment.
+
+- No secrets, keys, tokens or connection strings in templates, variable files, state files, images or manifests; secrets come from a secret store
+- Remote state is encrypted, access-controlled and locked; state files are not committed
+- Identity and access follow least privilege: no wildcard actions or resources, no owner or admin roles for workloads, managed or workload identities instead of long-lived keys
+- Storage and databases are not publicly reachable; encryption at rest and in transit is on; backups and soft delete are enabled
+- Network rules deny by default: no `0.0.0.0/0` on management or database ports, private endpoints where the provider offers them
+- Containers run as non-root with a pinned base image tag or digest, no privileged mode, no host mounts without a stated reason, and a read-only root file system where possible
+- Kubernetes workloads set resource limits, drop capabilities, use network policies and keep secrets out of plain manifests
+- Logging and audit trails are on for control-plane and data access
+- Modules, providers and images come from pinned versions and trusted sources
+- Resources that hold data carry deletion protection or a lifecycle guard
+
+Report each gap under Critical, High, Medium or Low as in the output format, with the file and line.
+
 ## Output format
 
 ```
