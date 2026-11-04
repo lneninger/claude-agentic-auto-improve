@@ -1,0 +1,66 @@
+contract: 2026-11-04-domain-split-registries
+started_at: '2026-11-04T20:35:51.387237+00:00'
+sub_tasks:
+  t1-reconcile-the-duplicate-vocabulary-entries:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 241
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-241-t1-reconcile-the-duplicate-vocabulary-entries.md
+  t2-extract-the-shared-apply-and-plugin-root-helpers:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 242
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-242-t2-extract-the-shared-apply-and-plugin-root-helpers.md
+  t3-layout-spec-shared-reader-structure-lint-and-digest:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 243
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-243-t3-layout-spec-shared-reader-structure-lint-and-digest.md
+  t4-single-write-path-and-journal-tracker:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 244
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-244-t4-single-write-path-and-journal-tracker.md
+  t5-script-readers-through-the-resolver:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 245
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-245-t5-script-readers-through-the-resolver.md
+  t6-migration-0001-layout-gate-and-doctor:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 246
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-246-t6-migration-0001-layout-gate-and-doctor.md
+  t7-agent-skill-and-template-instructions:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 247
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-247-t7-agent-skill-and-template-instructions.md
+  t8-plugin-registries-on-layout-2-registry-appends-and-docs:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 248
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-248-t8-plugin-registries-on-layout-2-registry-appends-and-docs.md
+  t9-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 249
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-249-t9-review.md
