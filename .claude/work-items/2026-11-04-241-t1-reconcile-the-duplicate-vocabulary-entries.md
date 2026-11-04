@@ -15,9 +15,9 @@ north_stars: inherited from .claude/work-items/2026-11-04-235-domain-split-regis
 parent_issue: 235
 base: fix/235-domain-split-registries
 contract: .claude/concepts/2026-11-04-domain-split-registries.md
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/250
+issue_link: deferred
+status: shipped
 created: 2026-11-04
 ---
 
