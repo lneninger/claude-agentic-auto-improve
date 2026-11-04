@@ -92,9 +92,10 @@ them again as the opt-in `codegraph` add-on (never registered by the plugin itse
 
 A project that wants the block back runs `/auto-improve-codegraph-install`; the README's "Retired hooks" section says how.
 
-Lifecycle hooks that keep the index fresh (not part of the retired gate): `SessionStart` →
-`codegraph sync-if-dirty`; PostToolUse on Edit/Write/MultiEdit → `codegraph mark-dirty` (async);
-`Stop` → `codegraph sync-if-dirty`.
+The plugin registers no hook that refreshes the index, and no part of it runs `codegraph mark-dirty`
+or `codegraph sync-if-dirty`. Keeping the index fresh belongs to the CodeGraph MCP server, whose
+file watcher notices edits on its own. If the index is stale anyway, the user runs `codegraph sync`
+or `codegraph init -i`.
 
 ## When the `codegraph` add-on is installed
 
