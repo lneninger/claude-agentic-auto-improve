@@ -242,11 +242,68 @@ def print_report(mechanisms: dict[str, Any], vocabulary: dict[str, Any], roots: 
     print()
 
 
+def check_structure(args: argparse.Namespace) -> int:
+    """``--check-structure``: the section 3.4 lint of the registry layout (R1-R6, A1).
+
+    Exit 0 = nothing blocking (or the tree is not on layout 2 yet, where every finding is advisory),
+    1 = a finding on a ``current`` tree, 2 = the check could not run (a new module is missing, or
+    the project folder does not exist). The rules live in ``_registry_layout``; this function only
+    resolves the folders, the project tokens and the plugin root.
+    """
+    try:
+        import _registry_layout as layout
+    except ImportError as exc:
+        print(f"[validate-registries] --check-structure needs the module '_registry_layout', which is "
+              f"missing or cannot be imported ({exc}). Copy the new registry modules from the plugin.",
+              file=sys.stderr)
+        return 2
+
+    if args.project:
+        project_root = Path(os.path.expanduser(args.project)).resolve()
+        if not project_root.is_dir():
+            print(f"[validate-registries] --project {args.project} is not a directory", file=sys.stderr)
+            return 2
+        registries_dir = project_root / ".claude" / "registries"
+    else:
+        registries_dir = mechanisms_file().parent
+        project_root = registries_dir.parent.parent
+
+    plugin_root = None
+    try:
+        from _plugin_root import separate_plugin_root
+        override = Path(os.path.expanduser(args.plugin_root)) if args.plugin_root else None
+        plugin_root = separate_plugin_root(
+            project_root, override,
+            needs=lambda cand: all((cand / ".claude" / "registries" / f"{n}.md").is_file()
+                                   for n in layout.REGISTRIES))
+    except ImportError as exc:
+        print(f"[validate-registries] --check-structure needs the module '_plugin_root' and the plugin "
+              f"doctor to find the plugin root ({exc}).", file=sys.stderr)
+        return 2
+
+    tokens, allowed = layout.load_project_tokens(project_root)
+    plugin_keys = layout.plugin_universal_keys(plugin_root) if plugin_root is not None else None
+    report = layout.check_structure(registries_dir, project_root=project_root, plugin_root=plugin_root,
+                                    plugin_keys=plugin_keys, tokens=tokens, allowed=allowed)
+    for line in report.lines(strict=args.strict):
+        print(line)
+    return report.exit_code(strict=args.strict)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate MECHANISMS.md and VOCABULARY.md references.")
     parser.add_argument("--root", action="append", default=[], help="Extra repo root to resolve paths under")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--check-structure", action="store_true",
+                        help="Lint the registry layout (R1-R6, A1) instead of checking dead references")
+    parser.add_argument("--project", help="With --check-structure: the project root (the folder holding .claude)")
+    parser.add_argument("--strict", action="store_true",
+                        help="With --check-structure: dead file references (R4) also fail a current tree")
+    parser.add_argument("--plugin-root", help="With --check-structure: the plugin tree to read Universal keys from")
     args = parser.parse_args()
+
+    if args.check_structure:
+        return check_structure(args)
 
     roots = find_candidate_roots(args.root)
 

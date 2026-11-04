@@ -93,6 +93,11 @@ if _missing_launcher_names:
 claude_roots = _pp.claude_roots
 concepts_roots = _pp.concepts_roots
 registry = _pp.registry
+# The split registry layout (layout 2): the root file plus its domain files, from ONE .claude root.
+# `checkout_equivalent_path` is the tracker's checkout-independent key (I-14).
+registry_files = _pp.registry_files
+registry_files_in = _pp.registry_files_in
+checkout_equivalent_path = _pp.checkout_equivalent_path
 area_mapping_path = _pp.area_mapping_path
 work_item_conventions_path = _pp.work_item_conventions_path
 work_items_dir = _pp.work_items_dir
@@ -121,6 +126,9 @@ __all__ = [
     "claude_roots",
     "concepts_roots",
     "registry",
+    "registry_files",
+    "registry_files_in",
+    "checkout_equivalent_path",
     "area_mapping_path",
     "work_item_conventions_path",
     "work_items_dir",
