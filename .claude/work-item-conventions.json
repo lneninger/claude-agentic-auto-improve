@@ -86,6 +86,7 @@
   },
   "contractLanding": {
     "$comment": "This project's landing gate. land_contract.py runs each step in its own landing checkout of the parent branch, after merging the default branch into it, and merges nothing unless every step exits 0. Every step reads its result from the exit code alone, so no result file is written into the tree. The hook-registration-tests step runs the plugin-owned Hook registration check's own suite (.claude/scripts/tests/test_check_hook_registrations.py). .claude/scripts/tests/test_land_contract_verification.py is the test that reads these steps, so a step added, renamed or reordered here is checked there. The hook-tests step runs each hook test file directly, because two of them are script-style and fail unittest discovery at import. test_gate_cost.py is left out on purpose: it is a timing measurement that needs a production-sized contracts folder named by an environment variable, not a correctness check. versionRaise turns on the landing's version raise (P7b): a sub-task pull request never raises the plugin version, and the landing raises it once, minor + 1, after the default branch is merged in.",
+    "timeoutMeasurement": "Each step carries measured_minutes, the duration of one full run of that step's command on the reference Windows workstation, measured 2026-11-03 (issue 213), when test_pr_merged.py held 744 tests. test_land_contract_verification.py fails when a step's timeout_minutes is below measured_minutes times 1.5, so re-measure and update both numbers together when a suite grows.",
     "versionRaise": true,
     "verification": {
       "steps": [
@@ -93,18 +94,21 @@
           "id": "version-bump",
           "command": ["py", "-3", ".claude/scripts/check_version_bump.py"],
           "results": { "format": "exit-code" },
+          "measured_minutes": 0.05,
           "timeout_minutes": 5
         },
         {
           "id": "loop-script-tests",
           "command": ["py", "-3", ".claude/scripts/tests/test_pr_merged.py"],
           "results": { "format": "exit-code" },
-          "timeout_minutes": 15
+          "measured_minutes": 22.86,
+          "timeout_minutes": 40
         },
         {
           "id": "hook-registration-tests",
           "command": ["py", "-3", ".claude/scripts/tests/test_check_hook_registrations.py"],
           "results": { "format": "exit-code" },
+          "measured_minutes": 0.06,
           "timeout_minutes": 5
         },
         {
@@ -114,7 +118,8 @@
             "import glob,subprocess,sys; fs=sorted(f for f in glob.glob('.claude/hooks/tests/test_*.py') if not f.endswith('test_gate_cost.py')); rcs=[subprocess.call([sys.executable,f]) for f in fs]; sys.exit(1 if (not fs or any(rcs)) else 0)"
           ],
           "results": { "format": "exit-code" },
-          "timeout_minutes": 15
+          "measured_minutes": 12.94,
+          "timeout_minutes": 25
         }
       ]
     }

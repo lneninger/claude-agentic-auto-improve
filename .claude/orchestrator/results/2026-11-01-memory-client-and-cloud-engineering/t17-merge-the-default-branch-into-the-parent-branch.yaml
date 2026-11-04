@@ -1,0 +1,37 @@
+status: completed
+commit: 609998259755634d18b4263753e78537839e3971
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/223
+merged_at: '2026-11-03T13:12:04Z'
+verified: github
+sub_issue_closed: close-failed
+hand_resolved:
+  files:
+  - .claude/registries/VOCABULARY.md
+  - .claude/scripts/auto_improve_finish_install.py
+  - .claude/scripts/tests/test_auto_improve_finish_install.py
+  - README.md
+  - .claude-plugin/marketplace.json
+  - .claude-plugin/plugin.json
+  - .claude/concepts/2026-11-02-pr-merged-records-leftover-cleanup.md
+  - .claude/registries/MECHANISMS.md
+  - .claude/scripts/pr_merged.py
+  - .claude/scripts/tests/test_pr_merged.py
+  - .cursor-plugin/plugin.json
+  - plugin.json
+  - skills/advance/SKILL.md
+  - skills/pr-merged/SKILL.md
+  - .claude/registries/JOURNAL.md
+  - skills/flow/SKILL.md
+  - skills/pr-merged/references/contract-completion.md
+  merge_commits: 30
+  commits_inspected: 68
+  commits_unread: 0
+base_ref: feature/memory-client-and-cloud-engineering
+base_is_default: false

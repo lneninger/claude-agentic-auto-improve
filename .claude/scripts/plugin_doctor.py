@@ -564,10 +564,48 @@ def _resolve_hook_path(raw: str, project: Path) -> Optional[Path]:
     return project / text
 
 
+def _launcher_candidates(project: Path, script: str) -> List[Path]:
+    """The files a Project hook launcher row would try for ``script``, in its order (contract section L): the
+    project's ``.claude/hooks/<script>``, then the same path in the main checkout when the project folder has
+    worktree segments. The rule is the launcher's own, step 3: every ``.claude/worktrees/<name>`` triple is
+    removed, with either separator and ignoring case, and the second candidate is tried only when it differs."""
+    parts = str(project).replace("\\", "/").split("/")
+    kept: List[str] = []
+    index = 0
+    while index < len(parts):
+        worktree = (parts[index].lower() == ".claude" and index + 2 < len(parts)
+                    and parts[index + 1].lower() == "worktrees")
+        if not worktree:
+            kept.append(parts[index])
+        index += 3 if worktree else 1
+    candidates = [project / ".claude" / "hooks" / script]
+    if len(kept) < len(parts):
+        candidates.append(Path("/".join(kept)) / ".claude" / "hooks" / script)
+    return candidates
+
+
+def _launcher_finds(project: Path, script: str) -> bool:
+    """True when ``script`` is a file in a folder a launcher row would try. A path that cannot be checked
+    counts as found: the scan skips such a row rather than guess."""
+    for candidate in _launcher_candidates(project, script):
+        try:
+            if candidate.is_file():
+                return True
+        except (OSError, ValueError):
+            return True
+    return False
+
+
 def _row_skipped(entry: dict) -> bool:
     """True for a row the doctor does not check. Only a row that plainly launches a Python script through a
     bare interpreter (python, python2, python3, python3.N, py, pythonw; ``.exe`` optional) with only simple
-    flags is checked, in shell form (no line break outside quotes) and in exec form (``command`` + ``args``)."""
+    flags is checked, in shell form (no line break outside quotes) and in exec form (``command`` + ``args``).
+    A Project hook launcher row is checked too: ``project_hook_launcher_parts`` reads it (the one reader, no
+    second parser), and ``dangling_hook_rows`` looks for its script in the launcher's folders. A row that
+    reader does not read (a stale or hand-written text, or no hooks folder beside this script) keeps the
+    handling below."""
+    if _launcher_row_parts(entry) is not None:
+        return False
     command = entry.get("command")
     if not isinstance(command, str):
         return True
@@ -616,6 +654,13 @@ def dangling_hook_rows(project: Path) -> List[DriftFinding]:
             continue
         for event, matcher, entry in _iter_rows(body):
             if _row_skipped(entry):
+                continue
+            launcher = _launcher_row_parts(entry)
+            if launcher is not None:
+                # The same finding as an old-form row for that script, named by the path the old form wrote.
+                _hook_class, script, _extras = launcher
+                if not _launcher_finds(project, script):
+                    add(layer, event, matcher, "launched", PROJECT_DIR_VARIABLES[0] + "/.claude/hooks/" + script)
                 continue
             launched, following = _launched_raw_tokens(entry)
             if launched is None:

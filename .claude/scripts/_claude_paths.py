@@ -66,6 +66,25 @@ except ImportError as exc:  # pragma: no cover - structural failure
         "home-directory default (work item #35)."
     ) from exc
 
+# The five names of the Project hook launcher surface (Revision 9). A `_project_paths.py` from a release
+# before the launcher imports cleanly and lacks them, so a bare attribute read below would raise
+# AttributeError, which the callers that guard this import (they catch ImportError) would not catch.
+# Raise ImportError instead, naming the file and each missing name, so they degrade as designed.
+_LAUNCHER_NAMES = (
+    "PROJECT_HOOK_LAUNCHER_SOURCE",
+    "HOOK_CLASS_BLOCK",
+    "HOOK_CLASS_WARN",
+    "project_hook_launcher_parts",
+    "project_hook_launcher_row",
+)
+_missing_launcher_names = [name for name in _LAUNCHER_NAMES if not hasattr(_pp, name)]
+if _missing_launcher_names:
+    raise ImportError(
+        f"_claude_paths: the _project_paths.py at {getattr(_pp, '__file__', _HOOKS_DIR)} lacks the Project hook "
+        f"launcher surface: {', '.join(_missing_launcher_names)}. Bring the hooks folder to the same release "
+        "as the scripts."
+    )
+
 
 # Re-exported resolver surface. Every one of these is a CALL-TIME function --
 # never bind one to a module-level constant in a consumer, or the path is

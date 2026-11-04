@@ -1097,6 +1097,10 @@ class TestVendoredConsumerReachesThePluginSources(Base):
         hooks.mkdir()
         for name in list(HOOK_FILES) + GATE_SUPPORT_FILES:  # the vendored copy; NO hooks.json (the sync never delivers it)
             (hooks / name).write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        # Fixture only (Revision 20, BL, B): a vendored consumer always holds the REAL helper (block 35 vendors
+        # it), and the writer refuses without the launcher names it carries (Revision 19, BE). Byte for byte,
+        # so the copy is never an older or edited file. Every other vendored hooks file keeps its stub.
+        shutil.copyfile(str(SCRIPT_ROOT / ".claude/hooks/_project_paths.py"), str(hooks / "_project_paths.py"))
         (proj / ".claude/project-profile.md").write_text(
             template_text(drop=("review-gates",) if with_profile_row_dropped else ()),
             encoding="utf-8", newline="")
@@ -6131,11 +6135,18 @@ class TestDanglingRowsReadBackWriter(unittest.TestCase):
         settings.write_text(json.dumps({"hooks": hooks}, indent=2), encoding="utf-8")
         return settings
 
-    def test_launcher_rows_written_today_give_no_finding_even_with_a_project_file_deleted(self):
-        """Documented skip: the rows `_written_hook` writes are Project hook launcher rows (`-c <source> <class>
-        <script>`). The launcher falls back when a project file is missing, so a missing file is not the
-        failure this finding is about, and a row form the doctor cannot judge is skipped, not guessed."""
+    def test_launcher_rows_written_today_give_one_finding_only_when_their_script_is_deleted(self):
+        """Rule changed (Revision 20, BL; Revision 19, BF; the owner's Q27 answer). Old: launcher rows are
+        skipped, so a deleted project file gives no finding (the launcher falls back). New: the rows
+        `_written_hook` writes are Project hook launcher rows (`-c <source> <class> <script>`), and a launcher
+        row is judged by its script only. A launcher row whose script is deleted gives exactly one
+        `dangling-hook-row` finding, role `launched`, whose path ends with `/<script>`. Deleting the gate
+        argument or `_gate_launch.py`, or nothing, gives none.
+
+        The script-deleted subtests wait for block 57 (Revision 19, Q28): the doctor does not judge a launcher
+        row by its script until that block merges."""
         names = (self.GUARD_FILE, "gate-launch.py", "_gate_launch.py", "concept-gate.py")
+        scripts = (self.GUARD_FILE, "gate-launch.py")
         for platform in ("win32", "linux"):
             for deleted in (None,) + names:
                 with self.subTest(platform=platform, deleted=deleted):
@@ -6143,7 +6154,16 @@ class TestDanglingRowsReadBackWriter(unittest.TestCase):
                     self.put(*names)
                     if deleted:
                         (self.project / ".claude" / "hooks" / deleted).unlink()
-                    self.assertEqual(self.scan(), [], "launcher rows are skipped: the launcher falls back")
+                    found = self.scan()
+                    if deleted in scripts:
+                        self.assertEqual(self.roles(found), ["launched"],
+                                         "a launcher row whose script %s is deleted is exactly one finding, role "
+                                         "launched; got %r" % (deleted, [f.path for f in found]))
+                        self.assertTrue(found[0].path.replace("\\", "/").endswith("/" + deleted),
+                                        "the path names the deleted script: %s" % found[0].path)
+                    else:
+                        self.assertEqual(found, [], "nothing deleted, or only the gate argument or "
+                                                    "_gate_launch.py: a launcher row is judged by its script only")
 
     def test_rows_the_old_installer_wrote_are_still_checked_and_give_one_finding_with_its_role(self):
         """The vendored-install case: an install registered before the launcher change, whose hook file

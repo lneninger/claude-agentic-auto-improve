@@ -266,6 +266,14 @@ Do not try it.
 Declining writes nothing. If the plan says nothing is missing, the script writes nothing and
 there is no backup.
 
+If the preview or the apply is refused as `project-hook-launcher-missing` (exit 3), the hooks
+folder beside the scripts has no usable `_project_paths.py` with the Project hook launcher, so no
+row can be written, whatever the plan would add. Nothing was changed and no backup was made. Tell
+the user the file the message names (`<project>/.claude/hooks/_project_paths.py`) and that the
+project's hooks folder must be brought to the same release as the scripts (copy the hooks
+folder from that release). Then run the preview again. Never write
+a row by hand to get past it.
+
 ### 2d. Any other mode: stop
 
 `both`, `none`, `plugin-source`, `plugin-disabled` and `install-record-unreadable` each stop
