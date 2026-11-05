@@ -13,7 +13,7 @@ branch: fix/259-codegraph-guard-fail-open
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261105-bug-259-codegraph-guard-fail-open
 north_stars: none
 contract: .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
-pr: none
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/270
 partial: true
 issue_link: unknown
 status: verifying
@@ -76,3 +76,4 @@ non-trivial → /design-first
 - Open after pass 3: (P3-W1) normalise before the host check on the commondir hop, in the four hop-function copies; (P3-W2 / W2) bind the guard's tree functions only when the helper carries the hop refusal, test with HEAD's real helper; (W1) a mapped-drive repository with a worktree on another volume now reads undecidable, which blocks writes in the main-checkout guard, fix needs a one-line change to Addendum 2 item 7; (W3) parity row for the four hop-function copies; (W4) MECHANISMS.md:43 correction; nits: escape the dot in TICKET_RE, no trailing underscore in the server-name grammar, list test_main_checkout_guard.py in Files to touch.
 - Held for the operator, not implemented: Windows owner check or per-user parent for session folders; turning the codegraph-tool-named refusal into a finding.
 - Known unrelated failure: test_verify_issue_link.py row 20 (brief 2026-11-02-171 has pr: UNKNOWN, tracked on master).
+- 2026-11-05 ship: pushed fix/259-codegraph-guard-fail-open and opened draft pull request #270 (title [INFRA][TESTS][DOCS], body ends Refs #259). verify_issue_link.py returned unexpected-closing-ref: GitHub reports #259 as a closing reference of the pull request although the brief is partial. Likely cause: the branch was created with gh issue develop (linked branch). Not repaired, nothing changed on GitHub; waiting for the operator: unlink the branch in the issue Development sidebar, or accept the close and mark the item not partial. Status stays verifying; issue_link stays unknown.
