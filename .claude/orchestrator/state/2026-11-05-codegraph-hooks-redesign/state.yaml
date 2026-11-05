@@ -2,9 +2,9 @@ contract: 2026-11-05-codegraph-hooks-redesign
 started_at: '2026-11-05T16:37:55.401588+00:00'
 sub_tasks:
   t1-live-checks:
-    status: pending
-    branch: null
-    pull_request: null
+    status: completed
+    branch: task/2026-11-05-codegraph-hooks-redesign/t1-live-checks
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/268
     issue: 263
     base: feature/261-codegraph-hooks-redesign
     brief: .claude/work-items/2026-11-05-263-t1-live-checks.md
