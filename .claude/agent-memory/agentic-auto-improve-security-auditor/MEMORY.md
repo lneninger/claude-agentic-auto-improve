@@ -1,0 +1,1 @@
+- [UNC host check vs normpath collapse](unc-host-check-normpath-collapse.md) — check the host after normpath; \\?\UNC\a\..\b becomes host b; older-helper probes precede caller checks

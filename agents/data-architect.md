@@ -102,19 +102,19 @@ If the project section does NOT exist in `MECHANISMS.md`, you still consult the 
 
 **Investigation sequence:**
 
-1. **`mcp__codegraph__codegraph_search`** for every symbol named in the user's request, plus the symbols of any `MECHANISMS.md` entry you plan to extend. The search returns symbol nodes with file:line locations.
-2. **`mcp__codegraph__codegraph_node`** on the most relevant hits to inspect signatures and members without reading the whole file.
-3. **`mcp__codegraph__codegraph_callers`** / **`mcp__codegraph__codegraph_callees`** to map integration points — who triggers this code, what it depends on.
-4. **`mcp__codegraph__codegraph_impact`** to size the blast radius if this task changes an existing method or shape.
-5. **`mcp__codegraph__codegraph_files`** for folder-style enumeration that would otherwise be a `Glob`.
-6. **For broad area exploration** (whole feature, unfamiliar subsystem), delegate to the Explore subagent — it has the heavy tools (`codegraph_explore`, `codegraph_context`) that return full source sections.
+1. **Ask CodeGraph (`mcp__codegraph__*`, for example the explore tool your server offers)** for every symbol named in the user's request, plus the symbols of any `MECHANISMS.md` entry you plan to extend. A CodeGraph answer returns symbol nodes with file:line locations.
+2. **Ask for the signatures and members** of the most relevant hits, without reading the whole file.
+3. **Ask who calls it and what it calls** to map integration points: who triggers this code, what it depends on.
+4. **Ask what depends on it** to size the blast radius if this task changes an existing method or shape.
+5. **Ask for the files of a folder or feature** for enumeration that would otherwise be a `Glob`.
+6. **For broad area exploration** (whole feature, unfamiliar subsystem), delegate to the Explore subagent: its CodeGraph tools return full source sections.
 
 **Read** is reserved for:
 - `MECHANISMS.md` / `VOCABULARY.md` / `JOURNAL.md` / `INTEGRATION.md` (always allowed; the gate doesn't apply to markdown).
 - Specific files that CodeGraph pointed at and you need the full body of (gate is open after step 1).
 - Config / generated / migration files (always allowed via path-segment allowlist).
 
-**Grep / Glob** are a last resort for content CodeGraph doesn't index (markdown comments, JSON config, auto-generated TypeScript). Treat falling back to them as a signal that the index may need a sync — call `mcp__codegraph__codegraph_status` first.
+**Grep / Glob** are a last resort for content CodeGraph doesn't index (markdown comments, JSON config, auto-generated TypeScript). Treat falling back to them as a signal that the index may need a sync — ask CodeGraph whether the index is current first (a CodeGraph status question), or run `codegraph sync`.
 
 Focus your investigation on:
 - Symbols referenced in the user's request.

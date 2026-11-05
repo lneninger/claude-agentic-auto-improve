@@ -6199,5 +6199,561 @@ class TestDanglingRowsReadBackWriter(unittest.TestCase):
         self.assertEqual(settings.read_bytes(), before, "INV-1: the scan only reads")
 
 
+# ======================================================================================================================
+# Issue #259 (concept contract 2026-11-05-codegraph-guard-fail-open): the codegraph add-on's permission entry, its
+# read-only --check, the codegraph-tool-named refusal, released hashes for an active hook, and the index-ownership
+# note in the preview. The fake plugin's codegraph manifest gets the two new keys in these classes only, so the older
+# rows (a round trip restores the original settings bytes) keep describing an add-on that grants nothing.
+# ======================================================================================================================
+WILDCARD = "mcp__codegraph__*"
+SERVER_FORM = "mcp__codegraph"
+NAMED_TOOL = "mcp__codegraph__codegraph_search"
+OLD_GUARD_TEXT = "# the codegraph guard exactly as the release before the fix shipped it\nimport sys\nsys.exit(2)\n"
+OLD_TRACKER_TEXT = "# the codegraph tracker of the release before the fix\nimport sys\nsys.exit(0)\n"
+
+
+def give_codegraph_the_new_manifest_keys(plugin_root):
+    """Rewrite the fake plugin's codegraph addon.json with permissions_allow and released_sha256 (old copies)."""
+    path = Path(plugin_root) / ".claude" / "addons" / "codegraph" / "addon.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data[af.KEY_PERMISSIONS_ALLOW] = [WILDCARD]
+    data[af.KEY_RELEASED] = {"codegraph-first-guard.py": _released(OLD_GUARD_TEXT),
+                             "codegraph-turn-reset.py": _released(OLD_TRACKER_TEXT),
+                             "codegraph-turn-tracker.py": _released(OLD_TRACKER_TEXT)}
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+class CodegraphHarness(AddonHarness):
+    def setUp(self):
+        super().setUp()
+        give_codegraph_the_new_manifest_keys(self.plugin)
+        self.configure_mcp("project")
+
+    def allow_list(self):
+        return (self.read_settings().get("permissions") or {}).get("allow")
+
+    def check_argv(self, project=None):
+        return ["addon", "--name", "codegraph", "--project", str(project or self.project), "--json",
+                "--claude-home", str(self.home), "--check"]
+
+    def run_check(self, project=None):
+        return self.cli(self.check_argv(project))
+
+    def write_layer(self, layer, data):
+        path = {"project": self.settings_path(), "local": self.project / ".claude" / "settings.local.json",
+                "user": self.home / "settings.json"}[layer]
+        write_json(path, data)
+        return path
+
+
+class TestCodegraphPermissionInsert(CodegraphHarness):
+    def test_the_preview_lists_the_permission_entry(self):
+        plan = self.preview("codegraph")
+        self.assertIn(WILDCARD, json.dumps(plan), msg="the permission entry is part of the plan: %r" % (plan,))
+
+    def test_the_apply_appends_the_wildcard_and_changes_nothing_else_in_the_settings(self):
+        existing = {"model": "opus", "permissions": {"allow": ["Bash(ls)"], "deny": ["Read(.env)"]},
+                    "hooks": {"Stop": [{"hooks": [copy.deepcopy(OTHER_ROW)]}]}}
+        write_json(self.settings_path(), existing)
+        self.install_addon("codegraph")
+        settings = self.read_settings()
+        self.assertEqual(self.allow_list(), ["Bash(ls)", WILDCARD], msg="appended after the existing entries")
+        self.assertEqual(settings["permissions"]["deny"], ["Read(.env)"], msg="the deny list is untouched")
+        self.assertEqual(settings.get("model"), "opus", msg="unrelated settings survive")
+        self.assertEqual([r for r in flat_registrations(settings) if r[2] == "mine.py"].__len__(), 1,
+                         msg="the project's own row survives")
+
+    def test_a_settings_file_with_no_permissions_key_gets_one(self):
+        write_json(self.settings_path(), {"model": "opus"})
+        self.install_addon("codegraph")
+        self.assertEqual(self.allow_list(), [WILDCARD], msg="permissions.allow is created holding the wildcard")
+
+    def test_a_second_run_adds_nothing_and_the_wildcard_is_listed_once(self):
+        self.install_addon("codegraph")
+        before = snapshot(self.tmp)
+        rc, out, plan = self.cli(self.addon_argv("codegraph"))
+        self.assertEqual(rc, 0, msg=out)
+        rc, out, parsed = self.apply("codegraph", (plan or {}).get("plan-sha256") or "")
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg=repr(parsed or out))
+        self.assertTreeSame(before, "a second apply writes nothing: no file, no row, no entry, no backup")
+        self.assertEqual((self.allow_list() or []).count(WILDCARD), 1, msg="listed exactly once")
+
+    def test_an_entry_already_there_is_not_duplicated(self):
+        write_json(self.settings_path(), {"permissions": {"allow": [WILDCARD]}})
+        self.install_addon("codegraph")
+        self.assertEqual(self.allow_list(), [WILDCARD], msg="the wildcard already allowed is left as it is")
+
+    def test_the_plan_hash_covers_the_permission_entry(self):
+        # Two previews over the SAME settings and files; only the manifest's permissions_allow differs.
+        with_entry = self.preview("codegraph")["plan-sha256"]
+        path = self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data[af.KEY_PERMISSIONS_ALLOW] = []
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        without_entry = self.preview("codegraph")["plan-sha256"]
+        self.assertNotEqual(with_entry, without_entry,
+                            msg="the permission insert is part of the plan, so it is part of the plan hash")
+
+    def test_removing_the_add_on_keeps_the_permission_entry_and_lists_it_as_kept(self):
+        self.install_addon("codegraph")
+        plan = self.cli(TestAddonRemoval.remove_argv(self, "codegraph"))[2]
+        rc, out, parsed = self.cli(TestAddonRemoval.remove_argv(self, "codegraph", apply=True,
+                                                                 sha=(plan or {}).get("plan-sha256")))
+        self.assertEqual(rc, 0, msg=repr(parsed or out))
+        self.assertIn(WILDCARD, self.allow_list() or [], msg="the permission entry is kept on uninstall (Q4)")
+        self.assertIn(WILDCARD, json.dumps({"plan": plan, "result": parsed}),
+                      msg="and the entry is listed under 'kept' in the plan or the result")
+
+
+class TestCodegraphCheck(CodegraphHarness):
+    """--check is a read-only mode of ``addon``: exit 0 clean, 1 with findings, 2 when it could not check."""
+
+    def test_a_project_that_allows_the_wildcard_exits_0_and_writes_nothing(self):
+        for form in (WILDCARD, SERVER_FORM):
+            with self.subTest(allowed=form):
+                self.write_layer("project", {"permissions": {"allow": [form]}})
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.run_check()
+                self.assertEqual(rc, 0, msg="exit 0 with the wildcard (or the server form) allowed: %r" % (parsed or out))
+                self.assertTreeSame(before, "--check only reads")
+
+    def test_a_missing_wildcard_exits_1_with_the_finding_code(self):
+        self.write_layer("project", {"model": "opus"})
+        rc, out, parsed = self.run_check()
+        self.assertEqual(rc, 1, msg="exit 1 with findings: %r" % (parsed or out))
+        self.assertIn("codegraph-wildcard-missing", out, msg="the finding code is printed: %r" % out)
+
+    def test_a_per_tool_entry_exits_1_naming_the_entry_and_the_layer(self):
+        self.write_layer("project", {"permissions": {"allow": [WILDCARD]}})
+        local = self.write_layer("local", {"permissions": {"allow": [NAMED_TOOL]}})
+        rc, out, parsed = self.run_check()
+        self.assertEqual(rc, 1, msg="exit 1 with findings: %r" % (parsed or out))
+        self.assertIn("codegraph-tool-named", out, msg="the finding code is printed: %r" % out)
+        self.assertIn(NAMED_TOOL, out, msg="the entry is named: %r" % out)
+        self.assertIn(local.name, out, msg="and so is the layer it sits in: %r" % out)
+
+    def test_an_unreadable_settings_layer_exits_2_and_never_reports_ready(self):
+        path = self.settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ this is not json", encoding="utf-8")
+        rc, out, parsed = self.run_check()
+        self.assertEqual(rc, 2, msg="exit 2: it could not check: %r" % (parsed or out))
+        self.assertTrue(out.strip(), msg="and it says why on stdout (an argument error prints nothing there)")
+        self.assertNotIn("codegraph-wildcard-missing", out, msg="an unreadable layer is not a finding about the entry")
+
+    # --- review round: EVERY refusal --check can return is exit 2 ("could not check"), never 3 ----------------------
+    # (the contract's Commands row, README.md and /verify-before-done Step 5.8 promise 0, 1 or 2 and nothing else;
+    # an agent that gets 3 has no instruction for it, and "could not check" must never be read as ready.
+    # `template-missing` is not reachable from `addon --check`: only the profile subcommand reads that template.)
+    def assertCouldNotCheck(self, label, code, run):
+        before = snapshot(self.tmp)
+        rc, out, parsed = run()
+        self.assertEqual((rc, (parsed or {}).get("code")), (2, code),
+                         msg="%s: --check could not check; exit 2 (not 3) with the refusal code %s: %r"
+                             % (label, code, parsed or out))
+        self.assertNotIn("codegraph-wildcard-missing", out, msg="a refusal is not a finding about the entry")
+        self.assertTreeSame(before, "--check only reads, even when it refuses")
+
+    def manifest_path(self):
+        return self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
+
+    def test_a_project_that_cannot_be_read_exits_2(self):
+        self.assertCouldNotCheck("project unreadable", "project-unreadable",
+                                 lambda: self.run_check(project=self.tmp / "no-such-project-folder"))
+
+    def test_a_missing_add_on_manifest_exits_2(self):
+        self.manifest_path().unlink()
+        self.assertCouldNotCheck("manifest missing", "addon-manifest-missing", self.run_check)
+
+    def test_an_unusable_add_on_manifest_exits_2(self):
+        self.manifest_path().write_text("{ not json", encoding="utf-8")
+        self.assertCouldNotCheck("manifest unusable", "addon-manifest-missing", self.run_check)
+
+    def test_a_settings_layer_that_exists_but_cannot_be_read_exits_2(self):
+        self.write_layer("project", {"permissions": {"allow": [WILDCARD]}})
+        local = self.write_layer("local", {"model": "opus"})
+        rc, out, parsed = self.run_check()
+        self.assertEqual(rc, 0, msg="control: readable layers holding the wildcard exit 0: %r" % (parsed or out))
+        real = Path.read_bytes
+
+        def flaky(path_self):
+            if path_self.name == local.name:
+                raise OSError("simulated: the file is locked")
+            return real(path_self)
+
+        def run_flaky():
+            with mock.patch.object(Path, "read_bytes", flaky):
+                return self.run_check()
+        self.assertCouldNotCheck("layer unreadable", "project-unreadable", run_flaky)
+
+    def test_check_together_with_apply_is_refused_as_mutually_exclusive(self):
+        self.write_layer("project", {"permissions": {"allow": [WILDCARD]}})
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.check_argv() + ["--apply", "--expect-sha256", "0" * 64])
+        self.assertEqual(rc, 2, msg="argparse refuses --check with --apply (exit 2); today the apply is silently "
+                                    "ignored and only the check runs (rc=%r): %r" % (rc, parsed or out))
+        self.assertIsNone(parsed, msg="and no result is printed for either mode: %r" % out)
+        self.assertTreeSame(before, "a refused command line writes nothing")
+
+    def test_check_together_with_stylesheet_or_expect_sha256_is_refused_like_apply(self):
+        # Review round 2 (code reviewer N5): --check only reads, so an option that only a write could use is a mistake in
+        # the command line, refused by parser.error (exit 2, nothing printed) exactly as --apply is.
+        self.write_layer("project", {"permissions": {"allow": [WILDCARD]}})
+        control_rc, control_out, _ = self.run_check()
+        self.assertEqual(control_rc, 0, msg="control: --check alone exits 0 here: %r" % control_out)
+        for label, extra in (("--stylesheet", ["--stylesheet", "styles.css"]),
+                             ("--expect-sha256", ["--expect-sha256", "0" * 64])):
+            with self.subTest(option=label):
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.cli(self.check_argv() + extra)
+                self.assertEqual(rc, 2, msg="argparse refuses --check with %s (exit 2); today the option is silently "
+                                            "dropped (rc=%r): %r" % (label, rc, parsed or out))
+                self.assertIsNone(parsed, msg="and no result is printed: %r" % out)
+                self.assertTreeSame(before, "a refused command line writes nothing")
+
+
+class TestCodegraphToolNamedRefusal(CodegraphHarness):
+    def test_an_install_refuses_when_a_layer_names_a_codegraph_tool(self):
+        self.write_layer("project", {"permissions": {"allow": [NAMED_TOOL]}})
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertEqual(rc, 2, msg="a correctable refusal is exit 2: %r" % (parsed or out))
+        self.assertEqual((parsed or {}).get("code"), "codegraph-tool-named", msg="the refusal code: %r" % (parsed or out))
+        message = str((parsed or {}).get("message", ""))
+        self.assertIn(NAMED_TOOL, message, msg="the message lists the entry")
+        self.assertIn("settings.json", message, msg="and the layer")
+        self.assertTreeSame(before, "a refusal writes nothing")
+
+    def test_a_tool_named_in_the_local_layer_is_refused_too(self):
+        self.write_layer("local", {"permissions": {"allow": [WILDCARD, "mcp__codegraph__codegraph_explore"]}})
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertEqual((rc, (parsed or {}).get("code")), (2, "codegraph-tool-named"), msg=repr(parsed or out))
+        self.assertIn("settings.local.json", str((parsed or {}).get("message", "")), msg="the local layer is named")
+
+    def test_the_wildcard_alone_is_never_refused(self):
+        self.write_layer("project", {"permissions": {"allow": [WILDCARD]}})
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "plan"), msg=repr(parsed or out))
+
+
+class TestCodegraphGrantShapeAndPreview(CodegraphHarness):
+    """Security W4 (the safe part): a manifest can only ask for a grant on one of ITS OWN prerequisite servers, and
+    the preview says in one plain sentence what that grant covers."""
+
+    def manifest_path(self):
+        return self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
+
+    def set_grants(self, grants):
+        data = json.loads(self.manifest_path().read_text(encoding="utf-8"))
+        data[af.KEY_PERMISSIONS_ALLOW] = grants
+        self.manifest_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def test_a_grant_that_is_not_a_prerequisite_servers_entry_is_refused_as_an_unusable_manifest(self):
+        for grant in ("Bash(*)", "Bash", "*", "mcp__*", "mcp__other__*", "mcp__other", "mcp__codegraph__codegraph_search",
+                      "mcp__codegraph__*__x", "mcp__codegraph__"):
+            with self.subTest(grant=grant):
+                self.set_grants([grant])
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+                self.assertEqual((parsed or {}).get("code"), "addon-manifest-missing",
+                                 msg="%r is not mcp__<prerequisite server>__* or mcp__<prerequisite server>: refused "
+                                     "as an unusable manifest: %r" % (grant, parsed or out))
+                self.assertNotEqual(rc, 0, msg="a refusal is not exit 0: %r" % (parsed or out))
+                self.assertTreeSame(before, "a refused manifest writes nothing")
+
+    def set_prerequisite(self, name, grants):
+        data = json.loads(self.manifest_path().read_text(encoding="utf-8"))
+        data[af.KEY_PREREQUISITES] = [{"kind": "mcp-server", "name": name}]
+        data[af.KEY_PERMISSIONS_ALLOW] = grants
+        self.manifest_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def test_a_prerequisite_server_name_outside_the_grammar_is_refused_as_an_unusable_manifest(self):
+        # Review round 2 (security P2-N4): the name must match [A-Za-z0-9][A-Za-z0-9_-]* with no '__', or the grant check
+        # (exact equality with mcp__<name>__*) can be widened from the other side: name '*' lets mcp__*__* through.
+        for name, grants in (("*", ["mcp__*__*"]), ("*", ["mcp__*"]), ("*", []), ("a__b", ["mcp__a__b__*"]),
+                             ("a__b", ["mcp__a__b"]), ("code graph", ["mcp__code graph__*"]),
+                             ("code\tgraph", ["mcp__code\tgraph__*"]), ("", [])):
+            with self.subTest(name=name, grants=grants):
+                self.set_prerequisite(name, grants)
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+                self.assertEqual((parsed or {}).get("code"), "addon-manifest-missing",
+                                 msg="a prerequisite server named %r is outside the grammar: refused as an unusable "
+                                     "manifest: %r" % (name, parsed or out))
+                self.assertNotEqual(rc, 0, msg="a refusal is not exit 0: %r" % (parsed or out))
+                self.assertTreeSame(before, "a refused manifest writes nothing")
+
+    def test_a_server_name_ending_in_an_underscore_or_starting_with_a_dash_is_refused_as_an_unusable_manifest(self):
+        # Addendum 3 item 14 (security P3-N2): the grammar is [A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9-])? with no '__'. A name
+        # ending in '_' makes the grant mcp__x___* ambiguous (server 'x', tool '_*'), so it is refused; '-x' never matched.
+        for name, grants in (("x_", ["mcp__x___*"]), ("x_", ["mcp__x_"]), ("x_", []), ("-x", ["mcp__-x__*"]),
+                             ("-x", []), ("a__b", []), ("a__b", ["mcp__a__b__*"])):
+            with self.subTest(name=name, grants=grants):
+                self.set_prerequisite(name, grants)
+                before = snapshot(self.tmp)
+                rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+                self.assertEqual((parsed or {}).get("code"), "addon-manifest-missing",
+                                 msg="a prerequisite server named %r is outside the grammar: refused as an unusable "
+                                     "manifest: %r" % (name, parsed or out))
+                self.assertNotEqual(rc, 0, msg="a refusal is not exit 0: %r" % (parsed or out))
+                self.assertTreeSame(before, "a refused manifest writes nothing")
+
+    def test_a_server_name_ending_in_a_dash_or_a_single_underscore_inside_is_not_refused_as_a_manifest_control(self):
+        for name, grants in (("x-", ["mcp__x-__*"]), ("x-", ["mcp__x-"]), ("a_b", ["mcp__a_b__*"]), ("codegraph", [WILDCARD])):
+            with self.subTest(name=name, grants=grants):
+                self.set_prerequisite(name, grants)
+                rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+                self.assertNotEqual((parsed or {}).get("code"), "addon-manifest-missing",
+                                    msg="%r is inside the grammar (the manifest is usable; the server is simply not "
+                                        "configured here, which is another refusal): %r" % (name, parsed or out))
+
+    def test_a_server_name_inside_the_grammar_is_not_refused_as_a_manifest_control(self):
+        self.set_prerequisite("my-server_2", ["mcp__my-server_2__*"])
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertNotEqual((parsed or {}).get("code"), "addon-manifest-missing",
+                            msg="letters, digits, '-' and a single '_' are allowed (the server is simply not "
+                                "configured here, which is another refusal): %r" % (parsed or out))
+        self.set_prerequisite("codegraph", [WILDCARD])
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "plan"), msg="'codegraph' still works: %r" % (parsed or out))
+
+    def test_the_two_accepted_forms_make_a_plan_control(self):
+        for grant in (WILDCARD, SERVER_FORM):
+            with self.subTest(grant=grant):
+                self.set_grants([grant])
+                rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+                self.assertEqual((rc, (parsed or {}).get("status")), (0, "plan"),
+                                 msg="mcp__<prerequisite server>__* and mcp__<prerequisite server> are accepted: %r"
+                                     % (parsed or out))
+
+    def grant_sentences(self, plan):
+        notes = [str(n) for n in (plan or {}).get("notes", [])]
+        return [n for n in notes if all(word in n.lower() for word in ("every", "future", "codegraph", "committed"))]
+
+    def test_the_install_preview_says_in_one_sentence_what_the_grant_covers(self):
+        plan = self.preview("codegraph")
+        found = self.grant_sentences(plan)
+        self.assertEqual(len(found), 1,
+                         msg="exactly one plain note says the grant covers every current and future tool of a server "
+                             "named codegraph, written to the committed settings file: %r" % (plan.get("notes"),))
+        self.assertIn("settings.json", found[0], msg="and names the file: %r" % found)
+        rc, text, _parsed = self.cli([a for a in self.addon_argv("codegraph") if a != "--json"])
+        self.assertEqual(rc, 0, msg=text)
+        lines = [ln for ln in text.splitlines() if ln.startswith("note:") and "future" in ln.lower()
+                 and "every" in ln.lower()]
+        self.assertEqual(len(lines), 1, msg="and the text preview prints it once: %r" % text)
+
+    def test_a_manifest_that_grants_nothing_prints_no_such_sentence_control(self):
+        self.set_grants([])
+        plan = self.preview("codegraph")
+        self.assertEqual(self.grant_sentences(plan), [],
+                         msg="control: no grant, nothing to explain: %r" % (plan.get("notes"),))
+
+
+class TestCodegraphReleasedHashes(CodegraphHarness):
+    """addon-remove deletes an UNEDITED old copy of an ACTIVE hook when the manifest's released_sha256 lists its
+    folded hash (the rule the disabled hook already has), and keeps an edited one."""
+
+    remove_argv = TestAddonRemoval.remove_argv
+    preview_remove = TestAddonRemoval.preview_remove
+    hook_path = TestAddonRemoval.hook_path
+    put_hook = TestAddonRemoval.put_hook
+    files_of = TestAddonRemoval.files_of
+    install_row_only = TestAddonRemoval.install_row_only
+
+    def test_an_unedited_old_copy_is_deleted_and_an_edited_one_is_kept(self):
+        guard = "codegraph-first-guard.py"
+        for label, text, action in (("the old release", OLD_GUARD_TEXT, "delete"),
+                                    ("the old release with CRLF", OLD_GUARD_TEXT.replace("\n", "\r\n"), "delete"),
+                                    ("edited by the team", "# my own guard\n", "kept-differs")):
+            with self.subTest(copy=label):
+                self.put_hook(guard, text)
+                self.install_row_only(guard, "PreToolUse", "Read|Grep|Glob")
+                plan = self.preview_remove("codegraph")
+                self.assertEqual(self.files_of(plan).get(".claude/hooks/" + guard), action,
+                                 msg="a released copy is deleted, an edited one is kept: %r" % (plan.get("files"),))
+                self.cli(self.remove_argv("codegraph", apply=True, sha=plan["plan-sha256"]))
+                self.assertEqual(self.hook_path(guard).exists(), action == "kept-differs")
+                for leftover in self.project.glob(".claude/settings.json.bak-*"):
+                    leftover.unlink()
+                if self.hook_path(guard).exists():
+                    self.hook_path(guard).unlink()
+
+    def test_the_manifest_keys_are_validated(self):
+        path = self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        broken = {
+            "permissions_allow is not a list": {af.KEY_PERMISSIONS_ALLOW: WILDCARD},
+            "released_sha256 holds a non-hash": {af.KEY_RELEASED: {"codegraph-first-guard.py": ["not-a-hash"]}},
+            "released_sha256 names a hook the add-on does not have": {af.KEY_RELEASED: {"nope.py": _released("x")}},
+        }
+        for label, change in broken.items():
+            with self.subTest(case=label):
+                path.write_text(json.dumps(dict(data, **change), indent=2), encoding="utf-8")
+                rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+                self.assertEqual((parsed or {}).get("code"), "addon-manifest-missing",
+                                 msg="a malformed manifest key is refused as an unusable manifest: %r" % (parsed or out))
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+class TestCodegraphIndexNote(CodegraphHarness):
+    """The preview's note comes from the one shared index-ownership rule (Project index = .codegraph/codegraph.db)."""
+
+    def setUp(self):
+        super().setUp()
+        self.configure_mcp("user")
+
+    def notes_for(self, project):
+        project = Path(project)
+        (project / ".claude").mkdir(parents=True, exist_ok=True)
+        rc, out, parsed = self.cli(self.addon_argv("codegraph", project=project))
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "plan"), msg="a plan: %r" % (parsed or out))
+        return "\n".join(str(n) for n in parsed.get("notes", []))
+
+    def fresh(self, name):
+        folder = self.tmp / name
+        folder.mkdir(parents=True)
+        return folder
+
+    def test_a_main_checkout_with_an_index_has_neither_note(self):
+        project = af.make_main_checkout(self.fresh("main"))
+        af.plant_index(project)
+        notes = self.notes_for(project)
+        self.assertNotIn("belongs to the main checkout", notes)
+        self.assertNotIn("no index", notes.lower())
+
+    def test_no_index_says_every_read_is_let_through_until_one_exists(self):
+        project = self.fresh("noindex")
+        notes = self.notes_for(project).lower()
+        self.assertIn("no index", notes, msg="the preview says there is no index")
+        self.assertIn("lets every read through", notes, msg="and what the guard does about it")
+
+    def test_a_codegraph_folder_without_the_database_is_named_as_not_an_index(self):
+        project = self.fresh("decoy")
+        af.plant_decoy(project)
+        notes = self.notes_for(project).lower()
+        self.assertIn("not an index", notes, msg="a .codegraph with no codegraph.db is not an index")
+        self.assertIn("no index", notes)
+
+    def test_a_worktree_under_the_main_checkout_says_the_index_belongs_to_the_main_checkout(self):
+        info = af.make_linked_worktree(self.fresh("inside"), layout="inside", gitdir_form="absolute")
+        af.plant_index(info["main"])
+        notes = self.notes_for(info["worktree"])
+        self.assertIn("belongs to the main checkout", notes, msg="notes: %r" % notes)
+        self.assertIn(str(info["main"] / ".codegraph").replace("\\", "/").lower(), notes.replace("\\", "/").lower(),
+                      msg="and names the index it means")
+
+    def test_a_worktree_outside_the_main_folder_with_a_relative_gitdir_says_the_same(self):
+        info = af.make_linked_worktree(self.fresh("outside"), layout="outside", gitdir_form="relative")
+        self.assertTrue(info["gitdir_text"].startswith(".."), msg="fixture: the gitdir is relative")
+        af.plant_index(info["main"])
+        notes = self.notes_for(info["worktree"])
+        self.assertIn("belongs to the main checkout", notes, msg="notes: %r" % notes)
+
+    def test_a_worktree_with_its_own_index_has_no_such_note(self):
+        info = af.make_linked_worktree(self.fresh("owner"), layout="inside", gitdir_form="absolute")
+        af.plant_index(info["main"])
+        af.plant_index(info["worktree"])
+        notes = self.notes_for(info["worktree"])
+        self.assertNotIn("belongs to the main checkout", notes)
+        self.assertNotIn("no index", notes.lower())
+
+
+class TestCodegraphOlderHelperBesideNewerScripts(Base):
+    """Approval addendum 2: scripts beside an older ``_project_paths.py`` that lacks worktree_own_root. The installer
+    treats the missing helper as 'undecidable', refuses nothing for it and prints one plain note."""
+
+    child_cli = TestLauncherFallbackNote.child_cli
+
+    def setUp(self):
+        super().setUp()
+        build_fake_addons(self.plugin)
+        give_codegraph_the_new_manifest_keys(self.plugin)
+        write_json(self.project / ".mcp.json", {"mcpServers": {"codegraph": {"command": "codegraph", "args": ["serve"]}}})
+
+    def scripts_copy(self):
+        copy_root = self.tmp / "scripts-copy"
+        shutil.copytree(SCRIPT_ROOT / ".claude" / "scripts", copy_root / ".claude" / "scripts",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        (copy_root / ".claude" / "hooks").mkdir()
+        real = (SCRIPT_ROOT / ".claude" / "hooks" / "_project_paths.py").read_text(encoding="utf-8")
+        # an older release: it keeps every name the scripts needed before, and has no worktree_own_root
+        older = real + "\n\nglobals().pop('worktree_own_root', None)\n"
+        (copy_root / ".claude" / "hooks" / "_project_paths.py").write_text(older, encoding="utf-8")
+        return copy_root
+
+    def test_the_stub_lacks_worktree_own_root_and_keeps_the_launcher_names_control(self):
+        copy_root = self.scripts_copy()
+        code = ("import sys, importlib.util; spec = importlib.util.spec_from_file_location('pp', sys.argv[1]); "
+                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+                "print(hasattr(m, 'worktree_own_root'), hasattr(m, 'project_hook_launcher_row'))")
+        proc = subprocess.run([sys.executable, "-B", "-c", code, str(copy_root / ".claude" / "hooks" / "_project_paths.py")],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "False True"), msg=proc.stderr[-300:])
+
+    def test_the_add_on_preview_still_works_and_says_in_one_plain_note_that_the_tree_is_undecidable(self):
+        copy_root = self.scripts_copy()
+        info = af.make_linked_worktree(self.tmp / "lw", layout="inside", gitdir_form="absolute")
+        af.plant_index(info["main"])
+        af.plant_server(info["worktree"])
+        argv = ["addon", "--name", "codegraph", "--project", str(info["worktree"]), "--json",
+                "--claude-home", str(self.home), "--platform", "win32"]
+        rc, parsed, err = self.child_cli(copy_root, argv)
+        self.assertEqual(rc, 0, msg="refuses nothing for a missing helper function: rc=%s stderr=%r" % (rc, err[-400:]))
+        self.assertEqual((parsed or {}).get("status"), "plan", msg="a plan, not a crash: %r / %r" % (parsed, err[-300:]))
+        self.assertNotIn("Traceback", err, msg="no traceback")
+        notes = [str(n) for n in (parsed or {}).get("notes", [])]
+        plain = [n for n in notes if re.search(r"undecidable|older|_project_paths", n, re.I)
+                 and "approves it" not in n]
+        self.assertEqual(len(plain), 1, msg="exactly one plain note about the helper being older: %r" % notes)
+        self.assertFalse(any("belongs to the main checkout" in n for n in notes),
+                         msg="and no ownership verdict is claimed without the helper: %r" % notes)
+
+
+class TestWorktreeOwnRootReachesTheScripts(unittest.TestCase):
+    """The installer takes the Caller tree root from the one shared function, through the bridge (``_claude_paths``)."""
+
+    def test_the_bridge_re_exports_worktree_own_root_and_lists_it_in_all(self):
+        import _claude_paths  # noqa: WPS433 - the scripts folder is on sys.path (see the top of this file)
+        self.assertTrue(hasattr(_claude_paths, "worktree_own_root"),
+                        msg="_claude_paths must re-export worktree_own_root (through getattr, with an inline fallback)")
+        self.assertIn("worktree_own_root", getattr(_claude_paths, "__all__", ()),
+                      msg="and list it in __all__ (test_installed_plugin_root.py pins every re-export)")
+
+    def test_the_bridges_inline_copy_of_the_walk_is_pinned_to_the_helper(self):
+        # The bridge's inline copy has no consumer while the helper beside it is current (WORKTREE_OWN_ROOT_NATIVE), so
+        # nothing else runs it; it must still answer exactly as the helper does on every own_root_cases input.
+        import _claude_paths  # noqa: WPS433
+        inline = getattr(_claude_paths, "_inline_worktree_own_root", None)
+        self.assertTrue(callable(inline), msg="_claude_paths._inline_worktree_own_root must exist (the fallback copy)")
+        sys.path.insert(0, str(SCRIPT_ROOT / ".claude" / "hooks"))
+        try:
+            import _project_paths as helper  # noqa: WPS433
+        finally:
+            sys.path.pop(0)
+        base = Path(tempfile.mkdtemp(prefix="bridge-walk-"))
+        try:
+            for name, ok, detail in af.own_root_cases(inline, base):
+                self.assertTrue(ok, msg="inline copy, row %r: %s" % (name, detail))
+            probes = [base / "main-checkout" / "src" / "deeper", base / "nogit" / "deep", base / "unreadable" / "deep",
+                      base / "nogitdirline" / "deep"] + sorted(base.glob("lw-*/**/src/sub"))
+            self.assertGreaterEqual(len(probes), 8, msg="the fixtures exist")
+            for probe in probes:
+                want, got = helper.worktree_own_root(str(probe)), inline(str(probe))
+                self.assertEqual(
+                    (af.canon(got[0]), af.canon(got[1]) if got[1] else None),
+                    (af.canon(want[0]), af.canon(want[1]) if want[1] else None),
+                    msg="the bridge's inline walk drifted from _project_paths.worktree_own_root on %s" % probe)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_the_bridge_must_not_make_a_bare_attribute_read_of_the_new_name(self):
+        text = (SCRIPT_ROOT / ".claude" / "scripts" / "_claude_paths.py").read_text(encoding="utf-8")
+        self.assertNotRegex(text, r"=\s*_pp\.worktree_own_root\b",
+                            msg="a bare `_pp.worktree_own_root` raises AttributeError beside an older _project_paths.py; "
+                                "look the name up with getattr and fall back to an inline copy of the walk")
+        self.assertIn("worktree_own_root", text, msg="the bridge must mention worktree_own_root at all")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

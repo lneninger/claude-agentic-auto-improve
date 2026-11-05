@@ -34,6 +34,21 @@
       "name": "codegraph"
     }
   ],
+  "permissions_allow": [
+    "mcp__codegraph__*"
+  ],
+  "released_sha256": {
+    "codegraph-first-guard.py": [
+      "712055e623e8e2b7afaf41131f8b1480127fb8efa238809f64d1fa5120eb4c22",
+      "40c8e4c21ec8fbc312649fc2dad2d6ee24b0eb3febb2a5a5b2e463ff6af39934"
+    ],
+    "codegraph-turn-reset.py": [
+      "9e1164fde61f340bb688725b3379ecc2b457713a62413a240e0ce28a70347807"
+    ],
+    "codegraph-turn-tracker.py": [
+      "3210b70bf2856c66d362357bb2ed57b0b88a21fefb14acc11376b9b3fccf6850"
+    ]
+  },
   "install_skill": "auto-improve-codegraph-install",
   "uninstall_skill": "auto-improve-codegraph-uninstall"
 }

@@ -70,10 +70,14 @@ Every command below is `$PY "$FI" addon --name codegraph --project . ...`.
 Three hooks work together:
 
 - `codegraph-first-guard.py` runs before `Read`, `Grep` and `Glob`. It blocks a call on a source-code path while no CodeGraph tool has run in this turn. Markdown, JSON, YAML and a few other file kinds are always allowed.
-- `codegraph-turn-tracker.py` runs after any `mcp__codegraph__*` tool. It writes the marker file `.claude/.codegraph-used-this-turn`, which opens the gate.
-- `codegraph-turn-reset.py` runs at each new prompt and deletes the marker, so every turn starts closed.
+- `codegraph-turn-tracker.py` runs after any `mcp__codegraph__*` tool. It writes the marker `turn.json` in the session's folder under the system temp folder (`auto-improve-codegraph-<session id>/`), which opens the gate. The marker belongs to the session, so a `cd` or `EnterWorktree` does not close the gate again.
+- `codegraph-turn-reset.py` runs at each new prompt and deletes the marker and any retry ticket, so every turn starts closed. Once per session it also prunes old session folders in the temp folder.
 
 It needs two helpers, `.claude/hooks/_project_paths.py` and `.claude/hooks/_error_log.py`, which the install copies only if the project lacks them.
+
+**The guard is a nudge, never a wall.** It lets a read through, prints one `allowed (fail-open:<reason>)` line and logs it, when CodeGraph is provably unavailable. There are five reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or the main checkout; a `.codegraph` folder without `codegraph.db` is not an index), `index-other-tree` (a linked worktree with no index of its own, whose only index belongs to the main checkout), `server-not-configured`, `server-disabled`, and `subagent`. In any other session with no CodeGraph tool, **repeat the identical blocked call once**: it is allowed and logged as a retry escape, and the next prompt clears it.
+
+**The permission entry.** The install also adds `mcp__codegraph__*` to the project's `permissions.allow`, inside the same preview and plan hash (the preview's `permissions-allow` field and its `unified-diff` show it). It never adds a single tool's name. The uninstall keeps the entry.
 
 ## If the CodeGraph MCP server is not configured
 
@@ -81,23 +85,23 @@ It needs two helpers, `.claude/hooks/_project_paths.py` and `.claude/hooks/_erro
 (exit `2`), tell the user in these words or close to them:
 
 > The CodeGraph server is not configured in this project, so I did not install the add-on. With
-> the gate installed and no server, every source Read, Grep and Glob would be blocked and the
-> agent would have no way to satisfy it. Nothing was written. Configure the CodeGraph MCP server
-> first, then run this again.
+> no server the guard would have nothing to ask first, and an installed guard that can never be
+> satisfied only adds a blocked round trip. Nothing was written. Configure the CodeGraph MCP
+> server first, then run this again.
 
 Do not install the add-on anyway. Do not edit `.mcp.json` yourself. Do not offer a way around
 the check. The server's setup is the user's decision.
 
 The script checks that the server is configured as a real entry (a non-empty `command` or `url`)
 and that no settings layer lists it in `disabledMcpjsonServers`. It does not check that the
-server is running. A server that is configured but not running still blocks every source read
-at run time, so remind the user that the server must be running. The refusal message names which
+server is running. A server that is configured but not running leaves the guard asking for a
+tool that is not there (the retry escape lets the read through), so remind the user that the server must be running. The refusal message names which
 condition failed: no entry, an entry that starts no server, or a server listed as disabled.
 
 When the server is defined only in the project's `.mcp.json` and no setting approves it
 (`enabledMcpjsonServers` or `enableAllProjectMcpServers`), the preview does not refuse. It
 carries one note saying so. Pass that note on to the user: Claude Code asks for approval when a
-session starts, and until the server is approved the gate would block every source read.
+session starts, and until the server is approved the guard would ask for a tool that is not there.
 
 ## Step 1: Preview (writes nothing)
 
@@ -123,7 +127,8 @@ Show the user, in plain words:
   and is not touched. A helper marked `keep-existing` is kept as it is.
 - the exact `unified-diff` for `.claude/settings.json`, and how many rows it adds.
 - that the add-on has no kill switch (`kill-switches` is an empty list): the way out is `/auto-improve-codegraph-uninstall`.
-- any `notes`.
+- the permission entry: `permissions-allow` lists `mcp__codegraph__*` under `add` (or `already-listed`).
+- any `notes`. **Relay the index note** if there is one: "no index: the guard lets every read through until one exists" or "the index at <main>/.codegraph belongs to the main checkout, so the guard lets reads through in this worktree" (a `.codegraph` folder with no `codegraph.db` is "not an index"). When the note says there is no index, or that the index belongs to the main checkout, **offer once** to run `codegraph init -i` in this working tree, and run it only on a yes. An index of its own brings the gate back here. Say that a new session is needed for the guard to see the new index.
 
 State your recommendation first, in one or two sentences. Then ask **once**: install this
 add-on?
@@ -148,7 +153,9 @@ back). Tell the user to add `.claude/settings.json.bak-*` to `.gitignore`.
 
 If the answer says `nothing-to-do`, the add-on was already installed. Nothing was written.
 
-The guard has no bypass variable. In a session with no `mcp__codegraph__*` tool, source reads through the shell still work, and `/auto-improve-codegraph-uninstall` followed by a new session takes the guard out.
+The guard has no bypass variable. In a session with no `mcp__codegraph__*` tool, repeat the blocked call once (the retry escape) and it is allowed and logged; `/auto-improve-codegraph-uninstall` followed by a new session takes the guard out.
+
+**Upgrading an install from before 0.15.2.** The old hook files differ from the new ones, so this skill refuses with `addon-file-differs`. The route is: run `/auto-improve-codegraph-uninstall` (it deletes an unedited old copy through the manifest's released hashes and keeps an edited one), run this skill, then start a new session. `addon --name codegraph --check` then confirms the permission entry.
 
 A project with a CodeGraph index builds it with the `codegraph` command line tool (`codegraph init -i`). This skill does not build the index.
 
@@ -166,13 +173,14 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 - `write-failed`: for example `.claude/settings.json` is a symbolic link, or `.claude` or
   `.claude/hooks` is a link (a junction on Windows) to another folder. Nothing was written.
   Tell the user to edit the file the link points to by hand, or to replace the link with a real folder.
+- `codegraph-tool-named` (exit `2`): a settings layer's `permissions.allow` names an individual CodeGraph tool. The message lists each entry and the file it is in. The user replaces it with `mcp__codegraph__*` by hand, then runs this again. Nothing was written.
 - `plugin-source-checkout`: this folder is the plugin's own checkout. Install an add-on in a
   project that uses the plugin instead.
 - `addon-unknown`: the name matches no add-on folder in the plugin.
 
 ## How to remove it
 
-This install never removes anything. The removal is its own skill, `/auto-improve-codegraph-uninstall`. It previews, asks once, then removes the three `settings.json` rows (with a backup) and only then the three hook files. It keeps a hook file you edited, leaves `_project_paths.py` and `_error_log.py` because other hooks use them. `.claude/.codegraph-used-this-turn`, if it exists, is a leftover of a turn that the user may delete.
+This install never removes anything. The removal is its own skill, `/auto-improve-codegraph-uninstall`. It previews, asks once, then removes the three `settings.json` rows (with a backup) and only then the three hook files. It keeps a hook file you edited, leaves `_project_paths.py` and `_error_log.py` because other hooks use them, and keeps the `mcp__codegraph__*` permission entry (listed under `kept`). The only leftover is the session folder in the system temp folder, which the reset hook prunes; an older `.claude/.codegraph-used-this-turn`, if it exists, is a leftover of a turn that the user may delete.
 
 Do not delete the hook files or the rows by hand while the hooks can run: a row that points at a missing script blocks every prompt. Only when a hook cannot run (the README table, section "Ways out when a hook cannot run") does the user remove its row by hand.
 
@@ -198,6 +206,6 @@ twice.
 ## When NOT to use
 
 - To index the code. That is `codegraph init -i`, run by the user.
-- To bypass the guard for a turn. There is no bypass; call a CodeGraph tool, or remove the add-on with `/auto-improve-codegraph-uninstall`.
+- To bypass the guard for a turn. There is no bypass variable; call a CodeGraph tool, repeat the blocked call once (the retry escape), or remove the add-on with `/auto-improve-codegraph-uninstall`.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
 - On Cursor or Codex. Hooks are Claude-only in this release.

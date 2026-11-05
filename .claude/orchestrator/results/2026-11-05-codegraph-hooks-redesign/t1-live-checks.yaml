@@ -1,0 +1,21 @@
+status: completed
+commit: b8e2e607d2e8106d7694f133806671e54fdc7660
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/268
+merged_at: '2026-11-05T18:33:18Z'
+verified: github
+review_verdict: pass
+sub_issue_closed: closed
+hand_resolved:
+  files: []
+  merge_commits: 0
+  commits_inspected: 2
+  commits_unread: 0
+base_ref: feature/261-codegraph-hooks-redesign
+base_is_default: false
