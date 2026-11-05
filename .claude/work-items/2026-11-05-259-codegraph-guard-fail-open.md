@@ -14,6 +14,7 @@ worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\2026110
 north_stars: none
 contract: .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
 pr: none
+partial: true
 issue_link: unknown
 status: verifying
 created: 2026-11-05
