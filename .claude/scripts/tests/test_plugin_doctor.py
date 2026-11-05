@@ -2579,5 +2579,139 @@ class TestDanglingRowSharedReaders(DanglingCase):
         self.assertEqual(launched, set(twice), "dangling names the same (event, file) pairs registered-twice does")
 
 
+# --------------------------------------------------------------------------
+# Registry layout (contract 2026-11-04-domain-split-registries, sub-task 6): three copy requirements for the
+# general.md skeletons, a report-only layout line, the body-less journal count and the --json key.
+# --------------------------------------------------------------------------
+import contextlib  # noqa: E402
+import io  # noqa: E402
+from unittest import mock  # noqa: E402
+
+_REPO = Path(__file__).resolve().parent.parent.parent.parent
+_STEMS = ("MECHANISMS", "VOCABULARY", "JOURNAL")
+
+
+def _plugin_with_skeletons(plugin: Path) -> Path:
+    """Add the three general.md skeletons to a fake plugin tree built by ``_fake_plugin``."""
+    for stem in _STEMS:
+        src = _REPO / ".claude" / "templates" / "registries" / stem / "general.md"
+        dst = plugin / ".claude" / "templates" / "registries" / stem / "general.md"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(src.read_bytes())
+    return plugin
+
+
+def _journal_entry(title: str, apply_when: str = "a thing happens", extra: str = "") -> str:
+    fields = ("- **Trigger:** manual\n- **Source contract:** N/A\n- **Lesson:** a lesson.\n")
+    if apply_when:
+        fields += "- **Apply when:** %s\n" % apply_when
+    return "### 2026-11-01 — %s\n%s- **Tags:** t\n%s\n" % (title, fields, extra)
+
+
+def _run_main(args: list, cwd_project: Path):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), mock.patch.object(sys, "argv", ["plugin_doctor.py"] + args):
+        code = _pd.main()
+    return code, out.getvalue()
+
+
+class TestRegistryLayoutRequirements(DoctorCase):
+    def test_three_general_skeletons_are_copy_requirements_with_real_sources(self):
+        wanted = {".claude/registries/%s/general.md" % s: ".claude/templates/registries/%s/general.md" % s
+                  for s in _STEMS}
+        found = {r.path: r for r in REQUIREMENTS if r.path in wanted}
+        self.assertEqual(sorted(found), sorted(wanted))
+        for path, req in found.items():
+            self.assertEqual(req.kind, "copy")
+            self.assertEqual(req.source, wanted[path])
+            self.assertTrue((_REPO / req.source).is_file(), req.source)
+
+    def test_fix_copies_the_skeletons_and_never_overwrites_one(self):
+        plugin = _plugin_with_skeletons(self.plugin)
+        mine = self.project / ".claude/registries/JOURNAL/general.md"
+        mine.parent.mkdir(parents=True)
+        mine.write_text("# mine\n", encoding="utf-8")
+        report = apply_fixes(self.project, check(self.project), plugin)
+        self.assertEqual(mine.read_text(encoding="utf-8"), "# mine\n")
+        for stem in ("MECHANISMS", "VOCABULARY"):
+            copied = self.project / ".claude/registries" / stem / "general.md"
+            self.assertEqual(copied.read_bytes(),
+                             (plugin / ".claude/templates/registries" / stem / "general.md").read_bytes())
+            self.assertIn(".claude/registries/%s/general.md" % stem, report["created"])
+        self.assertNotIn(".claude/registries/JOURNAL/general.md", report["created"])
+
+
+class TestRegistryLayoutReport(DoctorCase):
+    def _pending_registries(self, extra_journal: str = ""):
+        regs = self.project / ".claude" / "registries"
+        regs.mkdir(parents=True)
+        (regs / "MECHANISMS.md").write_text("# Mechanisms\n\n- **A** — body\n", encoding="utf-8")
+        (regs / "VOCABULARY.md").write_text("# Vocabulary\n\n- **B** — body\n", encoding="utf-8")
+        (regs / "JOURNAL.md").write_text(
+            "# Journal\n\n" + _journal_entry("Bodied") + _journal_entry("Bare one", apply_when="")
+            + _journal_entry("Archived", apply_when="", extra="  - **Status:** archived-title-only\n") + extra_journal,
+            encoding="utf-8")
+        (regs / "JOURNAL").mkdir()
+        (regs / "JOURNAL" / "backend.md").write_text("# Journal - backend\n\n" + _journal_entry("Bare two", apply_when=""),
+                                                     encoding="utf-8")
+        return regs
+
+    def test_the_layout_state_and_the_bodyless_count_are_reported(self):
+        self._pending_registries()
+        info = _pd.registry_layout_report(self.project)
+        self.assertEqual(info["layout"]["state"], "pending")
+        self.assertEqual(info["bodyless_journal_entries"], 2)  # root + domain file; the archived one does not count
+        code, text = _run_main(["--project", str(self.project), "--plugin", str(self.plugin)], self.project)
+        self.assertEqual(code, 0)
+        self.assertIn("registry layout: pending", text)
+        self.assertIn("registry_migrate.py --dry-run", text)
+        self.assertIn("body-less journal entries: 2", text)
+
+    def test_json_has_the_registry_layout_key_with_and_without_fix(self):
+        self._pending_registries()
+        for extra in ([], ["--fix"]):
+            with self.subTest(extra):
+                code, text = _run_main(["--project", str(self.project), "--plugin", str(self.plugin), "--json"] + extra,
+                                       self.project)
+                self.assertEqual(code, 0)
+                data = json.loads(text)
+                self.assertEqual(data["registry_layout"]["state"], "pending")
+                self.assertEqual(data["registry_layout"]["remedy"], "registry_migrate.py --dry-run")
+                self.assertEqual(data["bodyless_journal_entries"], 2)
+
+    def test_an_absent_registry_set_is_reported_absent(self):
+        info = _pd.registry_layout_report(self.project)
+        self.assertEqual(info["layout"]["state"], "absent")
+        self.assertEqual(info["bodyless_journal_entries"], 0)
+
+    def test_fix_never_migrates(self):
+        regs = self._pending_registries()
+        before = {p.relative_to(regs).as_posix(): p.read_bytes() for p in regs.rglob("*") if p.is_file()}
+        plugin = _plugin_with_skeletons(self.plugin)
+        code, text = _run_main(["--project", str(self.project), "--plugin", str(plugin), "--fix"], self.project)
+        self.assertEqual(code, 0)
+        after = {p.relative_to(regs).as_posix(): p.read_bytes() for p in regs.rglob("*") if p.is_file()}
+        for name, data in before.items():
+            self.assertEqual(after[name], data, "--fix rewrote %s" % name)
+        self.assertEqual(sorted(set(after) - set(before)), ["JOURNAL/general.md", "MECHANISMS/general.md",
+                                                           "VOCABULARY/general.md"])
+        for stem in _STEMS:
+            self.assertNotIn("registry-layout", (regs / ("%s.md" % stem)).read_text(encoding="utf-8"))
+        self.assertIn("registry layout: pending", text)
+
+    def test_a_missing_module_is_named_and_the_other_checks_go_on(self):
+        self._pending_registries()
+        with mock.patch.dict(sys.modules, {"_registry_layout": None}):
+            info = _pd.registry_layout_report(self.project)
+            self.assertEqual(info["layout"]["state"], "unavailable")
+            self.assertIn("_registry_layout", info["error"])
+            code, text = _run_main(["--project", str(self.project), "--plugin", str(self.plugin)], self.project)
+        self.assertEqual(code, 0)
+        self.assertIn("registry layout: unavailable", text)
+        self.assertIn("_registry_layout", text)
+        self.assertIn("missing  .claude/concepts", text)  # the other checks still ran
+        self.assertIn("body-less journal entries: unknown", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
