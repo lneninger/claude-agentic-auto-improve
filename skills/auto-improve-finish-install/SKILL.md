@@ -216,7 +216,9 @@ runs twice). The answer is a readiness report. Tell the user, in plain words:
   strict on purpose. The project names its real databases in that file.
 - **The code-search-first note.** Print `code-search-first-note`. In short: the guard that
   makes a CodeGraph call come first is the `codegraph` add-on. It is off by default, so the
-  plugin does not block source reads. `/auto-improve-codegraph-install` turns it on.
+  plugin does not block source reads. `/auto-improve-codegraph-install` turns it on. Once on,
+  the guard is a nudge: it lets reads through when CodeGraph is unavailable, and allows the
+  identical retry of a blocked call once.
 - **The add-ons.** Print the `add-ons` list from the report: each add-on's name and its
   install skill. Say they are opt-in and that this skill installs none of them.
 - **The platform note.** If the answer has `platform-note` (macOS and Linux), say plainly
@@ -326,7 +328,7 @@ installs none of them. Each has its own skill, which previews first and writes o
 | Add-on | What it does | Its install skill |
 |---|---|---|
 | `angular-tailwind` | At each prompt, reminds the agent of the Angular and Tailwind CSS rules. | `/auto-improve-angular-tailwind-install` |
-| `codegraph` | Blocks a source Read, Grep or Glob until a CodeGraph call has run in the turn. Needs the CodeGraph MCP server. | `/auto-improve-codegraph-install` |
+| `codegraph` | Blocks a source Read, Grep or Glob until a CodeGraph call has run in the turn, and lets reads through when CodeGraph is unavailable. Needs the CodeGraph MCP server. | `/auto-improve-codegraph-install` |
 | `strict-shell-gate` | Reads each shell command before it runs and blocks a write into a source file that no approved contract covers. | `/auto-improve-strict-shell-gate-install` |
 
 Only name them. Do not start one of them unless the user asks.

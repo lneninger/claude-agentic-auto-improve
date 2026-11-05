@@ -690,6 +690,93 @@ class WriteTargetKindTests(GuardTestCase):
         ])
 
 
+class BareRepositoryWorktreeTests(GuardTestCase):
+    """Review round 2 (code reviewer B1): a worktree of a BARE repository (gitdir: .../repo.git/worktrees/wt, no /.git/
+    segment) is a linked worktree, so a Write inside it is allowed -- it must never read as an undecidable tree.
+    Built by hand (no git): <base>/repo.git/worktrees/wt/commondir = ../.. and <base>/wt/.git = 'gitdir: <admin>'."""
+
+    def _hand_built(self, label: str) -> dict:
+        FX.copy_counter += 1
+        base = FX.root / "hand_built" / f"{label}_{FX.copy_counter}"
+        admin = base / "repo.git" / "worktrees" / "wt"
+        admin.mkdir(parents=True)
+        (admin / "commondir").write_text("../..\n", encoding="utf-8")
+        (base / "repo.git" / "HEAD").write_text("ref: refs/heads/master\n", encoding="utf-8")
+        bare_wt = base / "wt"
+        (bare_wt / "docs").mkdir(parents=True)
+        (bare_wt / ".git").write_text(f"gitdir: {posix(admin)}\n", encoding="utf-8")
+        # a regular main checkout with a linked worktree, for the BLOCK sibling of this run
+        main = base / "regular_main"
+        (main / ".git" / "worktrees" / "w2").mkdir(parents=True)
+        (main / ".git" / "worktrees" / "w2" / "commondir").write_text("../..\n", encoding="utf-8")
+        (main / "src").mkdir()
+        regular_wt = base / "regular_wt"
+        (regular_wt / "docs").mkdir(parents=True)
+        (regular_wt / ".git").write_text(f"gitdir: {posix(main / '.git' / 'worktrees' / 'w2')}\n", encoding="utf-8")
+        return {"bare_wt": bare_wt, "main": main, "regular_wt": regular_wt}
+
+    def test_a_write_inside_a_bare_repository_worktree_is_allowed(self):
+        t = self._hand_built("bare")
+        self.run_cases([
+            f("control: a Write into the main checkout from its own worktree", "Write", t["main"] / "src" / "n.md",
+              t["regular_wt"], t["regular_wt"], "block"),
+            f("Write inside a worktree of a bare repository", "Write", t["bare_wt"] / "docs" / "n.md",
+              t["bare_wt"], t["bare_wt"], "allow"),
+            f("Edit inside a worktree of a bare repository", "Edit", t["bare_wt"] / "docs" / "n.md",
+              t["bare_wt"], t["bare_wt"], "allow"),
+        ])
+
+
+class MappedDriveWorktreeTests(unittest.TestCase):
+    """Review round 3 (code reviewer W1, Addendum 3 item 12): the main checkout sits on a MAPPED DRIVE (os.path.realpath
+    turns it into \\\\server\\share\\main) and the linked worktree is on another volume. HEAD read that worktree as a
+    linked worktree; the host refusal must not turn it into an undecidable tree that walls every write.
+
+    In-process: the drive is simulated by patching os.path.realpath over a local folder (af.unc_share). No network."""
+
+    HOST = "mapped-259.invalid"
+
+    def setUp(self) -> None:
+        if not IS_WINDOWS:
+            self.skipTest("a mapped drive is a Windows reading of paths")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _addon_fixture as af  # noqa: WPS433
+        self.af = af
+        sys.path.insert(0, str(HOOKS_DIR))
+        self.addCleanup(lambda: sys.path.remove(str(HOOKS_DIR)))
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mcg_guard_mapped_drive_under_test", GUARD)
+        self.guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.guard)
+        FX.copy_counter += 1
+        self.base = FX.root / "mapped_drive" / f"case_{FX.copy_counter}"
+        self.share = self.base / "share"
+        info = af.make_linked_worktree(self.base, name="wt1", layout="outside", main=self.share / "main")
+        self.main, self.wt = info["main"], info["worktree"]
+        (self.main / "src").mkdir(parents=True, exist_ok=True)
+        (self.wt / "docs").mkdir(parents=True, exist_ok=True)
+
+    def decide(self, tool: str, path: Path) -> tuple:
+        from unittest import mock
+        payload = json.dumps(file_payload(tool, str(path), self.wt))
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.wt)}), \
+                self.af.unc_share(self.share, self.HOST, resolve_local=True):
+            return self.guard.decide(payload)
+
+    def test_a_write_in_the_worktree_of_a_mapped_drive_repository_is_allowed(self):
+        control = self.decide("Write", self.main / "src" / "n.md")
+        self.assertEqual(control[0], "block",
+                         msg="control: a Write into the main checkout from its own worktree is blocked: %r" % (control,))
+        self.assertIn(MARKER, control[1], msg="and the block carries the guard banner")
+        for tool in ("Write", "Edit"):
+            with self.subTest(tool=tool):
+                got = self.decide(tool, self.wt / "docs" / "n.md")
+                self.assertEqual(got, ("allow", ""),
+                                 msg="a %s inside the linked worktree whose main checkout is on a mapped drive must be "
+                                     "allowed (the tree reads linked-worktree, as in HEAD), not blocked as an "
+                                     "undecidable tree: %r" % (tool, got))
+
+
 # ===========================================================================
 # Git and gh command classes.
 # ===========================================================================

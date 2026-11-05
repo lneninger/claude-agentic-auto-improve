@@ -972,6 +972,54 @@ def angular_tailwind_problems(data) -> list:
     return problems
 
 
+#: Issue #259 (concept contract 2026-11-05-codegraph-guard-fail-open): the optional manifest keys ``permissions_allow``
+#: (the entries the install adds to permissions.allow) and ``released_sha256`` (the folded hash of every released copy
+#: of an ACTIVE hook, so addon-remove can delete an unedited old copy). Acceptance criterion 9 ("a test fails if the
+#: settings template lists a per-tool entry") is answered here: the plugin ships no settings template, so this
+#: manifest key is its role, and ``permissions_allow`` must be the wildcard only.
+CODEGRAPH_WILDCARD = "mcp__codegraph__*"
+LEGACY_TOOL_RE = re.compile(r"\bcodegraph_(search|node|callers|callees|impact|files|status|context|explore)\b")
+
+
+def permission_grant_problems(name: str, data) -> list:
+    """Every way ``permissions_allow`` breaks the rule 'the wildcard only, never a per-tool name'; [] means it holds."""
+    if not isinstance(data, dict) or af.KEY_PERMISSIONS_ALLOW not in data:
+        return ["%s: no %r key (the codegraph add-on grants the wildcard)" % (name, af.KEY_PERMISSIONS_ALLOW)]
+    grant = data[af.KEY_PERMISSIONS_ALLOW]
+    if not isinstance(grant, list) or not all(isinstance(g, str) and g for g in grant):
+        return ["%s: %r is not a list of non-empty strings" % (name, af.KEY_PERMISSIONS_ALLOW)]
+    problems = []
+    for entry in grant:
+        if entry != CODEGRAPH_WILDCARD:
+            problems.append("%s: %r lists %r; the only entry is %s" % (name, af.KEY_PERMISSIONS_ALLOW, entry,
+                                                                      CODEGRAPH_WILDCARD))
+        if entry.startswith("mcp__codegraph__codegraph_") or LEGACY_TOOL_RE.search(entry):
+            problems.append("%s: %r names an individual CodeGraph tool (%s)" % (name, af.KEY_PERMISSIONS_ALLOW, entry))
+    if grant != [CODEGRAPH_WILDCARD]:
+        problems.append("%s: %r is %r, not exactly [%r]" % (name, af.KEY_PERMISSIONS_ALLOW, grant, CODEGRAPH_WILDCARD))
+    return sorted(set(problems))
+
+
+def released_hash_problems(name: str, data) -> list:
+    """Every way ``released_sha256`` breaks its shape ({<active hook>: [lowercase hex SHA-256, ...]}); [] means it holds."""
+    if not isinstance(data, dict) or af.KEY_RELEASED not in data:
+        return ["%s: no %r key (the folded hashes of every released copy of each hook)" % (name, af.KEY_RELEASED)]
+    released = data[af.KEY_RELEASED]
+    hooks = data.get(af.KEY_HOOKS) or []
+    if not isinstance(released, dict) or not released:
+        return ["%s: %r is not a non-empty object {hook: [hash, ...]}" % (name, af.KEY_RELEASED)]
+    problems = []
+    for hook, hashes in released.items():
+        if hook not in hooks:
+            problems.append("%s: %r names %r, which is not one of the manifest's hook files" % (name, af.KEY_RELEASED, hook))
+        if not (isinstance(hashes, list) and hashes and all(isinstance(h, str) and SHA256_HEX.match(h) for h in hashes)):
+            problems.append("%s: %r of %s is not a non-empty list of lowercase hex SHA-256 values" % (name, af.KEY_RELEASED, hook))
+    for hook in hooks:
+        if hook not in released:
+            problems.append("%s: %r has no entry for the hook %s" % (name, af.KEY_RELEASED, hook))
+    return problems
+
+
 _default_hooks = default_hook_names(ROOT)
 check("the add-on folder holds exactly the three add-ons",
       ADDONS_DIR.is_dir() and sorted(p.name for p in ADDONS_DIR.iterdir() if p.is_dir()) == sorted(EXPECTED_ADDON_HOOKS),
@@ -1018,6 +1066,35 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
               "CLAUDE_ARCH_ADVISOR" not in (ADDONS_DIR / _name / "hooks" / ANGULAR_DISABLED_HOOK).read_text(
                   encoding="utf-8"))
     if _name == "codegraph":
+        _grant_problems = permission_grant_problems(_name, _data)
+        check("codegraph: permissions_allow is the wildcard only (acceptance criterion 9: no per-tool entry)",
+              not _grant_problems, "\n".join(_grant_problems))
+        _released_problems = released_hash_problems(_name, _data)
+        check("codegraph: released_sha256 holds the folded hashes of every released copy of each active hook",
+              not _released_problems, "\n".join(_released_problems))
+        # Controls for the two validators above: they are test code, so they pass today, and they prove the checks can fail.
+        _base = {af.KEY_HOOKS: ["a.py", "b.py"], af.KEY_PERMISSIONS_ALLOW: [CODEGRAPH_WILDCARD],
+                 af.KEY_RELEASED: {"a.py": ["0" * 64], "b.py": ["f" * 64]}}
+        check("control: a manifest that grants the wildcard only is accepted", not permission_grant_problems("demo", _base))
+        for _label, _bad in (
+                ("a per-tool entry beside the wildcard", [CODEGRAPH_WILDCARD, "mcp__codegraph__codegraph_search"]),
+                ("a per-tool entry alone", ["mcp__codegraph__codegraph_explore"]),
+                ("a bare legacy tool name", ["codegraph_search"]),
+                ("an empty list", []),
+                ("the server form instead of the wildcard", ["mcp__codegraph"]),
+                ("a string instead of a list", CODEGRAPH_WILDCARD)):
+            check("control: permissions_allow with %s is rejected" % _label,
+                  bool(permission_grant_problems("demo", {**_base, af.KEY_PERMISSIONS_ALLOW: _bad})))
+        check("control: a manifest with no permissions_allow is rejected",
+              bool(permission_grant_problems("demo", {k: v for k, v in _base.items() if k != af.KEY_PERMISSIONS_ALLOW})))
+        check("control: released_sha256 that is well formed is accepted", not released_hash_problems("demo", _base))
+        for _label, _bad in (("a hash that is not hex", {"a.py": ["nope"], "b.py": ["f" * 64]}),
+                             ("an upper-case hash", {"a.py": ["A" * 64], "b.py": ["f" * 64]}),
+                             ("a hook that is not in the manifest", {"a.py": ["0" * 64], "b.py": ["f" * 64], "c.py": ["1" * 64]}),
+                             ("a hook with no entry", {"a.py": ["0" * 64]}),
+                             ("an empty list of hashes", {"a.py": [], "b.py": ["f" * 64]})):
+            check("control: released_sha256 with %s is rejected" % _label,
+                  bool(released_hash_problems("demo", {**_base, af.KEY_RELEASED: _bad})))
         check("codegraph: the manifest names the CodeGraph MCP server as a prerequisite",
               "mcp-server" in json.dumps(_data.get(af.KEY_PREREQUISITES)) and
               "codegraph" in json.dumps(_data.get(af.KEY_PREREQUISITES)),

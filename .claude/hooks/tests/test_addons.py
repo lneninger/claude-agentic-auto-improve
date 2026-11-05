@@ -16,9 +16,13 @@ WHAT IS PINNED
   * none of the installed hooks prints a fallback-mode banner: the helpers the manifest names are enough;
   * angular-tailwind-advisor.py prints the CSS reminder for a UI prompt, stays silent for another prompt, and
     reads the PROJECT's architecture-guard.rules.json first (it names the project's reference document);
-  * the CodeGraph trio: codegraph-first-guard.py blocks a source Read with no sentinel, codegraph-turn-tracker.py
-    writes the sentinel after a CodeGraph tool call (and ignores any other tool), the guard then allows the
-    Read, and codegraph-turn-reset.py removes the sentinel so the guard blocks again;
+  * the CodeGraph trio (issue #259): with a Project index (.codegraph/codegraph.db) and a configured server the
+    codegraph-first-guard.py blocks a source Read with no marker; codegraph-turn-tracker.py writes the SESSION-keyed
+    marker (turn.json in <system temp>/auto-improve-codegraph-<session_id>/) after any CodeGraph tool call (and
+    ignores any other tool); the guard then allows the Read; codegraph-turn-reset.py removes the marker so the
+    guard blocks again. The guard fails open, with a logged reason, when there is no index, no server, a disabled
+    server or a subagent; the identical retry of a blocked call is allowed once; the manifest grants the wildcard
+    only and lists released hashes;
   * bash-gate.py blocks a redirect into an uncovered source file, allows a covered one and a trivial one,
     and (Revision 4, D) with ``_shell_write_targets.py`` deleted from the project it exits 2 naming that
     file; the strict-shell-gate manifest names ``_shell_write_targets.py`` as a helper;
@@ -34,13 +38,16 @@ Run:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent
@@ -83,14 +90,20 @@ class AddonCase(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(tempfile.mkdtemp(prefix="addon-home-"))
         self.addCleanup(__import__("shutil").rmtree, self.home, True)
+        # A temp folder per test: the CodeGraph hooks keep their Session folder in the system temp folder, so a
+        # row never reads or writes the developer's real one.
+        self.tmp = Path(tempfile.mkdtemp(prefix="addon-tmp-"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
         self.project = af.new_project("addon-run-")
         self.hooks = {p.name: p for p in self.INSTALLER(self.ADD_ON, self.project)}
 
     def run_hook(self, name: str, payload: dict, *, cwd: Path | None = None, extra_env: dict | None = None,
                  raw: bytes | None = None) -> Run:
         data = raw if raw is not None else json.dumps(payload).encode("utf-8")
+        env = {"TMP": str(self.tmp), "TEMP": str(self.tmp), "TMPDIR": str(self.tmp)}
+        env.update(extra_env or {})
         proc = subprocess.run([sys.executable, "-B", str(self.hooks[name])], input=data, capture_output=True,
-                              cwd=str(cwd or self.project), env=clean_env(self.project, self.home, extra_env),
+                              cwd=str(cwd or self.project), env=clean_env(self.project, self.home, env),
                               timeout=60)
         return Run(proc)
 
@@ -267,56 +280,203 @@ class CodegraphAddonTests(AddonCase):
     GUARD = "codegraph-first-guard.py"
     RESET = "codegraph-turn-reset.py"
     TRACKER = "codegraph-turn-tracker.py"
+    #: The release before the fix; its hooks are what an old install carries (the released_sha256 baseline).
+    BASELINE_COMMIT = "643b667"
 
-    def sentinel(self) -> Path:
+    def setUp(self) -> None:
+        super().setUp()
+        # A Project index and a configured server, so the gate is armed (the positive control of the contract);
+        # every fail-open row removes exactly one of them. A session id per test: no two tests share a folder.
+        af.plant_index(self.project)
+        af.plant_server(self.project)
+        self.sid = "s" + uuid.uuid4().hex
+
+    def marker(self, session: str | None = None) -> Path:
+        """The Turn marker: turn.json in the session's folder under the (fixture) system temp folder."""
+        return af.session_folder(self.tmp, session or self.sid) / "turn.json"
+
+    def legacy_sentinel(self) -> Path:
         return self.project / ".claude" / ".codegraph-used-this-turn"
 
-    def read_payload(self, rel: str = "src/Thing.cs") -> dict:
-        return {"tool_name": "Read", "tool_input": {"file_path": str(self.project / rel)}}
+    def payload(self, tool: str, tool_input: dict, **extra) -> dict:
+        body = {"session_id": self.sid, "cwd": str(self.project), "tool_name": tool, "tool_input": tool_input}
+        body.update(extra)
+        return body
 
-    def test_a_source_read_with_no_sentinel_is_blocked_with_the_guards_own_banner(self):
+    def read_payload(self, rel: str = "src/Thing.cs", **extra) -> dict:
+        return self.payload("Read", {"file_path": str(self.project / rel)}, **extra)
+
+    def assertAllowedBecause(self, run: Run, reason: str) -> None:
+        self.assertEqual(run.rc, 0, msg="the call must be allowed: " + run.describe())
+        self.assertIn("[codegraph-first-guard] allowed", run.err, msg="one stderr line says why: " + run.describe())
+        self.assertIn(reason, run.err, msg="and names the reason " + reason + ": " + run.describe())
+
+    def test_a_source_read_with_no_marker_is_blocked_with_the_guards_own_banner(self):
         run = self.run_hook(self.GUARD, self.read_payload())
-        self.assertEqual(run.rc, 2, msg="a source Read with no CodeGraph call this turn must be blocked: "
-                                        + run.describe())
+        self.assertEqual(run.rc, 2, msg="a source Read with an index, a server and no CodeGraph call this turn must be "
+                                        "blocked: " + run.describe())
         self.assertIn("[codegraph-first-guard] BLOCKED", run.err, msg="the guard's own banner: " + run.describe())
         self.assertNoFallbackBanner(run)
 
-    def test_the_tracker_writes_the_sentinel_and_the_guard_then_allows_the_read(self):
+    def test_the_tracker_writes_the_session_marker_and_the_guard_then_allows_the_read(self):
         blocked = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(blocked.rc, 2, msg="control: blocked before the tracker ran: " + blocked.describe())
-        tracked = self.run_hook(self.TRACKER, {"tool_name": "mcp__codegraph__codegraph_search",
-                                               "tool_input": {"query": "Thing"}})
+        tracked = self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "Thing"}))
         self.assertEqual(tracked.rc, 0, msg=tracked.describe())
-        self.assertTrue(self.sentinel().is_file(), msg="the tracker must write <cwd>/.claude/.codegraph-used-this-turn")
+        self.assertTrue(self.marker().is_file(), msg="the tracker must write turn.json in the session's folder under "
+                                                     "the system temp folder: " + str(self.marker()))
+        self.assertFalse(self.legacy_sentinel().exists(), msg="and no longer writes <cwd>/.claude/.codegraph-used-this-turn")
         allowed = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(allowed.rc, 0, msg="after the tracker ran the same Read is allowed: " + allowed.describe())
+        # The blocked call above issued a retry ticket for this exact Read, so the retry escape would allow it too.
+        # Only the absence of an `allowed (` line proves that the MARKER did it (the escape always prints one).
+        self.assertNotIn("allowed (", allowed.err,
+                         msg="allowed by the marker, not by the retry escape (which prints `allowed (...)`): "
+                             + allowed.describe())
         for run in (tracked, allowed):
             self.assertNoFallbackBanner(run)
 
-    def test_the_tracker_ignores_a_tool_that_is_not_a_codegraph_tool(self):
-        run = self.run_hook(self.TRACKER, {"tool_name": "Bash", "tool_input": {"command": "ls"}})
-        self.assertEqual(run.rc, 0, msg=run.describe())
-        self.assertFalse(self.sentinel().exists(), msg="only mcp__codegraph__* tools open the gate")
-        # Control: a CodeGraph tool does write it, so the absence above is the rule.
-        self.run_hook(self.TRACKER, {"tool_name": "mcp__codegraph__codegraph_node", "tool_input": {}})
-        self.assertTrue(self.sentinel().exists(), msg="control: a codegraph tool writes the sentinel")
+    def test_a_subagents_tracker_call_opens_the_gate_for_the_parent_session(self):
+        # A subagent's payload carries the PARENT's session_id plus agent_id: the marker lands in the parent's folder.
+        control = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(control.rc, 2, msg="control: the parent's Read is blocked first: " + control.describe())
+        session = "s" + uuid.uuid4().hex
+        tracked = self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_explore", {"query": "q"},
+                                                           session_id=session, agent_id="a1",
+                                                           agent_type="general-purpose"))
+        self.assertEqual(tracked.rc, 0, msg=tracked.describe())
+        parent = self.run_hook(self.GUARD, self.read_payload(session_id=session))
+        self.assertEqual(parent.rc, 0, msg="the parent's plain Read is allowed: " + parent.describe())
+        self.assertNotIn("allowed (", parent.err,
+                         msg="by the shared marker (nothing printed), not by an escape: " + parent.describe())
 
-    def test_the_reset_removes_the_sentinel_so_the_guard_blocks_again(self):
-        self.run_hook(self.TRACKER, {"tool_name": "mcp__codegraph__codegraph_search", "tool_input": {}})
+    def test_the_tracker_writes_the_marker_for_the_explore_tool_and_for_a_future_tool_name(self):
+        for tool, extra in (("mcp__codegraph__codegraph_explore", {"mcp_server": "codegraph"}),
+                            ("mcp__codegraph__codegraph_zz_future_tool", {})):
+            with self.subTest(tool=tool):
+                session = "s" + uuid.uuid4().hex
+                body = {"session_id": session, "cwd": str(self.project), "tool_name": tool,
+                        "tool_input": {"query": "q"}}
+                body.update(extra)
+                run = self.run_hook(self.TRACKER, body)
+                self.assertEqual(run.rc, 0, msg=run.describe())
+                marker = self.marker(session)
+                self.assertTrue(marker.is_file(), msg="any mcp__codegraph__ tool opens the turn: " + str(marker))
+                data = json.loads(marker.read_text(encoding="utf-8"))
+                self.assertEqual(sorted(data), ["pid", "summary", "tool", "ts"], msg="the marker shape: " + repr(data))
+                self.assertEqual(data["tool"], tool)
+
+    def test_the_tracker_ignores_a_tool_that_is_not_a_codegraph_tool(self):
+        run = self.run_hook(self.TRACKER, self.payload("Bash", {"command": "ls"}))
+        self.assertEqual(run.rc, 0, msg=run.describe())
+        self.assertFalse(self.marker().exists(), msg="only mcp__codegraph__* tools open the gate")
+        # Control: a CodeGraph tool does write it (a legacy tool name still counts), so the absence above is the rule.
+        self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_node", {}))
+        self.assertTrue(self.marker().exists(), msg="control: a codegraph tool writes the marker")
+
+    def test_the_marker_survives_a_directory_change(self):
+        self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_explore", {"query": "q"}))
+        elsewhere = self.project / "src" / "deeper"
+        elsewhere.mkdir(parents=True, exist_ok=True)
+        moved = self.payload("Read", {"file_path": str(self.project / "src" / "Thing.cs")}, cwd=str(elsewhere))
+        run = self.run_hook(self.GUARD, moved, cwd=elsewhere)
+        self.assertEqual(run.rc, 0, msg="same session, another cwd: the marker still opens the gate: " + run.describe())
+        other = dict(moved, session_id="s" + uuid.uuid4().hex)
+        self.assertEqual(self.run_hook(self.GUARD, other, cwd=elsewhere).rc, 2,
+                         msg="control: another session does not share it")
+
+    def test_the_reset_removes_the_marker_so_the_guard_blocks_again(self):
+        self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "Thing"}))
+        self.assertTrue(self.marker().is_file(), msg="control: the tracker wrote the session marker: " + str(self.marker()))
         self.assertEqual(self.run_hook(self.GUARD, self.read_payload()).rc, 0,
-                         msg="control: with the sentinel the Read is allowed")
-        reset = self.run_hook(self.RESET, {"prompt": "next question"})
+                         msg="control: with the marker the Read is allowed")
+        reset = self.run_hook(self.RESET, self.payload("", {}, prompt="next question"))
         self.assertEqual(reset.rc, 0, msg=reset.describe())
-        self.assertFalse(self.sentinel().exists(), msg="a new prompt removes the sentinel")
+        self.assertFalse(self.marker().exists(), msg="a new prompt removes the marker")
         self.assertEqual(self.run_hook(self.GUARD, self.read_payload()).rc, 2,
                          msg="and the guard blocks the same Read again")
         self.assertNoFallbackBanner(reset)
 
-    def test_a_non_source_read_is_allowed_without_the_sentinel(self):
+    def test_a_non_source_read_is_allowed_without_the_marker(self):
         blocked = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(blocked.rc, 2, msg="control: a source Read is blocked: " + blocked.describe())
         run = self.run_hook(self.GUARD, self.read_payload("docs/notes.md"))
         self.assertEqual(run.rc, 0, msg="a markdown Read needs no CodeGraph call: " + run.describe())
+
+    # --- the five reasons to let reads through (issue #259) ---------------------------------------------------------
+    def test_no_project_index_lets_the_read_through_even_when_a_decoy_codegraph_folder_exists(self):
+        for ancestor in af.ancestors_holding(self.project, *af.CODEGRAPH_INDEX):
+            if ancestor.resolve() != self.project.resolve():
+                self.fail("precondition: an ancestor of the fixture project holds a real codegraph.db: %s" % ancestor)
+        (self.project / ".codegraph" / "codegraph.db").unlink()
+        run = self.run_hook(self.GUARD, self.read_payload())
+        self.assertAllowedBecause(run, "fail-open:no-index")
+        shutil.rmtree(self.project / ".codegraph")
+        af.plant_decoy(self.project)  # CodeGraph's per-user folder shape: daemons/, telemetry.json, NO codegraph.db
+        decoy = self.run_hook(self.GUARD, self.read_payload(session_id="s" + uuid.uuid4().hex))
+        self.assertAllowedBecause(decoy, "fail-open:no-index")
+        af.plant_index(self.project)
+        armed = self.run_hook(self.GUARD, self.read_payload(session_id="s" + uuid.uuid4().hex))
+        self.assertEqual(armed.rc, 2, msg="control: with codegraph.db back the gate is armed again: " + armed.describe())
+
+    def test_no_configured_server_lets_the_read_through(self):
+        (self.project / ".mcp.json").unlink()
+        run = self.run_hook(self.GUARD, self.read_payload())
+        self.assertAllowedBecause(run, "fail-open:server-not-configured")
+
+    def test_a_disabled_server_lets_the_read_through(self):
+        af.plant_server(self.project, disabled=True)
+        run = self.run_hook(self.GUARD, self.read_payload())
+        self.assertAllowedBecause(run, "fail-open:server-disabled")
+
+    def test_a_subagent_payload_lets_the_read_through_and_the_same_payload_without_agent_id_does_not(self):
+        sub = self.read_payload(agent_id="agent-1234", agent_type="general-purpose")
+        self.assertAllowedBecause(self.run_hook(self.GUARD, sub), "fail-open:subagent")
+        plain = self.run_hook(self.GUARD, self.read_payload(session_id="s" + uuid.uuid4().hex))
+        self.assertEqual(plain.rc, 2, msg="control: the main session's payload (no agent_id) is blocked: " + plain.describe())
+
+    def test_the_identical_retry_of_a_blocked_call_is_allowed_once(self):
+        first = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(first.rc, 2, msg="control: the first call is blocked: " + first.describe())
+        retry = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(retry.rc, 0, msg="the identical retry is allowed (retry escape): " + retry.describe())
+        self.assertIn("retry-escape-used", retry.err, msg="and says so on stderr: " + retry.describe())
+        again = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(again.rc, 2, msg="single use: the next identical call is blocked again: " + again.describe())
+
+    def test_the_next_prompt_clears_a_retry_ticket(self):
+        self.assertEqual(self.run_hook(self.GUARD, self.read_payload()).rc, 2, msg="control: blocked, ticket issued")
+        tickets = list(af.session_folder(self.tmp, self.sid).glob("ticket-*"))
+        self.assertEqual(len(tickets), 1, msg="the block must issue ticket-<fingerprint> in the Session folder: %s" % tickets)
+        self.run_hook(self.RESET, self.payload("", {}, prompt="next"))
+        self.assertEqual(list(af.session_folder(self.tmp, self.sid).glob("ticket-*")), [],
+                         msg="the reset hook deletes this session's tickets")
+        again = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(again.rc, 2, msg="after the reset the identical call has no ticket: " + again.describe())
+
+    # --- the manifest (acceptance criteria 7 and the upgrade path) --------------------------------------------------
+    def test_the_manifest_grants_the_wildcard_only(self):
+        self.assertEqual(af.permissions_allow("codegraph"), [af.CODEGRAPH_WILDCARD],
+                         msg="permissions_allow must be exactly ['mcp__codegraph__*']; never a per-tool name")
+
+    def test_the_manifest_lists_the_released_hash_of_every_hook_as_it_shipped_before_the_fix(self):
+        released = af.released_hashes("codegraph")
+        hooks = af.hook_files("codegraph")
+        self.assertEqual(sorted(released), sorted(hooks), msg="released_sha256 has one entry per active hook")
+        for name in hooks:
+            shown = subprocess.run(["git", "show", "%s:.claude/addons/codegraph/hooks/%s" % (self.BASELINE_COMMIT, name)],
+                                   capture_output=True, cwd=str(af.PROJECT_ROOT))
+            if shown.returncode != 0:
+                self.skipTest("the baseline commit %s is not available in this checkout (this check needs the full git "
+                              "history: a shallow clone cannot show it, and the released hashes go unchecked)"
+                              % self.BASELINE_COMMIT)
+            data = shown.stdout
+            if data.startswith(b"\xef\xbb\xbf"):
+                data = data[3:]
+            folded = hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+            self.assertIn(folded, released[name],
+                          msg="%s as released at %s (folded) must be in released_sha256, so addon-remove can delete an "
+                              "unedited old copy" % (name, self.BASELINE_COMMIT))
 
 
 class StrictShellGateAddonTests(AddonCase):

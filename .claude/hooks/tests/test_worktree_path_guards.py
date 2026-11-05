@@ -357,6 +357,21 @@ def make_tree() -> dict:
     for project_tree in (repo, wt, wt2):
         write_fixture_rules(project_tree / ".claude" / "hooks")
 
+    # Issue #259: the codegraph guard fails open without a Project index or a configured server, so the fixture plants
+    # both. repo/.codegraph/codegraph.db is an ANCESTOR of wt and wt2, so one index arms every tree; a .mcp.json
+    # codegraph entry sits in repo, wt and wt2. Every fixture tree reads "undecidable" (repo/.git points at a missing
+    # folder), so index-other-tree cannot fire here. A control (C12) removes the file and expects the guard to let
+    # reads through. ~/.codegraph has no codegraph.db and does not count.
+    af.plant_index(repo)
+    for project_tree in (repo, wt, wt2):
+        af.plant_server(project_tree)
+    # Fixture home and temp folder of the codegraph rows (codegraph_env): the developer's machine is never read.
+    cghome = root / "cghome"
+    cgtmp = root / "cgtmp"
+    cghome.mkdir(parents=True, exist_ok=True)
+    cgtmp.mkdir(parents=True, exist_ok=True)
+    _CG.update({"home": cghome, "tmp": cgtmp})
+
     home = root / "home"
     (home / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -370,7 +385,30 @@ def make_tree() -> dict:
         "root": root, "repo": repo, "wt": wt, "wt_name": wt_name,
         "wt2": wt2, "wt2_name": wt2_name,
         "home": home, "isolated": isolated, "stale": stale,
+        "cghome": cghome, "cgtmp": cgtmp,
     }
+
+
+#: Set by make_tree: the fixture home and temp folder the codegraph rows run under.
+_CG: dict = {}
+
+
+def _new_sid() -> str:
+    """A fresh session id, so no two codegraph launches share a Session folder (or a retry ticket)."""
+    return "s" + uuid.uuid4().hex
+
+
+def codegraph_env(env: dict) -> dict:
+    """The environment of a codegraph row: HOME, USERPROFILE and CLAUDE_CONFIG_DIR at a fixture home folder, TMP and
+    TEMP at a fixture temp folder. ``base_env`` is unchanged, so the concept-gate, bash-gate and
+    db-destructive-guard rows keep the real home and task G (the real-home leak check) can still fail for them."""
+    out = dict(env)
+    home, tmp = _CG.get("home"), _CG.get("tmp")
+    if home is None or tmp is None:
+        raise RuntimeError("codegraph_env: make_tree has not run, there is no fixture home or temp folder")
+    out.update({"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_CONFIG_DIR": str(home),
+                "TMP": str(tmp), "TEMP": str(tmp), "TMPDIR": str(tmp)})
+    return out
 
 
 def base_env(project_dir: Path) -> dict:
@@ -389,6 +427,10 @@ def fallback_env(project_dir: Path, home: Path) -> dict:
 
 
 def run_hook(hook_path: Path, payload: dict, cwd: Path, env: dict, timeout: int = 20) -> subprocess.CompletedProcess:
+    if Path(hook_path).name.startswith("codegraph-"):
+        env = codegraph_env(env)
+        if "session_id" not in payload:
+            payload = dict(payload, session_id=_new_sid())
     return subprocess.run(
         ["py", "-3", str(hook_path)],
         input=json.dumps(payload).encode("utf-8"),
@@ -1126,20 +1168,35 @@ def run_bash_gate_cases(tree: dict) -> None:
 
 
 # ===========================================================================
-# codegraph-first-guard (C1-C10)
+# codegraph-first-guard (C1-C12)
 # ===========================================================================
-def _sentinel_path(directory: Path) -> Path:
+# Issue #259: the Turn marker is turn.json in the SESSION's folder under the system temp folder
+# (<TMP>/auto-improve-codegraph-<session_id>/), not <cwd>/.claude/.codegraph-used-this-turn. Each case that needs a
+# marker names its own session_id and writes/removes the marker for that session only.
+def _with_sid(payload: dict, session_id: str) -> dict:
+    return dict(payload, session_id=session_id)
+
+
+def _write_marker(tree: dict, session_id: str) -> None:
+    af.write_marker(tree["cgtmp"], session_id)
+
+
+def _remove_marker(tree: dict, session_id: str) -> None:
+    af.remove_marker(tree["cgtmp"], session_id)
+
+
+def _legacy_sentinel(directory: Path) -> Path:
     return directory / ".claude" / ".codegraph-used-this-turn"
 
 
-def _write_sentinel(directory: Path) -> None:
-    p = _sentinel_path(directory)
+def _write_legacy_sentinel(directory: Path) -> None:
+    p = _legacy_sentinel(directory)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("turn-sentinel\n", encoding="utf-8")
 
 
-def _remove_sentinel(directory: Path) -> None:
-    p = _sentinel_path(directory)
+def _remove_legacy_sentinel(directory: Path) -> None:
+    p = _legacy_sentinel(directory)
     if p.exists():
         p.unlink()
 
@@ -1148,13 +1205,17 @@ def run_codegraph_guard_cases(tree: dict) -> None:
     hook = addon_hook("codegraph-first-guard.py")
     repo, wt, wt_name = tree["repo"], tree["wt"], tree["wt_name"]
 
+    # Precondition of every block below: no folder above the fixture root holds a REAL codegraph.db, so the planted
+    # repo/.codegraph/codegraph.db is the only index and the no-index twin (C12) is a fair control.
+    above = [f for f in af.ancestors_holding(tree["root"], *af.CODEGRAPH_INDEX)]
+    check("C-pre: no ancestor of the fixture root holds a real .codegraph/codegraph.db [control]", not above,
+          "ancestor folders holding a real index: " + ", ".join(str(a) for a in above))
+
     cases: list[GateCase] = []
 
-    # Every C-series case declares the sentinel state IT needs via `setup=`,
-    # run immediately before its own launch (never while the case list is
-    # being built -- see GateCase.setup's docstring). No case relies on
-    # whatever a PRIOR case's construction, or even a prior case's own RUN,
-    # happened to leave behind; each states its precondition explicitly.
+    # Every C-series case declares the marker state IT needs via `setup=`, run immediately before its own launch
+    # (never while the case list is being built -- see GateCase.setup's docstring). Each case that needs a marker has
+    # its own session_id, so no case relies on whatever a prior case left behind.
 
     # C1 a: Read worktree src/Probe_<tok>.cs -> BLOCK, equals main
     t = tok()
@@ -1163,7 +1224,6 @@ def run_codegraph_guard_cases(tree: dict) -> None:
         payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
         main_payload=read_payload(fs(repo / "src" / f"Probe_{t}.cs")),
         cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: (_remove_sentinel(repo), _remove_sentinel(wt)),
     ))
 
     # C2 a: Grep path = the worktree root, no glob/type -> BLOCK, equals repo root
@@ -1172,7 +1232,6 @@ def run_codegraph_guard_cases(tree: dict) -> None:
         payload=grep_path_payload(fs(wt)),
         main_payload=grep_path_payload(fs(repo)),
         cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: (_remove_sentinel(repo), _remove_sentinel(wt)),
     ))
 
     # C3 a: Read project .claude/hooks/x_<tok>.py -> ALLOW (control)
@@ -1183,8 +1242,6 @@ def run_codegraph_guard_cases(tree: dict) -> None:
         payload=read_payload(fs(repo / ".claude" / "hooks" / f"x_{t}.py")),
         sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
         cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-        setup=lambda: _remove_sentinel(repo),
-        pre_sibling=lambda: _remove_sentinel(repo),
     ))
 
     # C4 a: Read worktree .claude/hooks/x_<tok>.py -> ALLOW (control)
@@ -1195,67 +1252,65 @@ def run_codegraph_guard_cases(tree: dict) -> None:
         payload=read_payload(fs(wt / ".claude" / "hooks" / f"x_{t}.py")),
         sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
         cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-        setup=lambda: _remove_sentinel(repo),
-        pre_sibling=lambda: _remove_sentinel(repo),
     ))
 
-    # C5 b: Read worktree src, sentinel present in <worktree>/.claude/ -> ALLOW
+    # C5 b: Read worktree src, a marker in THIS session's folder -> ALLOW (the sibling shares the session; the marker
+    # is removed before it, so the sibling blocks)
     t = tok()
     sib_t = tok()
+    sid5 = _new_sid()
     cases.append(GateCase(
         id="C5", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-        sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=wt, env=base_env(wt), expect="allow", fails_today=False,
-        setup=lambda: _write_sentinel(wt),
-        pre_sibling=lambda: _remove_sentinel(wt),
+        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs")), sid5),
+        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")), sid5),
+        cwd=wt, env=base_env(wt), expect="allow", fails_today=True,
+        setup=lambda: _write_marker(tree, sid5),
+        pre_sibling=lambda: _remove_marker(tree, sid5),
     ))
 
     c_hook = make_situation_c_copy(repo, "codegraph-first-guard.py")
 
-    # C6 c, cwd = worktree root: Read worktree src, sentinel present in
-    # <worktree>/.claude/ -> ALLOW
+    # C6 c, cwd = worktree root: Read worktree src, a marker in this session's folder -> ALLOW
     t = tok()
     sib_t = tok()
+    sid6 = _new_sid()
     cases.append(GateCase(
         id="C6", guard_key="codegraph-first-guard", hook_path=c_hook,
-        payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
-        sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
-        cwd=wt, env=base_env(repo), expect="allow", fails_today=False,
-        setup=lambda: _write_sentinel(wt),
-        pre_sibling=lambda: _remove_sentinel(wt),
+        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs")), sid6),
+        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")), sid6),
+        cwd=wt, env=base_env(repo), expect="allow", fails_today=True,
+        setup=lambda: _write_marker(tree, sid6),
+        pre_sibling=lambda: _remove_marker(tree, sid6),
     ))
 
-    # C7 c, cwd = worktree root: Read worktree src, no sentinel anywhere -> BLOCK
+    # C7 c, cwd = worktree root: Read worktree src, no marker anywhere -> BLOCK
     t = tok()
     cases.append(GateCase(
         id="C7", guard_key="codegraph-first-guard", hook_path=c_hook,
         payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
         cwd=wt, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: (_remove_sentinel(wt), _remove_sentinel(repo)),
     ))
 
-    # C8 c, cwd = worktree root: Read worktree src, sentinel ONLY in
-    # <repo>/.claude/ -> BLOCK (sentinel is looked for under cwd)
+    # C8 c, cwd = worktree root (RESTATED): the marker exists ONLY in ANOTHER session's folder, and a legacy
+    # <cwd>/.claude/.codegraph-used-this-turn file sits in the worktree AND in the repo -> BLOCK. The marker is
+    # keyed to the session, and the legacy file no longer opens anything.
     t = tok()
+    sid8, other8 = _new_sid(), _new_sid()
     cases.append(GateCase(
         id="C8", guard_key="codegraph-first-guard", hook_path=c_hook,
-        payload=read_payload(fs(wt / "src" / f"Probe_{t}.cs")),
+        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs")), sid8),
         cwd=wt, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: (_remove_sentinel(wt), _write_sentinel(repo)),
+        setup=lambda: (_write_marker(tree, other8), _write_legacy_sentinel(wt), _write_legacy_sentinel(repo)),
     ))
 
-    # C9 a: Read <repo>/.claude/./worktrees/<wt>/src/Probe_<tok>.cs -> BLOCK
-    # setup clears repo's sentinel -- C8 may have left it present, and since
-    # C9's cwd is repo, a leftover sentinel there would let it ALLOW for a
-    # reason unrelated to the bypass this case exists to pin down.
+    # C9 a: Read <repo>/.claude/./worktrees/<wt>/src/Probe_<tok>.cs -> BLOCK (fresh session: no marker)
     t = tok()
     dotted = fs(repo) + "/.claude/./worktrees/" + wt_name + f"/src/Probe_{t}.cs"
     cases.append(GateCase(
         id="C9", guard_key="codegraph-first-guard", hook_path=hook,
         payload=read_payload(dotted),
         cwd=repo, env=base_env(repo), expect="block", fails_today=True,
-        setup=lambda: _remove_sentinel(repo),
+        setup=lambda: (_remove_legacy_sentinel(wt), _remove_legacy_sentinel(repo)),
     ))
 
     # C10 a: Read <repo>/.claude//hooks/x_<tok>.py (main, doubled separator)
@@ -1268,12 +1323,71 @@ def run_codegraph_guard_cases(tree: dict) -> None:
         payload=read_payload(doubled),
         sibling_payload=read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")),
         cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
-        setup=lambda: _remove_sentinel(repo),
-        pre_sibling=lambda: _remove_sentinel(repo),
     ))
 
-    for c in cases:
-        run_gate_case(c)
+    # C11 c: the marker survives a directory change. The tracker runs with cwd = the main checkout, the guard is then
+    # called with cwd = the worktree and the SAME session_id -> ALLOW (cd / EnterWorktree does not close the gate).
+    t = tok()
+    sib_t = tok()
+    sid11 = _new_sid()
+    tracker = c_hook.parent / "codegraph-turn-tracker.py"
+    tracker_payload = {"session_id": sid11, "tool_name": "mcp__codegraph__" + "codegraph_explore",
+                       "tool_input": {"query": "survives a directory change"}, "hook_event_name": "PostToolUse"}
+    cases.append(GateCase(
+        id="C11", guard_key="codegraph-first-guard", hook_path=c_hook,
+        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs")), sid11),
+        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")), sid11),
+        cwd=wt, env=base_env(repo), expect="allow", fails_today=True,
+        setup=lambda: run_hook(tracker, tracker_payload, repo, base_env(repo)),
+        pre_sibling=lambda: _remove_marker(tree, sid11),
+    ))
+
+    try:
+        for c in cases:
+            run_gate_case(c)
+    finally:
+        # Today's tracker writes the legacy <cwd>/.claude/.codegraph-used-this-turn (C11 runs it with cwd = repo), and a
+        # leftover one would open every LATER cwd=repo row for the wrong reason. Removed whatever the outcome.
+        for folder in (repo, wt, tree["wt2"]):
+            _remove_legacy_sentinel(folder)
+
+    # C12: C1 with the Project index removed -> ALLOW, reason fail-open:no-index. The same call with the file back is the
+    # C1 block above, so only the index differs. The file is restored in a finally block, pass or fail.
+    db = repo / ".codegraph" / "codegraph.db"
+    saved = db.read_bytes()
+    t = tok()
+    target = read_payload(fs(wt / "src" / f"Probe_{t}.cs"))
+    try:
+        db.unlink()
+        proc = run_hook(hook, target, repo, base_env(repo))
+        stderr = _decode(proc.stderr)
+        ok = proc.returncode == 0 and "fail-open" in stderr and "no-index" in stderr
+        check("C12 [FAILS TODAY]: C1 with repo/.codegraph/codegraph.db removed -> ALLOW, reason fail-open:no-index", ok,
+              f"rc={proc.returncode} stderr={stderr[:500]!r}")
+    finally:
+        db.write_bytes(saved)
+    t = tok()
+    proc = run_hook(hook, read_payload(fs(wt / "src" / f"Probe_{t}.cs")), repo, base_env(repo))
+    ok, detail = assert_block("codegraph-first-guard", proc)
+    check("C12 twin [control]: with codegraph.db back the same Read is BLOCKED again", ok, detail)
+
+    # C13 (Guard fallback mode): a worktree OUTSIDE the main folder, the server only under the main checkout's path,
+    # the index in the main checkout -> the gate stays. The hook copy has no _project_paths.py beside it.
+    base = tree["root"] / "fb-outside"
+    info = af.make_linked_worktree(base, layout="outside", gitdir_form="absolute")
+    outside_wt, outside_main = info["worktree"], info["main"]
+    (outside_wt / "src").mkdir(parents=True, exist_ok=True)
+    af.plant_index(outside_main)
+    af.plant_server(outside_main)
+    isolated_dir = tree["isolated"] / "C13-codegraph"
+    isolated_dir.mkdir(parents=True, exist_ok=True)
+    fb_hook = make_isolated_copy(isolated_dir, "codegraph-first-guard.py")
+    t = tok()
+    proc = run_hook(fb_hook, read_payload(fs(outside_wt / "src" / f"Probe_{t}.cs")), outside_wt,
+                    fallback_env(outside_wt, tree["home"]))
+    ok, detail = assert_block("codegraph-first-guard", proc)
+    check("C13 [control]: fallback mode, worktree outside the main folder, server only under the main path -> BLOCK", ok,
+          detail)
 
 
 # ===========================================================================
@@ -2079,6 +2193,16 @@ def run_helper_cases() -> None:
     ceq_case("no segment, plain", "R/src/X.cs", "R/src/X.cs")
     ceq_case("no segment, doubled separator elsewhere (unchanged but for slashes)", "R//src/X.cs", "R//src/X.cs")
 
+    # Issue #259: worktree_own_root(path) -> (own tree root, gitdir) -- the Own tree root row of the contract, with the
+    # non-git, unreadable and no-gitdir-line rows of its Approval addendum. Defined with getattr, so a missing function
+    # is a failing row and the run goes on.
+    own_base = Path(tempfile.mkdtemp(prefix="wtguard-ownroot-"))
+    try:
+        for row_name, row_ok, row_detail in af.own_root_cases(getattr(pp, "worktree_own_root", None), own_base):
+            check("helper " + row_name + " [FAILS TODAY]", row_ok, row_detail)
+    finally:
+        shutil.rmtree(own_base, ignore_errors=True)
+
     def root_case(name: str, input_path: str, expected: Optional[str]) -> None:
         if fn_root is None:
             check(f"helper enclosing_worktree_root: {name} [FAILS TODAY]", False,
@@ -2135,6 +2259,9 @@ def run_helper_cases() -> None:
 # ===========================================================================
 def main() -> int:
     home_before = snapshot_real_home_logs()
+    # Issue #259 review (W5): the CodeGraph hooks keep their Session folders in the system temp folder. Like task G for the
+    # home logs, snapshot the REAL temp folder's auto-improve-codegraph-* names now and fail on any new one at the end.
+    real_temp_before = af.real_temp_codegraph_entries()
 
     tree = make_tree()
     try:
@@ -2142,7 +2269,7 @@ def main() -> int:
         run_concept_gate_cases(tree)
         print("-- bash-gate (B1-B9) --")
         run_bash_gate_cases(tree)
-        print("-- codegraph-first-guard (C1-C10) --")
+        print("-- codegraph-first-guard (C1-C13) --")
         run_codegraph_guard_cases(tree)
         print("-- db-destructive-guard (D1-D7) --")
         run_db_guard_cases(tree)
@@ -2172,6 +2299,11 @@ def main() -> int:
             "the REAL ~/.claude/logs/db-guard.log and errors.jsonl received no new "
             "bytes mentioning this run's temp root or any of its probe tokens",
             ok, detail,
+        )
+        leaked = sorted(af.real_temp_codegraph_entries() - real_temp_before)
+        check(
+            f"the REAL temp folder ({af.REAL_TEMP}) gained no auto-improve-codegraph-* entry during this run",
+            not leaked, f"new entries: {leaked}",
         )
         shutil.rmtree(tree["root"], ignore_errors=True)
 

@@ -15,7 +15,7 @@ You write to ONE place: the `## Critique` section of the contract file you were 
 
 ## Context Discipline
 
-**Prefer CodeGraph for symbol tracing.** When the contract cites a mechanism, file path, or symbol in MECHANISMS.md / VOCABULARY.md / INTEGRATION.md / a prior contract and you need to verify it still exists at the claimed location, use `mcp__codegraph__codegraph_search`, `mcp__codegraph__codegraph_node`, or `mcp__codegraph__codegraph_callers` before reaching for `Read` on a whole file. These return only the symbols you need and avoid the lost-in-the-middle effect on large files. Fall back to `Read` for markdown registries, the contract itself, and sections CodeGraph can't resolve.
+**Prefer CodeGraph for symbol tracing.** When the contract cites a mechanism, file path, or symbol in MECHANISMS.md / VOCABULARY.md / INTEGRATION.md / a prior contract and you need to verify it still exists at the claimed location, ask CodeGraph (`mcp__codegraph__*`, for example the explore tool your server offers) where the symbol is defined and who uses it before reaching for `Read` on a whole file. These return only the symbols you need and avoid the lost-in-the-middle effect on large files. Fall back to `Read` for markdown registries, the contract itself, and sections CodeGraph can't resolve.
 
 ## Absolute Rules
 

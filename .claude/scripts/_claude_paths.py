@@ -37,6 +37,7 @@ See ``.claude/concepts/2026-08-26-claude-scripts-path-resolution.md``
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -109,6 +110,94 @@ hook_file = _pp.hook_file
 tree_kind = _pp.tree_kind
 main_checkout_root = _pp.main_checkout_root
 installed_plugin_root = _pp.installed_plugin_root
+
+
+def _remote_host(text):
+    """``None`` for a local path. For a UNC or device path (a leading pair of separators, either kind) the
+    lower-cased host; ``"?c:"`` for a device path on a local drive; ``""`` when a device path names no host."""
+    slashed = text.replace("\\", "/")
+    if not slashed.startswith("//"):
+        return None
+    parts = [p for p in slashed[2:].split("/") if p]
+    if parts and parts[0] in ("?", "."):
+        if len(parts) > 2 and parts[0] == "?" and parts[1].upper() == "UNC":
+            return parts[2].lower()
+        if len(parts) > 1 and len(parts[1]) == 2 and parts[1][1] == ":" and parts[1][0].isalpha():
+            return "?" + parts[1].lower()
+        return ""
+    return parts[0].lower() if parts else ""
+
+
+def _hop_allowed(target, own, *also):
+    """A pointer hop may be looked at when it is local, or a UNC or device path whose host is the host of the tree's
+    own path or of any other spelling given (``also``: its ``os.path.realpath`` form). The text AND its normal form
+    are judged, and a ``..`` segment inside a UNC or device path is never allowed: the text checked is the text opened."""
+    allowed = {h for h in (_remote_host(o) for o in (own,) + also) if h}
+    climbs = ".." in target.replace("\\", "/").split("/")
+    for text in (target, os.path.normpath(target)):
+        host = _remote_host(text)
+        if host is not None and (not host or host not in allowed or climbs):
+            return False
+    return True
+
+
+def _own_spellings(path):
+    """The spellings of a tree's own path that count for the same-host rule: the written form, plus its
+    ``os.path.realpath`` form when the written form is local (a mapped drive resolves to ``\\\\server\\share``).
+    A path already written as UNC or device is never resolved: that would touch its host."""
+    return (path,) if _remote_host(path) is not None else (path, os.path.realpath(path))
+
+
+def _inline_worktree_own_root(path):
+    """The same walk as ``_project_paths.worktree_own_root``, for a ``_project_paths.py`` from an earlier release
+    that lacks it. Returns ``(own tree root, gitdir)``; see the helper's docstring for the contract. A gitdir that
+    is a UNC or device path naming another host than the tree, holds neither ``/.git/worktrees/`` nor
+    ``/.git/modules/``, or is cut off by the 4096-byte read cap is undecidable: ``(F, None)``, and nothing under it
+    is touched."""
+    import os
+
+    def pointer(folder, first):
+        raw = first[len("gitdir:"):].strip() if first.startswith("gitdir:") else ""
+        if not raw or not _hop_allowed(raw, *_own_spellings(folder)):
+            return None
+        target = os.path.normpath(os.path.join(folder, raw)).replace("\\", "/")
+        if not _hop_allowed(target, *_own_spellings(folder)) or not any(m in target.lower() for m in ("/.git/worktrees/", "/.git/modules/")):
+            return None
+        return target
+
+    try:
+        folder = os.path.abspath(path)
+        while not os.path.exists(folder):
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return None, None
+            folder = parent
+        while True:
+            entry = os.path.join(folder, ".git")
+            if os.path.isdir(entry):
+                return folder, None
+            if os.path.isfile(entry):
+                try:
+                    with open(entry, "rb") as fh:
+                        data = fh.read(4096)
+                    first = "" if len(data) >= 4096 and b"\n" not in data else data.split(b"\n", 1)[0].decode("utf-8").strip()
+                except (OSError, ValueError, UnicodeError):
+                    return None, None
+                return folder, pointer(folder, first)
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return None, None
+            folder = parent
+    except (OSError, ValueError):
+        return None, None
+
+
+# worktree_own_root is looked up with getattr: a `_project_paths.py` from an earlier release imports cleanly and
+# lacks it, so a bare attribute read would raise AttributeError at import. WORKTREE_OWN_ROOT_NATIVE tells a caller
+# whether the helper beside these scripts really has it (the installer then treats a missing helper as undecidable).
+_native_own_root = getattr(_pp, "worktree_own_root", None)
+WORKTREE_OWN_ROOT_NATIVE = callable(_native_own_root)
+worktree_own_root = _native_own_root if WORKTREE_OWN_ROOT_NATIVE else _inline_worktree_own_root
 # The Project hook launcher (Revision 9): the one source text, the row builder and the row reader.
 # PROJECT_HOOK_LAUNCHER_SOURCE is a constant, not a call-time function: it is fixed text.
 PROJECT_HOOK_LAUNCHER_SOURCE = _pp.PROJECT_HOOK_LAUNCHER_SOURCE
@@ -136,6 +225,8 @@ __all__ = [
     "hook_file",
     "tree_kind",
     "main_checkout_root",
+    "worktree_own_root",
+    "WORKTREE_OWN_ROOT_NATIVE",
     "installed_plugin_root",
     "PROJECT_HOOK_LAUNCHER_SOURCE",
     "project_hook_launcher_row",
