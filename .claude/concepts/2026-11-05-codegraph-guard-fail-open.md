@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-11-05 (revision 5, after the fourth critique and the user's answers)
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-11-05, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/270; 0 checklist items from review reports, 7 with no structured evidence; not performed (disclosed on #259): none; owner confirmed resolved: none
 **Approved:** 2026-11-05 by the user ("approve with addendum"), after five critique rounds; see `## Approval addendum (binding)`.
 **Work Item Brief:** .claude/work-items/2026-11-05-259-codegraph-guard-fail-open.md
 **Tracking issue:** #259
@@ -628,14 +629,14 @@ PRIOR_FINDINGS:
 
 ## Review checklist (filled in after implementation)
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both sides
-- [ ] `INTEGRATION.md` updated if new surfaces were introduced
-- [ ] No orphaned DTO/model mismatches
-- [ ] `Status` flipped to `implemented`
+- [ ] Implementation matches Data Shapes exactly — no structured evidence
+- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced) — no structured evidence
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — no structured evidence
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — no structured evidence
+- [ ] Integration surfaces reflected on both sides — no structured evidence
+- [ ] `INTEGRATION.md` updated if new surfaces were introduced — no structured evidence
+- [ ] No orphaned DTO/model mismatches — no structured evidence
+- [x] `Status` flipped to `implemented`
 
 ---
 

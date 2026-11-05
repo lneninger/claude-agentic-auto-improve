@@ -1,0 +1,10 @@
+contract: 2026-11-05-codegraph-guard-fail-open
+started_at: '2026-11-05T20:52:10.549783+00:00'
+sub_tasks:
+  t1-guard-tracker-reset-installer-docs-and-version:
+    status: completed
+    branch: null
+    pull_request: null
+    issue: null
+    base: master
+    brief: null
