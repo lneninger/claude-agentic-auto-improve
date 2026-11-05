@@ -415,6 +415,34 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a merge resolves a prose or procedure conflict "keeping both behaviours", especially numbered steps
 - **Tags:** merge, conflict-resolution, base-text, duplicate-steps
 
+### 2026-11-05 — A bridge re-export that silently falls back to an inline copy must also say which one it gave
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
+- **Lesson:** When a contract asks a re-export to fall back to an inline copy AND asks a caller to behave differently when the native function is missing, specify the signal the caller reads (an exported flag such as `WORKTREE_OWN_ROOT_NATIVE`); without it the two requirements contradict and the implementer has to invent a new export.
+- **Apply when:** a contract or addendum adds a `getattr`-with-fallback re-export to `_claude_paths.py` (or any bridge) and, in the same breath, a "missing helper" branch in a consumer
+- **Tags:** bridge, re-export, fallback, older-helper, contract-addendum
+
+### 2026-11-05 — A hardening fix applied to a shared classifier must be checked against every consumer of that classifier
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
+- **Lesson:** Before you narrow what a shared classifier accepts (here `_git_file_kind`, under `tree_kind`) for a security reason, list its callers and the action each takes on the new outcome. A rule that is safe for the new caller (the add-on's guard, which fails open on `undecidable`) can wall an existing enforcing caller (the main-checkout guard, which blocks on `undecidable`). Bare-repository worktrees and `--separate-git-dir` checkouts went from decidable to blocked.
+- **Apply when:** a review or security fix asks for "the same refusal" in a function the contract lists as "consumed as-is", or in any helper behind `tree_kind`, `main_checkout_root` or another MECHANISMS.md classifier
+- **Tags:** shared-classifier, tree-kind, hardening, regression, consumers
+
+### 2026-11-05 — A same-host path rule must compare against both the written and the realpath form of the tree's own path
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
+- **Lesson:** On Windows `os.path.realpath` turns a mapped network drive (`Z:\`) into its UNC form (`\\server\share`). A rule that refuses a UNC target "unless it names the same host as the tree's own path" must take the host set from both the unresolved and the realpath'd own path, and must judge a hop after `realpath` against the folder it hops from. Otherwise a repository on a mapped drive whose worktree sits on another volume reads `undecidable`, and an enforcing caller walls it. Separately, a caller-side check placed after a call into an older helper only discards that helper's answer; the probe has already happened. Gate the call itself on the helper's release.
+- **Apply when:** a contract adds a host, drive or "same location" comparison on paths, or a caller-side check meant to protect against an older shared helper
+- **Tags:** unc, mapped-drive, realpath, older-helper, path-hardening
+
+### 2026-11-05 — An "older release" test fixture must be pinned to a fixed commit or a frozen copy, never to HEAD
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
+- **Lesson:** Do not load "the previous release" of a file with `git show HEAD:<path>` in a test. Before the commit HEAD is the old release and the test passes; the moment the change is committed HEAD IS the new release, and every row that asserts "this helper lacks X" fails (five W-13 rows did, simulated by the pass-4 reviewer). Pin the fixture to the last release's commit or tag (checked with `git cat-file -e`, skipped when absent), or check in a frozen copy under the test's fixtures.
+- **Apply when:** a contract or addendum asks a test to compare against "HEAD's", "the current", or "the last release's" copy of a file that the same change edits
+- **Tags:** test-fixture, older-helper, git-show, head, self-invalidating-test
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

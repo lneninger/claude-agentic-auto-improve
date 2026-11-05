@@ -303,6 +303,43 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.15.2 (the `codegraph` guard fails open, issue #259):** the guard is a nudge, never a wall.
+
+- **It lets reads through when CodeGraph is provably unavailable**, and prints one
+  `[codegraph-first-guard] allowed (fail-open:<reason>)` line, logged once per session per reason in
+  `errors.jsonl`. The reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or
+  the main checkout; a `.codegraph` folder without `codegraph.db` is not an index), `index-other-tree`
+  (a linked worktree with no index of its own, whose only index belongs to the main checkout),
+  `server-not-configured`, `server-disabled` and `subagent` (the payload carries an `agent_id`).
+  `state-unwritable` is the sixth line: the guard's session folder cannot be used. Every other reason logs
+  once per session; `state-unwritable` logs on every call, because there is no writable state to rate-limit it.
+- **The retry escape replaces the shell advice.** The block message no longer teaches reading through
+  the shell. Repeat the identical blocked call once and it is allowed and logged as `retry-escape`;
+  the next prompt clears it. No environment variable is involved.
+- **The turn marker belongs to the session.** It is `turn.json` in
+  `<system temp folder>/auto-improve-codegraph-<session id>/`, no longer
+  `<cwd>/.claude/.codegraph-used-this-turn`, so `cd` or `EnterWorktree` does not close the gate. The reset
+  hook prunes old session folders in the temp folder once per session (never through a link, never a
+  folder holding a file it does not know, only after 7 days).
+- **Wildcard only.** No shipped file names an individual CodeGraph tool; the server now offers only
+  its explore tool. `addon.json` gains `permissions_allow` (`mcp__codegraph__*`, written to
+  `permissions.allow` by the install, kept on uninstall) and `released_sha256` (so the uninstall deletes an
+  unedited old hook copy). `auto_improve_finish_install.py addon --name codegraph --check` is a read-only
+  check: exit 0 clean, 1 with findings (`codegraph-wildcard-missing`, `codegraph-tool-named`), 2 when it could not
+  check (any refusal: a settings layer or the project cannot be read, the add-on manifest is missing or unusable). The install refuses with `codegraph-tool-named` when a layer names a
+  single tool. `/verify-before-done` runs the check when the guard is registered.
+- **Upgrading.** The rows an old install carries are the same three, but the old hook files differ from the new
+  ones, so the install refuses with `addon-file-differs`. By install age:
+
+| Install age | What it has | Route |
+|---|---|---|
+| 0.9.9 to 0.15.1, hook files unedited | the old hooks, the sentinel under `<cwd>/.claude/` | `/auto-improve-codegraph-uninstall` (deletes the unedited old copies through the released hashes), then `/auto-improve-codegraph-install`, then a new session |
+| a copy from before 0.9.9, when the guard was a core hook | the guard file under `.claude/hooks/` that no add-on put there | the uninstall keeps it (`kept-differs`) unless it matches a released hash; compare it with the plugin's copy, delete it by hand, then install |
+| any age, a hook file edited by your team | your edited copy | the uninstall keeps it (`kept-differs`); compare it with the plugin's copy, move your edits over, delete it, then install |
+| installed from this release | nothing to do | run `addon --name codegraph --check` to confirm the permission entry |
+
+The `test_auto_improve_finish_install.py` suite grows to 385 cases.
+
 **Changed in 0.14.5 (the settings writer refuses without the Project hook launcher):** four changes.
 
 - **The writer refuses instead of falling back.** When the hooks folder beside the scripts has no
@@ -400,9 +437,9 @@ parts.
   never edits that file. Three lines are now false or only partly true:
   - the CodeGraph bypass "set `CLAUDE_SKIP_CG=1`", which does nothing now;
   - "Disable the gate entirely: `CLAUDE_CONCEPT_GATE=off`", which no longer covers the shell gate;
-  - the claim that the gate "auto-bypasses until the index exists", which the hook does not do.
-    With no `mcp__codegraph__*` tool in the session, every source Read is blocked; read through
-    the shell, or uninstall the add-on and start a new session.
+  - the claim that the gate "auto-bypasses until the index exists", which was untrue of 0.12.x.
+    Since 0.15.2 it is true: with no index (`.codegraph/codegraph.db`) the guard lets reads
+    through. See "Changed in 0.15.2".
 - **Doctor.** `plugin_doctor.py --drift` reports a new kind of finding,
   `disabled-hook-installed`. A **disabled hook** is one an add-on still ships but no longer
   installs (the advisor is one). The doctor reports its file in `.claude/hooks/`, and its row in
@@ -475,7 +512,7 @@ default install runs none of them:
 | Add-on | Its hook files | What it does | Why it is not a default |
 |---|---|---|---|
 | `angular-tailwind` | no hook file is installed; four rule documents and a stylesheet snippet instead. The old `angular-tailwind-advisor.py` (formerly `architecture-advisor.py`) still ships but is disabled since 0.10.0 | copies the Angular, Material, Tailwind and UI-pattern rule documents into `.claude/references/angular-tailwind/` and lists them in `review.documents`; the guard's lines cite them by Rule ID | it only suits Angular plus Tailwind projects; `architecture-guard.py` still enforces at the write |
-| `codegraph` | `codegraph-first-guard.py`, `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | blocks `Read` / `Grep` / `Glob` on source until a CodeGraph tool has run in the turn | it blocks every source read when the CodeGraph server is missing |
+| `codegraph` | `codegraph-first-guard.py`, `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | asks for a CodeGraph call first: blocks `Read` / `Grep` / `Glob` on source until a CodeGraph tool has run in the turn, but lets reads through (with one logged line) when CodeGraph is unavailable, and allows the identical retry of a blocked call once | three program starts: on every Read, Grep and Glob, on every prompt, and after every CodeGraph call; plus one blocked round trip per new source call while the gate is closed |
 | `strict-shell-gate` | `bash-gate.py` | reads each shell command before it runs and blocks a write into a source file no approved contract covers | a program start on every shell command, and it misreads some commands (it read `--stat` as the file written in `sed -i` followed by `git diff --stat`) and cannot see what a program such as `python` or `node` writes; the Changed-file check, which stays on, catches those after the fact |
 
 **To install one in a project**, run its skill. Each one previews the files and the
@@ -527,12 +564,14 @@ The table describes rows in the earlier form, which name the file directly. A la
 | `bash-gate.py` is missing | Python's own error, exit 2, on every Bash call | the same Edit-tool route |
 | `codegraph-first-guard.py` is missing | Python's error on every Read, Grep and Glob, including the read of `settings.json` that Edit needs first | edit the row through the shell, or edit the file outside the session |
 | `codegraph-turn-reset.py` is missing | Python's error on `UserPromptSubmit`, so every prompt is blocked | edit `.claude/settings.json` outside the session, in an editor |
-| `codegraph-turn-tracker.py` is missing | an error after each CodeGraph call; the marker is never set, so reads stay blocked | as for a missing `codegraph-first-guard.py` |
+| `codegraph-turn-tracker.py` is missing | an error after each CodeGraph call; the marker is never set, so reads stay blocked until the identical retry | as for a missing `codegraph-first-guard.py` |
 
-A session with no `mcp__codegraph__*` tool is not a failure of the hook, but every source Read
-is blocked, because the guard never checks for an index. Reading through the shell works, as does
-running `/auto-improve-codegraph-uninstall` and then starting a new session. If the CodeGraph index
-is stale, run `codegraph sync` or `codegraph init -i`.
+A session with no `mcp__codegraph__*` tool is not a failure of the hook. Since 0.15.2 the guard
+lets the read through when it can prove CodeGraph is unavailable (no index, no configured server,
+a disabled server, a subagent, an index that belongs to another working tree); in any other
+session, repeat the blocked call once and it is allowed and logged. `/auto-improve-codegraph-uninstall`
+followed by a new session removes the guard. If the CodeGraph index is stale, run `codegraph sync`
+or `codegraph init -i`.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
 `post-edit-dispatcher.py` rather than as four separate hook entries.
@@ -967,7 +1006,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 344 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 385 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 

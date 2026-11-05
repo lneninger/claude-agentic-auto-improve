@@ -295,5 +295,126 @@ class TestOnlyTheMemoryAdapterNamesTheMemoryTools(unittest.TestCase):
                          "retrieve tool' and 'the configured capture tool'" % MEMORY_ADAPTER)
 
 
+# --- (5) only the wildcard names CodeGraph tools -------------------------------------------------------------------
+# Issue #259 (concept contract 2026-11-05-codegraph-guard-fail-open, "Scan"). The CodeGraph server now offers only the
+# explore tool, so a shipped file that names an individual tool names something that may not exist, and every such
+# name is a second place to keep in step. The rule: no shipped file contains the prefixed form
+# `mcp__codegraph__codegraph_<x>` and none contains a bare legacy name (`codegraph_search` and the rest); a file says
+# `mcp__codegraph__*` or "a CodeGraph tool". The file set is the one scan (4) uses (shipped_files). The only
+# exemption is the two test files that PROVE the wildcard covers the legacy names. README is not shipped
+# (check_version_bump.EXEMPT_NAMES), so it is edited but not scanned. The names are built from parts here, so this
+# file (not shipped: .claude/scripts/tests) never needs to be an exception.
+CG_PREFIX = "mcp__codegraph__" + "codegraph_"
+CG_LEGACY_RE = re.compile(r"\bcodegraph_(?:search|node|callers|callees|impact|files|status|context)\b")
+CG_WILDCARD = "mcp__codegraph__*"
+CG_EXEMPT = (".claude/hooks/tests/test_addons.py", ".claude/hooks/tests/test_codegraph_first_guard.py")
+
+
+def codegraph_name_files(root: Path) -> list[str]:
+    """Shipped files under ``root`` (the two proof files excepted) that name an individual CodeGraph tool."""
+    hits = []
+    for rel in shipped_files(root):
+        if rel in CG_EXEMPT:
+            continue
+        try:
+            text = (root / rel).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if CG_PREFIX in text or CG_LEGACY_RE.search(text):
+            hits.append(rel)
+    return hits
+
+
+def tools_line(text: str) -> str | None:
+    """The `tools:` line of an agent's front matter, or None."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return None
+        if line.startswith("tools:"):
+            return line
+    return None
+
+
+def codegraph_grant_problems(root: Path) -> tuple[int, list[str]]:
+    """(agents read, problems): every agent whose tools: line grants any CodeGraph tool must grant exactly the wildcard."""
+    problems, read = [], 0
+    for path in sorted((root / "agents").glob("*.md")):
+        read += 1
+        line = tools_line(path.read_text(encoding="utf-8", errors="replace"))
+        if line is None:
+            continue
+        tokens = [tok.strip() for tok in line[len("tools:"):].split(",") if tok.strip()]
+        granted = [tok for tok in tokens if "codegraph" in tok.lower()]
+        if granted and granted != [CG_WILDCARD]:
+            problems.append("agents/%s grants %r; the only CodeGraph grant is exactly %s" % (path.name, granted, CG_WILDCARD))
+    return read, problems
+
+
+class TestOnlyTheWildcardNamesCodeGraphTools(unittest.TestCase):
+    def plant(self, root: Path, rel: str, text: str) -> None:
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def test_control_a_prefixed_name_and_a_bare_legacy_name_are_caught_in_a_hook_test_a_registry_and_an_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.plant(root, ".claude/hooks/tests/test_other.py", "x = '" + CG_PREFIX + "search'\n")
+            self.plant(root, ".claude/registries/ZZ.md", "ask codegraph_" + "callers first\n")
+            self.plant(root, "agents/zz.md", "---\ntools: Read\n---\nuse codegraph_" + "explore? no: codegraph_" + "node\n")
+            self.assertEqual(codegraph_name_files(root),
+                             [".claude/hooks/tests/test_other.py", ".claude/registries/ZZ.md", "agents/zz.md"])
+
+    def test_control_the_two_proof_files_are_exempt_and_the_wildcard_and_python_names_are_not_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel in CG_EXEMPT:
+                self.plant(root, rel, CG_PREFIX + "search and codegraph_" + "node\n")
+            self.plant(root, ".claude/registries/OK.md", "say " + CG_WILDCARD + " or 'a CodeGraph tool'\n")
+            self.plant(root, ".claude/scripts/ok.py", "def codegraph_impact_files(): pass\ncodegraph_signal = 1\n")
+            self.assertEqual(codegraph_name_files(root), [])
+
+    def test_control_a_copy_under_a_worktrees_segment_and_an_unshipped_test_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.plant(root, "agents/.claude/worktrees/x/zz.md", CG_PREFIX + "search\n")
+            self.plant(root, ".claude/scripts/tests/test_x.py", CG_PREFIX + "search\n")
+            self.assertEqual(codegraph_name_files(root), [])
+
+    def test_no_shipped_file_names_an_individual_codegraph_tool(self):
+        files = shipped_files(PLUGIN_ROOT)
+        self.assertGreater(len(files), 0, "the scan must have read shipped files")
+        for rel in CG_EXEMPT:
+            self.assertIn(rel, files, "the scan must reach the exempt proof file %s" % rel)
+        self.assertEqual(codegraph_name_files(PLUGIN_ROOT), [],
+                         "no shipped file may name `mcp__codegraph__codegraph_<tool>` or a bare legacy tool name "
+                         "(search, node, callers, callees, impact, files, status, context); say `%s` or 'a CodeGraph "
+                         "tool'. Only %s may, because they prove the wildcard covers the legacy names"
+                         % (CG_WILDCARD, " and ".join(CG_EXEMPT)))
+
+    def test_control_the_grant_check_catches_a_per_tool_grant_and_accepts_the_wildcard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.plant(root, "agents/good.md", "---\nname: good\ntools: Read, Grep, " + CG_WILDCARD + "\n---\nbody\n")
+            self.plant(root, "agents/none.md", "---\nname: none\ntools: Read\n---\nbody\n")
+            self.assertEqual(codegraph_grant_problems(root), (2, []))
+            self.plant(root, "agents/bad.md", "---\nname: bad\ntools: Read, " + CG_PREFIX + "search\n---\nbody\n")
+            self.plant(root, "agents/both.md", "---\nname: both\ntools: " + CG_WILDCARD + ", " + CG_PREFIX + "node\n---\n")
+            read, problems = codegraph_grant_problems(root)
+            self.assertEqual(read, 4)
+            self.assertEqual(len(problems), 2, problems)
+
+    def test_every_agent_that_grants_codegraph_grants_exactly_the_wildcard(self):
+        read, problems = codegraph_grant_problems(PLUGIN_ROOT)
+        self.assertGreater(read, 0, "the scan must have read the agent files")
+        self.assertEqual(problems, [], "an agent's tools: line grants CodeGraph through `%s` and nothing narrower" % CG_WILDCARD)
+        granting = [p.name for p in (PLUGIN_ROOT / "agents").glob("*.md")
+                    if CG_WILDCARD in (tools_line(p.read_text(encoding="utf-8", errors="replace")) or "")]
+        self.assertGreater(len(granting), 0, "at least one agent must grant the wildcard (the scan is not vacuous)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

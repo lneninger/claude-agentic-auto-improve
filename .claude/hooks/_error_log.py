@@ -85,14 +85,16 @@ def log_event(
     agent: str | None = None,
     details: Mapping[str, Any] | None = None,
     log_name: str = "errors",
-) -> None:
+) -> bool:
     """Append a structured event to ``<LOG_DIR>/<log_name>.jsonl``.
 
-    Fail-soft: returns silently on any error. Never raises.
+    Fail-soft: never raises. Returns True when the record was appended, False when nothing was written (no log
+    folder, or any error); callers that ignore the value are unaffected.
 
     Args:
         hook: short hook name without extension (e.g. "concept-gate").
-        event: one of {"block", "warn", "redirect", "reconcile"}.
+        event: a short event name such as "block", "warn", "redirect", "reconcile",
+            "fail-open" or "retry-escape" (a free-form label; the list is open-ended).
         file: optional target file path, if the event is file-scoped.
         session_id: optional override; defaults to env / parent pid hash.
         agent: optional agent name, if known.
@@ -106,7 +108,7 @@ def log_event(
         if not LOG_DIR.exists():
             # Do not auto-create -- the /audit-errors skill owns dir creation.
             # This keeps the fast path truly passive until the user enables it.
-            return
+            return False
 
         name = (
             log_name
@@ -129,9 +131,10 @@ def log_event(
         # Atomic append -- Windows handles concurrent appends OK for short lines.
         with log_path.open("a", encoding="utf-8") as fp:
             fp.write(line + "\n")
+        return True
     except Exception:
         # Intentionally swallow -- the log is an observation tool, never a gate.
-        return
+        return False
 
 
 __all__ = ["log_event"]

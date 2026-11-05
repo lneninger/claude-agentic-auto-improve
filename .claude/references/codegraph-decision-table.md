@@ -18,31 +18,35 @@ call only in a project that installed it. The routing below still says which too
 
 ## Routing
 
-| Question | Tool | Where to call |
+| Question | Ask CodeGraph for | Where to call |
 |---|---|---|
-| "Where is `X` defined?" | `codegraph_search` → `codegraph_node` | Main session |
-| "Who calls `X`?" | `codegraph_callers` | Main session |
-| "What does `X` call?" | `codegraph_callees` | Main session |
-| "What breaks if I change `X`?" | `codegraph_impact` | Main session |
-| "List source files matching pattern" | `codegraph_files` | Main session |
-| "Is the index alive / fresh?" | `codegraph_status` | Main session |
-| "Explain the area around `X`" (broad) | `codegraph_context` | **Explore subagent only** |
-| "Map a feature from scratch" | `codegraph_explore` | **Explore subagent only** |
-| "Read a markdown / config file" | `Read` (no CodeGraph call needed) | Main session |
-| "Read a file CodeGraph just pointed to" | `Read` | Main session |
+| "Where is `X` defined?" | a symbol lookup, then the symbol's members | Main session |
+| "Who calls `X`?" | the callers of the symbol | Main session |
+| "What does `X` call?" | the callees of the symbol | Main session |
+| "What breaks if I change `X`?" | the impact of the symbol | Main session |
+| "List source files matching pattern" | the indexed files | Main session |
+| "Is the index alive / fresh?" | the index status (or run `codegraph status`) | Main session |
+| "Explain the area around `X`" (broad) | a focused context for the area | **Explore subagent only** |
+| "Map a feature from scratch" | a broad exploration | **Explore subagent only** |
+| "Read a markdown / config file" | nothing (`Read`, no CodeGraph call needed) | Main session |
+| "Read a file CodeGraph just pointed to" | nothing (`Read`) | Main session |
+
+Say `mcp__codegraph__*`, never one tool's name: a server offers different tools from one release to the
+next (the current one offers only its explore tool), and the permission entry an install writes is the
+wildcard `mcp__codegraph__*` for the same reason.
 
 ### Why the main-session / subagent split
 
-The heavy tools (`codegraph_explore`, `codegraph_context`) return **full source sections from many
+The heavy questions (a broad exploration, a focused context) return **full source sections from many
 files in one call** — they fill main-session context fast. Delegate them to an Explore subagent,
 which reads the heavy result and returns a focused summary.
 
-The lightweight tools return small structured records and are safe to call directly.
+The lightweight questions return small structured records and are safe to ask directly.
 
 When spawning an Explore agent, include this directive verbatim:
 
-> CodeGraph is your primary tool. Start with `codegraph_explore` (broad map) or `codegraph_context`
-> (focused area). Do NOT re-read files CodeGraph already returned source for — its sections are
+> CodeGraph is your primary tool. Start with a broad exploration or a focused context question,
+> through a `mcp__codegraph__*` tool. Do NOT re-read files CodeGraph already returned source for — its sections are
 > complete and authoritative. Only fall back to `Read` / `Grep` / `Glob` for files CodeGraph
 > doesn't index (markdown, JSON, config, generated code).
 
@@ -53,30 +57,30 @@ When spawning an Explore agent, include this directive verbatim:
 Wrong: `Grep -r "AAPL" src/` → would be noise; ask CodeGraph instead.
 
 Right:
-1. `codegraph_search("StockScreenerService")` → locates the type.
-2. `codegraph_node` on the hit → members and file:line.
-3. `codegraph_callees` on the filter method → shows it reads `StockFundamentals` locally.
+1. Ask CodeGraph for `StockScreenerService` → locates the type.
+2. Ask for the members of the hit → members and file:line.
+3. Ask for the callees of the filter method → shows it reads `StockFundamentals` locally.
 4. Now `Read` the file.
 
 ### "If I rename `StrategyStatus.Paused`, what breaks?"
 
-1. `codegraph_search("StrategyStatus")` → the enum node.
-2. `codegraph_impact` on it → the blast radius across backend and generated clients.
+1. Ask CodeGraph for `StrategyStatus` → the enum node.
+2. Ask for its impact → the blast radius across backend and generated clients.
 3. Cross-check the Angular side by hand: **generated TypeScript is not reliably indexed.** The
-   `.ts` client is regenerated from C#, so `codegraph_impact` may not show the frontend consumers
+   `.ts` client is regenerated from C#, so the impact answer may not show the frontend consumers
    at all. Confirm with `git grep` on `**/generated/` under the `frontend.root-container` slot of
    `.claude/project-profile.md`.
 
 ### "Map the recording capture feature"
 
-Do **not** call `codegraph_explore` in the main session. Dispatch an Explore subagent with the
+Do **not** ask a broad exploration question in the main session. Dispatch an Explore subagent with the
 directive above and a scope ("recording capture: entities, services, hub, Angular state") and keep
 only its summary.
 
 ### "Where is the JWT secret read?"
 
-1. `codegraph_search("JwtSettings")`.
-2. `codegraph_callers` on the settings type → the DI registration and the token service.
+1. Ask CodeGraph for `JwtSettings`.
+2. Ask for the callers of the settings type → the DI registration and the token service.
 3. `Read` `Program.cs` and the service.
 
 ## Retired gate (0.7.0)
@@ -87,7 +91,7 @@ them again as the opt-in `codegraph` add-on (never registered by the plugin itse
 | Retired hook | What it did |
 |---|---|
 | code-search-first guard | Blocked `Read`/`Grep`/`Glob` on source paths until a CodeGraph tool had run in the turn. |
-| CodeGraph turn tracker | Created the per-turn marker file after a CodeGraph call. |
+| CodeGraph turn tracker | Created the per-turn marker after a CodeGraph call. |
 | CodeGraph turn reset | Deleted the marker at every new prompt. |
 
 A project that wants the block back runs `/auto-improve-codegraph-install`; the README's "Retired hooks" section says how.
@@ -100,30 +104,38 @@ or `codegraph init -i`.
 ## When the `codegraph` add-on is installed
 
 A project that ran `/auto-improve-codegraph-install` has the block back, as three hooks that share
-one marker file, `<project>/.claude/.codegraph-used-this-turn`:
+one session folder, `<system temp folder>/auto-improve-codegraph-<session id>/`:
 
 | Hook | Event | Effect |
 |---|---|---|
-| `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the marker file is missing and the target is a source path. The message names the CodeGraph tool to use instead. |
-| `codegraph-turn-tracker.py` | PostToolUse on `mcp__codegraph__*` | Creates the marker file. |
-| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the marker file, so every new user turn opens a fresh investigation budget. |
+| `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the session's `turn.json` marker is missing, the target is a source path and CodeGraph is available. The message says to ask CodeGraph through a `mcp__codegraph__*` tool. |
+| `codegraph-turn-tracker.py` | PostToolUse on `mcp__codegraph__*` | Writes the session's `turn.json` marker, whatever the tool is called. |
+| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the marker and the retry tickets, so every new user turn opens a fresh investigation budget. It also prunes old session folders in the temp folder, once per session. |
 
-**The installed guard still blocks every source read when no CodeGraph server is configured.** It
-checks the marker file and nothing else; it never asks whether a CodeGraph server exists. With no
-server there is no `mcp__codegraph__*` call, so nothing creates the marker and every `Read` / `Grep`
-/ `Glob` on a source path stays blocked. That did not end in 0.7.0; the add-on's copy of the guard
-has the same behaviour. Workaround: read through Bash (`cat`, `sed -n`), which the gate does not
-intercept. A source path under `.claude/worktrees/` is gated like any other source path: the guard
-strips the worktree segment before it tests the path against the allowlist.
+The marker belongs to the session, not to a directory, so `cd` or `EnterWorktree` does not close the
+gate again.
 
-**Ways out.** There is no bypass variable. In a session with no `mcp__codegraph__*` tool, read
-through the shell, or run `/auto-improve-codegraph-uninstall` and start a new session. To stop the
-block for good, that uninstall skill removes the three hooks' rows from the project's
-`settings.json`; only when a hook cannot run does the user remove a row by hand (the README table
-"Ways out when a hook cannot run"). A stale index is fixed with `codegraph sync` or
-`codegraph init -i`. The install skill refuses to run when no CodeGraph server is configured, but a
-project that removes or disables the server afterwards keeps the installed hooks and their block.
-The README's "Retired hooks" section lists the add-ons and their skills.
+**The installed guard fails open when CodeGraph is provably unavailable.** It lets the read through,
+prints `[codegraph-first-guard] allowed (fail-open:<reason>)` and logs one record per session per
+reason, for these reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or the
+main checkout; CodeGraph's own per-user `~/.codegraph` has no `codegraph.db` and does not count),
+`index-other-tree` (a linked worktree without its own index, whose only index belongs to the main
+checkout, so its answers would be stale), `server-not-configured`, `server-disabled`, and `subagent`
+(the payload carries an `agent_id`). `state-unwritable` covers an unusable session folder. A subagent
+shares its parent's session, so a CodeGraph call by either opens the gate for both until the next
+prompt.
+
+**The retry escape.** In any other session where no `mcp__codegraph__*` tool is available (a
+background session, say), repeat the blocked call once, exactly: it is allowed and logged as
+`retry-escape`. A different call is blocked again, and the next prompt clears the escape. There is no
+bypass variable.
+
+**Ways out.** Run `/auto-improve-codegraph-uninstall` and start a new session. To stop the block for
+good, that uninstall skill removes the three hooks' rows from the project's `settings.json`; only when
+a hook cannot run does the user remove a row by hand (the README table "Ways out when a hook cannot
+run"). A stale index is fixed with `codegraph sync` or `codegraph init -i`. `addon --name codegraph
+--check` judges the permission entry. The README's "Retired hooks" section lists the add-ons and their
+skills.
 
 ## Allowlist — paths the retired gate skipped
 
@@ -142,7 +154,7 @@ real ones, while `codegraph status` says "up to date". **Trust it for relationsh
 existence or inventories.** Confirm on disk before asserting a file exists or that a count is
 complete.
 
-**The gate has no escape without an index.** Before 0.7.0 the hook still hard-blocked `Read`/`Grep`/`Glob` when the MCP server was absent, which is one reason it was retired. The add-on's copy of the guard does the same; see "When the `codegraph` add-on is installed" above.
+**The gate used to have no escape without an index.** Before 0.7.0 the hook hard-blocked `Read`/`Grep`/`Glob` when the MCP server was absent, which is one reason it was retired, and the add-on's copy did the same until 0.15.2. It now fails open and offers the retry escape; see "When the `codegraph` add-on is installed" above.
 
 ## Index health
 

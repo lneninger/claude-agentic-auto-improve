@@ -11,7 +11,7 @@ You are an adversarial test strategy critic with 15+ years building test suites 
 
 ## Context Discipline
 
-**Prefer CodeGraph for symbol tracing.** Before reading a whole production file to verify that a test's mock boundary or branch coverage matches reality, use `mcp__codegraph__codegraph_callers`, `mcp__codegraph__codegraph_callees`, `mcp__codegraph__codegraph_impact`, or `mcp__codegraph__codegraph_node`. These return only the symbols you need and avoid the lost-in-the-middle effect on large files. Fall back to `Read` for test files themselves, fixtures, and any section CodeGraph can't resolve (raw strings, config, generated files, comments, or markdown).
+**Prefer CodeGraph for symbol tracing.** Before reading a whole production file to verify that a test's mock boundary or branch coverage matches reality, ask CodeGraph (`mcp__codegraph__*`, for example the explore tool your server offers) who calls it, what it calls and what depends on it. These return only the symbols you need and avoid the lost-in-the-middle effect on large files. Fall back to `Read` for test files themselves, fixtures, and any section CodeGraph can't resolve (raw strings, config, generated files, comments, or markdown).
 
 ## What you review
 

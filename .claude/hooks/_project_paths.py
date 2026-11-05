@@ -558,23 +558,93 @@ _NO_TARGET_BASH = ("/dev/null", "/dev/stdout", "/dev/stderr")
 _ENV_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)|%(\w+)%")
 
 
+_GITDIR_READ_CAP = 4096
+_GITDIR_MARKERS = ("/.git/worktrees/", "/.git/modules/")
+
+
+def _remote_host(text: str) -> str | None:
+    """``None`` for a local path. For a UNC or device path (a leading pair of separators, either kind) the
+    lower-cased host; ``"?c:"`` for a device path on a local drive; ``""`` when a device path names no host."""
+    slashed = text.replace("\\", "/")
+    if not slashed.startswith("//"):
+        return None
+    parts = [p for p in slashed[2:].split("/") if p]
+    if parts and parts[0] in ("?", "."):
+        if len(parts) > 2 and parts[0] == "?" and parts[1].upper() == "UNC":
+            return parts[2].lower()
+        if len(parts) > 1 and len(parts[1]) == 2 and parts[1][1] == ":" and parts[1][0].isalpha():
+            return "?" + parts[1].lower()
+        return ""
+    return parts[0].lower() if parts else ""
+
+
+def _hop_allowed(target: str, own: str, *also: str) -> bool:
+    """A pointer hop may be looked at when it is local, or a UNC or device path whose host is the host of the tree's
+    own path or of any other spelling given (``also``: its ``os.path.realpath`` form). The text AND its normal form
+    are judged, and a ``..`` segment inside a UNC or device path is never allowed: the text checked is the text opened."""
+    allowed = {h for h in (_remote_host(o) for o in (own,) + also) if h}
+    climbs = ".." in target.replace("\\", "/").split("/")
+    for text in (target, os.path.normpath(target)):
+        host = _remote_host(text)
+        if host is not None and (not host or host not in allowed or climbs):
+            return False
+    return True
+
+
+def _own_spellings(path: str) -> tuple:
+    """The spellings of a tree's own path that count for the same-host rule: the written form, plus its
+    ``os.path.realpath`` form when the written form is local (a mapped drive resolves to ``\\\\server\\share``).
+    A path already written as UNC or device is never resolved: that would touch its host."""
+    return (path,) if _remote_host(path) is not None else (path, os.path.realpath(path))
+
+
+def _gitdir_pointer(folder: str, first: str) -> str | None:
+    """The normalised, forward-slash target of a ``gitdir:`` line, or ``None`` when it is undecidable: no usable
+    line, a UNC or device path naming another host than ``folder``, or a target holding neither ``/.git/worktrees/``
+    nor ``/.git/modules/``. Used by ``worktree_own_root`` only. Nothing under the target is touched."""
+    raw = first[len("gitdir:"):].strip() if first.startswith("gitdir:") else ""
+    if not raw or not _hop_allowed(raw, *_own_spellings(folder)):
+        return None
+    target = os.path.normpath(os.path.join(folder, raw)).replace("\\", "/")
+    if not _hop_allowed(target, *_own_spellings(folder)) or not any(m in target.lower() for m in _GITDIR_MARKERS):
+        return None
+    return target
+
+
+def _read_gitdir_line(entry: str) -> str:
+    """The first line of a file, read through a 4096-byte cap as strict UTF-8. A line cut off by the cap (4096 bytes
+    and no newline) reads as ``""``: undecidable."""
+    with open(entry, "rb") as fh:
+        data = fh.read(_GITDIR_READ_CAP)
+    if len(data) >= _GITDIR_READ_CAP and b"\n" not in data:
+        return ""
+    return data.split(b"\n", 1)[0].decode("utf-8").strip()
+
+
 def _git_file_kind(gitfile: str, folder: str) -> tuple[str, str | None]:
-    """Classify a ``.git`` FILE: linked worktree when its git directory holds ``commondir``."""
+    """Classify a ``.git`` FILE: linked worktree when its git directory holds ``commondir``. A gitdir or commondir
+    that is a UNC or device path naming another host than ``folder`` is undecidable, before anything is probed."""
     try:
-        with open(gitfile, "r", encoding="utf-8") as fh:
-            first = fh.readline().strip()
-        if not first.startswith("gitdir:") or not first[len("gitdir:"):].strip():
+        first = _read_gitdir_line(gitfile)
+        raw = first[len("gitdir:"):].strip() if first.startswith("gitdir:") else ""
+        own = _own_spellings(folder)
+        if not raw or not _hop_allowed(raw, *own):
             return "undecidable", None
-        target = os.path.normpath(os.path.join(folder, first[len("gitdir:"):].strip()))
-        if not os.path.isdir(target):
+        target = os.path.normpath(os.path.join(folder, raw))
+        if not _hop_allowed(target, *own) or not os.path.isdir(target):
             return "undecidable", None
         commondir = os.path.join(target, "commondir")
         if not os.path.isfile(commondir):
             return "main-checkout", os.path.realpath(folder)
-        with open(commondir, "r", encoding="utf-8") as fh:
-            relative = fh.readline().strip()
-        common = os.path.realpath(os.path.join(target, relative)) if relative else ""
-        if not common or not os.path.isdir(common):
+        relative = _read_gitdir_line(commondir)
+        # The commondir hop is judged against the folder it hops from (and the tree), and the joined text is normalised BEFORE the
+        # check: the string that is checked is the string that is opened.
+        joined = os.path.normpath(os.path.join(target, relative)) if relative else ""
+        hop = _own_spellings(target) + _own_spellings(folder)
+        if not joined or not _hop_allowed(relative, *hop) or not _hop_allowed(joined, *hop):
+            return "undecidable", None
+        common = os.path.realpath(joined)
+        if not _hop_allowed(common, *hop) or not os.path.isdir(common):
             return "undecidable", None
         return "linked-worktree", os.path.dirname(common)
     except (OSError, ValueError, UnicodeError):
@@ -613,6 +683,43 @@ def main_checkout_root(path: str) -> str | None:
     """Folder holding the main checkout's ``.git`` (for a linked worktree, the parent of the
     common git directory); ``None`` for outside-repository and undecidable."""
     return _classify(path)[1]
+
+
+def worktree_own_root(path: str) -> tuple[str | None, str | None]:
+    """``(own tree root, gitdir)`` of ``path``: the folder that holds the nearest ``.git`` entry.
+
+    Walks up from the nearest existing ancestor of ``path`` to the first folder F that holds a ``.git`` entry.
+    ``gitdir`` is ``None`` when ``.git`` is a FOLDER (a main checkout). When ``.git`` is a FILE whose first line is
+    ``gitdir: X``, ``gitdir`` is X resolved against F when relative, normalised, with forward slashes. A readable
+    ``.git`` file with no usable ``gitdir:`` line returns ``(F, None)`` (an undecidable tree). ``(None, None)`` when
+    no ``.git`` exists up to the filesystem root, or the ``.git`` file cannot be read.
+
+    Unlike ``main_checkout_root`` this returns the OWN root of a linked worktree, never the main checkout's. Reads
+    ``.git`` entries only: no subprocess, no environment (contract 2026-11-05-codegraph-guard-fail-open, Own tree root).
+    """
+    try:
+        folder = os.path.abspath(path)
+        while not os.path.exists(folder):
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return None, None
+            folder = parent
+        while True:
+            entry = os.path.join(folder, ".git")
+            if os.path.isdir(entry):
+                return folder, None
+            if os.path.isfile(entry):
+                try:
+                    first = _read_gitdir_line(entry)
+                except (OSError, ValueError, UnicodeError):
+                    return None, None
+                return folder, _gitdir_pointer(folder, first)
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return None, None
+            folder = parent
+    except (OSError, ValueError):
+        return None, None
 
 
 def _expand_variables(text: str) -> str:
@@ -818,7 +925,7 @@ SETTINGS_SETTLE_SECONDS = 2.0
 #: The only event a database guard is registered for.
 GUARD_EVENT = "PreToolUse"
 #: A session id is used in a file name, so it may hold only these characters.
-_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?")  # never ends in "." (Windows strips it)
 _MARKER_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 #: Rotate the project's db-guard.log at this size, like the guard's own audit writer does.
 DEFERRAL_LOG_MAX_BYTES = 10 * 1024 * 1024
