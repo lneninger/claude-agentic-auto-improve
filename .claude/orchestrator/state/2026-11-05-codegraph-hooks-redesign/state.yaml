@@ -1,0 +1,38 @@
+contract: 2026-11-05-codegraph-hooks-redesign
+started_at: '2026-11-05T16:37:55.401588+00:00'
+sub_tasks:
+  t1-live-checks:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 263
+    base: feature/261-codegraph-hooks-redesign
+    brief: .claude/work-items/2026-11-05-263-t1-live-checks.md
+  t2-shadow-decision-and-cheaper-hot-path-in-the-guard:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 264
+    base: feature/261-codegraph-hooks-redesign
+    brief: .claude/work-items/2026-11-05-264-t2-shadow-decision-and-cheaper-hot-path-in-the-guard.md
+  t3-cost-measurement:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 265
+    base: feature/261-codegraph-hooks-redesign
+    brief: .claude/work-items/2026-11-05-265-t3-cost-measurement.md
+  t4-upgrade-path-and-documentation:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 266
+    base: feature/261-codegraph-hooks-redesign
+    brief: .claude/work-items/2026-11-05-266-t4-upgrade-path-and-documentation.md
+  t5-fail-open-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 267
+    base: feature/261-codegraph-hooks-redesign
+    brief: .claude/work-items/2026-11-05-267-t5-fail-open-review.md
