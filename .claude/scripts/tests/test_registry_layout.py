@@ -744,8 +744,10 @@ class ThisRepositoryTests(unittest.TestCase):
                               encoding="utf-8", env=env, cwd=str(REPO_ROOT))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
-        self.assertTrue(lines[0].startswith("advisory: registry layout pending"), lines[:3])
-        for ln in lines[1:]:
+        # This repository is on layout 2 (state "current"), so no layout advisory line is printed:
+        # only R4 and digest lines remain.
+        for ln in lines:
+            self.assertFalse(ln.startswith("advisory: registry layout"), ln)
             self.assertTrue(ln.startswith("advisory: R4 ") or ln.startswith("digest: "), ln)
 
 
