@@ -56,7 +56,7 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual([p.name for p in target.parent.iterdir()], ["f.txt"])
 
 
-class StageAndReplaceTests(unittest.TestCase):
+class _StageCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -71,6 +71,8 @@ class StageAndReplaceTests(unittest.TestCase):
         self.t2.write_bytes(b"old two")
         self.writes = [(self.t1, b"new one"), (self.t2, b"new two"), (self.t3, b"new three")]
 
+
+class StageAndReplaceTests(_StageCase):
     def test_success_replaces_all_and_backs_up_existing(self):
         result = _preview_apply.stage_and_replace(self.writes, self.backup)
         self.assertNotEqual(result.get("status"), "refused", result)
@@ -144,6 +146,84 @@ class StageAndReplaceTests(unittest.TestCase):
         self.assertEqual(result["code"], "write-failed")
         self.assertEqual(_tree(self.root), before)
         self.assertEqual(self.t1.read_bytes(), b"old one")
+
+
+class BackupLayoutTests(_StageCase):
+    """W2: backups land under backup_dir / target.relative_to(base); N3: folders the run created are removed again."""
+
+    def test_backup_path_is_backup_dir_joined_with_the_path_relative_to_base(self):
+        result = _preview_apply.stage_and_replace(self.writes, self.backup, base=self.root)
+        self.assertNotEqual(result.get("status"), "refused", result)
+        self.assertEqual((self.backup / "reg" / "one.md").read_bytes(), b"old one")
+        self.assertEqual((self.backup / "reg" / "two.md").read_bytes(), b"old two")
+        self.assertEqual(sorted(str(p.relative_to(self.backup)).replace("\\", "/")
+                                for p in self.backup.rglob("*") if p.is_file()), ["reg/one.md", "reg/two.md"])
+
+    def test_base_defaults_to_the_common_parent_folder_of_the_targets(self):
+        result = _preview_apply.stage_and_replace(self.writes, self.backup)
+        self.assertNotEqual(result.get("status"), "refused", result)
+        self.assertEqual(sorted(p.name for p in self.backup.rglob("*") if p.is_file()), ["one.md", "two.md"])
+        self.assertTrue((self.backup / "one.md").is_file())
+
+    def test_a_deep_checkout_stays_under_max_path_with_the_relative_layout(self):
+        deep_root = self.root / ("d" * 40) / ("e" * 40)
+        backup = deep_root / ".claude" / "cache" / "registry-migrations" / "20261106T000000Z" / "backup"
+        target = deep_root / ".claude" / "registries" / "VOCABULARY" / "general.md"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"old")
+        old_rule = backup / Path(*Path(os.path.abspath(str(target))).parts[1:])
+        self.assertGreater(len(str(old_rule)), 260)
+        result = _preview_apply.stage_and_replace([(target, b"new")], backup, base=deep_root)
+        self.assertNotEqual(result.get("status"), "refused", result)
+        copy = backup / ".claude" / "registries" / "VOCABULARY" / "general.md"
+        self.assertLess(len(str(copy)), 260)
+        self.assertEqual(copy.read_bytes(), b"old")
+
+    def test_a_target_outside_base_is_write_failed_before_any_stage_file(self):
+        outside = Path(self._tmp.name) / "elsewhere" / "x.md"
+        outside.parent.mkdir()
+        outside.write_bytes(b"outside")
+        before = _tree(Path(self._tmp.name))
+        result = _preview_apply.stage_and_replace([(self.t1, b"new one"), (outside, b"new")], self.backup,
+                                                  base=self.root)
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["code"], "write-failed")
+        self.assertEqual(_tree(Path(self._tmp.name)), before)
+
+    def test_a_folder_made_by_a_failed_run_is_removed_and_an_existing_one_stays(self):
+        new_dir = self.root / "NEWREG"
+        writes = [(new_dir / "general.md", b"new"), (self.t1, b"new one"), (self.t2, b"new two")]
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            if ".stage-" in os.path.basename(str(src)):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise OSError("locked")
+            return real_replace(src, dst)
+
+        with mock.patch("os.replace", flaky):
+            result = _preview_apply.stage_and_replace(writes, self.backup, base=self.root)
+        self.assertEqual(result["code"], "write-failed")
+        self.assertFalse(new_dir.exists())
+        self.assertTrue(self.t1.parent.is_dir())
+
+    def test_a_folder_made_before_a_staging_failure_is_removed(self):
+        new_dir = self.root / "NEWREG"
+        writes = [(new_dir / "general.md", b"new"), (self.t1, b"new one")]
+        real_open = open
+
+        def flaky(path, *a, **k):
+            if ".stage-" in os.path.basename(str(path)) and os.path.basename(str(path)).startswith(".one"):
+                raise OSError("disk full")
+            return real_open(path, *a, **k)
+
+        with mock.patch("builtins.open", flaky):
+            result = _preview_apply.stage_and_replace(writes, self.backup, base=self.root)
+        self.assertEqual(result["code"], "write-failed")
+        self.assertFalse(new_dir.exists())
+        self.assertTrue(self.t1.parent.is_dir())
 
 
 if __name__ == "__main__":

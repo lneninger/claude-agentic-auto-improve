@@ -24,7 +24,9 @@ A refusal (exit 3) leaves every registry file byte-identical and still writes th
 ``backup/``) and to standard output as JSON. ``--project`` is required: the script never guesses the project.
 
 Refusal codes (exit 3): project-undetermined, not-a-git-tree, uncommitted-registry-changes, conflicting-entry,
-unknown-layout, changed-since-preview, content-loss-detected, symlink-target, write-failed. Bad arguments exit 2.
+unknown-layout, changed-since-preview, content-loss-detected, symlink-target, write-failed. Bad arguments exit 2, and
+so does ``plan-build-failed`` (an exception while building the plan): the report is written with mode ``refused``,
+the refusal code ``plan-build-failed`` and ``error`` set, and no registry file is touched.
 """
 
 from __future__ import annotations
@@ -112,7 +114,8 @@ def _resolve_plugin_root(project: Path, override: Optional[str]) -> Tuple[Option
 
 def _new_report(project: Path, state: Any) -> Dict[str, Any]:
     return {"number": NUMBER, "project": str(project), "mode": "dry-run", "refusal_code": "", "refusal_message": "",
-            "plan_hash": "", "plugin_root": "not-needed", "plugin_root_reason": "", "plugin_root_hint": "",
+            "plan_hash": "", "error": "", "plugin_root": "not-needed", "plugin_root_reason": "",
+            "plugin_root_hint": "",
             "layout_state": state.as_dict(),
             "files": [], "report_dir": "", "registries": {}, "conflicts": []}
 
@@ -125,6 +128,8 @@ def render_markdown(report: Dict[str, Any]) -> str:
                                     " (%s)" % report["plugin_root_reason"] if report["plugin_root_reason"] else "")]
     if report["refusal_code"]:
         out += ["- Refusal: **%s** -- %s" % (report["refusal_code"], report["refusal_message"])]
+    if report.get("error"):
+        out += ["- Error: %s" % report["error"]]
     if report.get("plugin_root_hint"):
         out += ["- Note: %s" % report["plugin_root_hint"]]
     out += ["", "## Files to write", ""] + (["- `%s`" % f for f in report["files"]] or ["- none"])
@@ -277,8 +282,11 @@ def run(args: argparse.Namespace) -> int:
     try:
         plan = migration.build_plan(ctx)
     except Exception as exc:
-        sys.stderr.write("registry_migrate: the plan could not be built: %s: %s\n" % (type(exc).__name__, exc))
-        return EXIT_BAD
+        # N2: the report is still written; no registry file has been touched (the plan only reads).
+        job.report.update({"files": [], "conflicts": [], "registries": {}, "plan_hash": "none",
+                           "error": "%s: %s" % (type(exc).__name__, exc)})
+        return job.finish(EXIT_BAD, ("plan-build-failed", "the plan could not be built: %s: %s"
+                                     % (type(exc).__name__, exc)))
     job.report["registries"] = plan.registries
     job.report["conflicts"] = plan.conflicts
     job.report["files"] = [f.rel for f in plan.files]
@@ -301,7 +309,7 @@ def run(args: argparse.Namespace) -> int:
         return job.finish(EXIT_REFUSED, plan.refusal)
     lost = migration.verify_plan(plan)
     if lost is not None:
-        return job.finish(EXIT_REFUSED, ("content-loss-detected", lost))
+        return job.finish(EXIT_REFUSED, (getattr(lost, "code", "content-loss-detected"), str(lost)))
     for f in plan.files:
         if _is_symlinked(f.path, project):
             return job.finish(EXIT_REFUSED, ("symlink-target", "%s is, or sits below, a symbolic link; nothing was "
@@ -314,7 +322,8 @@ def run(args: argparse.Namespace) -> int:
 
     # (5) stage, back up, replace
     from _preview_apply import stage_and_replace
-    result = stage_and_replace([(f.path, f.after) for f in plan.files], job.folder / "backup")
+    # base = the project root, so a backup lands at backup/.claude/registries/... (short, W2)
+    result = stage_and_replace([(f.path, f.after) for f in plan.files], job.folder / "backup", base=project)
     if result.get("status") != "applied":
         return job.finish(EXIT_REFUSED, ("write-failed", str(result.get("message", "write failed"))))
     return job.finish(EXIT_OK)
