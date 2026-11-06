@@ -130,6 +130,23 @@ background session, say), repeat the blocked call once, exactly: it is allowed a
 `retry-escape`. A different call is blocked again, and the next prompt clears the escape. There is no
 bypass variable.
 
+**Shadow mode.** The installed guard also measures itself, enforcing nothing. On each call it reads the
+session transcript, recomputes the decision from the transcript alone, and appends one record to
+`<project>/.claude/logs/codegraph-shadow.jsonl` (the project is `CLAUDE_PROJECT_DIR`; unset, nothing is
+written). Each record has classes, booleans and hash prefixes, never a path or prompt text, and an
+`outcome` of `agree`, `shadow-more-open` or `shadow-more-closed` against the live decision. Anything the
+shadow raises is swallowed, so the live outcome is unchanged. It needs no row beyond the guard's own.
+`py -3 .claude/scripts/codegraph_shadow_report.py [--project <dir>] [--json]` summarises the log
+read-only (exit 2 when the log is missing or unreadable; every count is a lower bound). The
+uninstall keeps the log. The data decides a later cut-over; nothing about the live guard changes now.
+
+**Upgrading.** Re-running `/auto-improve-codegraph-install` takes the new hook files: an unedited
+older copy (its line-ending-folded hash is in the add-on's `released_sha256`) is previewed as `update`,
+backed up as `<hook>.bak-<UTC stamp>` and replaced, inside the same plan hash. An edited copy is
+refused as `addon-file-differs`, naming the file and the route (uninstall, which keeps it, then
+install). The rows are the same three in every add-on release (the permission entry joined them in
+0.15.2), so the upgrade replaces files, not rows. It takes effect in a new session.
+
 **Ways out.** Run `/auto-improve-codegraph-uninstall` and start a new session. To stop the block for
 good, that uninstall skill removes the three hooks' rows from the project's `settings.json`; only when
 a hook cannot run does the user remove a row by hand (the README table "Ways out when a hook cannot

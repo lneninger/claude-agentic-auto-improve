@@ -6755,5 +6755,153 @@ class TestWorktreeOwnRootReachesTheScripts(unittest.TestCase):
         self.assertIn("worktree_own_root", text, msg="the bridge must mention worktree_own_root at all")
 
 
+# ======================================================================================================================
+# Issue #266 (concept contract 2026-11-05-codegraph-hooks-redesign, "Upgrade the add-on in place"): a hook whose folded
+# hash is in the manifest's released_sha256 is an unedited older release; the install backs it up and replaces it
+# (action ``update``) instead of refusing it as addon-file-differs. An edited copy is still refused.
+# ======================================================================================================================
+SECOND_OLD_GUARD_TEXT = "# a second released guard, the patch release\nimport sys\nsys.exit(2)\n"
+GUARD = "codegraph-first-guard.py"
+
+
+class TestCodegraphUpgradeInPlace(CodegraphHarness):
+    def guard_path(self):
+        return self.project / ".claude" / "hooks" / GUARD
+
+    def put_guard(self, text):
+        path = self.guard_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+        return path
+
+    def current_guard(self):
+        return self.source_file("codegraph", GUARD).read_bytes()
+
+    def release_second_guard(self):
+        path = self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data[af.KEY_RELEASED][GUARD] = _released(OLD_GUARD_TEXT, SECOND_OLD_GUARD_TEXT)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def file_actions(self, plan):
+        return {f["path"]: f["action"] for f in plan["files"]}
+
+    def guard_backups(self):
+        return sorted((self.project / ".claude" / "hooks").glob(GUARD + ".bak-*"))
+
+    def test_a_released_copy_is_previewed_as_update_then_backed_up_and_replaced(self):
+        self.put_guard(OLD_GUARD_TEXT.replace("\n", "\r\n"))
+        plan = self.preview("codegraph")
+        self.assertEqual(self.file_actions(plan)[".claude/hooks/" + GUARD], "update",
+                         msg="an unedited released copy is an update: %r" % (plan.get("files"),))
+        self.assertIn(GUARD, "\n".join(str(n) for n in plan.get("notes", [])),
+                      msg="the preview words the update and names the file")
+        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg=repr(parsed or out))
+        self.assertEqual(self.guard_path().read_bytes(), self.current_guard(), msg="replaced with the plugin's copy")
+        backups = self.guard_backups()
+        self.assertEqual(len(backups), 1, msg="one backup beside the file: %r" % backups)
+        self.assertEqual(backups[0].read_bytes(), OLD_GUARD_TEXT.replace("\n", "\r\n").encode("utf-8"),
+                         msg="the backup holds the old bytes exactly")
+        self.assertEqual(parsed.get("updated"), [".claude/hooks/" + GUARD])
+
+    def test_an_edited_copy_is_refused_naming_the_file_and_the_uninstall_then_install_route(self):
+        edited = "# my own guard\n"
+        self.put_guard(edited)
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertRefused(parsed, "addon-file-differs", "an edited copy is not a released copy")
+        self.assertEqual(rc, 2)
+        self.assertIn(GUARD, parsed["message"], msg="the message names the file")
+        self.assertIn("auto-improve-codegraph-uninstall", parsed["message"], msg="and the uninstall route")
+        self.assertIn("auto-improve-codegraph-install", parsed["message"], msg="then the install again")
+        self.assertTreeSame(before, "nothing is written")
+        self.assertEqual(self.guard_path().read_text(encoding="utf-8"), edited)
+
+    def test_an_identical_copy_is_present_and_a_second_install_has_nothing_to_do(self):
+        self.install_addon("codegraph")
+        plan = self.preview("codegraph")
+        self.assertEqual(self.file_actions(plan)[".claude/hooks/" + GUARD], "present")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg=repr(parsed or out))
+        self.assertTreeSame(before, "nothing is written and no backup is taken")
+
+    def test_a_re_run_after_an_update_changes_nothing(self):
+        self.put_guard(OLD_GUARD_TEXT)
+        self.install_addon("codegraph")
+        self.assertEqual(self.guard_path().read_bytes(), self.current_guard())
+        plan = self.preview("codegraph")
+        self.assertEqual(self.file_actions(plan)[".claude/hooks/" + GUARD], "present")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg=repr(parsed or out))
+        self.assertTreeSame(before, "the re-run writes nothing")
+        self.assertEqual(len(self.guard_backups()), 1, msg="and takes no second backup")
+
+    def test_a_released_file_that_changed_since_the_preview_is_refused_and_untouched(self):
+        self.release_second_guard()
+        self.put_guard(OLD_GUARD_TEXT)
+        plan = self.preview("codegraph")
+        self.put_guard(SECOND_OLD_GUARD_TEXT)  # another released copy: the apply would now replace other bytes
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
+        self.assertRefused(parsed, "changed-since-preview", "the file changed after the preview")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_released_file_edited_since_the_preview_is_never_overwritten(self):
+        self.put_guard(OLD_GUARD_TEXT)
+        plan = self.preview("codegraph")
+        self.put_guard("# edited after the preview\n")
+        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
+        self.assertIn((parsed or {}).get("code"), ("changed-since-preview", "addon-file-differs"), msg=repr(parsed))
+        self.assertEqual(self.guard_path().read_text(encoding="utf-8"), "# edited after the preview\n")
+        self.assertEqual(self.guard_backups(), [])
+
+    def test_a_linked_copy_is_refused_even_when_it_points_at_a_released_file(self):
+        real = self.tmp / "elsewhere" / GUARD
+        real.parent.mkdir(parents=True)
+        real.write_bytes(OLD_GUARD_TEXT.encode("utf-8"))
+        link = self.guard_path()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(str(real), str(link))
+        except (OSError, NotImplementedError, AttributeError) as exc:
+            self.skipTest("this account cannot create symbolic links: %s" % exc)
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertRefused(parsed, "addon-file-differs", "a link is never replaced")
+        self.assertEqual(real.read_bytes(), OLD_GUARD_TEXT.encode("utf-8"))
+
+    def test_a_linked_hooks_folder_is_refused_before_any_update(self):
+        real = self.tmp / "elsewhere-hooks"
+        real.mkdir()
+        (real / GUARD).write_bytes(OLD_GUARD_TEXT.encode("utf-8"))
+        hooks = self.project / ".claude" / "hooks"
+        hooks.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(str(real), str(hooks), target_is_directory=True)
+        except (OSError, NotImplementedError, AttributeError) as exc:
+            self.skipTest("this account cannot create symbolic links: %s" % exc)
+        plan = self.preview("codegraph")
+        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
+        self.assertRefused(parsed, "write-failed", "the hooks folder is a link")
+        self.assertEqual((real / GUARD).read_bytes(), OLD_GUARD_TEXT.encode("utf-8"))
+
+    def test_the_shipped_manifest_lists_every_released_version_of_the_guard_and_the_reset_hook(self):
+        shipped = json.loads((Path(fi.__file__).resolve().parents[1] / "addons" / "codegraph" / "addon.json")
+                             .read_text(encoding="utf-8"))["released_sha256"]
+        guard_hashes = {
+            "40c8e4c21ec8fbc312649fc2dad2d6ee24b0eb3febb2a5a5b2e463ff6af39934",  # 5876b17, the add-on's first release
+            "712055e623e8e2b7afaf41131f8b1480127fb8efa238809f64d1fa5120eb4c22",  # 4c53a44, the kill switches removed
+            "8c44ed6044e3ca3069b6d14b7161e6dad88af180649c171eebbbcd2af6b63d9d",  # 3780c2f, #259 (0.15.2)
+        }
+        reset_hashes = {
+            "9e1164fde61f340bb688725b3379ecc2b457713a62413a240e0ce28a70347807",  # 5876b17 and 4c53a44
+            "900db4ad8fe4eb7aab83db6f834072a84c66b49cb554059a457ee301b002dd03",  # 3780c2f, #259 (0.15.2)
+        }
+        self.assertTrue(guard_hashes <= set(shipped["codegraph-first-guard.py"]), msg=repr(shipped))
+        self.assertTrue(reset_hashes <= set(shipped["codegraph-turn-reset.py"]), msg=repr(shipped))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
