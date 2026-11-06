@@ -338,7 +338,7 @@ test (zero `UserPromptSubmit` rows written), not by a timing run.
 | any age, a hook file edited by your team | your edited copy | the uninstall keeps it (`kept-differs`); compare it with the plugin's copy, move your edits over, delete it, then install |
 | installed from this release | nothing to do | run `addon --name codegraph --check` to confirm the permission entry |
 
-The `test_auto_improve_finish_install.py` suite grows to 385 cases.
+The `test_auto_improve_finish_install.py` suite grows to 394 cases.
 
 **Changed in 0.14.5 (the settings writer refuses without the Project hook launcher):** four changes.
 
@@ -1006,7 +1006,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 385 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 394 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
