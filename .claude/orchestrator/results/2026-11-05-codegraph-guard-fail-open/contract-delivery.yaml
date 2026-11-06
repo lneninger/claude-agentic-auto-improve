@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/270
+number: 270
+head_ref: fix/259-codegraph-guard-fail-open
+base_ref: master
+base_is_default: true
+commit: e4f392c406932e3982c2bcb020be050f54fad801
+merged_at: '2026-11-05T20:46:38Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-05T20:52:17.242427+00:00'
+blocks_recorded:
+- t1-guard-tracker-reset-installer-docs-and-version
+blocks_already_recorded: []
