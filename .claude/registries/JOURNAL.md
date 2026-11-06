@@ -1,3 +1,5 @@
+<!-- registry-layout: 2 -->
+
 # Adaptive Engineering Journal
 
 > **Purpose:** append-only log of lessons learned across concept contracts. Captures pitfalls caught pre-approval by `contract-critic`, contract-vs-code divergences caught post-implementation by `fullstack-code-reviewer`, and manually-logged insights via `/journal-add`. Read by `data-architect` (Step 1) and `contract-critic` on every run so past lessons become forward-looking checklist items.
@@ -7,7 +9,7 @@
 > - `fullstack-code-reviewer` post-implementation, when it detects justified contract-vs-code divergence (the contract had a defect) → entry appended with `Trigger: post-impl divergence`.
 > - `/journal-add` skill → manual entry, any project, any time.
 >
-> **Structure:** two tiers. Universal lessons apply across every project. Project sections hold codebase-specific lessons. `data-architect` and `contract-critic` always consult BOTH tiers.
+> **Structure:** two tiers. Universal lessons apply across every project. Project lessons (registry layout 2) live in domain files `JOURNAL/<domain>.md` beside this file, named by the `## Project tier` pointer at its end. `data-architect` and `contract-critic` always consult BOTH tiers.
 >
 > **Append-only:** never reorder or rewrite past entries. If a lesson is later refined, append a new entry that references the old one by date+title. The historical trail matters.
 
@@ -328,3 +330,8 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 
 <!-- empty on day 1 — populated as lessons are discovered -->
 
+## Project tier
+
+This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.
+
+The file `general.md` always exists in that folder, and every `.md` file in the folder is read.
