@@ -13,9 +13,9 @@ branch: feature/261-codegraph-hooks-redesign
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261105-feature-261-codegraph-hooks-redesign
 north_stars: none
 contract: .claude/concepts/2026-11-05-codegraph-hooks-redesign.md
-pr: none
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/289
+issue_link: closes
+status: shipped
 created: 2026-11-05
 ---
 
