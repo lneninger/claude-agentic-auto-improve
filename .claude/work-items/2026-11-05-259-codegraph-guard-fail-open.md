@@ -14,9 +14,8 @@ worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\2026110
 north_stars: none
 contract: .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
 pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/270
-partial: true
-issue_link: unknown
-status: verifying
+issue_link: closes
+status: shipped
 created: 2026-11-05
 ---
 
@@ -77,3 +76,4 @@ non-trivial → /design-first
 - Held for the operator, not implemented: Windows owner check or per-user parent for session folders; turning the codegraph-tool-named refusal into a finding.
 - Known unrelated failure: test_verify_issue_link.py row 20 (brief 2026-11-02-171 has pr: UNKNOWN, tracked on master).
 - 2026-11-05 ship: pushed fix/259-codegraph-guard-fail-open and opened draft pull request #270 (title [INFRA][TESTS][DOCS], body ends Refs #259). verify_issue_link.py returned unexpected-closing-ref: GitHub reports #259 as a closing reference of the pull request although the brief is partial. Likely cause: the branch was created with gh issue develop (linked branch). Not repaired, nothing changed on GitHub; waiting for the operator: unlink the branch in the issue Development sidebar, or accept the close and mark the item not partial. Status stays verifying; issue_link stays unknown.
+- 2026-11-05: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/270); contract 2026-11-05-codegraph-guard-fail-open flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #259: none
