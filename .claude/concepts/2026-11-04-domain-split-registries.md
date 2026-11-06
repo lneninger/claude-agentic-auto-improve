@@ -7,7 +7,7 @@
 **Work Item Brief:** .claude/work-items/2026-11-04-235-domain-split-registries.md
 **Tracking issue:** pending (opened by `/design-first` Step 3.4)
 **Budget:** 18,000 tokens (XL contract). Superseded text and every critique round live in `.claude/contract-history/2026-11-04-domain-split-registries.round-{1,2,3}.md`.
-**Amendment:** 3 (2026-11-04), the final one. It follows critic round 3 and the user's decision "Amend once more, then I approve" (B1–B3, all WARNs and NITs).
+**Amendment:** 4 (2026-11-06). The t9 review returned `**Verdict:** blocked`, so this amendment adds sub-tasks 10 (fixes) and 11 (superseding review). Status went from `approved` back to `draft`; the owner answered Q19 (a) and Q20 (yes) and accepted every amendment-4 critique finding (2026-11-06), and the owner re-approved on 2026-11-06 (Status back to `approved`; the owner also approved the reader re-seed and the `conflicting-entry` refusal). Amendment 3 (2026-11-04) was approved; blocks 1–9 and their completion records are unchanged. See "Amendment 4 record".
 
 > **Protocol:** filled in by `data-architect`. Implementers refuse to run unless `Status: approved`. `concept-gate.py` reads `Files to touch`. Lifecycle, budget rule and management commands: `.claude/templates/concept-contract.md`.
 
@@ -43,7 +43,7 @@ Not applicable. Reason: no Angular UI surface is touched; `Files to touch` holds
 |------|--------|------------|-----------|
 | Registry (mechanisms, vocabulary, journal) | name; root file; domain files (`general`, then alphabetical); layout state | **I-1** over the three root files under the resolved `.claude/registries/`: `absent` = none exists. `unknown` = one or two missing (reason `registry-missing:<NAME>`), a marker with another value, or mixed marked/unmarked roots. `pending` = all three exist, none marked. `current` = all three marked on line 1, no root holds a `## Project:` heading or any entry or leftover below its pointer, and every `<REG>/general.md` exists. `stale-sync` = all marked but a `current` condition fails. **I-2** a layout-2 root's last section is the fixed pointer `## Project tier`: it names `<REGISTRY>/<domain>.md`, says `general.md` always exists and every `.md` in the folder is read, and lists no domain (generic, syncable). **I-3** domain files resolve from the same `.claude` root as the root file; never a union of roots. **I-4** `INTEGRATION.md` is outside the layout; the digest indexes it and R6 hashes it when present. **Tier heading** = `## Project: <name>` (layout 1) or `## Project tier` (the pointer). | the project |
 | Registry entry | registry; tier (`universal`, `project:<name>` on layout 1, `domain:<slug>`); file; line; title; key; text; tags; source contract; status (`active`, `archived-title-only`, `legacy`) | **I-5** has a body unless `archived-title-only` or `legacy` (body per grammar below). **I-6** keys unique per registry. **I-7** append-only from layout 2 on: an entry is never reordered or rewritten; allowed appends are a new entry, an indented `Correction (<date>, <source>)` line, and an indented `Status: archived-title-only` line under a bodiless entry. Exceptions: sub-task 1's pre-layout reconciliation; header prose and leftover blocks are not entries. **I-8** fenced code blocks are never parsed. **I-8b** non-entry heading: a journal `###` heading not starting with a `YYYY-MM-DD` shape (e.g. `### Tag conventions`), or a `#`/`##` heading that is neither a tier heading nor a legacy dated heading. Its **section** runs to the next heading of the same or higher level, and every line in it is prose: never an entry, never an R1/A1 finding. **I-8c** a legacy entry is keyed (R2 applies), indexed by the digest under its tier, returned to readers, exempt from R1/A1, printed as `advisory: legacy <file>:<line>`, never converted, and never fires the tracker. | its registry |
-| Registry migration | number (0001); from; to; plan; plan hash; report | **I-9** dry-run writes nothing under `.claude/registries/`. **I-10** apply writes only when the recomputed plan hash equals `--expect-sha256`. **I-11** idempotent: after a successful apply the tree is `current`; on `current` the plan is empty and exit is 0, checked before any git check (see Commands). **I-12** no loss, checked on the plan before any write. *Entries:* every input (key, text) maps to an output entry with that key holding every input line (merges per step 4), and per registry `occurrences in = kept + moved + merged away`. *Text:* after folding line endings, dropping the BOM and trimming trailing spaces, the multiset of non-blank source lines equals the multiset of non-blank destination lines, minus the lines 0001 adds and plus the removed lines, both **counted per instance** (multiset subtraction). Added lines: marker, pointer section, skeleton header, leftover heading, provenance and fence lines. Removed lines are a closed set, each listed with file:line and reason: `project-heading`; `replaced-sync-section` (the marker and pointer-section lines a stale sync delivered; on `stale-sync`, "project content" starts after the pointer section, so these lines are counted once); `merged-duplicate` (a line of a duplicate copy that also appears verbatim in the kept copy). Mismatch → `content-loss-detected`, nothing written. **I-13** a refusal leaves every registry file byte-identical and still writes the report. | plugin (code); project (result) |
+| Registry migration | number (0001); from; to; plan; plan hash; report | **I-9** dry-run writes nothing under `.claude/registries/`. **I-10** apply writes only when the recomputed plan hash equals `--expect-sha256`. **I-11** idempotent: after a successful apply the tree is `current`; on `current` the plan is empty and exit is 0, checked before any git check (see Commands). **I-12** no loss, checked on the plan before any write. *Entries:* every input (key, text) maps to an output entry with that key holding every input line (merges per step 4), and per registry `occurrences in = kept + moved + merged away`. *Text:* after folding line endings, dropping the BOM and trimming trailing spaces, the multiset of non-blank source lines equals the multiset of non-blank destination lines, minus the lines 0001 adds and plus the removed lines, both **counted per instance** (multiset subtraction). Added lines: marker, pointer section, skeleton header, leftover heading, provenance and fence lines. Removed lines are a closed set, each listed with file:line and reason: `project-heading`; `replaced-sync-section` (the marker and pointer-section lines a stale sync delivered; on `stale-sync`, "project content" starts after the pointer section, so these lines are counted once); `merged-duplicate` (a line of a duplicate copy that also appears verbatim in the kept copy). Mismatch → `content-loss-detected`, nothing written. *Per entry (amendment 4, W3):* with the same normalisation (line endings folded, BOM dropped, trailing spaces trimmed, blank lines ignored), each key's output entry holds, as a multiset, every input line of every occurrence of that key minus that key's `merged-duplicate` lines; else `content-loss-detected`. Two output entries with one key → `conflicting-entry` naming both output locations and their first lines. **I-13** a refusal leaves every registry file byte-identical and still writes the report. | plugin (code); project (result) |
 
 ### Value Objects
 
@@ -55,7 +55,7 @@ Not applicable. Reason: no Angular UI surface is touched; `Files to touch` holds
 | Path reference | one backticked span | made only of letters, digits, `_ - . / \`; contains `/` or `\`; ends in `.<1-8 letters or digits>`; does not start with `/`, `./` or `../`. So `` `?? d/f.txt` ``, `` `"$CLAUDE_PROJECT_DIR"/…` ``, `` `../website-design/references/foundation.md` `` and any `file:line` span are not references (file:line citations are not checked; Non-Goals) | `_registry_layout.path_references`, R4 |
 | Migration leftover block | source file; line range; reason (`project-prose`, `non-entry-heading`); verbatim lines | under the one `## Migration 0001 leftovers (not parsed as entries)` heading, which is the **last** section of `<REG>/general.md` (an I-8b section: the whole section is prose); one `<!-- leftover from <file>:<a>-<b>, <reason> -->` line, then a fence longer than any backtick run inside; content byte-equal to source after folding | 0001 output; lint prints `advisory: leftover <file>:<line>` |
 | Structure finding | rule id; file; line; key; message; remedy; severity (`finding`, `advisory`) | rule id R1–R6 or A1; file and line always set; key empty only for R4–R6 | lint, digest, migration report |
-| Migration report | number; project; mode (`dry-run`, `apply`, `refused`); refusal code; plan hash; plugin root used or `unverified` + reason; per registry: kept, moved (key, from, to, reason), merged duplicates, appended merge lines, bodiless orphans (hint + ready-to-run `--archive-title-only` line), unclassified, token entries moved, plugin-owned token entries, unverified token entries, universal candidates, unmovable token lines, legacy entries, leftovers, removed lines, conflicts (key, locations, differing field, each version's first line), counts | refusal code empty unless `refused`; every list present, possibly empty; plan hash in every mode | `registry-migration-report.md` + `report.json` in `<project>/.claude/cache/registry-migrations/0001-<UTC>/`, JSON on stdout |
+| Migration report | number; project; mode (`dry-run`, `apply`, `refused`); refusal code; plan hash; plugin root used or `unverified` + reason; per registry: kept, moved (key, from, to, reason), merged duplicates, appended merge lines, bodiless orphans (hint + ready-to-run `--archive-title-only` line), unclassified, token entries moved, plugin-owned token entries, unverified token entries, universal candidates, unmovable token lines, legacy entries, leftovers, removed lines, conflicts (key, locations, differing field, each version's first line), counts; error (amendment 4, N2) | refusal code empty unless `refused`; every list present, possibly empty; plan hash in every mode, except `none` when the plan could not be built; error is empty unless the plan could not be built, and then the mode is `refused`, the refusal code is `plan-build-failed`, error holds the exception type and message, every list is empty, the report is still written, no registry file is touched (I-13) and the exit is 2 | `registry-migration-report.md` + `report.json` in `<project>/.claude/cache/registry-migrations/0001-<UTC>/`, JSON on stdout |
 | Registry layout state | state; found marker (value or `none`); layout current (2); reasons; remedy | marker `none` for `pending`/`absent`; reasons non-empty for `stale-sync`/`unknown`; remedy `registry_migrate.py --dry-run` (pending, stale-sync), `plugin_doctor.py --fix` (absent, registry-missing), else "make the root markers agree, then re-run `--check`" | `layout_state`, `--check`, doctor, lint mode, `registry_append.py` |
 | Plugin root resolution | path or none; reason (`same-as-project`, `no-manifest`, `not-found`) | resolved only by `_plugin_root.separate_plugin_root(project, plugin_root, needs=<all three root registries exist>)`; never the project's own tree; none → every token entry is `unverified` and stays | 0001 step 2, R3, R4 candidate roots |
 
@@ -63,8 +63,8 @@ Not applicable. Reason: no Angular UI surface is touched; `Files to touch` holds
 
 - **R1 bodiless-entry** — a journal entry without `Apply when:` text; *addition:* an M/V entry with an empty body. `archived-title-only`, legacy entries and I-8b sections are exempt.
 - **R2 duplicate-title** — a key present more than once across root and domain files; every location reported.
-- **R3 project-entry-above-pointer** — in a root: a `## Project:` heading, or an entry or leftover below the pointer. Plus, when `.claude/.project-tokens.json` lists tokens, a token-bearing Universal entry (case-insensitive, `allowed` honoured) that is **client-authored** (key absent from the resolved plugin root's Universal tier). A hit in a plugin-owned entry is advisory `R3 plugin-owned`. With no resolved plugin root, every hit is advisory `R3 unverified`. Client-authored Universal entries without a token are advisory `R3 universal-candidate`.
-- **R4 dead-file-reference — ADVISORY.** Each Path reference in a registry file (fences and leftovers skipped) is resolved against the **candidate roots**: the project root (the folder holding `.claude/`), then the resolved plugin root when there is one. A reference whose path starts with an **excluded prefix** is skipped: `.claude/settings.json`, `.claude/settings.local.json`, `.claude/.sync-config.json`, `.claude/.sync-state/`, `.claude/hook-registration-profile.json`, `.claude/.scout-cache/`, `.claude/cache/`, `.claude/logs/`, `.codegraph/` (consumer-only or generated; the closed list lives in `_registry_layout` and the spec). Others resolving under no candidate print `advisory: R4 <file>:<line> <path>`; exit unchanged except under `--strict`. Expected on this repository: the retired-contract citations (`2026-10-12-dedupe-claude-config.md`, `2026-10-07-worktree-isolation-by-default.md`), `tools/sync-plugin.cmd`, `tools/sync-plugin.ps1`, `python/scalping_strategy_rl/…`, `tests/integration/conftest.py`. Reported, never rewritten (I-7). The default (non-structure) mode keeps its regex and exit code.
+- **R3 project-entry-above-pointer** — in a root: a `## Project:` heading, or an entry or leftover below the pointer. Plus, when `.claude/.project-tokens.json` lists tokens, a token-bearing Universal entry (case-insensitive, `allowed` honoured) that is **client-authored** (key absent from the resolved plugin root's Universal tier). A hit in a plugin-owned entry is advisory `R3 plugin-owned`. With no resolved plugin root, every hit is advisory `R3 unverified`. Client-authored Universal entries without a token are advisory `R3 universal-candidate`. *Amendment 4 (Q19 a):* when the project holds this plugin's own manifest (`_manifest_names_plugin(project)`), the `universal-candidate` advisories are dropped, and only when at least one was dropped the lint prints exactly one line, `advisory: R3 universal-candidate skipped: <N> entries; this project holds the plugin's own manifest` (fixed prefix `advisory: R3 universal-candidate skipped`, ASCII only). Token findings, `plugin-owned`, `unverified` and every other result are unchanged.
+- **R4 dead-file-reference — ADVISORY.** Each Path reference in a registry file (fences and leftovers skipped) is resolved against the **candidate roots**: the project root (the folder holding `.claude/`), then the resolved plugin root when there is one. A reference whose path starts with an **excluded prefix** is skipped: `.claude/settings.json`, `.claude/settings.local.json`, `.claude/.sync-config.json`, `.claude/.sync-state/`, `.claude/hook-registration-profile.json`, `.claude/.scout-cache/`, `.claude/cache/`, `.claude/logs/`, `.codegraph/` (consumer-only or generated; the closed list lives in `_registry_layout` and the spec). Others resolving under no candidate print `advisory: R4 <file>:<line> <path>`; exit unchanged except under `--strict`. Expected on this repository: the retired-contract citations (`2026-10-12-dedupe-claude-config.md`, `2026-10-07-worktree-isolation-by-default.md`), `tools/sync-plugin.cmd`, `tools/sync-plugin.ps1`, `python/scalping_strategy_rl/…`, `tests/integration/conftest.py`. Reported, never rewritten (I-7); an appended `Correction` line naming the right path does not silence it, because the original span stays (amendment 4, N1). The default (non-structure) mode keeps its regex and exit code; from amendment 4 (W4) it reads every file of `registry_files`, and in each file it ignores everything from the `## Migration 0001 leftovers (not parsed as entries)` heading on, so leftovers never produce a default-mode finding.
 - **R5 domain-file-invalid** — deliberate deviation from §3.1.2/§3.4: on-disk discovery, no `registries.domains` slot (Q8). Fires on `general.md` missing, a non-slug name, a nested folder, an `INTEGRATION/` folder; applies when a domain folder exists or the state is `current`/`stale-sync`.
 - **R6 digest-stale** — the digest records `<!-- registry-sources-sha256: <hex> -->` over every file it reads (registry files + `INTEGRATION.md` when present, sorted path, normalised bytes). Fires when the digest exists and the line is missing or differs, or a registry key (legacy included) is absent from it. Absent digest prints `digest: absent`.
 - **A1 malformed-entry** — *addition beyond §3.4.* Journal: a `###` heading starting with a `YYYY-MM-DD` shape that has an invalid date, no separator, a missing required field, or a Trigger outside {`pre-approval critic`, `post-approval`, `post-impl divergence`, `manual`}. M/V: a column-0 `- **title**` with no separator. Legacy entries are not A1.
@@ -75,7 +75,7 @@ Not applicable. Reason: no Angular UI surface is touched; `Files to touch` holds
 
 | Name | Emitter | Listeners | Payload |
 |------|---------|-----------|---------|
-| Journal entry appended | `registry_append.py` (calls the listener directly, passing the new signature as `fresh`) or an Edit/Write on any journal file (`post-edit-dispatcher.py` → tracker) | `accuracy_update.process_journal_change(files, fresh=())` → `record_failure(area, contract, "post-approval-journal")` for `post-*` triggers | **I-14** signature stays `sha1(date + "\|" + title)`. The machine-wide seen cache gains `seeded_files`, keyed by `checkout_equivalent_path(resolved path)` (`MECHANISMS.md:43`; case-folded on Windows), so a file seeded in one checkout is seeded in every worktree of it. Each file of `registry_files("JOURNAL.md")` whose key is not seeded is seeded first (signatures marked seen, nothing fires); new signatures in seeded files fire, plus any `fresh` one. An old cache (`_initialized`, no `seeded_files`) counts as having seeded the root `JOURNAL.md` key only. Nothing fires retroactively or twice. **Accepted guard limit** (pinned by a test, Q17): a hand-written `post-*` entry in a journal file whose checkout-equivalent path this machine's cache has never seen does not fire; the script path does. |
+| Journal entry appended | `registry_append.py` (calls the listener directly, passing the new signature as `fresh`) or an Edit/Write on any journal file (`post-edit-dispatcher.py` → tracker) | `accuracy_update.process_journal_change(files, fresh=())` → `record_failure(area, contract, "post-approval-journal")` for `post-*` triggers | **I-14** signature stays `sha1(date + "\|" + title)`. The machine-wide seen cache gains `seeded_files`, keyed by `checkout_equivalent_path(resolved path)` (`MECHANISMS.md:43`; case-folded on Windows), so a file seeded in one checkout is seeded in every worktree of it. Each file of `registry_files("JOURNAL.md")` whose key is not seeded is seeded first (signatures marked seen, nothing fires); new signatures in seeded files fire, plus any `fresh` one. An old cache (`_initialized`, no `seeded_files`) counts as having seeded the root `JOURNAL.md` key only. *Reader change (amendment 4):* each `seeded_files` value records the reader that seeded it (`reader: 2` = `_registry_layout`); a file seeded under an earlier reader (no `reader` value) is re-seeded once on its next read with the current reader (every signature it yields marked seen, nothing fires except a `fresh` one), so a heading the old and new journal patterns read differently never fires after an upgrade, on any client journal. Nothing fires retroactively or twice. **Accepted guard limit** (pinned by a test, Q17): a hand-written `post-*` entry in a journal file whose checkout-equivalent path this machine's cache has never seen does not fire, and neither does one hand-written in the same edit that triggers a file's reader re-seed; the script path does. |
 | Registry layout migrated | `registry_migrate.py --apply` | operator, doctor | Migration report |
 
 ### Commands
@@ -85,14 +85,14 @@ Not applicable. Reason: no Angular UI surface is touched; `Files to touch` holds
 | Append registry entry | `registry_append.py` | `--project` (required), `--registry mechanisms\|vocabulary\|journal`, `--from-file <entry.md\|->`, then `--universal`, or `--domain <slug>` [`--create-domain`], or neither. **Domain choice** (non-`--universal`): `--domain` when that file exists (or `--create-domain`), else the source contract's area via `derive_area` when that file exists, else `general`; the choice is printed. **Placement on `current`:** `--universal` → end of the Universal tier, before the pointer; else end of the domain file's entries, before the leftovers heading when present. **Placement on `pending`/`stale-sync`:** a non-`--universal` entry goes to the domain file chosen as above, with `general.md` created from the skeleton when missing (an unknown `--domain` without `--create-domain` falls back to `general`, named in the advisory); it is **never** written into a root file. `--universal` → end of the root's Universal tier (before a synced pointer, else before the first `## Project:`, else end of file). Both print `advisory: registry layout <state> — appended to <file>:<line>; run registry_migrate.py --dry-run`, exit 0. Writes via `_atomic_write`; prints `file:line`. | `bodiless-input`, `duplicate-entry` (root + all domain files), `malformed-input`, `unknown-domain` (`current` only), `no-universal-tier` (`--universal` and the root holds no title heading and no entry above its first tier heading), `correction-target-missing`, `archive-target-missing`, `archive-target-has-body` (2); `layout-unknown`, `registries-absent`, `project-undetermined`, `write-failed` (3) |
 | Check registry structure | `validate_registries.py --check-structure [--project] [--strict]` | — | 0 / 1 / 2 per Mode |
 | Check layout | `registry_migrate.py --check --project <root>` | — | prints the layout state as JSON; 0 `current`/`absent`; 6 `pending`/`stale-sync`; 2 `unknown` or unreadable |
-| Preview / apply migration | `registry_migrate.py --dry-run` / `--apply --expect-sha256 <h>`; `--project` required; `--plugin-root <path>` optional, passed to `separate_plugin_root` as its override (rejected when it is the project or names another plugin → `unverified`) | **Order:** (1) arguments and project; (2) layout state — on `current` with an empty plan, print the report and exit 0; (3) `not-a-git-tree`, then `uncommitted-registry-changes` (git status of `.claude/registries/` only); (4) plan, I-12, hash compare (apply); (5) stage and replace. Dry-run runs (1)–(4). | `project-undetermined` (unset or absent), `not-a-git-tree`, `uncommitted-registry-changes`, `conflicting-entry`, `unknown-layout`, `changed-since-preview`, `content-loss-detected`, `symlink-target`, `write-failed` (3); bad arguments 2 |
+| Preview / apply migration | `registry_migrate.py --dry-run` / `--apply --expect-sha256 <h>`; `--project` required; `--plugin-root <path>` optional, passed to `separate_plugin_root` as its override (rejected when it is the project or names another plugin → `unverified`) | **Order:** (1) arguments and project; (2) layout state — on `current` with an empty plan, print the report and exit 0; (3) `not-a-git-tree`, then `uncommitted-registry-changes` (git status of `.claude/registries/` only); (4) plan, I-12, hash compare (apply); (5) stage and replace. Dry-run runs (1)–(4). | `project-undetermined` (unset or absent), `not-a-git-tree`, `uncommitted-registry-changes`, `conflicting-entry`, `unknown-layout`, `changed-since-preview`, `content-loss-detected`, `symlink-target`, `write-failed` (3); `plan-build-failed` (2; amendment 4: an exception while building the plan, report written with `error`); bad arguments 2 |
 
 **Plan hash:** `_plan_digest` over `b"registry-migration"`, `b"0001"`, then per file to write in sorted POSIX relative-path order: path, input bytes or `absent`, planned output bytes. The report is outside the plan.
 
 **Shared helpers.**
-- `_preview_apply.py` — `_plan_digest` and `_atomic_write` **extracted unchanged** from `auto_improve_finish_install.py` (finish-install imports them back; `_backup_write` stays in finish-install, unused here). **New code:** `stage_and_replace(writes, backup_dir)`: (a) write every planned output to `.<name>.stage-<pid>` beside its target; any failure deletes all stage files and returns `write-failed` with no target touched; (b) copy every existing target into `backup_dir/<relative path>`; (c) `os.replace` each stage file onto its target in plan order; (d) on a replace failure, restore every already-replaced target from `backup_dir` (delete targets that did not exist), delete the remaining stage files, return `write-failed`. 0001's `backup_dir` = `<report folder>/backup/`, never under `.claude/registries/`.
+- `_preview_apply.py` — `_plan_digest` and `_atomic_write` **extracted unchanged** from `auto_improve_finish_install.py` (finish-install imports them back; `_backup_write` stays in finish-install, unused here). **New code:** `stage_and_replace(writes, backup_dir, base=None)`: (a) write every planned output to `.<name>.stage-<pid>` beside its target; any failure deletes all stage files and every folder step (a) created, and returns `write-failed` with no target touched; (b) copy every existing target into `backup_dir / target.relative_to(base)` (`base` defaults to the common parent folder of the targets; 0001 passes the project root; a target outside `base` → `write-failed` before step (a)) (amendment 4, W2); (c) `os.replace` each stage file onto its target in plan order; (d) on a replace failure, restore every already-replaced target from `backup_dir` (delete targets that did not exist), delete the remaining stage files, remove every folder step (a) created that is now empty (amendment 4, N3), return `write-failed`. 0001's `backup_dir` = `<report folder>/backup/`, never under `.claude/registries/`.
 - `_plugin_root.py` — `_separate_plugin_root` (`auto_improve_finish_install.py:347-377`) and the helpers it calls (`_same_dir`, `_norm`, `_manifest_names_plugin`, `_load_json_lenient`, `_claude_home`, `_version_key`, `_cache_roots`, `PLUGIN_NAME`) **extracted unchanged**, exported as `separate_plugin_root`; its "own copy" candidate is this module's tree (same folder as before). `find_plugin_root` is imported from `plugin_doctor` inside the function only. Finish-install imports every moved name back (one definition each).
-- **Import chain (kept minimal):** `_preview_apply` and `_plugin_root` import the standard library only and change no `sys` state at import. `_registry_layout` imports the standard library and `_claude_paths`. Finish-install hard-imports `_preview_apply` and `_plugin_root`. `plugin_doctor` and `validate_registries --check-structure` import the new modules lazily and, on `ImportError`, report the missing module by name (doctor: one line, other checks unaffected; lint: exit 2). The tracker hook exits 0 with one stderr line if the new `accuracy_update` entry point is missing.
+- **Import chain (kept minimal):** `_preview_apply` and `_plugin_root` import the standard library only and change no `sys` state at import. `_registry_layout` imports the standard library and `_claude_paths`. Finish-install hard-imports `_preview_apply` and `_plugin_root`. `plugin_doctor` and `validate_registries --check-structure` import the new modules lazily and, on `ImportError`, report the missing module by name (doctor: one line, other checks unaffected; lint: exit 2). The tracker hook exits 0 with one stderr line if the new `accuracy_update` entry point is missing. *Amendment 4 (W1):* `accuracy_update` imports `_registry_layout` **lazily**, inside `parse_journal_entries` only; on `ImportError` that function writes one stderr line naming the module and returns no entries (nothing fires, nothing is seeded). Its module-level imports stay as today, so `critic-verdict-tracker.py:68` and `contract-status-watcher.py:68`, which import `accuracy_update` inside a fail-soft `try` (`_DEPS_OK = False` on any exception, silently), keep recording critic and status accuracy on a copied-script client that lacks `_registry_layout`. A test pins this for both hooks.
 
 **Migration 0001 (layout 1 or `stale-sync` → 2), per registry:**
 1. **Parse** roots and domain files into entries, legacy entries, I-8b sections and fences.
@@ -108,7 +108,7 @@ Not applicable. Reason: no Angular UI surface is touched; `Files to touch` holds
 4. **Same key in more than one place** (after step 3):
    - identical text, or one copy's lines all appear verbatim in the other: one copy is kept at the destination (an existing domain-file location wins), the other's lines are `merged-duplicate`;
    - otherwise compare field by field (journal fields; for M/V the body is one field): when no field present in both copies differs, the kept copy is the bodied one (else the domain-file one) and each line of the other copy not already present is **appended verbatim** under the kept entry, listed as an appended merge line; nothing is discarded;
-   - a field present in both copies with different text → refuse `conflicting-entry`, naming every location, the field and each version's first line. **Way out:** on layout 1, keep one version, rename one title, or fold one version into a `Correction` line; commit; re-run the dry-run.
+   - a field present in both copies with different text → refuse `conflicting-entry`, naming every location, the field and each version's first line. The heading line counts as a field (amendment 4, W3): two copies whose heading lines differ (for example only in the date) conflict, so step 4 never appends a line that parses as a heading. **Way out:** on layout 1, keep one version, rename one title, or fold one version into a `Correction` line; commit; re-run the dry-run.
 5. **Bodiless keys** go through steps 3–4 like any entry. Each is listed as a bodiless orphan with the hint "recover the body from your own backups, or mark it" and a ready-to-run `registry_append.py --archive-title-only "<title>"` line (Q15). 0001 never invents or marks text.
 6. **Write.** The marker, exactly one pointer section, `general.md` from the skeleton when missing, moved entries above the leftovers section, the leftovers section last. I-12 first, then `stage_and_replace`.
 
@@ -141,6 +141,7 @@ Not applicable. Reason: no Angular UI surface is touched; `Files to touch` holds
 - `_project_paths.registry_files`; `_claude_paths` re-exports `registry_files`, `checkout_equivalent_path`.
 - `_registry_layout`: `LAYOUT_CURRENT = 2`, `MARKER`, `REGISTRIES`, `R4_EXCLUDED_PREFIXES`, `parse_entries`, `entry_key`, `path_references`, `layout_state`, `structure_findings(…, plugin_keys=None)`.
 - `_preview_apply`: `_plan_digest`, `_atomic_write`, `stage_and_replace`. `_plugin_root`: `separate_plugin_root`.
+- `_plugin_root._manifest_names_plugin` is consumed (amendment 4, Q19 a) by `--check-structure` for the R3 `universal-candidate` skip. It stays private (one definition, same plugin, already imported back by finish-install); it is listed here so the consumer is on record.
 - `validate_registries.py --check-structure [--strict]`; `accuracy_update.process_journal_change(files, fresh=())` (the hook becomes a thin wrapper whose `is_journal` matches any `registry_files("JOURNAL.md")` file at call time).
 - `plugin_doctor.REQUIREMENTS` + report lines + `--json` key; `registry_migrations/__init__.py` list, `m0001_domain_split.py`.
 - `skills/verify-before-done/SKILL.md` step running `--check-structure` (exit 1 NOT-READY; exit 0 with advisories is not); `skills/design-first/SKILL.md` section "Run the data-architect's registry appends" (Q14); `.claude/references/registry-layout.md` § "For the sync tool".
@@ -185,7 +186,7 @@ Not applicable. Reason: no REST endpoint or SignalR event is added or changed.
 
 ## Confidence
 
-Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plugin_root` and its helpers `:284-377`, `_atomic_write` `:380-394`, `checkout_equivalent_path` `_project_paths.py:486`, and the `.gitignore` entry for `.claude/cache/`). Medium on multi-file rollback on Windows and on M/V header bullets parsing (Uncertain Assumptions). Full rationale: round-3 history, Part C.
+Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plugin_root` and its helpers `:284-377`, `_atomic_write` `:380-394`, `checkout_equivalent_path` `_project_paths.py:486`, and the `.gitignore` entry for `.claude/cache/`). Medium on multi-file rollback on Windows and on M/V header bullets parsing (Uncertain Assumptions). Full rationale: round-3 history, Part C. Amendment 4 re-read `accuracy_update.py:40-78,404-438` (the old `_ENTRY_HEADER` and its body cut), `critic-verdict-tracker.py:66-72` and `contract-status-watcher.py:68` (fail-soft imports of `accuracy_update`), and `test_registry_layout.py:737-749` (the this-repository pin). Medium on whether the first post-upgrade re-seed lands before a client's next hand-written `post-*` entry (Accepted guard limit).
 
 ## Alternatives Considered & Why Rejected
 
@@ -197,7 +198,7 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - `VERIFIED via .claude/registries/*.md`: flat registries, no `## Project:` heading, no domain folder, 41 unique journal titles; `JOURNAL.md:28` `### Tag conventions` outside a fence; VOCABULARY duplicates at `:79/:91` and `:86/:94`. This repository's `.project-tokens.json` `tokens` list is empty.
 - `VERIFIED via auto_improve_finish_install.py:94,284-394`: `_SCRIPTS_DIR`, `_norm`, `_same_dir`, `_manifest_names_plugin`, `_cache_roots`, `_separate_plugin_root`, `_atomic_write`; callers of `_separate_plugin_root` at `:474,1735,2403` keep working through the import-back.
 - `VERIFIED via _project_paths.py:486`: `checkout_equivalent_path` strips `.claude/worktrees/<name>/` segments.
-- `ASSUMED`: on this repository `separate_plugin_root` returns none (the project is the plugin tree) unless a cache copy exists, so R3/R4 use the project root only; tokens are empty, so nothing moves. `ASSUMED`: M/V header bullets parse as the digest's `BULLET` reads them today. Verification for both: sub-task 3 runs `--check-structure`; any non-R4 finding is reported as AMENDMENT, never suppressed.
+- `FALSIFIED` (t9 review W5, 2026-11-06): on this repository `separate_plugin_root` returns none unless a cache copy exists. A cache copy does exist (`~/.claude/plugins/cache/auto-improve`, an older installed release), so the plugin's own new Universal entries read as client-authored and print 9 `R3 universal-candidate` advisories (exit 0). Tokens are empty, so nothing moves. The remedy is Q19 (answered (a): skip only that advisory when the project holds the plugin's own manifest). `ASSUMED`: M/V header bullets parse as the digest's `BULLET` reads them today. Verification for both: sub-task 3 runs `--check-structure`; any non-R4 finding is reported as AMENDMENT, never suppressed.
 
 ## Failure Modes & Mitigations
 
@@ -206,6 +207,8 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - **The writer misfiles project entries on unmigrated clients** → the fallback writes only domain files; the root is written only for `--universal`.
 - **A vendored client's tree is taken for the plugin** → `separate_plugin_root`; none → `unverified`, nothing moved.
 - **The tracker fires retroactively, or misses entries in worktrees** → `seeded_files` keyed checkout-independently; tests for both.
+- **The new journal reader yields a signature the old regex never did, on a client journal already seeded** (amendment 4) → `seeded_files` records the reader; a file seeded under the old reader is re-seeded once, nothing fires; a client-shaped fixture whose headings the two patterns read differently pins it.
+- **A copied-script client lacks `_registry_layout` after W1** (amendment 4) → `accuracy_update` imports it lazily; the critic-verdict and contract-status hooks keep importing `accuracy_update`; a test pins both.
 - **A token entry moved by 0001 comes back with the next sync** → plugin-owned entries never move; R3 advisory; follow-up stub.
 - **The migration half-writes** → stage all, back up outside the registries, replace, restore on failure (`write-failed`).
 - **The lint is red on unmigrated clients, legacy titles or historical paths** → advisory mode until `current`, R4 advisory, `archived-title-only`.
@@ -220,12 +223,14 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - [ ] **Q16 Legacy entries** — **Recommendation:** keep them verbatim, never converted: read, keyed, indexed and moved like entries (I-8c), so nothing drops out of the digest or the readers. Conversion would rewrite an entry's text (I-7), and the legacy form has no field layout to convert from. Non-blocking; proceeding on this.
 - [ ] **Q17 Tracker on a never-seen journal file** — **Recommendation:** accept as an Accepted guard limit. With checkout-independent keys, the limit applies only to a journal file whose main-checkout path this machine has never seen (the first hand edit of a newly created domain file, or a fresh machine), not to worktrees. The alternative fires on every historical entry of a client's split journals. The script path always fires. Non-blocking.
 - [ ] **Q18 Moving token-free client entries out of a heading-less root** (new) — **Recommendation:** 0001 reports them as `universal-candidate` and the client procedure tells the operator to add a `## Project: <name>` heading above them on layout 1 and re-run the dry-run. This is the one hand edit the procedure allows (a heading, not an entry). Auto-moving would need 0001 to judge "project vs universal" without tokens and could strip genuine Universal content. Non-blocking.
+- [x] **Q19 (amendment 4) False `universal-candidate` advisories on the plugin's own repository (t9 W5).** → **Answered (owner, 2026-11-06): (a).** Skip ONLY the `universal-candidate` advisory when the project holds this plugin's own manifest, and print one line saying so (only when at least one advisory was dropped; wording under R3). Token findings and every other R3 result are unchanged. Block 10 carries this answer; the (b)/(c) paths below are void. Original question: The lint compares this repository against an older installed copy of the plugin. That copy lacks the newest Universal entries, so the lint tells the maintainer to move the plugin's own entries. The exit stays 0. Options: **(a)** when the project holds this plugin's own manifest, skip `universal-candidate` and print one line saying so; **(b)** document the behaviour in the spec and in the validate-registries skill, and change no code; **(c)** leave it as it is. **Recommendation: (a), limited to `universal-candidate` only.** Token findings and every other R3 result stay unchanged. A vendored client that copied the manifest (JOURNAL 2026-10-04) then loses only an advisory and never a finding, and the skip line makes that visible. Do not treat the project as the plugin source in general: in that case a vendored client's token entries would read as plugin-owned, and an R3 finding would become an advisory. Block 10 is written for (a). If you pick (b), the W5 bullet in block 10 becomes a documentation bullet and `validate_registries.py` loses that part. If you pick (c), the bullet and the spec file are dropped. Either way the block is edited before re-approval.
+- [x] **Q20 (amendment 4) Append the two lessons the t9 review proposed.** → **Answered (owner, 2026-11-06): yes.** Block 10 appends both with `registry_append.py --registry journal --universal`; the W5 lesson's wording follows Q19 (a). `JOURNAL.md` stays in block 10's Files to touch unconditionally. Original question: These are the lessons for W5 and for C1 ("a sub-task that flips the state an earlier sub-task's test pins must re-run that suite"). **Recommendation: yes, in block 10,** with `registry_append.py --registry journal --universal`. That batches them with registry files that already need the landing raise. The W5 lesson's wording follows the Q19 answer. If the answer is no, drop `.claude/registries/JOURNAL.md` from block 10.
 
 ---
 
 ## Critique
 
-Full critic text of every round is in history: round 1 (6 BLOCKER / 8 WARN / 4 NIT) in `.round-1.md`; round 2 (4 / 8 / 7) in `.round-2.md`; round 3, "Pass 3 (amendment 2)" (3 / 8 / 4), with the rounds-1–2 decision trail and the replaced amendment-2 text, in `.claude/contract-history/2026-11-04-domain-split-registries.round-3.md`. No further critic round runs (user decision).
+Full critic text of every round is in history: round 1 (6 BLOCKER / 8 WARN / 4 NIT) in `.round-1.md`; round 2 (4 / 8 / 7) in `.round-2.md`; round 3, "Pass 3 (amendment 2)" (3 / 8 / 4), with the rounds-1–2 decision trail and the replaced amendment-2 text, in `.claude/contract-history/2026-11-04-domain-split-registries.round-3.md`. No further critic round runs on blocks 1–9 (user decision). Amendment 4 had its own round (2 / 8 / 4, below), every finding accepted by the owner on 2026-11-06.
 
 - **Rounds 1–2** → addressed by amendments 1 and 2; round 3 verified them, with the gaps carried as B1, W5, W3 (trail: round-3 history, Part B).
 
@@ -234,6 +239,95 @@ Full critic text of every round is in history: round 1 (6 BLOCKER / 8 WARN / 4 N
 - **B3** → Addressed by: I-14 checkout-equivalent key, Q17, sub-task 4 two-worktree test.
 - **W1** → R4 candidate roots, excluded prefixes, expected list. **W2** → `stage_and_replace`. **W3** → `backup_dir`, Commands "Order". **W4** → "Import chain", README file list, stub item 7. **W5** → step 4 field-wise merge. **W6** → Legacy entry (I-8c), Q16. **W7** → `universal-candidate`, Q18. **W8** → I-8b section scope, leftovers last.
 - **NITs** → trimmed into history (no token size claimed); tier heading defined; `## Project:` placement removed; I-12 per-instance counting.
+
+### Amendment 4 critique
+
+**Critic:** contract-critic
+**Date:** 2026-11-06
+**Verdict:** blockers-found
+**Counts:** 2 BLOCKER / 8 WARN / 4 NIT, plus one positive-evidence note (heading count corrected 2026-11-06).
+**Scope:** blocks 10 and 11, "Amendment 4 record", the amended body text (`stage_and_replace` `base`, Migration report `error`, the FALSIFIED plugin-root line), Q19, Q20. Blocks 1–9 were not re-critiqued.
+
+#### Findings
+
+- **[BLOCKER] N1's expected outcome cannot happen under I-7.**
+  - **What is wrong:** a Correction line is appended under the entry and the original span stays, so `rule_r4` (line-based, `_registry_layout.py:685-703`, no Correction awareness) still prints R4 for `` `registry_migrations/__init__.py` `` at `MECHANISMS.md:112`. Block 11 then checks "R4 no longer reports the path", which is a guaranteed miss.
+  - **Prior artifact ignored:** this contract's I-7 and R4 ("Reported, never rewritten (I-7)"); `skills/validate-registries/SKILL.md:69` ("The original dead reference stays in the entry, so the validator keeps listing it").
+  - **Where in this contract:** `### 10` N1 — "Afterwards --check-structure no longer prints R4 for that path."; `### 11` — "N1 (Correction line present, made by registry_append; R4 no longer reports the path)".
+  - → Addressed by: blocks 10 and 11 now claim only that a Correction line naming the right path is appended with `registry_append.py --correction-of`; R4 keeps listing the original span at `MECHANISMS.md:112` (I-7, R4 rule text, `skills/validate-registries/SKILL.md`); no hand edit.
+- **[BLOCKER] The W5 skip line can turn the C1 pin red, and block 10 leaves that pin's file out of its list.**
+  - **What is wrong:** `ThisRepositoryTests` (`test_registry_layout.py:742-749`, rewritten by PR #288 to the same "R4 or `digest:` lines only" shape the t9 review prescribes) runs `--check-structure` on this repository, which holds `.claude-plugin/plugin.json`. The bullet says the lint "prints once" the skip line, but does not say whether that happens whenever the manifest is present or only when a candidate was actually dropped. In the first reading, the pinned suite fails. Block 10 requires that suite to exit 0 and says "test_registry_layout.py is not on its list". Older-test search (5) looks only for tests that count `universal-candidate` lines, so it misses this pin. This is the t9 C1 defect class again, inside the amendment that records the lesson about it (Q20).
+  - **Prior artifact ignored:** `.claude/reviews/2026-11-04-domain-split-registries/t9-review-fullstack-code-reviewer.md` C1 and Disposition "A second proposed lesson (C1)".
+  - **Where in this contract:** `### 10` W5 — "drops R3 universal-candidate advisories and prints once ..."; CONSTRAINTS — "C1 is NOT part of this block, and test_registry_layout.py is not on its list."
+  - → Addressed by: the skip line prints only when at least one advisory was dropped, with the fixed prefix `advisory: R3 universal-candidate skipped`; `test_registry_layout.py` joins block 10's Files to touch, its this-repository test allows that prefix (PR #288's no-layout-advisory assertion kept), block 10 reruns the suite, and older-test search item (6) names the file.
+- **[WARN] The W1 signature pin reads as a pin on live repository state.**
+  - **What is wrong:** "the signature set of this repository's journal (the 41 existing entries) is identical before and after" breaks as soon as block 10's own Q20 bullet appends two journal entries, and again on every later append, unless the "frozen fixture" is a frozen copy of the text rather than of the live file. The contract does not say which.
+  - **Prior artifact ignored:** t9 review C1 (a test that pins state a later write changes).
+  - **Where in this contract:** `### 10` W1 — "Compute the expected set in the test from today's regex as a frozen fixture".
+  - → Addressed by: block 10 W1 pins the 41 signatures against a frozen fixture file, `.claude/hooks/tests/fixtures/journal-signatures-2026-11-06.md` (a byte copy of `JOURNAL.md` taken before block 10's appends), never the live `JOURNAL.md`.
+- **[WARN] I-14 ("nothing fires retroactively") is proven only on this repository's 41 headings.**
+  - **What is wrong:** the two parsers do not accept the same headings. The new one matches `_HEADING` `[ \t]+` and `_J_HEADER` `(\S.*?)` (`_registry_layout.py:59,62`); the old `_ENTRY_HEADER` uses multiline `\s+` and `(.+?)` (`accuracy_update.py:404`). Any heading that only the new parser accepts becomes a new signature in an already-seeded client file, and it fires on the first edit after upgrade. Neither a test nor a Failure Mode covers new ⊆ old on client journals.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-04 "A VERIFIED parser claim must be tested on the unfilled and the missing case".
+  - **Where in this contract:** `### 10` W1; `## Failure Modes & Mitigations` (no amendment-4 entry).
+  - → Addressed by: I-14 now records the seeding reader in `seeded_files` and re-seeds a file seeded under the old reader once, firing nothing; a Failure Mode entry and a block 10 test row on a client-shaped journal whose headings the two patterns read differently.
+- **[WARN] W1 widens accuracy_update's import chain without amending "Import chain".**
+  - **What is wrong:** `accuracy_update` is also imported, fail-soft, by `critic-verdict-tracker.py:68` and `contract-status-watcher.py:68`. A hard import of `_registry_layout` would silently stop critic and status accuracy tracking on a copied-script client that lacks that module. The "Import chain" bullet still names only the journal tracker's degradation.
+  - **Prior artifact ignored:** this contract's "Import chain (kept minimal)" bullet (amendment 3, approved).
+  - **Where in this contract:** `### 10` W1 — "builds its entries from _registry_layout.parse_text".
+  - → Addressed by: "Import chain" amended: `accuracy_update` imports `_registry_layout` lazily inside `parse_journal_entries`, names `critic-verdict-tracker.py` and `contract-status-watcher.py` and their quiet fail-soft import, and block 10 adds a test that both hooks still import `accuracy_update` with `_registry_layout` hidden.
+- **[WARN] The Migration report `error` case has no mode and no refusal code.**
+  - **What is wrong:** the VO allows modes `dry-run`, `apply` and `refused`, and the refusal code is "empty unless `refused`". The closed refusal set has no build-error code, so the `mode` and `refusal code` values of a report written with `error` are undeclared.
+  - **Prior artifact ignored:** this contract's Migration report VO row and the `Preview / apply migration` Rejections column.
+  - **Where in this contract:** `### Value Objects` Migration report — "error (amendment 4, N2)"; `### 10` N2.
+  - → Addressed by: the Migration report VO sets mode `refused` and refusal code `plan-build-failed` for the error case, and `plan-build-failed` (exit 2) joins the closed Rejections set of Preview / apply migration.
+- **[WARN] W3's per-entry containment does not say how lines are normalised or what happens with two output entries for one key.**
+  - **What is wrong:** the I-12 text check folds line endings, the BOM and trailing spaces, but the new per-entry multiset check does not say it does the same, so a CRLF client could read as `content-loss-detected`. It also does not say what happens when step 4 appends a differing heading line, which yields two output entries with one key.
+  - **Prior artifact ignored:** this contract's I-12 (*Text* normalisation clause).
+  - **Where in this contract:** `### 10` W3 — "verify_plan parses each output entry and requires that its line multiset contains that set".
+  - → Addressed by: I-12 "Per entry" clause and block 10 W3 apply I-12's normalisation (line endings, BOM, trailing spaces, blank lines); step 4 treats the heading line as a field, and two output entries with one key refuse `conflicting-entry`; CRLF and differing-date test rows.
+- **[WARN] W4 points the old fence-toggle scanner at `general.md`, where migration leftovers live.**
+  - **What is wrong:** `extract_entries` toggles on any line that starts with three backticks (`validate_registries.py:158-165`). Leftover blocks use "a fence longer than any backtick run inside", so a leftover that contains a three-backtick run flips the toggle. The default report then reports paths inside the leftover and skips real entries after it. That contradicts "Inert: never parsed, never a finding", and no leftover fixture is listed.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-01 "A shared reader reused by a stricter consumer must be re-checked against the forms its errors were harmless for"; this contract's Migration leftover block VO.
+  - **Where in this contract:** `### 10` W4 — "The regex, the flags and the exit rule do not change."
+  - → Addressed by: the default mode ignores each file from the `## Migration 0001 leftovers (not parsed as entries)` heading on, so leftovers never produce findings (R4 rule text, block 10 W4); a test with a leftover holding a three-backtick run and a dead path.
+- **[WARN] Conditional text survives into an approved TASK block.**
+  - **What is wrong:** "Q20 (when answered yes)" and "If Q19 is answered otherwise, this bullet was rewritten before approval; follow the approved text" stay in the TASK block. Files to touch lists `.claude/registries/JOURNAL.md` with no condition, while the Amendment 4 record says "(and `JOURNAL.md` under Q20)".
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-22 "An accepted critic WARN or answered Open Question must amend the contract body before approval".
+  - **Where in this contract:** `### 10` CONSTRAINTS (W5 and Q20 bullets); `## Amendment 4 record` Delivery bullet.
+  - → Addressed by: Q19 and Q20 are answered; block 10's TASK block has no conditional wording, `JOURNAL.md` stays in its Files to touch unconditionally, and the Amendment 4 record's Delivery bullet drops "under Q20".
+- **[WARN] PR #288 is a route into the parent branch outside the plan, and the gate on it is advisory.**
+  - **What is wrong:** preconditions are "information for the operator, never a gate" (`pr_merged.py:1175`). t8 is already completed, so t10 is released as soon as the contract is re-approved, and it can be dispatched before #288 merges. "Cut this branch after that merge" then rests on operator discipline. The amendment also does not name #288's head kind: a `task/*` head runs in parent mode, and any other head is not checked (`check_version_bump.py:10`).
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-30 "A delivery rule must name every route into delivery, not only the one the author had in mind".
+  - **Where in this contract:** `### 10` — "**Preconditions:** pull-request lneninger/claude-agentic-auto-improve#288"; `## Amendment 4 record` C1 bullet.
+  - → Addressed by: the Amendment 4 record names #288's head `fix/235-pin-current-layout-in-layout-test` (not `task/*`, so `check_version_bump.py` does not check it in parent mode, and t11 checks it changes no version file) and states that Preconditions are information only, not a gate (`pr_merged.py` ~1175); block 10's TASK opens with a Run-first line to confirm #288 is merged before starting.
+- **[NIT] W5 calls a private helper and its tests sit in the wrong file.** It calls `_plugin_root._manifest_names_plugin`, a private name; `## Extension Points` lists only `separate_plugin_root`. Its tests live in `test_validate_registries_default.py`, although they test `--check-structure`.
+  - → Disposition: the W5 tests move to `test_registry_layout.py` (now on block 10's list). The private name stays (one definition in the same plugin, already imported back by finish-install) and is recorded under Extension Points as consumed.
+- **[NIT] W4 leaves the `--json` shape undefined.** The default `--json` shape (`validate_registries.py:313-317`, one `mechanisms` dict and one `vocabulary` dict) is not defined for per-file blocks.
+  - → Disposition: block 10 W4 keeps the `mechanisms` and `vocabulary` keys with today's shape, aggregated over all files, and adds one key `files` (one block per file read, in `registry_files` order). Additive only.
+- **[NIT] Block 11's Files to touch omits the Gate Output its TASK requires.** It lists only the `.md`, not `t11-review-fullstack-code-reviewer.gate.json` (same as block 9; `.json` is gate-exempt).
+  - → Disposition: noted, not changed. A review gate's Files to touch names exactly one path (the artefact); the `.gate.json` is gate-exempt and the TASK block already requires it.
+- **[NIT] `## Confidence` was not revisited for amendment 4.** It still cites only the amendment-3 re-reads.
+  - → Disposition: `## Confidence` now cites the amendment-4 re-reads and the one medium point (re-seed timing).
+- **[NIT] Verified as correct (positive evidence).**
+  - (1) *Depends on 8* is right. `compute_released` (`pr_merged.py:623-625`) treats a dependency whose `review_verdict` is not pass as unmet forever, and t9's existing record means it is skipped rather than re-released.
+  - (2) The Preconditions line parses: it is column-0 (`:1180`), the `pull-request` head is recognised, and `_PR_SHORT_REF` matches (`:1183`).
+  - (3) Supersession works. `read_review_set` matches the basename (`:3755-3758`), the gate name `t11-review-fullstack-code-reviewer.gate.json` follows the `name[:-3] + ".gate.json"` rule (`:3734`), and `t9-review-fullstack-code-reviewer.md` exists in the folder. `effective_blocked_reports` (`:4084-4086`) then drops t9, whatever t11's own verdict is.
+  - (5) Neither block lists a version file, which matches the repository `CLAUDE.md` Parent Branch Delivery Rule.
+  - → Disposition: positive evidence; no change. The new fixture file in block 10 is not a version file, so (5) still holds.
+
+#### Applicable journal entries (amendment 4)
+
+- **2026-10-30 — One shared reader must own the filtering** — heeded by block 10 W1.
+- **2026-10-04 — A root locator can return the consumer itself under vendoring** — heeded by Q19 (a): only an advisory is dropped.
+- **2026-10-04 — A VERIFIED parser claim must be tested on the unfilled and the missing case** — partly heeded (fence, path-length and misattached-line fixtures). Not addressed for client signature parity; see WARN.
+- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body** — heeded in intent by Q19 ("Either way the block is edited before re-approval"). Conditional text is left behind; see WARN.
+- **2026-11-01 — A shared reader reused by a stricter consumer…** — not addressed for W4 leftovers; see WARN.
+- **2026-10-30 — A delivery rule must name every route into delivery** — partly heeded (Amendment 4 Delivery bullet). Not addressed for PR #288; see WARN.
+
+#### What the critic did not check
+
+- No shell, so `pr_merged.py --contract 2026-11-04-domain-split-registries --status --json` (item 14 `layout_defects`) was not run. Item 14 was judged from the text: the header and the Work Item Brief are present, and neither block lists a version file.
+- Whether PR #288 exists, its head branch and its diff (no `gh`).
 
 ---
 
@@ -252,7 +346,18 @@ Full critic text of every round is in history: round 1 (6 BLOCKER / 8 WARN / 4 N
 - **2026-10-28 — Do not promote a mechanism the registry already describes as an extension seam** — heeded: Preview-hash apply and the plugin-root guard are shared by extraction; only the reader and the runner are new.
 - **2026-10-17 — Judge "identical to master" by git's view** — heeded by I-12 folding and R6's content hash.
 - **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — heeded: every round-3 finding changes the body.
+- **Amendment 4:** *2026-10-30 One shared reader must own the filtering* and *2026-11-01 A shared reader reused by a stricter consumer…* are heeded by block 10's W1 (the tracker reads through `rl.parse_text`, and the signatures are pinned on the 41 existing entries). *2026-10-04 A root locator can return the consumer itself under vendoring* is heeded by Q19 (a): only an advisory is dropped. *2026-10-04 A VERIFIED parser claim must be tested on the unfilled and the missing case* is heeded by the fence, path-length, misattached-line and domain-only fixtures, and by the client-shaped signature-parity row with the reader re-seed (critic WARN 2). *2026-10-22 An accepted critic WARN … must amend the contract body* is heeded: each t9 finding and each amendment-4 critique finding changes the body or a block, and the TASK block carries no conditional text. *2026-11-01 A shared reader reused by a stricter consumer…* is also heeded by the default mode ignoring leftovers (critic WARN 6). *2026-10-30 A delivery rule must name every route into delivery* is heeded by naming PR #288's head and the Run-first line (critic WARN 8). The t9 C1 lesson (Q20, appended by block 10) is heeded by block 10 putting `test_registry_layout.py` on its list, widening its pin for the skip line and running all 13 t9 suites.
 - Orthogonal to north-stars: none active.
+
+## Amendment 4 record (2026-11-06)
+
+- **Reason:** `.claude/reviews/2026-11-04-domain-split-registries/t9-review-fullstack-code-reviewer.md` returned `**Verdict:** blocked` (range `dca00fd..70c8e6b`) with C1, W1–W5 and N1–N3.
+- **C1** (stale pin at `test_registry_layout.py:747`): fixed by draft PR #288 into the parent branch, head `fix/235-pin-current-layout-in-layout-test`. That PR is outside the plan. Its head is not `task/*`, so `check_version_bump.py` does not run in parent mode on it; t11 checks that the range changes no version file. Block 10 declares #288 under **Preconditions**, which is information for the operator only and never a gate (`pr_merged.py` ~line 1175): t10 is released on re-approval whether or not #288 has merged. Block 10's TASK therefore opens with a Run-first line telling the implementer to confirm #288 is merged into the parent branch before starting.
+- **W1–W4, N1–N3:** block 10. **W5:** Q19 answered (a) by the owner, 2026-11-06. **Lessons:** Q20 answered yes; block 10 appends both.
+- **Body changes:** `stage_and_replace` gains `base` and folder cleanup (W2, N3). The Migration report gains `error`, with mode `refused` and refusal code `plan-build-failed` (N2, critic WARN 4). The plugin-root assumption is marked FALSIFIED (W5). After the amendment-4 critique: R3 gains the `universal-candidate` skip and its line; R4 states a Correction line does not silence it, and the default mode ignores leftovers; I-12 gains the per-entry clause; step 4 treats the heading line as a field; I-14 gains the reader re-seed; "Import chain" makes `accuracy_update`'s import of `_registry_layout` lazy and names both fail-soft hooks; two Failure Modes; Extension Points records `_manifest_names_plugin`; Confidence updated.
+- **Critique resolution (owner, 2026-11-06):** both BLOCKERs and all 8 WARNs accepted and addressed (see "→ Addressed by" lines under `### Amendment 4 critique`); each NIT addressed or noted there. N1 now claims only the appended Correction line; R4 keeps listing `MECHANISMS.md:112`.
+- **Delivery:** blocks 10 and 11 are sub-tasks into `fix/235-domain-split-registries`, and neither raises the version. Block 10 touches `.claude/registries/MECHANISMS.md` and `.claude/registries/JOURNAL.md`, which count as shipped files. The landing's single minor raise covers them.
+- **Ordering:** block 10 depends on 8, not 9, because a `blocked` review releases nothing. Block 11 supersedes the t9 report through its Gate Output, which makes t9 no longer effective.
 
 ---
 
@@ -637,6 +742,187 @@ CONSTRAINTS:
   - The header ends with exactly one of: "**Verdict:** pass", "**Verdict:** pass-with-findings",
     "**Verdict:** blocked".
   - Write the Gate Output <artefact stem>.gate.json beside it, covering every Review checklist item.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-04-domain-split-registries.md
+  contract_status: approved
+```
+
+### 10. Fix the t9 review findings (`python-ai-developer`)
+
+**Depends on:** 8
+
+**Preconditions:** pull-request lneninger/claude-agentic-auto-improve#288
+
+**Files to touch:**
+- `.claude/scripts/accuracy_update.py`
+- `.claude/hooks/tests/test_journal_post_approval_tracker.py`
+- `.claude/hooks/tests/fixtures/journal-signatures-2026-11-06.md`
+- `.claude/scripts/_preview_apply.py`
+- `.claude/scripts/tests/test_preview_apply.py`
+- `.claude/scripts/registry_migrate.py`
+- `.claude/scripts/registry_migrations/m0001_domain_split.py`
+- `.claude/scripts/tests/test_registry_migrate.py`
+- `.claude/scripts/validate_registries.py`
+- `.claude/scripts/tests/test_validate_registries_default.py`
+- `.claude/scripts/tests/test_registry_layout.py`
+- `.claude/references/registry-layout.md`
+- `.claude/registries/MECHANISMS.md`
+- `.claude/registries/JOURNAL.md`
+
+**Pre-written TASK block:**
+```
+TASK: Fix t9 review findings W1-W4, N1-N3 and W5 (Q19 answer (a)); append the two Q20 lessons. Each fix comes with
+  its tests.
+CONTEXT: concept contract amendment 4 ("Amendment 4 record", "Shared helpers" incl. "Import chain", R3, R4, I-12,
+  I-14, step 4, Migration report VO, Q19, Q20, "Amendment 4 critique"); review
+  .claude/reviews/2026-11-04-domain-split-registries/t9-review-fullstack-code-reviewer.md.
+FILES: as listed.
+CONSTRAINTS:
+  - Run first, before any edit: gh pr view 288 --repo lneninger/claude-agentic-auto-improve --json state,mergedAt,baseRefName
+    must show state MERGED into fix/235-domain-split-registries. If it does not, stop and report; do not start. The
+    Preconditions line is information only (pr_merged.py ~line 1175 never gates on it). Cut this branch from the parent
+    branch after that merge. PR #288 (head fix/235-pin-current-layout-in-layout-test) fixed C1; C1 is not re-fixed here.
+  - W1: accuracy_update.parse_journal_entries builds its entries from _registry_layout.parse_text(text, "JOURNAL", ...),
+    keeping journal entries only (never legacy entries, I-8c; never inside fences, I-8). Delete _ENTRY_HEADER and keep no
+    other journal heading regex in this file. The signature stays sha1(date|title), with the title taken exactly as today.
+    Import _registry_layout lazily inside parse_journal_entries; on ImportError write one stderr line naming the module
+    and return no entries. Module-level imports stay as today ("Import chain").
+    I-14 reader re-seed: each seeded_files value records reader 2; a file whose value has no reader is re-seeded once
+    on its next read with the new reader (all its signatures marked seen, nothing fires except a fresh one).
+    Tests (test_journal_post_approval_tracker.py):
+      (a) a dated ### heading inside a fence, added to a seeded file, fires zero times;
+      (b) frozen signature pin: create .claude/hooks/tests/fixtures/journal-signatures-2026-11-06.md as a byte copy of
+          .claude/registries/JOURNAL.md taken BEFORE this block's Q20 appends (41 entries). The test computes the
+          expected set from that fixture with a copy of today's _ENTRY_HEADER held as a test constant, and the actual
+          set from the new code on the same fixture; the two are identical and hold 41 signatures. Never read the live
+          JOURNAL.md in this test, so this block's appends and later appends never turn it red;
+      (c) client parity row: a client-shaped journal whose headings the old and new patterns read differently (at
+          least a heading inside a fence, a tab after the date, no space after the separator, a heading the old \s+
+          reads across a line break, CRLF line endings), seeded under the old reader (cache value with no reader),
+          then read by the new code: zero fires; then one new post-approval heading appended: exactly one fire;
+      (d) with _registry_layout hidden (sys.modules entry set to None in a subprocess), critic-verdict-tracker.py and
+          contract-status-watcher.py both still import accuracy_update (their _DEPS_OK is true), and
+          accuracy_update.record_clean still runs; parse_journal_entries returns no entries and writes one stderr line.
+  - W2: stage_and_replace(writes, backup_dir, base=None). Back up to backup_dir / target.relative_to(base). base defaults
+    to the common parent folder of the targets. A target outside base returns write-failed before any stage file is
+    written. registry_migrate passes the project root. Tests: the backup path equals backup_dir / relative path; a fixture
+    nested deep enough that the old absolute-path rule would pass 260 characters while the new path stays under it
+    (assert on the computed length, no long-path OS setting needed); a target outside base -> write-failed, every
+    target unchanged.
+  - N3: remember the folders step (a) created. After a staging failure or a rollback, remove the ones that are empty.
+    Test: a new MECHANISMS/ folder made by a failed run is gone afterwards; a folder that existed before stays.
+  - W3: per key, _plan_registry records the multiset of input lines of every occurrence, minus that key's merged-duplicate
+    removed lines. verify_plan parses each output entry and requires that its line multiset contains that set; otherwise
+    content-loss-detected. Both sides are normalised exactly as I-12's text check: line endings folded, BOM dropped,
+    trailing spaces trimmed, blank lines ignored. Step 4 treats the heading line as a field, so two copies whose heading
+    lines differ refuse conflicting-entry and step 4 never appends a heading line. If the plan still holds two output
+    entries with one key, verify_plan refuses conflicting-entry naming both output locations and their first lines. The
+    key-set and count checks stay. Tests: a forced plan that moves one body line from one entry to another ->
+    content-loss-detected, files byte-identical, report written; the existing merge fixture (the Lesson-only copy
+    appended under the bodied one) still passes; a CRLF + BOM + trailing-space client fixture -> no
+    content-loss-detected; two copies whose headings differ only in the date -> conflicting-entry, files byte-identical.
+  - N2: an exception in build_plan writes the report through Run.finish with mode refused, refusal code
+    plan-build-failed, `error` set (exception type and message), every list empty and plan hash `none`, then exits 2
+    (Migration report VO; Commands Rejections). No registry file is touched. Test: a forced build_plan exception gives
+    exit 2, registry files byte-identical, and a report folder whose report.json has mode refused, refusal code
+    plan-build-failed and the error.
+  - W4: the default (no-flag) mode iterates registry_files("MECHANISMS.md") and registry_files("VOCABULARY.md")
+    (through _claude_paths, same root, I-3) and prints one report block per file. In each file it ignores every line
+    from the "## Migration 0001 leftovers (not parsed as entries)" heading on, so leftovers never produce findings.
+    The regex, the flags and the exit rule do not change. --json keeps the mechanisms and vocabulary keys with today's
+    shape, aggregated over all files, and adds one key "files" (one block per file, registry_files order). Tests (new
+    file test_validate_registries_default.py, temp project only): a dead path only in MECHANISMS/backend.md is reported
+    under that file and gives exit 1; a flat layout-1 fixture prints the same blocks and the same --json mechanisms and
+    vocabulary values as before; a layout-2 fixture with no dead path gives exit 0; a general.md whose leftovers
+    section holds a three-backtick run and a dead path gives no finding from the leftover and still reports a dead
+    path in an entry above it.
+  - W5 (Q19 answer (a)): when _plugin_root._manifest_names_plugin(project) is true, --check-structure drops every R3
+    universal-candidate advisory. Only when at least one was dropped it prints exactly one line, ASCII only:
+    "advisory: R3 universal-candidate skipped: <N> entries; this project holds the plugin's own manifest"
+    (fixed prefix "advisory: R3 universal-candidate skipped"). Token findings, R3 plugin-owned, R3 unverified and every
+    other result are unchanged. Document this in registry-layout.md under R3. Tests in test_registry_layout.py: a
+    project with the manifest and candidates gets the skip line (N correct) and no candidates; the same project with
+    the manifest and no candidates gets no skip line; the same fixture without the manifest still lists the candidates;
+    a token-bearing client-authored entry stays a finding with the manifest present.
+    In ThisRepositoryTests (as rewritten by PR #288), add "advisory: R3 universal-candidate skipped" to the allowed
+    line prefixes, beside "advisory: R4 " and "digest: ". Keep PR #288's assertion that no layout advisory line is
+    printed; change nothing else in that test.
+  - N1: never edit the entry by hand (I-7). Run registry_append.py --project . --registry mechanisms --correction-of
+    "Registry migration runner" --source "t9 review N1" with an entry file whose text names
+    .claude/scripts/registry_migrations/__init__.py. Show the printed file:line in the PR. R4 keeps listing the original
+    span at MECHANISMS.md:112 (I-7; skills/validate-registries/SKILL.md says the validator keeps listing it); that is
+    expected and not a failure.
+  - Q20: append the two proposed lessons with registry_append.py --project . --registry journal --universal, Trigger
+    "post-impl divergence", Source contract this contract. W5 lesson: the review's text, worded for answer (a) (skip
+    only the universal-candidate advisory when the project holds the plugin's own manifest, print one line, never
+    downgrade a finding). C1 lesson: the wording under "A second proposed lesson". Show each printed file:line in the PR.
+    Take the W1 fixture copy before these appends.
+  - Older-test search, one question per change, each with its own grep and its result in the PR: (1) tests asserting
+    _ENTRY_HEADER or parse_journal_entries output, or reading the live JOURNAL.md signature set; (2) tests asserting a
+    backup path layout or calling stage_and_replace positionally; (3) tests asserting verify_plan messages or the
+    report's mode/refusal values; (4) tests asserting the default report's exact text, block count or --json shape;
+    (5) tests counting R3 universal-candidate lines on a fixture that holds the manifest; (6) tests that run
+    --check-structure on this repository and restrict its output lines, starting with
+    .claude/scripts/tests/test_registry_layout.py ThisRepositoryTests; (7) tests or hooks that import accuracy_update
+    and depend on its import-time behaviour (at least critic-verdict-tracker.py, contract-status-watcher.py,
+    journal-post-approval-tracker.py).
+  - Version: no version file. This sub-task PR goes into the parent branch, and the landing raises the version once
+    (MECHANISMS.md and JOURNAL.md are shipped registry seeds).
+  - Run, all 13 t9 suites plus the new one, every one exit 0 (test_registry_layout.py is on this block's list and is
+    rerun after the W5 change; --check-structure on this repository prints only R4, digest: and at most one
+    "advisory: R3 universal-candidate skipped" line):
+    py -3 .claude/scripts/tests/test_preview_apply.py ; py -3 .claude/scripts/tests/test_plugin_root.py ;
+    py -3 .claude/scripts/tests/test_registry_layout.py ; py -3 .claude/scripts/tests/test_script_path_resolution.py ;
+    py -3 .claude/scripts/tests/test_registry_append.py ; py -3 .claude/hooks/tests/test_journal_post_approval_tracker.py ;
+    py -3 .claude/scripts/tests/test_registry_readers.py ; py -3 .claude/scripts/tests/test_registry_migrate.py ;
+    py -3 .claude/scripts/tests/test_plugin_doctor.py ; py -3 .claude/scripts/tests/test_plugin_text_scans.py ;
+    py -3 .claude/scripts/tests/test_skill_script_lookup.py ; py -3 .claude/scripts/tests/test_auto_improve_finish_install.py ;
+    py -3 .claude/scripts/tests/test_check_version_bump.py ; py -3 .claude/scripts/tests/test_validate_registries_default.py ;
+    py -3 .claude/scripts/registry_migrate.py --check --project . ;
+    py -3 .claude/scripts/validate_registries.py --check-structure --project .
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-04-domain-split-registries.md
+  contract_status: approved
+```
+
+### 11. Review (`fullstack-code-reviewer`)
+
+**Depends on:** 10
+
+**Files to touch:**
+- `.claude/reviews/2026-11-04-domain-split-registries/t11-review-fullstack-code-reviewer.md`
+
+**Pre-written TASK block:**
+```
+TASK: Re-review the contract's delivered work after the t9 blocked verdict, and write a superseding review artefact.
+CONTEXT: concept contract at .claude/concepts/2026-11-04-domain-split-registries.md (amendment 4); blocked report
+  .claude/reviews/2026-11-04-domain-split-registries/t9-review-fullstack-code-reviewer.md.
+FILES: .claude/reviews/2026-11-04-domain-split-registries/t11-review-fullstack-code-reviewer.md
+CONSTRAINTS:
+  - Header names "Supersedes: .claude/reviews/2026-11-04-domain-split-registries/t9-review-fullstack-code-reviewer.md".
+    The Gate Output t11-review-fullstack-code-reviewer.gate.json sets
+    "supersedes": ["t9-review-fullstack-code-reviewer.md"] and lists every Review checklist item verbatim.
+  - Commit range: dca00fd..<merge commit of sub-task 10>. List the first-parent merges inside it, including
+    PR #285 (t9), PR #288 (C1) and sub-task 10's PR.
+  - Check, one line each: C1 fixed (test_registry_layout.py exits 0; pin asserts no layout advisory and
+    --check exits 0); W1 (no journal heading regex outside _registry_layout; fence test; 41 signatures unchanged);
+    W1 also: signature pin reads the frozen fixture, never the live JOURNAL.md; client parity row fires zero;
+    accuracy_update imports _registry_layout lazily and both fail-soft hooks still import it;
+    W2 (relative backup path; path-length test); W3 (per-entry line containment with I-12 normalisation;
+    misattached-line, CRLF and differing-date tests); W4 (default mode reads domain files, ignores leftovers, --json
+    adds "files"; tests); W5 per Q19 (a) (skip line only when a candidate was dropped, fixed prefix; ThisRepositoryTests
+    allows that prefix and still asserts no layout advisory line); N1 (a Correction line naming
+    .claude/scripts/registry_migrations/__init__.py is present under "Registry migration runner", made by
+    registry_append --correction-of; R4 still lists the original span at MECHANISMS.md:112, as I-7 requires);
+    N2 (mode refused, refusal code plan-build-failed, exit 2); N3; both Q20 lessons appended to JOURNAL.md;
+    every t9 "Met" item still holds; no version file changed in the range beyond the test fixture.
+  - Re-run every suite in the t9 Evidence table, all 13 including test_registry_layout.py, plus
+    test_validate_registries_default.py, and the live commands --check, --dry-run, --check-structure (with and without
+    --strict), plugin_doctor --project . (--json too), and check_version_bump.py in parent mode.
+  - Write the six-section artefact. The file does NOT exist yet; you create it. "## Evidence" lists every command with
+    its exit code and is never empty.
+  - The header ends with exactly one of: "**Verdict:** pass", "**Verdict:** pass-with-findings",
+    "**Verdict:** blocked".
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-11-04-domain-split-registries.md
   contract_status: approved
