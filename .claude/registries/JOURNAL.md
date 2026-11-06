@@ -330,6 +330,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 
 <!-- empty on day 1 — populated as lessons are discovered -->
 
+### 2026-11-06 — A plugin repository that is also installed resolves its own older copy as "the plugin"
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** When a check compares a project against "the installed plugin", decide explicitly what happens when the project IS the plugin's source and an older installed copy exists; a stale cache copy turns the plugin's newest entries into "client-authored" findings. Skip only the advisory that the stale copy makes false (here R3 universal-candidate) when the project holds the plugin's own manifest, print one line saying how many were skipped, and never downgrade a finding: a vendored client that copied the manifest then loses an advisory, never a finding.
+- **Apply when:** a contract resolves a separate plugin root (separate_plugin_root, find_plugin_root) to classify ownership, and the plugin's own repository is one of the projects it runs on.
+- **Tags:** plugin-root, vendoring, ownership, cache-copy, assumption-falsified
+
+### 2026-11-06 — A sub-task that flips the state an earlier sub-task's test pins must re-run that suite
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** A sub-task that changes the state that an earlier sub-task's test pins must re-run that suite. Briefs that flip repository state (migration applies, registry rewrites) need a `Run:` line that names every suite pinning that state; here t8 migrated this repository to layout 2 and t3's suite, which pinned the old flat state, stayed red on the parent branch because nothing re-ran it.
+- **Apply when:** a brief flips repository state (a migration apply, a registry rewrite, a layout marker) that a test written by an earlier sub-task asserts on, and no CI workflow runs that suite.
+- **Tags:** sub-task, regression, state-pin, run-line, brief
+
 ## Project tier
 
 This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.

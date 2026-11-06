@@ -610,6 +610,70 @@ class ModeAndCliTests(TmpCase):
         self.assertIn("_registry_layout", done.stderr)
 
 
+SKIP_PREFIX = "advisory: R3 universal-candidate skipped"
+
+
+class PluginOwnManifestSkipTests(TmpCase):
+    """W5 (Q19 a): a project that holds the plugin's own manifest gets no R3 universal-candidate advisories."""
+
+    def plugin(self, *, same_entries: bool) -> Path:
+        plugin = self.root.parent / "plug"
+        write(plugin, ".claude-plugin/plugin.json", json.dumps({"name": "agentic-auto-improve"}))
+        if same_entries:
+            make_layout1(plugin)
+        else:
+            write(plugin, ".claude/registries/MECHANISMS.md", "## Universal Patterns\n- **Other** — x\n")
+            write(plugin, ".claude/registries/VOCABULARY.md", "## Universal Vocabulary\n- **Other** — x\n")
+            write(plugin, ".claude/registries/JOURNAL.md", "## Universal lessons\n")
+        return plugin
+
+    def structure(self, plugin: Path, *, manifest: bool, tokens: bool = False, m: str = M_BODY):
+        make_layout2(self.root, m=m)
+        if manifest:
+            write(self.root, ".claude-plugin/plugin.json", json.dumps({"name": "agentic-auto-improve"}))
+        if tokens:
+            write(self.root, ".claude/.project-tokens.json", json.dumps({"tokens": ["acmecorp"], "allowed": []}))
+        return self.run_cli(VALIDATE, "--check-structure", "--project", str(self.root), "--plugin-root", str(plugin))
+
+    @staticmethod
+    def candidate_lines(done) -> list:
+        return [ln for ln in done.stdout.splitlines()
+                if ln.startswith("advisory: R3 universal-candidate") and not ln.startswith(SKIP_PREFIX)]
+
+    def test_manifest_and_candidates_gives_the_skip_line_and_no_candidate_lines(self):
+        plugin = self.plugin(same_entries=False)
+        without = self.structure(plugin, manifest=False)
+        listed = self.candidate_lines(without)
+        self.assertEqual(len(listed), 6, without.stdout)
+        shutil.rmtree(self.root)
+        self.root.mkdir()
+        done = self.structure(plugin, manifest=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.candidate_lines(done), [])
+        skips = [ln for ln in done.stdout.splitlines() if ln.startswith(SKIP_PREFIX)]
+        self.assertEqual(skips, ["advisory: R3 universal-candidate skipped: 6 entries; "
+                                 "this project holds the plugin's own manifest"])
+        self.assertTrue(skips[0].isascii())
+
+    def test_manifest_and_no_candidates_gives_no_skip_line(self):
+        done = self.structure(self.plugin(same_entries=True), manifest=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("universal-candidate", done.stdout)
+
+    def test_the_same_project_without_the_manifest_still_lists_the_candidates(self):
+        done = self.structure(self.plugin(same_entries=False), manifest=False)
+        self.assertEqual(len(self.candidate_lines(done)), 6, done.stdout)
+        self.assertNotIn(SKIP_PREFIX, done.stdout)
+
+    def test_a_token_bearing_client_entry_stays_a_finding_with_the_manifest_present(self):
+        done = self.structure(self.plugin(same_entries=False), manifest=True, tokens=True,
+                              m=M_BODY + "\n- **Gamma** — mentions AcmeCorp")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("finding: R3 ", done.stdout)
+        self.assertIn("'Gamma'", done.stdout)
+        self.assertEqual(self.candidate_lines(done), [])
+
+
 class DigestTests(TmpCase):
     def digest_text(self) -> str:
         return (self.root / ".claude" / ".scout-cache" / "registry-digest.md").read_text(encoding="utf-8")
@@ -745,10 +809,11 @@ class ThisRepositoryTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
         # This repository is on layout 2 (state "current"), so no layout advisory line is printed:
-        # only R4 and digest lines remain.
+        # only R4 and digest lines remain (and, when a plugin root resolves, the one R3 skip line).
         for ln in lines:
             self.assertFalse(ln.startswith("advisory: registry layout"), ln)
-            self.assertTrue(ln.startswith("advisory: R4 ") or ln.startswith("digest: "), ln)
+            self.assertTrue(ln.startswith("advisory: R4 ") or ln.startswith("digest: ")
+                            or ln.startswith("advisory: R3 universal-candidate skipped"), ln)
 
 
 if __name__ == "__main__":

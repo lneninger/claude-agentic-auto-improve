@@ -391,6 +391,11 @@ def _merge_group(group: List[Occ]) -> Tuple[Optional[Merged], Optional[dict]]:
                     present[key] -= 1
                 removed.append((other.sf.rel, other.entry.line + idx, REASON_MERGED, text))
             else:
+                if idx == 0:
+                    # The heading line is a field (step 4): a heading that is not already in the kept copy is a
+                    # difference to refuse, never a line to append.
+                    return None, {"key": base.entry.key, "locations": [o.where for o in ordered], "field": "heading",
+                                  "versions": [merged_lines[0].rstrip(), text.rstrip()]}
                 merged_lines.append(text)
                 appended.append(text)
                 mine[key] += 1
@@ -518,6 +523,8 @@ def _plan_registry(ctx: Context, name: str, plan: Plan) -> None:
             singles.append(occ)
 
     edits: Dict[str, Dict[int, Tuple[int, list]]] = collections.defaultdict(dict)
+    # I-12 (entries): per key, every input line of every copy, minus the lines a merge removed as duplicates
+    key_lines: Dict[str, collections.Counter] = {}
     placements: List[dict] = []              # moved survivors, in source order
     survivors: List[Tuple[Occ, str]] = []    # (occ, final file rel or dest rel)
     merged_away = 0
@@ -536,6 +543,8 @@ def _plan_registry(ctx: Context, name: str, plan: Plan) -> None:
     for group in groups:
         if len(group) == 1:
             occ = group[0]
+            if occ.entry.key:
+                key_lines[occ.entry.key] = _nonblank(occ.lines)
             if occ.origin == "move":
                 slug, reason = classify(occ)
                 occ.dest, occ.reason = slug, reason
@@ -549,6 +558,14 @@ def _plan_registry(ctx: Context, name: str, plan: Plan) -> None:
             plan.conflicts.append(dict(conflict, registry=name))
             continue
         merged_away += len(group) - 1
+        merged_key = group[0].entry.key
+        if merged_key:
+            total: collections.Counter = collections.Counter()
+            for member in group:
+                total.update(_nonblank(member.lines))
+            dropped = _nonblank([r[3] for r in merged.removed])
+            total.subtract(dropped)
+            key_lines[merged_key] = +total
         pos = merged.position
         for other in group:
             if other is pos or other.origin == "move":
@@ -667,6 +684,7 @@ def _plan_registry(ctx: Context, name: str, plan: Plan) -> None:
     # --- files, orphans, accounting -------------------------------------------------------------
     dst = collections.Counter()
     out_keys: List[str] = []
+    out_entries: List[dict] = []
     for rel_path, out in sorted(outputs.items()):
         sf, path, lines = out["sf"], out["path"], out["lines"]
         dst.update(_nonblank(lines))
@@ -676,6 +694,10 @@ def _plan_registry(ctx: Context, name: str, plan: Plan) -> None:
         pf = rl.parse_text("\n".join(lines), name, kind="root" if out["sf"] is root else "domain",
                            slug=None if out["sf"] is root else path.stem, file=rel_path)
         out_keys += [e.key for e in pf.entries]
+        for e in pf.entries:
+            span = pf.lines[e.line - 1:e.end_line]
+            out_entries.append({"key": e.key, "location": "%s:%d" % (rel_path, e.line),
+                                "first_line": span[0].rstrip() if span else "", "lines": _nonblank(span)})
         if out["sf"] is not root:
             for e in pf.entries:
                 if e.kind == "entry" and e.status != rl.ARCHIVED and not e.has_body:
@@ -690,7 +712,8 @@ def _plan_registry(ctx: Context, name: str, plan: Plan) -> None:
                         "merged_away": merged_away, "out": in_count - merged_away}
     plan.accounting[name] = {"src": src, "dst": dst, "added": added, "removed": removed,
                              "in_keys": sorted({o.entry.key for o in occs}), "out_keys": out_keys,
-                             "expected_out": in_count - merged_away}
+                             "expected_out": in_count - merged_away,
+                             "key_lines": key_lines, "out_entries": out_entries}
 
 
 # ---------------------------------------------------------------------------
@@ -719,8 +742,39 @@ def _conflict_message(conflicts: Sequence[dict]) -> str:
             "`Correction` line; commit; re-run the dry-run.")
 
 
+class PlanProblem(str):
+    """The message of a failed plan check; ``code`` is the refusal code the runner reports it under."""
+    code = "content-loss-detected"
+
+
+class ConflictingEntryProblem(PlanProblem):
+    code = "conflicting-entry"
+
+
+def _duplicate_output_keys(acc: dict) -> List[str]:
+    """One message per key held by two or more output entries, naming each location and its first line."""
+    seen: Dict[str, List[dict]] = collections.OrderedDict()
+    for entry in acc.get("out_entries", []):
+        if entry["key"]:
+            seen.setdefault(entry["key"], []).append(entry)
+    return ["%r is held by %s" % (key, " and ".join("%s (%s)" % (e["location"], e["first_line"]) for e in entries))
+            for key, entries in seen.items() if len(entries) > 1]
+
+
 def verify_plan(plan: Plan) -> Optional[str]:
-    """The I-12 check on the plan: None when nothing is lost, otherwise the message of ``content-loss-detected``."""
+    """The I-12 check on the plan: None when nothing is lost, otherwise the message of the refusal.
+
+    The message is a ``PlanProblem``: its ``code`` is ``content-loss-detected``, or ``conflicting-entry`` when the plan
+    still holds two output entries with one key. Per registry the check is the multiset of lines (per result), the key
+    set and count, and, per key, that the output entry holds every input line of every copy except the lines a merge
+    removed as duplicates.
+    """
+    duplicates: List[str] = []
+    for name, acc in plan.accounting.items():
+        duplicates += ["%s: %s" % (name, msg) for msg in _duplicate_output_keys(acc)]
+    if duplicates:
+        return ConflictingEntryProblem("; ".join(duplicates) + ". Two output entries with one key would be a copy "
+                                       "the migration did not merge; nothing was written.")
     problems: List[str] = []
     for name, acc in plan.accounting.items():
         expected = collections.Counter(acc["src"])
@@ -742,4 +796,13 @@ def verify_plan(plan: Plan) -> Optional[str]:
         if len(acc["out_keys"]) != acc["expected_out"]:
             problems.append("%s: %d entries in the result, %d expected (in = out + merged away)" % (
                 name, len(acc["out_keys"]), acc["expected_out"]))
-    return "; ".join(problems) if problems else None
+        by_key = {e["key"]: e for e in acc.get("out_entries", []) if e["key"]}
+        for key, needed in acc.get("key_lines", {}).items():
+            held = by_key.get(key)
+            if held is None:
+                continue                                   # a missing key is reported by the key-set check above
+            if not _contains(held["lines"], needed):
+                absent = sorted((needed - held["lines"]).elements())[:3]
+                problems.append("%s: the output entry %r at %s lacks input lines: %s" % (
+                    name, key, held["location"], absent))
+    return PlanProblem("; ".join(problems)) if problems else None

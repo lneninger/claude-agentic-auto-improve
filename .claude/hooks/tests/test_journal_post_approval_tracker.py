@@ -13,8 +13,10 @@ Run: py -3 .claude/hooks/tests/test_journal_post_approval_tracker.py
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,7 +27,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 HOOK = ROOT / ".claude" / "hooks" / "journal-post-approval-tracker.py"
 APPEND = ROOT / ".claude" / "scripts" / "registry_append.py"
+SCRIPTS = ROOT / ".claude" / "scripts"
+CRITIC = ROOT / ".claude" / "hooks" / "critic-verdict-tracker.py"
+WATCHER = ROOT / ".claude" / "hooks" / "contract-status-watcher.py"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "journal-signatures-2026-11-06.md"
 MARK = "<!-- registry-layout: 2 -->"
+
+#: A copy of the journal heading pattern the tracker used before issue 292 (W1), held here as a constant so the
+#: signature pins keep their meaning after accuracy_update drops it.
+OLD_ENTRY_HEADER = re.compile(r"^###\s+(\d{4}-\d{2}-\d{2})\s+(?:—|--|-)\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _sha(date: str, title: str) -> str:
+    return hashlib.sha1(f"{date}|{title}".encode("utf-8", errors="ignore")).hexdigest()
+
+
+def old_signatures(text: str) -> set:
+    return {_sha(m.group(1), m.group(2).strip()) for m in OLD_ENTRY_HEADER.finditer(text)}
+
+
+def _accuracy_update():
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    import accuracy_update  # type: ignore
+    return accuracy_update
+
+
+def new_signatures(text: str) -> set:
+    return {e["sig"] for e in _accuracy_update().parse_journal_entries(text)}
 
 CONTRACT = "# C\n\n**Status:** approved\n\n**Files to touch:**\n\n- `web/app/thing.ts`\n"
 ROOT_JOURNAL = (MARK + "\n# Journal\n\n> header\n\n## Universal\n\n"
@@ -217,6 +246,86 @@ class SeedingTests(TrackerCase):
                              "--domain", "ops", "--create-domain")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.p.fires(), 1)
+
+
+class GrammarTests(TrackerCase):
+    """W1: the tracker reads the journal through _registry_layout (fences ignored, I-8); signatures unchanged."""
+
+    def test_a_dated_heading_inside_a_fence_added_to_a_seeded_file_fires_zero_times(self):
+        self.seed()
+        fenced = ("## Notes\n\nA sample of the format:\n\n```markdown\n"
+                  + entry("Sample inside a fence", "post-approval", self.p.contract) + "```\n")
+        append_text(self.general, fenced)
+        self.assertEqual(self.p.hook(self.general).returncode, 0)
+        self.assertEqual(self.p.fires(), 0)
+        top = "```\n" + entry("Fence at the top level", "post-impl divergence", self.p.contract) + "```\n"
+        append_text(self.general, top)
+        self.assertEqual(self.p.hook(self.general).returncode, 0)
+        self.assertEqual(self.p.fires(), 0)
+
+    def test_signatures_of_the_frozen_journal_copy_are_unchanged(self):
+        # The fixture is a byte copy of JOURNAL.md taken before the issue 292 appends; the live file is never read.
+        text = FIXTURE.read_text(encoding="utf-8")
+        expected = old_signatures(text)
+        actual = new_signatures(text)
+        self.assertEqual(len(expected), 41)
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(actual), 41)
+
+    def test_client_journal_seeded_by_the_old_reader_is_reseeded_once_without_firing(self):
+        post = ("- **Trigger:** post-approval\n- **Source contract:** `%s`\n- **Lesson:** l\n"
+                "- **Apply when:** a\n- **Tags:** t\n" % self.p.contract.as_posix())
+        client = ("# Journal - general\n\n> header\n\n"
+                  "```markdown\n### 2026-02-01 — Inside a fence\n" + post + "```\n\n"
+                  "### 2026-02-02\t— Tab after the date\n" + post + "\n"
+                  "### 2026-02-03 —No space after the separator\n" + post + "\n"
+                  "### 2026-02-04\n— Across a line break\n" + post + "\n"
+                  "### 2026-02-05 — Plain heading\n" + post).replace("\n", "\r\n")
+        self.general.write_bytes(client.encode("utf-8"))
+        old = old_signatures(client)
+        self.assertGreaterEqual(len(old), 3)
+        self.assertNotEqual(old, new_signatures(client))  # the two readers read this journal differently
+        key = _accuracy_update().journal_file_key(self.general)
+        state = self.home / ".claude" / "state"
+        state.mkdir(parents=True)
+        (state / "journal-entries-seen.json").write_text(json.dumps(
+            {"_initialized": True, "sigs": {s: True for s in old}, "seeded_files": {key: True}}), encoding="utf-8")
+        self.assertEqual(self.p.hook(self.general).returncode, 0)
+        self.assertEqual(self.p.fires(), 0)
+        self.assertEqual(self.p.cache()["seeded_files"][key], {"reader": 2})
+        append_text(self.general, ("### 2026-11-05 — One new heading\n" + post).replace("\n", "\r\n"))
+        self.assertEqual(self.p.hook(self.general).returncode, 0)
+        self.assertEqual(self.p.fires(), 1)
+
+    def test_without_the_layout_module_the_hooks_still_import_and_parsing_yields_nothing(self):
+        probe = (
+            "import sys, io, importlib.util\n"
+            "sys.modules['_registry_layout'] = None\n"
+            "def load(name, path):\n"
+            "    spec = importlib.util.spec_from_file_location(name, path)\n"
+            "    mod = importlib.util.module_from_spec(spec)\n"
+            "    spec.loader.exec_module(mod)\n"
+            "    return mod\n"
+            f"c = load('critic_probe', {str(CRITIC)!r})\n"
+            f"w = load('watcher_probe', {str(WATCHER)!r})\n"
+            "assert c._DEPS_OK is True, 'critic'\n"
+            "assert w._DEPS_OK is True, 'watcher'\n"
+            "import accuracy_update\n"
+            "assert isinstance(accuracy_update.record_clean('probe-area', 'probe-contract.md'), dict)\n"
+            "err = io.StringIO(); real = sys.stderr; sys.stderr = err\n"
+            "try:\n"
+            "    out = accuracy_update.parse_journal_entries('### 2026-01-01 -- T\\n- **Trigger:** manual\\n')\n"
+            "finally:\n"
+            "    sys.stderr = real\n"
+            "assert out == [], out\n"
+            "lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]\n"
+            "assert len(lines) == 1 and '_registry_layout' in lines[0], lines\n"
+            "print('ok')\n"
+        )
+        done = subprocess.run([sys.executable, "-c", probe], capture_output=True, env=self.p.env(),
+                              cwd=str(self.p.base), timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
+        self.assertIn(b"ok", done.stdout)
 
 
 class WorktreeTests(TrackerCase):

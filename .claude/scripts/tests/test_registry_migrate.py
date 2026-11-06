@@ -615,6 +615,141 @@ class RefusalTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+class FixTheT9ReviewTests(unittest.TestCase):
+    """Issue 292: W2 (backup layout), W3 (entry-level I-12), N2 (plan-build-failed), N3 (folders of a failed run)."""
+
+    def env(self, p: Proj) -> dict:
+        return {"CLAUDE_CONFIG_DIR": str(p.home / ".claude"), "HOME": str(p.home), "USERPROFILE": str(p.home)}
+
+    def inproc(self, p: Proj, *args: str):
+        import registry_migrate as rm
+        return run_inproc(rm, ["--project", str(p.project), "--plugin-root", str(PLUGIN_FIXTURE), *args], self.env(p))
+
+    def test_w2_backups_land_under_the_path_relative_to_the_project(self):
+        p = Proj(self)
+        before = snapshot(p.project)
+        done = p.apply()
+        self.assertEqual(done.returncode, 0, out(done))
+        backup = Path(p.report(done)["report_dir"]) / "backup"
+        self.assertEqual((backup / ".claude" / "registries" / "JOURNAL.md").read_bytes(),
+                         before[".claude/registries/JOURNAL.md"])
+        self.assertTrue(all(q.relative_to(backup).parts[:2] == (".claude", "registries")
+                            for q in backup.rglob("*") if q.is_file()))
+
+    def test_w3_a_forced_plan_that_moves_a_body_line_between_entries_is_content_loss(self):
+        from registry_migrations import m0001_domain_split as m0001
+        p = Proj(self)
+        before = snapshot(p.project)
+        original = m0001._insert_block
+        held: dict = {}
+
+        def moving(lines, boundary, block):
+            block = list(block)
+            if block and "Unclassified lesson" in block[0] and "line" not in held:
+                held["line"] = block.pop()                 # a body line leaves the first entry ...
+            elif block and "Orphan journal lesson" in block[0] and "line" in held and "done" not in held:
+                block.append(held["line"])                 # ... and lands on the next one: same file, same multiset
+                held["done"] = True
+            return original(lines, boundary, block)
+        with mock.patch.object(m0001, "_insert_block", moving):
+            code, stdout, stderr = self.inproc(p, "--apply", "--expect-sha256", "0" * 64)
+        self.assertTrue(held.get("done"), "the forced plan did not trigger")
+        self.assertEqual(code, 3, stderr)
+        rep = json.loads(stdout)
+        self.assertEqual(rep["refusal_code"], "content-loss-detected")
+        self.assertIn("Unclassified lesson".lower(), rep["refusal_message"].lower())
+        self.assertEqual(snapshot(p.project), before)
+        self.assertTrue((Path(rep["report_dir"]) / "report.json").is_file())
+
+    def test_w3_crlf_bom_and_trailing_space_registries_are_not_content_loss(self):
+        p = Proj(self)
+        for path in sorted(p.regs.rglob("*.md")):
+            text = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+            lines = [ln + "  " if ln.strip() else ln for ln in text.split("\n")]
+            path.write_bytes(b"\xef\xbb\xbf" + "\r\n".join(lines).encode("utf-8"))
+        p.commit()
+        done = p.apply()
+        self.assertEqual(done.returncode, 0, out(done))
+        self.assertNotIn("content-loss-detected", out(done))
+        self.assertEqual(p.state(), "current", rl.layout_state(p.regs).reasons)
+
+    def test_w3_two_copies_whose_headings_differ_only_in_the_date_are_a_conflict(self):
+        p = Proj(self)
+        copy = (p.regs / "JOURNAL" / "frontend.md").read_text(encoding="utf-8").split("### ", 1)[1]
+        backend = p.regs / "JOURNAL" / "backend.md"
+        backend.write_bytes(backend.read_bytes() + ("\n### " + copy.replace("2026-10-12", "2026-10-13")).encode("utf-8"))
+        p.commit()
+        before = snapshot(p.project)
+        done = p.run("--dry-run")
+        self.assertEqual(done.returncode, 3, out(done))
+        rep = p.report(done)
+        self.assertEqual(rep["refusal_code"], "conflicting-entry")
+        self.assertEqual(rep["registries"]["JOURNAL"]["conflicts"][0]["field"], "heading")
+        self.assertEqual(snapshot(p.project), before)
+
+    def test_w3_two_output_entries_with_one_key_are_a_conflicting_entry(self):
+        from registry_migrations import m0001_domain_split as m0001
+        p = Proj(self)
+        import registry_migrations
+        ctx = m0001.Context(project=p.project.resolve(), registries_dir=p.regs, templates_dir=REPO_ROOT / ".claude" /
+                            "templates" / "registries", plugin_keys=None)
+        plan = m0001.build_plan(ctx)
+        self.assertIsNone(plan.refusal)
+        self.assertIsNone(m0001.verify_plan(plan))
+        entries = plan.accounting["JOURNAL"]["out_entries"]
+        first = entries[0]
+        entries.append(dict(first, location="JOURNAL/elsewhere.md:9"))
+        verdict = m0001.verify_plan(plan)
+        self.assertEqual(getattr(verdict, "code", ""), "conflicting-entry")
+        self.assertIn(first["location"], verdict)
+        self.assertIn("JOURNAL/elsewhere.md:9", verdict)
+        self.assertIn(first["first_line"], verdict)
+        self.assertIs(registry_migrations.migration_for("pending"), m0001)
+
+    def test_n2_a_plan_build_exception_writes_a_refused_report_and_exits_2(self):
+        from registry_migrations import m0001_domain_split as m0001
+        p = Proj(self)
+        before = snapshot(p.project)
+        with mock.patch.object(m0001, "build_plan", side_effect=RuntimeError("boom in the planner")):
+            code, stdout, stderr = self.inproc(p, "--dry-run")
+        self.assertEqual(code, 2, stderr)
+        self.assertEqual(snapshot(p.project), before)
+        shown = json.loads(stdout)
+        saved = json.loads((Path(shown["report_dir"]) / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved, shown)
+        self.assertEqual(saved["mode"], "refused")
+        self.assertEqual(saved["refusal_code"], "plan-build-failed")
+        self.assertIn("RuntimeError", saved["error"])
+        self.assertIn("boom in the planner", saved["error"])
+        self.assertEqual(saved["plan_hash"], "none")
+        self.assertEqual((saved["files"], saved["conflicts"], saved["registries"]), ([], [], {}))
+        self.assertTrue((Path(shown["report_dir"]) / "registry-migration-report.md").is_file())
+        self.assertIn("plan-build-failed", stderr)
+
+    def test_n3_a_folder_made_by_a_failed_run_is_gone_and_an_existing_one_stays(self):
+        p = Proj(self, "stale-sync")
+        self.assertFalse((p.regs / "MECHANISMS").exists())
+        self.assertTrue((p.regs / "JOURNAL").is_dir())
+        rep = p.dry()
+        real_replace = os.replace
+        calls = {"stage": 0}
+
+        def flaky(src, dst, *a, **kw):
+            if ".stage-" in os.path.basename(str(src)):
+                calls["stage"] += 1
+                if calls["stage"] == 3:
+                    raise OSError("simulated replace failure")
+            return real_replace(src, dst, *a, **kw)
+        with mock.patch("_preview_apply.os.replace", flaky):
+            code, stdout, stderr = self.inproc(p, "--apply", "--expect-sha256", rep["plan_hash"])
+        self.assertEqual(code, 3, stderr)
+        self.assertEqual(json.loads(stdout)["refusal_code"], "write-failed")
+        self.assertFalse((p.regs / "MECHANISMS").exists())
+        self.assertFalse((p.regs / "VOCABULARY").exists())
+        self.assertTrue((p.regs / "JOURNAL").is_dir())
+
+
+# ---------------------------------------------------------------------------
 class VendoredTests(unittest.TestCase):
     """(d) The project vendors the plugin's scripts: the only plugin tree is the project itself."""
 

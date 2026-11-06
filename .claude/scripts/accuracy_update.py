@@ -401,9 +401,11 @@ def record_from_contract(contract_path: str, verdict_or_source: str, is_failure:
 #: contract was already approved when the issue surfaced -- the same accuracy signal.
 POST_APPROVAL_TOKENS = ("post-approval", "post-impl", "post-implementation")
 
-_ENTRY_HEADER = re.compile(r"^###\s+(\d{4}-\d{2}-\d{2})\s+(?:—|--|-)\s+(.+?)\s*$", re.MULTILINE)
-_TRIGGER_LINE = re.compile(r"^\s*-\s*\*\*Trigger:\*\*\s*(.+?)\s*$", re.MULTILINE)
-_SOURCE_LINE = re.compile(r"^\s*-\s*\*\*Source contract:\*\*\s*`?([^\s`]+)`?", re.MULTILINE)
+_SOURCE_VALUE = re.compile(r"^\s*`?([^\s`]+)")
+
+#: The reader of the journal grammar that seeded a file (I-14). Each ``seeded_files`` value records it; a file whose
+#: value holds no reader (or a lower one) is seeded again on its next read, with every signature marked seen.
+JOURNAL_READER = 2
 
 
 def journal_signature(date: str, title: str) -> str:
@@ -412,30 +414,37 @@ def journal_signature(date: str, title: str) -> str:
 
 
 def parse_journal_entries(text: str) -> list[dict]:
-    """Every ``### YYYY-MM-DD <sep> <title>`` block: {sig, date, title, trigger, source_contract, body}."""
-    headers = list(_ENTRY_HEADER.finditer(text))
+    """Every journal entry of ``text``: {sig, date, title, trigger, source_contract, body}.
+
+    The entries come from ``_registry_layout.parse_text`` (the sole owner of the journal grammar): entries only, never
+    legacy entries (I-8c) and never anything inside a fenced block (I-8). The module is imported here, not at the top
+    ("Import chain"): when it is missing, one stderr line names it and no entries are returned, so the hooks that
+    import this module keep working.
+    """
+    try:
+        import _registry_layout as rl  # lazy: the module-level imports of this file stay as they were
+    except ImportError as exc:
+        try:
+            sys.stderr.write("[accuracy_update] _registry_layout is unavailable (%s); no journal entries read\n" % exc)
+        except Exception:
+            pass
+        return []
     entries: list[dict] = []
-    for i, h in enumerate(headers):
-        start = h.start()
-        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
-        # Stop at the next `## ` heading if it comes before the next `### `.
-        ss_break = re.search(r"(?m)^##\s", text[h.end():end])
-        if ss_break:
-            end = h.end() + ss_break.start()
-        body = text[start:end]
-        date = h.group(1)
-        title = h.group(2).strip()
-        trig_m = _TRIGGER_LINE.search(body)
-        src_m = _SOURCE_LINE.search(body)
+    for entry in rl.parse_text(text, "JOURNAL").entries:
+        if entry.kind != "entry":
+            continue
+        src_m = _SOURCE_VALUE.match(entry.fields.get("source contract", ""))
+        title = entry.title.strip()
         entries.append({
-            "sig": journal_signature(date, title),
-            "date": date,
+            "sig": journal_signature(entry.date, title),
+            "date": entry.date,
             "title": title,
-            "trigger": (trig_m.group(1).strip().lower() if trig_m else ""),
+            "trigger": entry.fields.get("trigger", "").strip().lower(),
             "source_contract": (src_m.group(1).strip() if src_m else ""),
-            "body": body,
+            "body": entry.text,
         })
     return entries
+
 
 
 def _seen_path() -> Path:
@@ -508,6 +517,11 @@ def _resolve_contract_path(raw: str, journal_file: Path) -> Path | None:
     return None
 
 
+def _seeded_by_current_reader(value) -> bool:
+    """True when a ``seeded_files`` value records the current journal reader (a bare ``True`` records none)."""
+    return isinstance(value, dict) and isinstance(value.get("reader"), int) and value["reader"] >= JOURNAL_READER
+
+
 def process_journal_change(files, fresh=()) -> list[dict]:
     """Fire the 'post-approval-journal' signal for journal entries that are new (Event "Journal entry appended").
 
@@ -517,7 +531,8 @@ def process_journal_change(files, fresh=()) -> list[dict]:
     The machine-wide cache holds ``sigs`` (every signature seen) and ``seeded_files`` (the files whose
     existing entries were taken as history), keyed by ``journal_file_key``. Every file of
     ``registry_files("JOURNAL.md")`` that is not seeded is seeded first: its signatures are marked seen and
-    nothing fires. A new signature in a seeded changed file fires, and so does a fresh one. An old cache
+    nothing fires. So does a file whose value records no reader, or an older one: it is seeded again once with
+    reader ``JOURNAL_READER`` (I-14 reader re-seed). A new signature in a seeded changed file fires, and so does a fresh one. An old cache
     (``_initialized``, no ``seeded_files``) counts as having seeded the root ``JOURNAL.md`` key only.
     Nothing fires retroactively or twice.
 
@@ -559,7 +574,7 @@ def process_journal_change(files, fresh=()) -> list[dict]:
         except OSError:
             continue
         entries = parse_journal_entries(text)
-        was_seeded = key in seeded
+        was_seeded = _seeded_by_current_reader(seeded.get(key))
         is_changed = key in changed
         candidates: list[dict] = []
         for entry in entries:
@@ -568,7 +583,7 @@ def process_journal_change(files, fresh=()) -> list[dict]:
             if (was_seeded and is_changed) or entry["sig"] in fresh_sigs:
                 candidates.append(entry)
             known[entry["sig"]] = True
-        seeded[key] = True
+        seeded[key] = {"reader": JOURNAL_READER}
         if not was_seeded:
             log_event(hook="accuracy", event="journal-tracker-seeded", file=str(path),
                       details={"entries_seeded": len(entries) - len(candidates)}, log_name="accuracy")
