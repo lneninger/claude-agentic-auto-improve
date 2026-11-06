@@ -73,6 +73,17 @@ REQUIREMENTS: List[Requirement] = [
     Requirement(".claude/registries/JOURNAL.md", "copy",
                 "lessons the design agent and the critic read on every run",
                 source=".claude/registries/JOURNAL.md"),
+    # The project-tier catch-all domain file of each registry (registry layout 2). Copied, never overwritten;
+    # creating one does not migrate anything: `registry_migrate.py` is the only thing that does.
+    Requirement(".claude/registries/MECHANISMS/general.md", "copy",
+                "project-tier mechanisms that fit no other domain file; the registry layout always has this file",
+                source=".claude/templates/registries/MECHANISMS/general.md"),
+    Requirement(".claude/registries/VOCABULARY/general.md", "copy",
+                "project-tier vocabulary that fits no other domain file; the registry layout always has this file",
+                source=".claude/templates/registries/VOCABULARY/general.md"),
+    Requirement(".claude/registries/JOURNAL/general.md", "copy",
+                "project-tier lessons that fit no other domain file; the registry layout always has this file",
+                source=".claude/templates/registries/JOURNAL/general.md"),
     Requirement(".claude/project-profile.md", "scaffold",
                 "the only file you must author; the loop reads its implementers and review-gates slots; /auto-improve-finish-install fills the slots it can",
                 source=".claude/project-profile.md", authored=True),
@@ -182,6 +193,52 @@ def find_plugin_root(explicit: Optional[str] = None) -> Optional[Path]:
         if (c / ".claude/templates/concept-contract.md").is_file():
             return c
     return None
+
+
+def registry_layout_report(project_root: Path) -> Dict[str, Any]:
+    """Report-only: the registry layout state and the number of body-less journal entries.
+
+    Returns ``{"layout": {...}, "bodyless_journal_entries": int | None, "error": str | None}``. ``layout`` is the
+    layout state (``state``, ``marker``, ``layout_current``, ``reasons``, ``remedy``). The doctor never migrates:
+    the remedy it prints is a command for the operator. ``_registry_layout`` is imported here, not at the top, so a
+    copy of the scripts that lacks it (or its ``_claude_paths`` dependency) reports the missing module by name and
+    every other check goes on.
+    """
+    try:
+        import _registry_layout as rl
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or "_registry_layout"
+        message = ("the module %s is missing, so the registry layout was not checked (copy the scripts folder "
+                   "from the plugin: %s)" % (missing, exc))
+        return {"layout": {"state": "unavailable", "marker": "none", "layout_current": None, "reasons": [message],
+                           "remedy": ""},
+                "bodyless_journal_entries": None, "error": message}
+    registries = Path(project_root) / ".claude" / "registries"
+    try:
+        layout = rl.layout_state(registries).as_dict()
+        entries = rl.collect_entries(registries, project_root=Path(project_root), registries=["JOURNAL"])
+        bodyless = sum(1 for e in entries if e.kind == "entry" and e.status != rl.ARCHIVED and not e.has_body)
+    except Exception as exc:
+        message = "the registries could not be read: %s" % exc
+        return {"layout": {"state": "unavailable", "marker": "none", "layout_current": None, "reasons": [message],
+                           "remedy": ""},
+                "bodyless_journal_entries": None, "error": message}
+    return {"layout": layout, "bodyless_journal_entries": bodyless, "error": None}
+
+
+def registry_layout_lines(info: Dict[str, Any]) -> List[str]:
+    """The two report lines for ``registry_layout_report``'s result."""
+    layout = info["layout"]
+    if info["error"]:
+        first = "registry layout: unavailable - %s" % info["error"]
+    else:
+        first = "registry layout: %s" % layout["state"]
+        if layout["reasons"]:
+            first += " (%s)" % ", ".join(layout["reasons"])
+        if layout["remedy"]:
+            first += " - run: %s" % layout["remedy"]
+    count = info["bodyless_journal_entries"]
+    return [first, "body-less journal entries: %s" % ("unknown" if count is None else count)]
 
 
 def check(project_root: Path) -> List[Requirement]:
@@ -1029,8 +1086,11 @@ def main() -> int:
     missing = check(project)
 
     if not args.fix:
+        layout_info = registry_layout_report(project)
         out = {"project": str(project), "plugin_root": str(plugin) if plugin else None,
-               "missing": [{"path": r.path, "kind": r.kind, "why": r.why} for r in missing]}
+               "missing": [{"path": r.path, "kind": r.kind, "why": r.why} for r in missing],
+               "registry_layout": layout_info["layout"],
+               "bodyless_journal_entries": layout_info["bodyless_journal_entries"]}
         if args.json:
             print(json.dumps(out, indent=2))
         else:
@@ -1040,12 +1100,18 @@ def main() -> int:
                 print("  nothing missing")
             for r in missing:
                 print(f"  missing  {r.path:<44} [{r.kind}] {r.why}")
+            for line in registry_layout_lines(layout_info):
+                print(line)
             print("\nrun again with --fix to create what is safe")
         return 0
 
     report = apply_fixes(project, missing, plugin)
     report["project"] = str(project)
     report["plugin_root"] = str(plugin) if plugin else None
+    # Report-only, read after the fixes: --fix never migrates a layout.
+    layout_info = registry_layout_report(project)
+    report["registry_layout"] = layout_info["layout"]
+    report["bodyless_journal_entries"] = layout_info["bodyless_journal_entries"]
 
     if args.json:
         print(json.dumps(report, indent=2))
@@ -1060,6 +1126,8 @@ def main() -> int:
             print(f"  UNRESOLVED     {p}")
         if not any(report[k] for k in ("created", "needs_authoring", "left_to_you", "unresolved")):
             print("  nothing to do")
+        for line in registry_layout_lines(layout_info):
+            print(line)
     return 0
 
 
