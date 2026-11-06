@@ -8,7 +8,7 @@ user_invocable: true
 
 This skill holds the application layer of the design method. It builds on the design foundation owned by `agentic-auto-improve:website-design` (`references/foundation.md`) and never restates it. A marketing or content page is designed with `website-design` alone.
 
-The `ui-ux-designer` agent keeps one step this skill does not repeat: **Step 0, the `ui-evolution` journal lessons.** When you run this skill on its own, do that step first (grep `.claude/registries/JOURNAL.md` for `Tags:.*ui-evolution`, apply each lesson whose `Apply when:` matches, treat `recurring-mistake` as load-bearing), exactly as Step 0 of `agents/ui-ux-designer.md` words it.
+The `ui-ux-designer` agent keeps one step this skill does not repeat: **Step 0, the `ui-evolution` journal lessons.** When you run this skill on its own, do that step first (grep `.claude/registries/JOURNAL.md` and `.claude/registries/JOURNAL/*.md` for `Tags:.*ui-evolution`, apply each lesson whose `Apply when:` matches, treat `recurring-mistake` as load-bearing), exactly as Step 0 of `agents/ui-ux-designer.md` words it.
 
 ## Project Context
 

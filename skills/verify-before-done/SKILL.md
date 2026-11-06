@@ -27,6 +27,8 @@ Roots come from `.claude/project-profile.md`. Read it first; do not infer a path
 
 **Step 5.5 (safety-critical review gate) fires on every non-docs-only scope** — it short-circuits to PASS when no safety-critical path is touched, so it is cheap. See Step 5.5 for the path-to-reviewer mapping.
 
+**Step 5.6 (registry structure lint) fires on every scope, docs-only included**, because a registry file under `.claude/registries/` is a docs-only change that can break the registry layout.
+
 ## Steps 1 to 4: the scripted runner first, the prose steps as the fallback
 
 When Step 0 selected any of Steps 1 to 4, try `land_contract.py --verify-here` first. It runs the configured verification steps of this checkout against the failing-test baseline on the default branch, and it is the one test run: **the prose Steps 1 to 3 never run beside it**, because two test runs on one LocalDB would collide. It never pushes, merges, resets, cleans or regenerates anything, so Step 4 (drift) stays the prose regenerate-compare-stage step below, whatever the runner says.
@@ -225,6 +227,38 @@ The 2026-05-17 eval-runs consolidation contract showed 5 WARN findings from `con
 
 For a one-shot human-approved exception, the **user** (not an agent) sets `CLAUDE_VERIFY_REVIEW_GATE=off` in the environment for the session. Agents MUST NOT set or unset this. Document any use in the commit message.
 
+## Step 5.6: Registry structure lint
+
+Run the structure lint of the registries (the three root files and their domain files, `MECHANISMS/*.md`, `VOCABULARY/*.md`, `JOURNAL/*.md`). Find `validate_registries.py` with the standard script lookup block, then run it with the project root:
+
+```bash
+VAL=
+S=.claude/scripts/validate_registries.py
+if [ -f "$S" ]; then VAL=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then VAL=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  VAL=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$VAL" --check-structure --project "$CLAUDE_PROJECT_DIR"
+```
+
+If `VAL` comes back empty, say the lint could not run (the plugin's script was not found) and report Step 5.6 as `NOT RUN`; never report it as passed. Otherwise read the exit code:
+
+- **1:** the registries hold a finding (a bodiless entry, a duplicate title, project content in a Universal root, an invalid domain file, a stale digest or a malformed entry) on a project that is on registry layout 2. The verdict is **NOT-READY**: halt, show the printed findings with their file and line, and do not go on to Step 6. A bodiless entry is cleared with the `registry_append.py ... --archive-title-only` line the lint prints, run by the operator; never by hand-editing the registry.
+- **0:** the step passes. `advisory:` lines in the output (a dead path reference, a legacy entry, a project that is not yet on registry layout 2) are reported as written, and they do **not** make the verdict NOT-READY.
+- **2:** the lint could not run; show its message and report Step 5.6 as `NOT RUN`.
+
 ## Step 6: HANDOFF completeness check
 
 If the caller is an agent producing a `### HANDOFF` block (see `.claude/HANDOFF_SCHEMA.md`), verify:
@@ -289,6 +323,7 @@ Once all applicable steps pass, emit:
 - Generated drift: CLEAN
 - Migration applied: <yes/no/NA>
 - Safety-critical review gate: PASS (<n> isolated reviewers verified | NO SAFETY-CRITICAL PATHS)
+- Registry structure lint: PASS (<n> advisory lines) | NOT-READY | NOT RUN
 - HANDOFF fields: COMPLETE
 - Commit hygiene: CLEAN
 - VERDICT: READY
