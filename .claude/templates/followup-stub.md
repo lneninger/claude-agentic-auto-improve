@@ -19,7 +19,7 @@
 
 <One sentence — concrete action that would close this stub. Examples:
 - "Run `/design-first` on this stub to produce a full draft contract."
-- "Append to `.claude/registries/MECHANISMS.md` under <project>."
+- "Append the mechanism with `registry_append.py --registry mechanisms` to the matching `MECHANISMS/<domain>.md` file."
 - "Audit the existing area for drift against the new shape introduced in the parent."
 - "Open a backlog ticket and re-evaluate after phase X ships.">
 

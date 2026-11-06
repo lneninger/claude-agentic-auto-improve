@@ -33,10 +33,10 @@
   One paragraph. Describe the concept in the user's vocabulary, not implementation terms.
 
 - **Existing VOCABULARY.md terms that apply:**
-  List every term from `.claude/registries/VOCABULARY.md` (Universal or Project sections) that is relevant. Link the section header so the reader can jump to the definition.
+  List every term from `.claude/registries/VOCABULARY.md` (the Universal root) or a `.claude/registries/VOCABULARY/*.md` domain file that is relevant. Link the section header so the reader can jump to the definition.
 
 - **New terms proposed for VOCABULARY.md:**
-  For each: the term, the proposed one-paragraph definition, and which tier it belongs in (Universal or Project). If the term is ambiguous, DO NOT guess — move it to Open Questions.
+  For each: the term, the proposed one-paragraph definition, and where it belongs (the Universal root, or a domain file such as `VOCABULARY/general.md`). If the term is ambiguous, DO NOT guess — move it to Open Questions.
 
 ---
 
@@ -102,7 +102,7 @@ Declare every shape this feature introduces or modifies. No implementation code 
 
 ## Reused Mechanisms
 
-Every entry from `.claude/registries/MECHANISMS.md` this task leans on. No exceptions — if you are not reusing at least one mechanism, you have not looked hard enough.
+Every entry from `.claude/registries/MECHANISMS.md` or a `.claude/registries/MECHANISMS/*.md` domain file this task leans on. No exceptions — if you are not reusing at least one mechanism, you have not looked hard enough.
 
 For each: `<mechanism name>` — **extended by `<X>`** OR **consumed as-is**.
 
@@ -323,9 +323,9 @@ Must be resolved before `Status` flips to `approved`. Each question must be answ
 
 ## Critique
 
-> **Filled by `contract-critic` during `/design-first` Step 4.5, AFTER the data-architect drafts this contract and BEFORE the user reviews it.** The data-architect leaves this section empty. The critic reads MECHANISMS.md / VOCABULARY.md / INTEGRATION.md / JOURNAL.md and appends BLOCKER / WARN / NIT findings here so the user sees them alongside Open Questions.
+> **Filled by `contract-critic` during `/design-first` Step 4.5, AFTER the data-architect drafts this contract and BEFORE the user reviews it.** The data-architect leaves this section empty. The critic reads the root registry files, their domain files (`MECHANISMS/*.md`, `VOCABULARY/*.md`, `JOURNAL/*.md`) and INTEGRATION.md, and appends BLOCKER / WARN / NIT findings here so the user sees them alongside Open Questions.
 >
-> **The critic is advisory.** The user remains the approval gate — Status flips to `approved` only after the user reviews both Open Questions AND critique findings. User-confirmed findings become entries in `.claude/registries/JOURNAL.md` automatically (Trigger: `pre-approval critic`) so the same defect class is caught on future contracts.
+> **The critic is advisory.** The user remains the approval gate — Status flips to `approved` only after the user reviews both Open Questions AND critique findings. User-confirmed findings become journal entries (`JOURNAL/*.md`, appended with `registry_append.py`) automatically (Trigger: `pre-approval critic`) so the same defect class is caught on future contracts.
 >
 > **Format produced by the critic** (do not pre-fill):
 > ```
@@ -346,9 +346,9 @@ Must be resolved before `Status` flips to `approved`. Each question must be answ
 
 ## Lessons referenced
 
-> **Filled by `data-architect` during Step 4.** List every `.claude/registries/JOURNAL.md` entry (Universal or matching project) whose `Apply when:` pattern matched this contract and whose lesson influenced a design decision. Empty if no entries applied. This section is what makes the journal a living checklist — without it, lessons stay invisible.
+> **Filled by `data-architect` during Step 4.** List every journal entry (`.claude/registries/JOURNAL.md` root or a `JOURNAL/*.md` domain file) whose `Apply when:` pattern matched this contract and whose lesson influenced a design decision. Empty if no entries applied. This section is what makes the journal a living checklist — without it, lessons stay invisible.
 
-- **<YYYY-MM-DD — journal entry title>** — heeded by `<section / decision in this contract>`. Cross-reference: `.claude/registries/JOURNAL.md` § `<Universal lessons | Project: <name>>`.
+- **<YYYY-MM-DD — journal entry title>** — heeded by `<section / decision in this contract>`. Cross-reference: `.claude/registries/JOURNAL.md` or `JOURNAL/<domain>.md`, entry `<title>`.
 
 If no journal entries applied, write: `No applicable lessons in JOURNAL.md at draft time.`
 
