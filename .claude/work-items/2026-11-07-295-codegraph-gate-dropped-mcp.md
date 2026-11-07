@@ -13,9 +13,9 @@ branch: feature/295-codegraph-gate-dropped-mcp
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261107-improvement-295-codegraph-gate-dropped-mcp
 north_stars: none
 contract: .claude/concepts/2026-11-07-295-codegraph-gate-dropped-mcp.md
-pr: none
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/316
+issue_link: closes
+status: shipped
 created: 2026-11-07
 ---
 
