@@ -1,0 +1,43 @@
+status: completed
+commit: 28f0b1850ae68dc286c98d298abf48963dbac5b2
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/303
+merged_at: '2026-11-07T12:46:59Z'
+verified: github
+hand_resolved:
+  files:
+  - .claude-plugin/marketplace.json
+  - .claude-plugin/plugin.json
+  - .claude/addons/codegraph/addon.json
+  - .claude/addons/codegraph/hooks/codegraph-first-guard.py
+  - .claude/addons/codegraph/hooks/codegraph-turn-reset.py
+  - .claude/agent-memory/agentic-auto-improve-security-auditor/MEMORY.md
+  - .claude/agent-memory/agentic-auto-improve-security-auditor/plan-apply-ticket-and-shadow-log-links.md
+  - .claude/hooks/tests/test_codegraph_shadow.py
+  - .claude/references/codegraph-decision-table.md
+  - .claude/registries/JOURNAL.md
+  - .claude/registries/VOCABULARY.md
+  - .claude/reviews/2026-11-06-session-folder-owner-and-tool-named/review-fullstack-code-reviewer-pass4-merge.gate.json
+  - .claude/reviews/2026-11-06-session-folder-owner-and-tool-named/review-fullstack-code-reviewer-pass4-merge.md
+  - .claude/reviews/2026-11-06-session-folder-owner-and-tool-named/review-security-auditor-pass5-merge.md
+  - .claude/scripts/auto_improve_finish_install.py
+  - .claude/scripts/tests/test_auto_improve_finish_install.py
+  - .claude/scripts/tests/test_codegraph_session_parent_docs.py
+  - .claude/scripts/tests/test_plugin_manifests.py
+  - .cursor-plugin/plugin.json
+  - README.md
+  - plugin.json
+  - skills/auto-improve-codegraph-install/SKILL.md
+  - skills/auto-improve-codegraph-uninstall/SKILL.md
+  merge_commits: 2
+  commits_inspected: 6
+  commits_unread: 0
+base_ref: master
+base_is_default: true
+delivered_by: contract-delivery
