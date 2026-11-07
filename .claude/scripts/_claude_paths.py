@@ -96,8 +96,28 @@ concepts_roots = _pp.concepts_roots
 registry = _pp.registry
 # The split registry layout (layout 2): the root file plus its domain files, from ONE .claude root.
 # `checkout_equivalent_path` is the tracker's checkout-independent key (I-14).
-registry_files = _pp.registry_files
-registry_files_in = _pp.registry_files_in
+#
+# `registry_files` and `registry_files_in` are looked up with getattr: a `_project_paths.py` from a release before the
+# layout (e.g. 643b667) imports cleanly and lacks them, so a bare read would raise AttributeError at import, which the
+# callers that guard this import (they catch ImportError) would not catch. When the helper has a name the bridge
+# re-exports the helper's function itself; when it lacks one it binds a stand-in that raises ImportError ON CALL,
+# naming the function, the helper's file and the remedy. Never an inline copy and never a root-file-only fallback.
+# These are the only two names that can be missing beside a helper that passes the launcher check above; every
+# other name stays a bare read (checkout_equivalent_path is present in both older helpers, and a stand-in there
+# would turn a degraded run into an exception).
+def _missing_helper_function(name):
+    def stand_in(*_args, **_kwargs):
+        raise ImportError(
+            f"_claude_paths: {name}() is not available: the _project_paths.py at "
+            f"{getattr(_pp, '__file__', _HOOKS_DIR)} is from a release before the split registry layout and has no "
+            f"{name}. Bring the hooks folder to the same release as the scripts."
+        )
+    stand_in.__name__ = name
+    return stand_in
+
+
+registry_files = getattr(_pp, "registry_files", None) or _missing_helper_function("registry_files")
+registry_files_in = getattr(_pp, "registry_files_in", None) or _missing_helper_function("registry_files_in")
 checkout_equivalent_path = _pp.checkout_equivalent_path
 area_mapping_path = _pp.area_mapping_path
 work_item_conventions_path = _pp.work_item_conventions_path

@@ -80,7 +80,20 @@ def is_journal(path: Path) -> bool:
     if _pp is not None:
         try:
             return any(_same_file(path, candidate) for candidate in _pp.registry_files("JOURNAL.md"))
-        except Exception:
+        except Exception as exc:
+            if path.name == "JOURNAL.md" or (path.parent.name == "JOURNAL" and path.suffix == ".md"):
+                # A hooks folder older than the scripts (no registry_files): the edit goes untracked. Say so once
+                # and log it under the event name the default branch's tracker used; any other path stays silent.
+                try:
+                    sys.stderr.write("[journal-post-approval-tracker] registry_files is unavailable in %s (%s); "
+                                     "the journal edit was not tracked\n"
+                                     % (getattr(_pp, "__file__", "_project_paths.py"), type(exc).__name__))
+                except Exception:
+                    pass
+                log_event(hook="journal-post-approval-tracker", event="journal-tracker-reader-missing",
+                          file=str(path), details={"reason": "_project_paths.registry_files is unavailable",
+                                                   "error": "%s: %s" % (type(exc).__name__, exc)},
+                          log_name="accuracy")
             return False
     # No resolver (a partial copy of the hooks folder): fall back to the names, so the missing
     # entry point below is still reported once instead of the edit being silently ignored.
