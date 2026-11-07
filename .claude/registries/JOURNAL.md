@@ -491,6 +491,41 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a brief flips repository state (a migration apply, a registry rewrite, a layout marker) that a test written by an earlier sub-task asserts on, and no CI workflow runs that suite.
 - **Tags:** sub-task, regression, state-pin, run-line, brief
 
+### 2026-11-07 — A fail-soft reader must not record "seen" for what it could not read
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** When a reader degrades to "no entries" because a dependency is missing, the caller must tell that apart from an empty file and skip every state write (seen sets, seeded markers, reader versions); otherwise the first healthy run treats all history as new.
+- **Apply when:** a tracker or cache keys "already processed" on the output of a parser that has an ImportError or fail-soft path returning an empty result.
+- **Tags:** fail-soft, seen-cache, retroactive-fire, lazy-import, degraded-path
+
+### 2026-11-07 — A parent branch that shares files with a moving default branch must take the default branch in through a sub-task before its landing
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** The landing merges the default branch and resolves only union and regenerated paths. When the default branch rewrote a file the parent branch also rewrote (here the journal tracker, moved by each side onto a different shared reader), the landing halts. As soon as both sides touch one file, merge the default branch into the parent branch through a reviewed sub-task, decide which shared reader survives, and run the default branch's new suites there.
+- **Apply when:** a contract delivered through a parent branch changes a file the default branch has changed since the parent branch was cut.
+- **Tags:** parent-branch, landing, merge, shared-reader, unresolvable-conflict
+
+### 2026-11-07 — Merge rules written for a long-lived branch must heed the default branch's journal, not only the branch's own
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** A lesson the default branch added after the branch was cut is not in the branch's journal, yet it arrives with the merge and binds it. Read the default branch's JOURNAL.md (git show origin/<default>:.claude/registries/JOURNAL.md) before writing conflict-resolution rules.
+- **Apply when:** a contract writes rules for merging the default branch into a parent or other long-lived branch.
+- **Tags:** merge, journal, parent-branch, conflict-resolution
+
+### 2026-11-07 — No tool enforces how a pull request into a parent branch is merged; the next block must prove it
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** The repository allows merge commit, squash and rebase, and the Merge-direction check judges only the target. When a sub-task's value depends on a merge commit (a merge of the default branch), say so to the owner in its pull request, and open the next block with a check from the parent tip that the default branch's merge base moved.
+- **Apply when:** a sub-task's pull request must be merged with a merge commit.
+- **Tags:** merge-method, parent-branch, squash, run-first
+
+### 2026-11-07 — Adapters that rebuild an old reader over a stricter grammar must list every behaviour difference
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** Keeping the old reader's tests as acceptance tests proves only the forms those fixtures hold. Read both readers side by side, list each form they read differently (fences, prose sections, legacy headings, continuation, field repeats), and pin each with a fixture row.
+- **Apply when:** a contract replaces a reader's body with an adapter over another reader and keeps the old names.
+- **Tags:** adapter, shared-reader, behaviour-difference, fixtures
+
 ## Project tier
 
 This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.

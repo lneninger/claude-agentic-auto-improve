@@ -538,6 +538,18 @@ def process_journal_change(files, fresh=()) -> list[dict]:
 
     Returns the list of fired entries ({title, contract, areas}).
     """
+    # A degraded tracker seeds nothing (t11 W1): with no reader, "seen" would be recorded for entries never read.
+    try:
+        import _registry_layout  # noqa: F401  (only the import is checked here)
+    except ImportError as exc:
+        try:
+            sys.stderr.write("[accuracy_update] _registry_layout is unavailable (%s); journal tracker did nothing\n" % exc)
+        except Exception:
+            pass
+        log_event(hook="accuracy", event="journal-tracker-reader-missing", details={"error": str(exc)},
+                  log_name="accuracy")
+        return []
+
     fresh_sigs = {str(s) for s in (fresh or ())}
     changed: dict[str, Path] = {}
     for f in files or ():

@@ -1547,7 +1547,9 @@ registries (issue #235)" above.
    refusal also leaves the registry files byte-identical. The refusal codes are
    `project-undetermined`, `not-a-git-tree`, `uncommitted-registry-changes`,
    `conflicting-entry`, `unknown-layout`, `changed-since-preview`, `content-loss-detected`,
-   `symlink-target` and `write-failed`. Exit 3 is a refusal, and exit 2 is a bad argument.
+   `symlink-target` and `write-failed`. Exit 3 is a refusal, and exit 2 is a bad argument, or
+   `plan-build-failed` (an exception while building the plan; the report is still written and
+   names the error).
 
 6. **Check the result.**
 
