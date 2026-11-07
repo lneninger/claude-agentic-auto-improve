@@ -506,7 +506,11 @@ def _registry_files(project: Path, name: str) -> List[Tuple[str, bool]]:
     shipped = _CVB["is_shipped"]
     registries = Path(project) / ".claude" / "registries"
     found: List[Tuple[str, bool]] = []
-    for path in lister(registries, name + ".md"):
+    try:
+        listed = list(lister(registries, name + ".md"))
+    except ImportError as exc:  # the bridge's stand-in beside a hooks folder older than the scripts
+        raise Refusal("reader-unavailable", "_registry_layout.registry_files_in is unavailable: %s" % exc)
+    for path in listed:
         rel = _rel(Path(project), path)
         per_domain = path.parent != registries
         if shipped is None or shipped(rel):

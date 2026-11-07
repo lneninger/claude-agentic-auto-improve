@@ -1297,6 +1297,37 @@ class HiddenLayoutModuleTests(Base):
         self.assertEqual(out["capture"][0], 1)
         self.assertEqual(out["capture"][1]["refused"], "reader-unavailable")
 
+    def test_a_lister_that_raises_import_error_refuses_reader_unavailable_and_retrieval_still_runs(self):
+        """Amendment 6: beside an older hooks folder the bridge hands _registry_layout a stand-in that raises
+        ImportError on call. memory_boundary binds that function, not None, and must turn the error into the same
+        refusal as a missing module."""
+        p = self.project()
+        brief = p.write(BRIEF_REL, BRIEF)
+        p.write(".claude/concepts/%s.md" % SLUG, "# Contract\n\n**Work Item Brief:** %s\n" % BRIEF_REL)
+        p.write(".claude/registries/MECHANISMS.md", MECHANISMS)
+        report = p.write(".scratch/report.json", json.dumps({"contract": SLUG, "completion": {"verdict": "flipped"},
+                                                              "written_files": [BRIEF_REL]}))
+        script = self.SCRIPT.replace(
+            "sys.modules['_registry_layout'] = None\n"
+            "import memory_boundary as mb\n",
+            "import memory_boundary as mb\n"
+            "def stand_in(*a, **k):\n"
+            "    raise ImportError('registry_files_in() is not available (stand-in)')\n"
+            "mb._RL['registry_files_in'] = stand_in\n")
+        self.assertIn("stand_in", script)
+        calls = {
+            "retrieve": ["retrieve-request", "--project", str(p.root), "--brief", str(brief)],
+            "capture": ["capture-candidates", "--project", str(p.root), "--contract", SLUG, "--run-report",
+                        str(report), "--default-branch", "master"],
+        }
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", script % str(SCRIPTS_DIR), json.dumps(calls)],
+                              capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["retrieve"][0], 0, out["retrieve"])
+        self.assertEqual(out["capture"][0], 1)
+        self.assertEqual(out["capture"][1]["refused"], "reader-unavailable")
+
     def test_the_file_list_comes_from_the_layout_module_not_a_fixed_domain_list(self):
         source = (SCRIPTS_DIR / "memory_boundary.py").read_text(encoding="utf-8")
         self.assertNotIn("DEFAULT_DOMAINS", source)
