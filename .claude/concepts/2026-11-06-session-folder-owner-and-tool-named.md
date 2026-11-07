@@ -279,6 +279,12 @@ All answered by the user on 2026-11-06 (question dialog); each accepted the reco
 
 Revision 1, 2026-11-06, after critique round 1 (1 BLOCKER, 7 WARN, 4 NIT) and Q1-Q5: shipped-text list added; I-4 restated and `check-failed` added; the Hop proof accepts the 0.15.2 helper; the Remote rule reuses `_remote_host`; the POSIX base reads only the mapping; `retry-ticket-unwritten` added; the Stateless session; the three leak checks moved; decision order renumbered.
 
+## Divergence note (2026-11-07, merge with the hooks redesign)
+
+While this contract was in review, master merged the codegraph hooks redesign (#261, plugin 0.16.2). Its rule G-1 reads the turn marker before the target is classified. This contract's invariant I-6 allows a marker to be read only from a session folder proven usable, so the session check now runs first, ahead of target classification. Decision order after the merge: session check, marker, targets, subagent / no index / server, ticket.
+
+Effect: our earlier property "a non-source target resolves nothing" no longer holds. Every guarded call resolves the per-user parent, and the first call may create it (mode 0700 on POSIX), as master's step 0 already did for the old folder. An unusable state still lets non-source and no-target reads through, and still blocks a source read as `session-state-unusable`. Accepted by the code reviewer (pass 4, merge) and the security auditor (pass 5, merge) as the lesser evil: classifying first would drop G-1's saving, and reading the marker first would break I-6.
+
 ## Revision note (round 2)
 
 Revision 2, 2026-11-06, after critique pass 2 (1 BLOCKER, 6 WARN, 6 NIT); no new user decision:

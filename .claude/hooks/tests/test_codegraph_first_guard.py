@@ -2942,6 +2942,78 @@ def run_unusable_parent(w: World) -> None:
               describe(first) + " / " + describe(retry))
 
 
+# ---- criterion 9b (merge order): an unusable Session state still lets a NON-source call through, silently -------------
+# Merged step order: session check -> marker -> targets -> subagent/index/server -> ticket. The verdict runs BEFORE the
+# targets, so the silent allow of a README read, a read with no target and a `**/*.md` glob depends on step 1 skipping the
+# marker read and step 2 still running after an unusable verdict. A "fail fast" edit (block on an unusable state before
+# classifying) would break it; these rows pin it. `a.py` blocks as the control in the same fixture.
+def run_unusable_nonsource(w: World) -> None:
+    nt = os.name == "nt"
+    variable = "LOCALAPPDATA" if nt else "XDG_CACHE_HOME"
+
+    def relative_base(sb, session):
+        return {variable: "relative-271"}, "not-absolute", None
+
+    def session_link(sb, session):
+        target = sb.root / "nonsource-link-target"
+        target.mkdir()
+        af.session_parent(sb.home)  # a usable Per-user session parent
+        if not af.make_dir_link(pfolder(sb, session), target):
+            return None
+        return {}, "session-link", target
+
+    for label, build in (("LOCALAPPDATA/XDG_CACHE_HOME relative", relative_base), ("the Session folder is a link", session_link)):
+        with af.Sandbox("cgq9n-") as sb:
+            session = sid()
+            built = build(sb, session)
+            if built is None:
+                skip(f"Q-9n [{label}]", "the OS refused to create a folder link")
+                continue
+            extra, problem, link_target = built
+            project = project_of(sb, "u9n")
+            make_logs(project)
+            calls_ = (("a README Read", "Read", {"file_path": str(project / "README.md")}),
+                      ("a Read with no target", "Read", {}),
+                      ("a **/*.md Glob", "Glob", {"pattern": "**/*.md"}))
+            for what, tool, tool_input in calls_:
+                proc = run_hook(w.guard, sb, project, tool, tool_input, session, extra_env=extra)
+                check(f"Q-9n [{label}]: {what} exits 0 with EMPTY stderr", proc.returncode == 0 and proc.stderr == "", describe(proc))
+            check(f"Q-9n [{label}]: and none of the three wrote a block record", events(project, "block") == [],
+                  repr(events(project, "block")))
+            control = run_hook(w.guard, sb, project, "Read", {"file_path": str(project / "a.py")}, session, extra_env=extra)
+            check(f"Q-9n [{label}] [control]: a.py in the same fixture BLOCKS as session-state-unusable ({problem})",
+                  blocked(control) and names_problem(control.stderr, project, problem), describe(control))
+            if link_target is not None:
+                check(f"Q-9n [{label}]: and nothing was written through the link", not any(link_target.iterdir()),
+                      "target holds: %s" % [p.name for p in link_target.iterdir()])
+    # in-process: decide() allows a non-source target with the Session folder a link, and writes nothing through it
+    with af.Sandbox("cgq9d-") as sb:
+        session = sid()
+        target = sb.root / "decide-link-target"
+        target.mkdir()
+        af.session_parent(sb.home)
+        project = project_of(sb, "u9d")
+        make_logs(project)
+        if not af.make_dir_link(pfolder(sb, session), target):
+            skip("Q-9n decide: non-source-target with a link Session folder", "the OS refused to create a folder link")
+        else:
+            guard_mod = load_module(w.guard, "codegraph_first_guard_nonsource_decide")
+            saved_cwd = os.getcwd()
+            try:
+                with mock.patch.dict(os.environ, af.isolated_env(sb.home, sb.tmp, project), clear=True), \
+                        mock.patch.object(tempfile, "tempdir", str(sb.tmp)):
+                    os.chdir(str(project))
+                    got = guard_mod.decide("Read", {"file_path": str(project / "n.md")}, {"session_id": session, "cwd": str(project)})
+            except Exception as exc:  # noqa: BLE001
+                got = ("raised", repr(exc))
+            finally:
+                os.chdir(saved_cwd)
+            check("Q-9n decide: a .md Read with the Session folder a link is ('allow', 'non-source-target')",
+                  tuple(got) == ("allow", "non-source-target"), repr(got))
+            check("Q-9n decide: and the link target is unchanged (empty)", list(target.iterdir()) == [],
+                  "target holds: %s" % [p.name for p in target.iterdir()])
+
+
 # ---- check-failed: an exception while computing the verdict is a block, never the I-4 allow ---------------------------
 def run_check_failed(w: World) -> None:
     with af.Sandbox("cgq9f-") as sb:
@@ -3703,6 +3775,7 @@ def run() -> None:
         guarded("Q-foreign", run_foreign_marker, world)
         guarded("Q-rule", run_parent_rule_table, world)
         guarded("Q-unusable", run_unusable_parent, world)
+        guarded("Q-nonsource", run_unusable_nonsource, world)
         guarded("Q-checkfailed", run_check_failed, world)
         guarded("Q-announce", run_announce_unusable, world)
         guarded("Q-ticket", run_ticket_unwritten, world)
