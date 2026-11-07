@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-11-05
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-11-07, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/268, https://github.com/lneninger/claude-agentic-auto-improve/pull/274, https://github.com/lneninger/claude-agentic-auto-improve/pull/277, https://github.com/lneninger/claude-agentic-auto-improve/pull/282, https://github.com/lneninger/claude-agentic-auto-improve/pull/284, https://github.com/lneninger/claude-agentic-auto-improve/pull/289; 1 checklist items from review reports, 0 with no structured evidence; not performed: none; owner confirmed resolved: none
 **Work Item Brief:** .claude/work-items/2026-11-05-261-codegraph-hooks-redesign.md
 **Tracking issue:** #261
 **Budget:** 12,000 tokens
@@ -522,11 +523,11 @@ PRIOR_FINDINGS:
 
 ## Review checklist (filled in after implementation)
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [ ] Implementation matches Data Shapes exactly — not applicable (.claude/reviews/2026-11-05-codegraph-hooks-redesign/t1-live-checks-python-ai-developer.md)
+- [x] Reused Mechanisms are actually reused (no parallel implementations introduced) — evidence: .claude/reviews/2026-11-05-codegraph-hooks-redesign/t5-fail-open-review-fullstack-code-reviewer.md
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — not applicable (.claude/reviews/2026-11-05-codegraph-hooks-redesign/t1-live-checks-python-ai-developer.md)
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — not applicable (.claude/reviews/2026-11-05-codegraph-hooks-redesign/t1-live-checks-python-ai-developer.md)
+- [ ] Integration surfaces reflected on both backend and frontend sides — not applicable (.claude/reviews/2026-11-05-codegraph-hooks-redesign/t1-live-checks-python-ai-developer.md)
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — not applicable (.claude/reviews/2026-11-05-codegraph-hooks-redesign/t1-live-checks-python-ai-developer.md)
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — not applicable (.claude/reviews/2026-11-05-codegraph-hooks-redesign/t1-live-checks-python-ai-developer.md)
+- [x] `Status` flipped to `implemented`

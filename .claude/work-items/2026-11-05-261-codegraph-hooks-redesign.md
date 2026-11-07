@@ -89,3 +89,6 @@ rollout and cost measurements.
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-11-07: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/268, https://github.com/lneninger/claude-agentic-auto-improve/pull/274, https://github.com/lneninger/claude-agentic-auto-improve/pull/277, https://github.com/lneninger/claude-agentic-auto-improve/pull/282, https://github.com/lneninger/claude-agentic-auto-improve/pull/284, https://github.com/lneninger/claude-agentic-auto-improve/pull/289); contract 2026-11-05-codegraph-hooks-redesign flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed: none
