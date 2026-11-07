@@ -55,7 +55,10 @@ TICKET_RE = re.compile(r"ticket-[0-9a-f]{64}|\.tmp-[0-9a-f]{16}")
 PRUNED_FLAG = "pruned"
 LEGACY_SENTINEL_NAME = ".codegraph-used-this-turn"
 #: The only file names a session folder may hold (the atomic-write ``.tmp-<16 hex>`` siblings included); a folder with any other entry is kept whole.
-KNOWN_FILE_RE = re.compile(r"turn\.json|availability\.json|pruned|logged-[a-z0-9-]+|ticket-[0-9a-f]{64}|\.tmp-[0-9a-f]{16}")
+#: The shadow's Transcript cursor ``transcript-cursor.json`` and its temp file ``transcript-cursor.<pid>.tmp`` are known names (issue #261).
+KNOWN_FILE_RE = re.compile(
+    r"turn\.json|availability\.json|pruned|logged-[a-z0-9-]+|ticket-[0-9a-f]{64}|\.tmp-[0-9a-f]{16}"
+    r"|transcript-cursor\.json|transcript-cursor\.[0-9]+\.tmp")
 #: A session folder younger than this (by its newest file) is never pruned.
 MIN_AGE_SECONDS = 7 * 24 * 60 * 60
 _SESSION_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?")  # never ends in "." (Windows strips it)
@@ -416,7 +419,8 @@ def prune_session_folders(root, before_remove=_no_op, now=None) -> list:
 
     A folder is skipped (never deleted) when it is a link or not a folder, when on POSIX it is owned by another
     user, when it holds anything other than plain, non-link files named ``turn.json``, ``availability.json``,
-    ``pruned``, ``logged-<reason>`` or ``ticket-<64 hex>``, or when its newest file is younger than 7 days.
+    ``pruned``, ``logged-<reason>``, ``ticket-<64 hex>``, ``transcript-cursor.json`` or ``transcript-cursor.<digits>.tmp``,
+    or when its newest file is younger than 7 days.
     Immediately before each ``os.remove`` the file and the folder are checked again (still plain, still known,
     the folder still not a link, the file's real parent still the folder's real path); any mismatch stops and keeps
     the rest. The folder goes with ``os.rmdir`` (never a recursive delete).

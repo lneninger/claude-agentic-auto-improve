@@ -303,7 +303,7 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
-**Changed in 0.15.3 (the `codegraph` session folder moves to a per-user parent and fails closed, issue #271):**
+**Changed in 0.16.3 (the `codegraph` session folder moves to a per-user parent and fails closed, issue #271):**
 
 - **The move.** The `codegraph` add-on's hooks keep every session folder under the Per-user session parent: `%LOCALAPPDATA%\auto-improve-codegraph\`
   on Windows; `$XDG_CACHE_HOME/auto-improve-codegraph/`, else `~/.cache/auto-improve-codegraph/` (mode `0700`, owned by
@@ -324,12 +324,13 @@ test (zero `UserPromptSubmit` rows written), not by a timing run.
 - **The refusal says what to do.** `codegraph-tool-named` stays a refusal; its message now lists each entry with its layer and
   file, then the one step that fixes it: replace each entry with `mcp__codegraph__*`. One capability constant,
   `TREE_HOP_REFUSAL`, replaces `WORKTREE_OWN_ROOT_NATIVE`.
-- **Upgrading.** The 0.15.2 hook copies are in `released_sha256`, so the route is the same: `/auto-improve-codegraph-uninstall`
-  (deletes an unedited 0.15.2 copy), then `/auto-improve-codegraph-install`, then a new session.
+- **Upgrading.** The 0.15.2 and 0.16.2 hook copies are in `released_sha256`, so the route is the in-place one:
+  re-run `/auto-improve-codegraph-install` (it backs up an unedited older copy as `<hook>.bak-<UTC stamp>` and replaces
+  it), then start a new session.
 
 | Install age | What it has | Route |
 |---|---|---|
-| 0.15.2, hook files unedited | session folders in the system temp folder | uninstall, install, new session; the old temp folders are ignored |
+| 0.15.2 or 0.16.0 to 0.16.2, hook files unedited | session folders in the system temp folder, the older hooks | re-run the install, new session; the old temp folders are ignored |
 | an upgraded project that keeps its 0.15.2 `_project_paths.py` | a helper with `_hop_allowed` and `worktree_own_root`, no `TREE_HOP_REFUSAL` | nothing to do: it passes the Hop proof, so `index-other-tree` keeps firing |
 | installed from this release | nothing to do | run `addon --name codegraph --check` |
 
@@ -341,7 +342,7 @@ test (zero `UserPromptSubmit` rows written), not by a timing run.
   the main checkout; a `.codegraph` folder without `codegraph.db` is not an index), `index-other-tree`
   (a linked worktree with no index of its own, whose only index belongs to the main checkout),
   `server-not-configured`, `server-disabled` and `subagent` (the payload carries an `agent_id`).
-  Since 0.15.3 an unusable session folder blocks instead (`session-state-unusable`); see below.
+  Since 0.16.3 an unusable session folder blocks instead (`session-state-unusable`); see below.
 - **The retry escape replaces the shell advice.** The block message no longer teaches reading through
   the shell. Repeat the identical blocked call once and it is allowed and logged as `retry-escape`;
   the next prompt clears it. Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed. No environment variable is involved.
@@ -369,7 +370,7 @@ test (zero `UserPromptSubmit` rows written), not by a timing run.
 | any age, a hook file edited by your team | your edited copy | the uninstall keeps it (`kept-differs`); compare it with the plugin's copy, move your edits over, delete it, then install |
 | installed from this release | nothing to do | run `addon --name codegraph --check` to confirm the permission entry |
 
-The `test_auto_improve_finish_install.py` suite grows to 385 cases.
+The `test_auto_improve_finish_install.py` suite grows to 394 cases.
 
 **Changed in 0.14.5 (the settings writer refuses without the Project hook launcher):** four changes.
 
@@ -1037,7 +1038,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 399 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 408 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 

@@ -446,7 +446,7 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 ### 2026-11-06 — An exception sentence that names the outcome of a later call must list every outcome that call can have
 - **Trigger:** post-impl divergence
 - **Source contract:** .claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md
-- **Lesson:** The contract's E1 and I-7b sentences say the repeat after a `retry-ticket-unwritten` block "is blocked once more (as `source-target`)". The guard's step 8 gives `ambiguous-target` when every target is of the unknown class (a Grep with only a pattern, a generic Glob), so the sentence is false for those calls at ten shipped sites and in the guard's own banner. Before you write a sentence that predicts which reason a later call gets, read the branch that picks the reason and name every value it can return, or name the outcome without the reason ("blocked once more, this time with the retry recorded").
+- **Lesson:** The contract's E1 and I-7b sentences say the repeat after a `retry-ticket-unwritten` block "is blocked once more (as `source-target`)". The guard's ticket step gives `ambiguous-target` when every target is of the unknown class (a Grep with only a pattern, a generic Glob), so the sentence is false for those calls at ten shipped sites and in the guard's own banner. Before you write a sentence that predicts which reason a later call gets, read the branch that picks the reason and name every value it can return, or name the outcome without the reason ("blocked once more, this time with the retry recorded").
 - **Apply when:** a contract adds a message or doc sentence that predicts the block reason, exit code or log event of a future call
 - **Tags:** guard-message, block-reason, exception-sentence, doc-drift
 
@@ -456,6 +456,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Lesson:** The contract assumed `os.path.realpath` of a mapped network drive returns `\\server\share` (ASSUMED, to be recorded). The recorded row found a real mapped `Z:` on the developer machine (`net use`: Disconnected), and `os.path.realpath('Z:\\')` gave no answer in 10 seconds; measured again, `realpath('Z:\\x')` took 21.1 s and returned `Z:\x` unchanged, not the share, so the rule judged it local. A hook that resolves a drive before judging it can hang until the host's hook timeout, and a timed-out hook is a non-blocking error, which is an allow. When a rule must decide whether a drive letter is remote, ask the local drive table first (`GetDriveTypeW`, no network I/O) and refuse `DRIVE_REMOTE` there. Call `realpath` only after that check, and only for a drive the table calls fixed.
 - **Apply when:** a contract adds a Windows path rule that calls `realpath`, `resolve()`, `samefile` or any opening call on a path whose drive letter may be a mapped network drive, inside a hook with a timeout
 - **Tags:** windows, mapped-drive, realpath, hook-timeout, fail-closed
+
+### 2026-11-07 — A contract that reorders a hook's decision steps must be re-read against every contract that reorders the same steps before either merges
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md
+- **Lesson:** #271 put "no source target, allow" first so that nothing is resolved for a markdown read, while #261 (merged first) had moved the Turn marker check ahead of target classification for a cheaper hot path. A marker may only be read from a folder proven usable, so the merge had to resolve the per-user session folder on every call, non-source reads included: the contract's step 1 became false, the parent is now created on a markdown read, and every guard call pays the Windows drive check (about 8 ms for the `ctypes` import on first use). The bench and the docs written for #261 still described its order and its temp-folder layout. When two open contracts change the order or the state location of the same hook, name the other contract in each one's Preconditions, restate the merged order and its per-call cost in whichever lands second, and re-run the first one's measurement on the merged code.
+- **Apply when:** a contract renumbers or reorders decision steps, or moves the state, of a hook or guard that another open (unmerged) contract also edits
+- **Tags:** merge, decision-order, hot-path, concurrent-contracts, bench
+
+### 2026-11-03 — A stop list checked against a moving default branch needs a rule for changes outside the edited lines
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When a block stops on "master changed a file on the stop list", say in the block which kind of change still allows it to go on (for example a hunk outside the lines the block edits, proven by a quoted git diff and a clean git merge-tree), so a busy default branch does not force a contract amendment for every changelog paragraph.
+- **Apply when:** a fix or merge block's pre-check compares origin/<default> against a stop list of shared, often-edited files such as README.md
+- **Tags:** pre-check, stop-list, moving-base, merge-tree, amendment
 
 ---
 

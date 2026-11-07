@@ -26,7 +26,9 @@ What the script will not do:
 - It keeps the `mcp__codegraph__*` permission entry in `permissions.allow` and lists it under `kept`.
 - It does not delete the session folder `auto-improve-codegraph-<session id>` under the Per-user session parent (`%LOCALAPPDATA%\auto-improve-codegraph\` on Windows, `~/.cache/auto-improve-codegraph/` or `$XDG_CACHE_HOME/auto-improve-codegraph/` on POSIX): that is a leftover, and the reset hook prunes it. Folders `auto-improve-codegraph-*` left in the system temp folder by 0.15.2 are no longer read; delete them by hand if wanted (an older `.claude/.codegraph-used-this-turn` is a leftover of a turn the user may delete).
 
-**Upgrade route.** To take the 0.15.2 fix into a project that installed the add-on earlier: run this skill (it deletes an unedited old hook copy through the released hashes), run `/auto-improve-codegraph-install`, then start a new session.
+- It keeps the shadow log, `<project>/.claude/logs/codegraph-shadow.jsonl`, and everything else under `.claude/logs/`. The log is measurement data the report (`py -3 .claude/scripts/codegraph_shadow_report.py`) reads; the user deletes it by hand if they want it gone. Hook backups an upgrade took (`.claude/hooks/*.bak-*`) are kept too.
+
+**Upgrade route.** An uninstall is not needed to upgrade: re-running `/auto-improve-codegraph-install` backs up and replaces an unedited older hook copy (a hash listed in the manifest's `released_sha256`). The route through this skill is for a hook file you edited, which the install refuses as `addon-file-differs`: run this skill (it keeps the edited file; rename or remove it by hand), run `/auto-improve-codegraph-install`, then start a new session.
 
 ## Step 0: Find the script
 

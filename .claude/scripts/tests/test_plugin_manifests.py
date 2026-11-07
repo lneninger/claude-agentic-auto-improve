@@ -1085,6 +1085,19 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
                 _missing.append("%s: 0.15.2 hash %s is not listed" % (_hook, _folded))
         check("codegraph: released_sha256 covers the 0.15.2 copies of the three hooks (pinned from e4f392c)",
               not _missing and len(_data.get(af.KEY_RELEASED, {})) == 3, "\n".join(_missing))
+        # The 0.16.2 copies (origin/master at the merge of issue #271) are released too: the 0.16.3 hooks replace them.
+        # Pinned literals (folded SHA-256 of each hook at 0.16.2; the tracker did not change between 0.15.2 and 0.16.2).
+        _released_0162 = {
+            "codegraph-first-guard.py": "575c83f3aa031391b8d502d245b7e0fe02e4b91c4d632c4686240532175ac9c2",
+            "codegraph-turn-reset.py": "3a1658c93f5d2b29c445e185985df4e5946bbec61f333c23a0adee6f0707925d",
+            "codegraph-turn-tracker.py": "7e2daa3aead78342d70d87db6565ffdaccc03d9f39b4f80c04088ec7e7751dbc",
+        }
+        _missing_0162 = []
+        for _hook, _folded in _released_0162.items():
+            if _folded not in (_data.get(af.KEY_RELEASED, {}) or {}).get(_hook, []):
+                _missing_0162.append("%s: 0.16.2 hash %s is not listed" % (_hook, _folded))
+        check("codegraph: released_sha256 covers the 0.16.2 copies of the three hooks (pinned literals)",
+              not _missing_0162, "\n".join(_missing_0162))
         # Controls for the two validators above: they are test code, so they pass today, and they prove the checks can fail.
         _base = {af.KEY_HOOKS: ["a.py", "b.py"], af.KEY_PERMISSIONS_ALLOW: [CODEGRAPH_WILDCARD],
                  af.KEY_RELEASED: {"a.py": ["0" * 64], "b.py": ["f" * 64]}}

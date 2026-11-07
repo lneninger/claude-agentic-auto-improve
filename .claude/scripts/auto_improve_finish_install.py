@@ -2274,10 +2274,14 @@ def _addon_file_ops(project: Path, root: Path, folder: Path, manifest: Dict[str,
     """What the install does to each file: copy it, find it already identical, or leave a helper alone.
 
     A hook or document file that exists in the project and differs from the plugin's is refused
-    (addon-file-differs): nothing is overwritten. A helper that exists is kept as it is, whatever it holds.
+    (addon-file-differs): nothing is overwritten. The one exception is a hook whose folded hash is listed in the
+    manifest's ``released_sha256`` for that hook (an unedited older release): its action is ``update``, and the
+    apply backs it up, then replaces it. A helper that exists is kept as it is, whatever it holds.
     A disabled hook is not in the list: no install copies it.
     """
     ops: List[Dict[str, Any]] = []
+    released = manifest.get("released_sha256", {})
+    have_bytes = b""
     entries = [("hook", ".claude/hooks/" + h, folder / "hooks" / h) for h in manifest["hooks"]]
     entries += [("document", _document_path(folder.name, d), folder / "documents" / d)
                 for d in manifest.get("documents", [])]
@@ -2300,14 +2304,27 @@ def _addon_file_ops(project: Path, root: Path, folder: Path, manifest: Dict[str,
                     have = dest.read_bytes() if dest.is_file() and not os.path.islink(str(dest)) else None
                 except OSError:
                     have = None
-                if have is None or _fold_text_bytes(have) != _fold_text_bytes(wanted):
+                if have is not None and _fold_text_bytes(have) == _fold_text_bytes(wanted):
+                    action = "present"
+                elif (have is not None and kind == "hook"
+                      and _sha256(_fold_text_bytes(have)) in released.get(src.name, ())):
+                    # An unedited copy of an older release: replaced in place, after a backup (Q3).
+                    action = "update"
+                    have_bytes = have
+                else:
                     return refusal("addon-file-differs",
-                                   "%s exists in the project and differs from the plugin's add-on file, so it "
-                                   "is left as it is and nothing was written. Compare it with %s, then rename "
-                                   "or remove it by hand if you want the add-on's copy" % (rel, src), dest), []
-                action = "present"
-        ops.append({"path": rel, "kind": kind, "action": action, "dest": dest, "data": wanted,
-                    "sha256": _sha256(wanted)})
+                                   "%s exists in the project and differs from the plugin's add-on file, and it is "
+                                   "not an unedited copy of a released version, so it is left as it is and "
+                                   "nothing was written. Compare it with %s. To take the add-on's copy, run "
+                                   "/auto-improve-%s-uninstall (it keeps an edited file), rename or remove %s by "
+                                   "hand, then run /auto-improve-%s-install again"
+                                   % (rel, src, folder.name, rel, folder.name), dest), []
+        op = {"path": rel, "kind": kind, "action": action, "dest": dest, "data": wanted,
+              "sha256": _sha256(wanted)}
+        if action == "update":
+            op["have"] = have_bytes
+            op["have-sha256"] = _sha256(have_bytes)
+        ops.append(op)
     return None, ops
 
 
@@ -2761,7 +2778,10 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
     problem, edit = _plan_settings_edit(project, platform, home, regs, grants)
     if problem:
         return problem, {}
-    ops_digest = "\n".join("%s|%s|%s" % (o["action"], o["path"], o["sha256"]) for o in ops).encode("utf-8")
+    # An update also binds the bytes it will replace, so a file that changed after the preview changes the hash.
+    ops_digest = "\n".join("%s|%s|%s%s" % (o["action"], o["path"], o["sha256"],
+                                          "|" + o["have-sha256"] if "have-sha256" in o else "")
+                           for o in ops).encode("utf-8")
     old_bytes, new_bytes, to_add = edit["old-bytes"], edit["new-bytes"], edit["to-add"]
     index_notes = (_codegraph_index_notes(project)
                    if any(isinstance(n, dict) and n.get("name") == "codegraph" for n in manifest["prerequisites"])
@@ -2787,7 +2807,10 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
                     "args": _written_hook(r, platform)["args"], "registration-key": r.key} for r in to_add],
         "already-present": edit["present"], "interpreter": "py -3" if platform == "win32" else "python3",
         "disable-all-hooks": edit["disabled"], "unified-diff": edit["diff"],
-        "notes": list(edit["notes"]) + approval_notes + index_notes,
+        "notes": list(edit["notes"]) + approval_notes + index_notes + [
+            "%s is an unedited copy of an older release of this add-on. The apply saves it as %s.bak-<UTC stamp> "
+            "beside it, then replaces it with the add-on's current file" % (o["path"], posixpath.basename(o["path"]))
+            for o in ops if o["action"] == "update"],
         "kill-switches": [k for k in manifest.get("kill_switches", []) if isinstance(k, str)],
         "new-session-note": NEW_SESSION_NOTE,
     }
@@ -2849,13 +2872,14 @@ def apply_addon(
                        "what would be written changed since it was previewed (settings.json, the add-on's "
                        "files in the project or in the plugin differ); run the preview again", target)
     copies = [o for o in payload["ops"] if o["action"] == "copy"]
+    updates = [o for o in payload["ops"] if o["action"] == "update"]
     profile = payload["profile"]
     profile_changes = bool(profile["adds"])
     sheet_writes = payload["stylesheet-writes"]
     settings_changes = payload["settings-changes"]
-    if not copies and not settings_changes and not profile_changes and not sheet_writes:
+    if not copies and not updates and not settings_changes and not profile_changes and not sheet_writes:
         return {"status": "nothing-to-do", "target": str(target), "add-on": name}
-    destinations = [posixpath.dirname(op["path"]) for op in copies]
+    destinations = [posixpath.dirname(op["path"]) for op in copies + updates]
     destinations += [posixpath.dirname(write["path"]) for write in sheet_writes]
     linked = _linked_folder_refusal(project, list(dict.fromkeys(list(WRITE_FOLDERS) + destinations)), target)
     if linked:
@@ -2879,7 +2903,34 @@ def apply_addon(
         if os.path.lexists(str(op["dest"])):
             return refusal("changed-since-preview", "%s appeared while the apply was running; nothing more "
                            "was written" % op["path"], op["dest"])
+    for op in updates:
+        # Every update is checked before the first write: the file must still hold the bytes the plan saw.
+        try:
+            now = op["dest"].read_bytes() if op["dest"].is_file() and not os.path.islink(str(op["dest"])) else None
+        except OSError:
+            now = None
+        if now != op["have"]:
+            return refusal("changed-since-preview", "%s changed while the apply was running; nothing was written"
+                           % op["path"], op["dest"])
     copied: List[str] = []
+    updated: List[str] = []
+    file_backups: List[str] = []
+    for op in updates:
+        try:
+            backup_path = _backup_write(op["dest"], op["have"])
+        except OSError as exc:
+            return refusal("write-failed", "the backup of %s could not be written: %s (nothing of it was replaced)"
+                           % (op["path"], exc), op["dest"])
+        error = _atomic_write(op["dest"], op["data"])
+        if error:
+            try:
+                backup_path.unlink()  # the original is untouched, so the backup would only be clutter
+            except OSError:
+                pass
+            return refusal("write-failed", "%s could not be replaced: %s (updated so far: %s)"
+                           % (op["path"], error, ", ".join(updated) or "none"), op["dest"])
+        updated.append(op["path"])
+        file_backups.append(str(backup_path))
     for op in copies:
         error = _atomic_write(op["dest"], op["data"])
         if error:
@@ -2887,7 +2938,8 @@ def apply_addon(
                            % (op["path"], error, ", ".join(copied) or "none"), op["dest"])
         copied.append(op["path"])
     result: Dict[str, Any] = {"status": "applied", "target": str(target), "add-on": name,
-                              "copied": copied, "added": len(payload["to-add"]), "backup": None,
+                              "copied": copied, "updated": updated, "file-backups": file_backups,
+                              "added": len(payload["to-add"]), "backup": None,
                               "registered": [], "new-session-note": NEW_SESSION_NOTE}
     if profile_changes:
         # The documents are on disk, so the profile never lists a file that is not there. The slot was

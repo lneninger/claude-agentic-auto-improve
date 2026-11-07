@@ -1,0 +1,18 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/289
+number: 289
+head_ref: feature/261-codegraph-hooks-redesign
+base_ref: master
+base_is_default: true
+commit: fa3c3eb6055adbfc9c41038d986276045b2be592
+merged_at: '2026-11-06T22:20:21Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-07T10:58:06.115331+00:00'
+blocks_recorded: []
+blocks_already_recorded:
+- t1-live-checks
+- t2-shadow-decision-and-cheaper-hot-path-in-the-guard
+- t3-cost-measurement
+- t4-upgrade-path-and-documentation
+- t5-fail-open-review

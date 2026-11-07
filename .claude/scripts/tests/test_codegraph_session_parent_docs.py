@@ -93,10 +93,10 @@ class TestReadme(WordingCase):
         self.assertLacks(README, "`state-unwritable` is the sixth line", "the reason is removed")
         self.assertLacks(README, "`<system temp folder>/auto-improve-codegraph-<session id>/`", "moved")
 
-    def test_it_carries_e1_e2_and_a_changed_in_0_15_3_block(self):
+    def test_it_carries_e1_e2_and_a_changed_in_0_16_3_block(self):
         self.assertHas(README, E1_HEAD, "E1 at the README retry sentences")
         self.assertHas(README, E2, "E2 after 'logged once per session per reason'")
-        self.assertHas(README, "Changed in 0.15.3", "the new block")
+        self.assertHas(README, "Changed in 0.16.3", "the new block (this change ships in 0.16.3)")
         self.assertHas(README, "session-state-unusable", "the new reason")
         self.assertHas(README, "retry-ticket-unwritten", "the new reason")
         self.assertHas(README, "index-other-tree", "the upgraded-project row (a 0.15.2 helper passes the Hop proof)")
@@ -162,7 +162,7 @@ class TestRetryExceptionAtEverySite(WordingCase):
 
 class TestRetryExceptionHasAReferent(WordingCase):
     """Review pass 2 (round 3, code-review WARN): E1 is an exception to a retry sentence, so it stands only where one comes
-    right before it. A copy with no retry sentence in front (the README 0.15.3 'It fails closed' bullet) reads as a limit on
+    right before it. A copy with no retry sentence in front (the README 0.16.3 'It fails closed' bullet) reads as a limit on
     what the guard lets through, which is false: a subagent, a project with no index and one with no server still pass."""
 
     RETRY = re.compile(r"repeat the (?:identical )?blocked call once", re.IGNORECASE)
@@ -191,8 +191,12 @@ class TestRetryExceptionHasAReferent(WordingCase):
 class TestReviewFixRoundWording(WordingCase):
     """Review fix round: C-W3 (upgrade paragraph), C-I (grammar, dangling E2)."""
 
-    def test_install_skill_upgrade_paragraph_says_before_0_15_3(self):
-        self.assertHas(INSTALL_SKILL, "Upgrading an install from before 0.15.3.", "a 0.15.2 install also refuses addon-file-differs")
+    def test_install_skill_upgrade_paragraph_updates_a_0_15_2_install_in_place(self):
+        # Merge with the in-place upgrade (#266, 0.16.0): the paragraph "Upgrading an install from before 0.15.3" (uninstall
+        # first) is gone; a 0.15.2 and a 0.16.0-0.16.2 install are updated by re-running the install.
+        self.assertHas(INSTALL_SKILL, "Upgrading an older install: re-run this skill.", "an unedited older install is updated in place")
+        self.assertHas(INSTALL_SKILL, "**0.15.2 (the fail-open guard):**", "the 0.15.2 entry")
+        self.assertHas(INSTALL_SKILL, "**0.16.0 to 0.16.2 (the shadow measurement):**", "the 0.16.x entry")
         self.assertLacks(INSTALL_SKILL, "Upgrading an install from before 0.15.2.", "stale version")
 
     def test_mechanisms_has_no_is_fails_grammar_break(self):

@@ -308,13 +308,24 @@ CG_PREFIX = "mcp__codegraph__" + "codegraph_"
 CG_LEGACY_RE = re.compile(r"\bcodegraph_(?:search|node|callers|callees|impact|files|status|context)\b")
 CG_WILDCARD = "mcp__codegraph__*"
 CG_EXEMPT = (".claude/hooks/tests/test_addons.py", ".claude/hooks/tests/test_codegraph_first_guard.py")
+# Issue #261 (concept contract 2026-11-05-codegraph-hooks-redesign). The shadow decision reads the real session
+# transcript, and a recorded transcript names the tools exactly as the host wrote them, so the captured fixtures cannot
+# be reworded without ceasing to be recordings. The shadow test replays them. Two narrow additions: the one fixtures
+# folder (a trailing slash makes it a folder prefix, never a file-name prefix) and the one replaying test file.
+CG_EXEMPT_RECORDED = (".claude/hooks/tests/test_codegraph_shadow.py",)
+CG_EXEMPT_RECORDED_DIRS = (".claude/hooks/tests/fixtures/codegraph-transcripts/",)
+
+
+def codegraph_exempt(rel: str) -> bool:
+    """True for a proof file, the shadow replay test, or a file inside the recorded-transcript fixtures folder."""
+    return rel in CG_EXEMPT or rel in CG_EXEMPT_RECORDED or rel.startswith(CG_EXEMPT_RECORDED_DIRS)
 
 
 def codegraph_name_files(root: Path) -> list[str]:
-    """Shipped files under ``root`` (the two proof files excepted) that name an individual CodeGraph tool."""
+    """Shipped files under ``root`` (the exempt files excepted) that name an individual CodeGraph tool."""
     hits = []
     for rel in shipped_files(root):
-        if rel in CG_EXEMPT:
+        if codegraph_exempt(rel):
             continue
         try:
             text = (root / rel).read_text(encoding="utf-8", errors="ignore")
@@ -377,6 +388,24 @@ class TestOnlyTheWildcardNamesCodeGraphTools(unittest.TestCase):
             self.plant(root, ".claude/scripts/ok.py", "def codegraph_impact_files(): pass\ncodegraph_signal = 1\n")
             self.assertEqual(codegraph_name_files(root), [])
 
+    def test_control_the_recorded_transcript_exemption_is_narrow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            named = CG_PREFIX + "search and codegraph_" + "node\n"
+            fixtures = ".claude/hooks/tests/fixtures/codegraph-transcripts/"
+            for rel in (fixtures + "sequential-turns.jsonl", fixtures + "README.md", ".claude/hooks/tests/test_codegraph_shadow.py"):
+                self.plant(root, rel, named)
+            self.assertEqual(codegraph_name_files(root), [])
+            # a neighbouring file, a sibling folder and a look-alike folder name are all still caught
+            for rel in (".claude/hooks/tests/test_codegraph_shadow_extra.py",
+                        ".claude/hooks/tests/fixtures/other/x.jsonl",
+                        ".claude/hooks/tests/fixtures/codegraph-transcripts-copy/x.jsonl"):
+                self.plant(root, rel, named)
+            self.assertEqual(codegraph_name_files(root),
+                             [".claude/hooks/tests/fixtures/codegraph-transcripts-copy/x.jsonl",
+                              ".claude/hooks/tests/fixtures/other/x.jsonl",
+                              ".claude/hooks/tests/test_codegraph_shadow_extra.py"])
+
     def test_control_a_copy_under_a_worktrees_segment_and_an_unshipped_test_are_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -392,8 +421,10 @@ class TestOnlyTheWildcardNamesCodeGraphTools(unittest.TestCase):
         self.assertEqual(codegraph_name_files(PLUGIN_ROOT), [],
                          "no shipped file may name `mcp__codegraph__codegraph_<tool>` or a bare legacy tool name "
                          "(search, node, callers, callees, impact, files, status, context); say `%s` or 'a CodeGraph "
-                         "tool'. Only %s may, because they prove the wildcard covers the legacy names"
-                         % (CG_WILDCARD, " and ".join(CG_EXEMPT)))
+                         "tool'. Only %s may, because they prove the wildcard covers the legacy names; and %s, "
+                         "which hold recorded transcripts and the test that replays them"
+                         % (CG_WILDCARD, " and ".join(CG_EXEMPT),
+                            " and ".join(CG_EXEMPT_RECORDED + CG_EXEMPT_RECORDED_DIRS)))
 
     def test_control_the_grant_check_catches_a_per_tool_grant_and_accepts_the_wildcard(self):
         with tempfile.TemporaryDirectory() as tmp:
