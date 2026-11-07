@@ -1,0 +1,30 @@
+status: completed
+commit: 090f24d99640d11e54eb10ba510300d29bf66116
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/309
+merged_at: '2026-11-07T19:04:08Z'
+verified: github
+sub_issue_closed: closed
+hand_resolved:
+  files:
+  - .claude/registries/JOURNAL.md
+  - .claude/registries/MECHANISMS.md
+  - .claude/registries/VOCABULARY.md
+  - .claude/scripts/pr_merged.py
+  - .claude/scripts/tests/test_pr_merged.py
+  - README.md
+  - skills/flow/SKILL.md
+  - skills/pr-merged/SKILL.md
+  - skills/pr-merged/references/contract-completion.md
+  - skills/auto-improve-finish-install/SKILL.md
+  merge_commits: 34
+  commits_inspected: 100
+  commits_unread: 0
+base_ref: fix/235-domain-split-registries
+base_is_default: false
