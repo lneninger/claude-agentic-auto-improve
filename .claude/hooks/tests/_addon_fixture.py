@@ -278,3 +278,545 @@ def _copy_into(add_on: str, project: Path | str | None, files: list[str]) -> lis
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
     return installed
+
+
+# ======================================================================================================
+# CODEGRAPH FIXTURE HELPERS (issue #259, concept contract 2026-11-05-codegraph-guard-fail-open)
+# ------------------------------------------------------------------------------------------------------
+# Test-side fixtures shared by the codegraph guard suites. They read nothing from the developer's real
+# home or temp folder: every caller passes the fixture home and the fixture temp folder.
+#   * Project index        <folder>/.codegraph/codegraph.db is a regular file (a ``.codegraph`` folder with no
+#                          codegraph.db is NOT an index: it is the shape of CodeGraph's per-user ``~/.codegraph``).
+#   * Session folder       <temp>/auto-improve-codegraph-<session key>/ holding ``turn.json`` (the Turn marker).
+#   * Linked worktree      a main checkout (.git FOLDER) + .git/worktrees/<name>/commondir + a worktree .git FILE.
+# ======================================================================================================
+import os  # noqa: E402
+import subprocess  # noqa: E402
+
+#: Manifest keys the contract adds.
+KEY_PERMISSIONS_ALLOW = "permissions_allow"
+KEY_RELEASED = "released_sha256"
+#: What the codegraph add-on must grant: the wildcard only, never a per-tool name.
+CODEGRAPH_WILDCARD = "mcp__codegraph__*"
+CODEGRAPH_SESSION_PREFIX = "auto-improve-codegraph-"
+CODEGRAPH_INDEX = ("." + "codegraph", "codegraph.db")
+
+
+def permissions_allow(add_on: str) -> list:
+    """The manifest's ``permissions_allow`` list; a manifest without it, or with a malformed one, FAILS the caller."""
+    data = manifest(add_on, KNOWN_HOOKS.get(add_on))
+    if KEY_PERMISSIONS_ALLOW not in data:
+        raise AddonFixtureError("manifest of %r has no %r key" % (add_on, KEY_PERMISSIONS_ALLOW))
+    value = data[KEY_PERMISSIONS_ALLOW]
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        raise AddonFixtureError("manifest of %r has a %r that is not a list of non-empty strings"
+                                % (add_on, KEY_PERMISSIONS_ALLOW))
+    return list(value)
+
+
+def released_hashes(add_on: str) -> dict:
+    """The manifest's ``released_sha256`` map ``{<active hook>: [sha256 hex, ...]}``; absent or malformed FAILS."""
+    data = manifest(add_on, KNOWN_HOOKS.get(add_on))
+    if KEY_RELEASED not in data:
+        raise AddonFixtureError("manifest of %r has no %r key" % (add_on, KEY_RELEASED))
+    value = data[KEY_RELEASED]
+    ok = isinstance(value, dict) and value and all(
+        isinstance(k, str) and isinstance(v, list) and v and all(
+            isinstance(h, str) and len(h) == 64 and h == h.lower() and all(c in "0123456789abcdef" for c in h)
+            for h in v)
+        for k, v in value.items())
+    if not ok:
+        raise AddonFixtureError("manifest of %r has a %r that is not {hook: [64-hex, ...]}" % (add_on, KEY_RELEASED))
+    return dict(value)
+
+
+class Sandbox:
+    """A throw-away root with a fixture home folder and a fixture temp folder; removed on exit, pass or fail."""
+
+    def __init__(self, prefix: str = "cgsandbox-") -> None:
+        self.root = Path(tempfile.mkdtemp(prefix=prefix)).resolve()
+        self.home = self.root / "home"
+        self.tmp = self.root / "tmp"
+        self.home.mkdir()
+        self.tmp.mkdir()
+        (self.home / "AppData" / "Local").mkdir(parents=True)
+
+    def __enter__(self) -> "Sandbox":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.remove()
+
+    def remove(self) -> None:
+        # a folder link inside the sandbox is removed as a link first, so the cleanup never follows it
+        for entry in self.root.rglob("*"):
+            try:
+                if is_link(entry):
+                    os.rmdir(str(entry)) if entry.is_dir() else os.remove(str(entry))
+            except OSError:
+                pass
+        shutil.rmtree(self.root, ignore_errors=True)
+        if self.root.exists():
+            LEFTOVERS.append(str(self.root))
+
+
+#: Sandboxes this process could not remove (reported by the suites that care).
+LEFTOVERS: list[str] = []
+
+
+def is_link(path: Path) -> bool:
+    """Delivery cleanup's link test: lstat, then S_ISLNK, or a Windows reparse point. Never is_junction."""
+    import stat
+    try:
+        st = os.lstat(str(path))
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(st, "st_file_attributes", 0) & reparse)
+
+
+def make_dir_link(link: Path, target: Path) -> bool:
+    """A folder link at ``link`` pointing at ``target``: a junction on Windows (no privilege), a symlink on POSIX."""
+    try:
+        if os.name == "nt":
+            done = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
+            return done.returncode == 0 and link.exists()
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except OSError:
+        return False
+
+
+#: The process's REAL temp folder, read once at import (before any suite points ``tempfile.tempdir`` at a fixture).
+REAL_TEMP = tempfile.gettempdir()
+
+
+def parent_base(env, os_name: str):
+    """The Parent base rule of contract 2026-11-06-session-folder-owner-and-tool-named, as a pure function of the
+    environment mapping and the OS name: ``(base path or None, problem or None)``. It reads ONLY ``env``. Windows:
+    ``LOCALAPPDATA``. POSIX: ``XDG_CACHE_HOME``, and when that is unset or empty ``HOME`` + ``/.cache``; both unset
+    or empty gives ``unset``. A set but relative value gives ``not-absolute`` (never skipped to the next name)."""
+    import ntpath
+    import posixpath
+    if os_name == "nt":
+        raw, isabs = env.get("LOCALAPPDATA") or "", ntpath.isabs
+    else:
+        isabs = posixpath.isabs
+        raw = env.get("XDG_CACHE_HOME") or ""
+        if not raw:
+            home = env.get("HOME") or ""
+            if not home:
+                return None, "unset"
+            if not isabs(home):
+                return None, "not-absolute"
+            return posixpath.join(home, ".cache"), None
+    if not raw:
+        return None, "unset"
+    if not isabs(raw):
+        return None, "not-absolute"
+    return raw, None
+
+
+def session_parent(home: Path, create: bool = True) -> Path:
+    """The Per-user session parent the CodeGraph hooks use for a run whose fixture home is ``home``:
+    ``<base>/auto-improve-codegraph``, the base computed by the pure rule from the SAME variables ``isolated_env``
+    sets (``LOCALAPPDATA`` = ``<home>/AppData/Local``, ``XDG_CACHE_HOME`` = ``<home>/.cache``). Created on demand
+    with ``os.mkdir(p, 0o700)`` then ``os.chmod(p, 0o700)``, never ``mkdir(parents=True)`` (a umask mode would make
+    every POSIX row fail closed with ``open-mode``)."""
+    home = Path(home)
+    env = {"LOCALAPPDATA": str(home / "AppData" / "Local"), "XDG_CACHE_HOME": str(home / ".cache"), "HOME": str(home)}
+    base, problem = parent_base(env, os.name)
+    if base is None:
+        raise AddonFixtureError("session_parent: the Parent base rule gave %r for %r" % (problem, env))
+    parent = Path(base) / "auto-improve-codegraph"
+    if create:
+        for folder in (Path(base), parent):
+            if not folder.is_dir():
+                os.mkdir(str(folder), 0o700)
+                os.chmod(str(folder), 0o700)
+    return parent
+
+
+def real_parent() -> Path | None:
+    """The REAL Per-user session parent of the developer running the suite, by the pure rule over the ORIGINAL
+    environment; None when the rule gives none."""
+    base, _problem = parent_base(os.environ, os.name)
+    return (Path(base) / "auto-improve-codegraph") if base else None
+
+
+#: The REAL Per-user session parent, computed once at import from the original ``os.environ`` (before any suite patches it).
+REAL_PARENT = real_parent()
+
+
+def real_temp_codegraph_entries() -> set:
+    """The names of the ``auto-improve-codegraph-*`` entries in the real temp folder (the leak check of the suites that
+    run the CodeGraph hooks: a run must add none)."""
+    try:
+        return {n for n in os.listdir(REAL_TEMP) if n.startswith(CODEGRAPH_SESSION_PREFIX)}
+    except OSError:
+        return set()
+
+
+def real_parent_codegraph_entries() -> set:
+    """The names of the ``auto-improve-codegraph-*`` entries in the REAL Per-user session parent (a run must add none)."""
+    try:
+        return {n for n in os.listdir(str(REAL_PARENT)) if n.startswith(CODEGRAPH_SESSION_PREFIX)} if REAL_PARENT else set()
+    except OSError:
+        return set()
+
+
+def real_parent_snapshot():
+    """Review fix round T-L3: a snapshot of the REAL Per-user session parent that notices more than a new
+    ``auto-improve-codegraph-*`` name: ``None`` when the parent folder does not exist, else the frozenset of EVERY entry name
+    in it (a ``.tmp-*`` file or any non-prefixed entry counts). Comparing two snapshots also catches the parent being
+    created by a run (None -> a set)."""
+    if REAL_PARENT is None:
+        return None
+    try:
+        return frozenset(os.listdir(str(REAL_PARENT)))
+    except OSError:
+        return None
+
+
+def can_make_file_symlink(folder: Path) -> bool:
+    """True when the OS lets this process create a FILE symlink under ``folder`` (Windows needs Developer Mode)."""
+    probe_target = Path(folder) / "symlink-probe-target"
+    probe_link = Path(folder) / "symlink-probe-link"
+    try:
+        probe_target.write_text("x\n", encoding="utf-8")
+        os.symlink(str(probe_target), str(probe_link))
+        return True
+    except (OSError, NotImplementedError):
+        return False
+    finally:
+        for leftover in (probe_link, probe_target):
+            try:
+                os.remove(str(leftover))
+            except OSError:
+                pass
+
+
+def make_file_link(link: Path, target: Path, kind: str) -> bool:
+    """A FILE link at ``link`` to ``target``: ``kind`` is ``hard`` (os.link, no privilege on NTFS) or ``symlink``."""
+    try:
+        if kind == "hard":
+            os.link(str(target), str(link))
+        else:
+            os.symlink(str(target), str(link))
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def plant_index(folder: Path) -> Path:
+    """A Project index: ``<folder>/.codegraph/codegraph.db`` (a regular file) and a config.json beside it."""
+    cg = Path(folder) / CODEGRAPH_INDEX[0]
+    cg.mkdir(parents=True, exist_ok=True)
+    (cg / "config.json").write_text("{}\n", encoding="utf-8")
+    db = cg / CODEGRAPH_INDEX[1]
+    db.write_bytes(b"SQLite format 3\x00 fixture index\n")
+    return db
+
+
+def plant_decoy(folder: Path) -> Path:
+    """CodeGraph's per-user data folder shape: ``.codegraph`` with daemons/ and telemetry, and NO codegraph.db."""
+    cg = Path(folder) / CODEGRAPH_INDEX[0]
+    (cg / "daemons").mkdir(parents=True, exist_ok=True)
+    (cg / "telemetry.json").write_text("{}\n", encoding="utf-8")
+    (cg / "update-check.json").write_text("{}\n", encoding="utf-8")
+    return cg
+
+
+def plant_server(folder: Path, name: str = "codegraph", disabled: bool = False) -> Path:
+    """A configured MCP server entry in ``<folder>/.mcp.json``; ``disabled`` also lists it in the project's
+    ``.claude/settings.json`` ``disabledMcpjsonServers`` (a real read layer)."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / ".mcp.json"
+    path.write_text(json.dumps({"mcpServers": {name: {"command": "codegraph", "args": ["serve", "--mcp"]}}}),
+                    encoding="utf-8")
+    if disabled:
+        (folder / ".claude").mkdir(parents=True, exist_ok=True)
+        (folder / ".claude" / "settings.json").write_text(
+            json.dumps({"disabledMcpjsonServers": [name]}), encoding="utf-8")
+    return path
+
+
+def ancestors_holding(path: Path, *rel: str) -> list:
+    """Every ancestor of ``path`` (and ``path`` itself) that holds ``rel`` (for example ('.codegraph', 'codegraph.db'))."""
+    found = []
+    current = Path(path).resolve()
+    while True:
+        if os.path.lexists(str(current.joinpath(*rel))):
+            found.append(current)
+        if current.parent == current:
+            return found
+        current = current.parent
+
+
+def make_main_checkout(folder: Path) -> Path:
+    folder = Path(folder)
+    (folder / ".git").mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def make_linked_worktree(base: Path, name: str = "wt1", layout: str = "inside",
+                         gitdir_form: str = "absolute", main: Path | None = None) -> dict:
+    """A REAL linked-worktree layout: ``<main>/.git`` folder, ``<main>/.git/worktrees/<name>/commondir`` = ``../..``
+    and a worktree ``.git`` FILE ``gitdir: <admin folder>``.
+
+    ``layout``: ``inside`` puts the worktree under ``<main>/.claude/worktrees/<name>``, ``outside`` puts it beside
+    the main folder. ``gitdir_form``: ``absolute`` or ``relative`` (resolved against the worktree folder).
+    Returns ``{main, worktree, admin, gitdir_text}``."""
+    base = Path(base)
+    main = make_main_checkout(Path(main) if main else base / "main")
+    admin = main / ".git" / "worktrees" / name
+    admin.mkdir(parents=True, exist_ok=True)
+    (admin / "commondir").write_text("../..\n", encoding="utf-8")
+    worktree = (main / ".claude" / "worktrees" / name) if layout == "inside" else (base / ("wt-" + name))
+    worktree.mkdir(parents=True, exist_ok=True)
+    if gitdir_form == "absolute":
+        text = admin.as_posix()
+    elif gitdir_form == "relative":
+        text = os.path.relpath(str(admin), str(worktree)).replace("\\", "/")
+    else:
+        raise AddonFixtureError("unknown gitdir form %r" % gitdir_form)
+    (worktree / ".git").write_text("gitdir: %s\n" % text, encoding="utf-8")
+    return {"main": main, "worktree": worktree, "admin": admin, "gitdir_text": text}
+
+
+def session_folder(parent: Path, session_id: str) -> Path:
+    """The Session folder the three hooks share for ``session_id`` under the Per-user session parent ``parent``
+    (``af.session_parent(<fixture home>)``), never under the system temp folder."""
+    return Path(parent) / (CODEGRAPH_SESSION_PREFIX + session_id)
+
+
+def write_marker(parent: Path, session_id: str, tool: str = "mcp__codegraph__" + "codegraph_explore",
+                 stamped: bool = True) -> Path:
+    """Write the Turn marker as the tracker does: ``turn.json`` in the Session folder under ``parent``. ``stamped``
+    (the default) writes {ts, tool, summary, pid, writer: "codegraph-turn-tracker", session: session_id}, an OWN
+    marker; ``stamped=False`` writes the 0.15.2 shape {ts, tool, summary, pid}, a Foreign marker."""
+    folder = session_folder(parent, session_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    marker = folder / "turn.json"
+    body = {"ts": 1, "tool": tool, "summary": "fixture", "pid": 1}
+    if stamped:
+        body.update({"writer": "codegraph-turn-tracker", "session": session_id})
+    marker.write_text(json.dumps(body) + "\n", encoding="utf-8")
+    return marker
+
+
+def remove_marker(parent: Path, session_id: str) -> None:
+    marker = session_folder(parent, session_id) / "turn.json"
+    if marker.exists():
+        marker.unlink()
+
+
+def isolated_env(home: Path, tmp: Path, project: Path | None = None, extra: dict | None = None) -> dict:
+    """The environment of a codegraph row: HOME, USERPROFILE and CLAUDE_CONFIG_DIR at the fixture home, LOCALAPPDATA at
+    ``<home>/AppData/Local`` and XDG_CACHE_HOME at ``<home>/.cache`` (so the Per-user session parent is inside the
+    fixture), TMP and TEMP at the fixture temp folder, every CLAUDE_* and GIT_* variable of the developer removed."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_") and not k.startswith("GIT_")}
+    env.update({"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_CONFIG_DIR": str(home),
+                "LOCALAPPDATA": str(Path(home) / "AppData" / "Local"), "XDG_CACHE_HOME": str(Path(home) / ".cache"),
+                "TMP": str(tmp), "TEMP": str(tmp), "TMPDIR": str(tmp),
+                "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
+    if project is not None:
+        env["CLAUDE_PROJECT_DIR"] = str(project)
+    if extra:
+        env.update(extra)
+    return env
+
+
+def canon(path) -> str | None:
+    """A comparable form of a path: real path, forward slashes, no trailing slash, lower case (Windows is case blind)."""
+    if path is None:
+        return None
+    return os.path.realpath(str(path)).replace("\\", "/").rstrip("/").lower()
+
+
+def own_root_cases(fn, base: Path) -> list:
+    """The unit rows of ``_project_paths.worktree_own_root`` as ``[(name, ok, detail)]`` (the Own tree root row of the
+    contract plus its Approval addendum, item 1). ``fn`` is the function, or None when it does not exist yet: then
+    every row FAILS with a diagnostic, and the runner goes on. Shared by the guard suite and the path-guards suite."""
+    base = Path(base)
+    rows: list = []
+
+    def row(name: str, ok: bool, detail: str = "") -> None:
+        rows.append((name, bool(ok), detail))
+
+    def call(name: str, path: Path):
+        if fn is None:
+            row(name, False, "_project_paths.worktree_own_root is not defined")
+            return None
+        try:
+            return fn(str(path))
+        except Exception as exc:  # noqa: BLE001 - a raising helper is a failing row, never a crash of the runner
+            row(name, False, "worktree_own_root(%r) raised %r" % (str(path), exc))
+            return None
+
+    def shape(got) -> tuple:
+        if isinstance(got, (tuple, list)) and len(got) == 2:
+            return (canon(got[0]), canon(got[1]) if got[1] is not None else None)
+        return ("<bad shape %r>" % (got,), None)
+
+    # no .git anywhere up the path is a precondition of the (None, None) rows: say so loudly when it does not hold
+    plain = base / "nogit" / "deep"
+    plain.mkdir(parents=True, exist_ok=True)
+    above = ancestors_holding(plain, ".git")
+    if above:
+        row("worktree_own_root precondition: no ancestor of the no-git fixture holds a .git entry", False,
+            "ancestors holding .git: %s" % ", ".join(str(a) for a in above))
+
+    main = make_main_checkout(base / "main-checkout")
+    (main / "src" / "deeper").mkdir(parents=True, exist_ok=True)
+    name = "worktree_own_root: a main checkout (.git FOLDER) returns (folder, None) from a sub folder"
+    got = call(name, main / "src" / "deeper")
+    if got is not None or fn is not None:
+        row(name, shape(got) == (canon(main), None), "got %r, expected (%s, None)" % (got, main))
+    name = "worktree_own_root: a path that does not exist yet walks from its nearest existing ancestor"
+    got = call(name, main / "src" / "not" / "yet" / "File.cs")
+    if got is not None or fn is not None:
+        row(name, shape(got) == (canon(main), None), "got %r, expected (%s, None)" % (got, main))
+
+    for layout in ("inside", "outside"):
+        for form in ("absolute", "relative"):
+            info = make_linked_worktree(base / ("lw-%s-%s" % (layout, form)), layout=layout, gitdir_form=form)
+            sub = info["worktree"] / "src" / "sub"
+            sub.mkdir(parents=True, exist_ok=True)
+            name = "worktree_own_root: linked worktree (%s layout, %s gitdir) from a sub folder returns its OWN root" % (
+                layout, form)
+            got = call(name, sub)
+            if got is not None or fn is not None:
+                expected = (canon(info["worktree"]), canon(info["admin"]))
+                row(name, shape(got) == expected, "got %r, expected %r" % (got, expected))
+            name = "worktree_own_root: that gitdir comes back with forward slashes (%s layout, %s gitdir)" % (layout, form)
+            got = call(name, sub)
+            if got is not None and isinstance(got, (tuple, list)) and len(got) == 2:
+                row(name, isinstance(got[1], str) and "\\" not in got[1], "gitdir element %r" % (got[1],))
+            elif fn is not None:
+                row(name, False, "unusable result %r" % (got,))
+
+    name = "worktree_own_root: no .git entry anywhere up the path returns (None, None)"
+    got = call(name, plain)
+    if fn is not None and not above:
+        row(name, got is not None and tuple(got) == (None, None), "got %r" % (got,))
+    elif fn is None:
+        pass
+
+    # (the simulated UNC share / mapped drive helper `unc_share` lives at the end of this file)
+    unreadable = base / "unreadable" / "deep"
+    unreadable.mkdir(parents=True, exist_ok=True)
+    (unreadable.parent / ".git").write_bytes(b"\xff\xfe\x00\xd8 not text, not utf-8 \x80\x81\n")
+    name = "worktree_own_root: an unreadable .git file returns (None, None)"
+    got = call(name, unreadable)
+    if fn is not None:
+        row(name, got is not None and tuple(got) == (None, None), "got %r" % (got,))
+
+    nolines = base / "nogitdirline" / "deep"
+    nolines.mkdir(parents=True, exist_ok=True)
+    (nolines.parent / ".git").write_text("this file is readable but has no pointer line\n", encoding="utf-8")
+    name = "worktree_own_root: a readable .git file with no gitdir: line returns (folder, None), an undecidable tree"
+    got = call(name, nolines)
+    if fn is not None:
+        row(name, got is not None and shape(got) == (canon(nolines.parent), None), "got %r" % (got,))
+    return rows
+
+
+# --------------------------------------------------------------------------------------------------------------
+# A simulated UNC share and mapped drive (issue #259, review round 3). Nothing here touches a network: every path
+# of the form \\<host>\<share>\... (or its \\?\UNC\ form) is answered from a LOCAL folder, and a path that merely
+# names the host but is not under the share is answered "nothing there" without a probe.
+# --------------------------------------------------------------------------------------------------------------
+def unc_share(share_root, host: str, share: str = "team", resolve_local: bool = False, others: tuple = ()):
+    """Context manager. ``\\\\<host>\\<share>\\rest`` reads, stats and opens ``<share_root>\\rest``.
+
+    ``resolve_local=True`` also simulates a MAPPED DRIVE: ``os.path.realpath`` of a local path under ``share_root``
+    returns its ``\\\\<host>\\<share>\\...`` form (what CPython does on Windows for a mapped network drive).
+    ``others``: lower-case substrings (other fake hosts) that are NEVER answered here: such a call falls through to
+    whatever was patched before (the suite's watcher), so a probe of them stays visible. Windows only."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        import builtins
+        import ntpath
+        from contextlib import ExitStack
+        from unittest import mock
+
+        root = os.path.abspath(str(share_root))
+        unc_root = "\\\\%s\\%s" % (host, share)
+        low = unc_root.lower()
+        foreign = tuple(o.lower() for o in others)
+        real_rp, real_isdir, real_isfile, real_exists, real_open = (
+            os.path.realpath, os.path.isdir, os.path.isfile, os.path.exists, builtins.open)
+
+        def text_of(p):
+            try:
+                t = os.fspath(p)
+            except TypeError:
+                return None
+            if isinstance(t, bytes):
+                return None
+            t = t.replace("/", "\\")
+            if t[:8].lower() == "\\\\?\\unc\\":
+                t = "\\\\" + t[8:]
+            return t
+
+        def classify(p):
+            """('local', path) under the share, ('quiet', None) names the host elsewhere, (None, None) not ours."""
+            t = text_of(p)
+            if t is None:
+                return None, None
+            tl = t.lower()
+            if any(o in tl for o in foreign):
+                return None, None
+            if tl == low or tl.startswith(low + "\\"):
+                return "local", root + t[len(unc_root):]
+            if host.lower() in tl:
+                return "quiet", None
+            return None, None
+
+        def realpath(p, *a, **k):
+            kind, _loc = classify(p)
+            if kind == "local":
+                return ntpath.normpath(text_of(p))
+            if kind == "quiet":
+                return p
+            real = real_rp(p, *a, **k)
+            if resolve_local:
+                r = os.path.normcase(real)
+                rr = os.path.normcase(root)
+                if r == rr or r.startswith(rr + "\\"):
+                    return unc_root + real[len(root):]
+            return real
+
+        def answering(real_fn):
+            def inner(p, *a, **k):
+                kind, loc = classify(p)
+                if kind == "local":
+                    return real_fn(loc, *a, **k)
+                if kind == "quiet":
+                    return False
+                return real_fn(p, *a, **k)
+            return inner
+
+        def opened(p, *a, **k):
+            kind, loc = classify(p)
+            if kind == "local":
+                return real_open(loc, *a, **k)
+            if kind == "quiet":
+                raise OSError("simulated share: nothing at %s" % (p,))
+            return real_open(p, *a, **k)
+
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(os.path, "realpath", realpath))
+            stack.enter_context(mock.patch.object(os.path, "isdir", answering(real_isdir)))
+            stack.enter_context(mock.patch.object(os.path, "isfile", answering(real_isfile)))
+            stack.enter_context(mock.patch.object(os.path, "exists", answering(real_exists)))
+            stack.enter_context(mock.patch.object(builtins, "open", opened))
+            yield
+
+    return _cm()

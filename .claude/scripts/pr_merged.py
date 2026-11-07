@@ -54,6 +54,7 @@ DEFAULT_IMPLEMENTERS = (
     "senior-test-engineer",
     "ui-ux-designer",
     "python-ai-developer",
+    "cloud-engineer",
 )
 
 PROFILE_PATH = Path(".claude/project-profile.md")

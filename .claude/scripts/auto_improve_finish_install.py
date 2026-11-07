@@ -29,6 +29,7 @@ Usage:
       --expect-sha256 <plan hash>
   py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . \\
       --stylesheet <relative path> [--stylesheet ...] [--json]
+  py -3 .claude/scripts/auto_improve_finish_install.py addon --name <add-on> --project . --check [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py addon-remove --name <add-on> --project . [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py addon-remove --name <add-on> --project . --apply \\
       --expect-sha256 <plan hash>
@@ -62,6 +63,16 @@ unavailable), both ``hooks`` and an ``addon`` install that writes a row refuse a
 (exit 3) in the preview and in the apply, and write nothing. A hook the manifest lists under ``disabled`` is never copied and never registered; a
 project that still carries one (under its current or a former name) is refused as ``disabled-hook-present``.
 
+An add-on manifest may also carry two optional keys (issue #259). ``permissions_allow`` lists the entries the install
+adds to the project's ``permissions.allow`` (a text splice inside the same plan hash; an entry already listed adds
+nothing; the removal keeps the entry and lists it under ``kept``). An install is refused as ``codegraph-tool-named``
+(exit 2) when a settings layer's ``permissions.allow`` names an individual CodeGraph tool. ``released_sha256`` maps
+each ACTIVE hook to the folded hashes of its released copies, so ``addon-remove`` deletes an unedited old copy. The
+read-only ``addon --check`` judges the three settings layers: exit 0 clean, 1 with findings
+(``codegraph-wildcard-missing``, ``codegraph-tool-named``), 2 when a layer could not be read. The preview also carries
+an index-ownership note for the codegraph add-on: a Project index is ``.codegraph/codegraph.db``; no index, or an index
+that belongs to the main checkout, means the guard lets reads through.
+
 An add-on whose manifest names a ``stylesheet_snippet`` also takes ``--stylesheet <relative path>`` (repeatable):
 the snippet is appended at the end of that global stylesheet, between its begin and end markers, when none of the
 snippet's classes is defined there. Without the option the preview only lists the candidate stylesheets
@@ -83,6 +94,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,6 +144,7 @@ Result = Dict[str, Any]
 EXIT_OK: int = 0
 EXIT_REFUSED: int = 2
 EXIT_ENVIRONMENT: int = 3
+EXIT_FINDINGS: int = 1  # ``addon --check`` found something to fix (2 is a refusal: it could not check)
 
 # --- Closed set of refusal codes (contract: Data Shapes) --------------------------------
 
@@ -168,6 +181,7 @@ REFUSAL_CODES: Tuple[str, ...] = (
     "registration-settings-missing",
     "hook-registration-profile-unreadable",
     "project-hook-launcher-missing",
+    "codegraph-tool-named",
 )
 
 _ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing",
@@ -221,6 +235,8 @@ CODE_SEARCH_NOTE = (
 WRITE_FOLDERS = (".claude", ".claude/hooks")
 ADDONS_REL = ".claude/addons"
 ADDON_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+#: A prerequisite MCP server name in an add-on manifest (also checked for a double underscore, which splits a grant).
+_SERVER_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9-])?")
 ADDON_HELPER_ROOTS = (".claude/hooks/", ".claude/scripts/")
 ADDON_ROW_KEYS = ("async", "statusMessage")
 #: Where an add-on's documents land in the project: ``<ADDON_DOCUMENTS_REL>/<add-on name>/<file>``.
@@ -1482,6 +1498,23 @@ def _row_insertion(text: str, event: str, matcher: Optional[str], hook: Dict[str
     return _splice_in(text, inner, None, hook, unit, newline)
 
 
+def _allow_insertion(text: str, entry: str, unit: str, newline: str) -> Tuple[int, str]:
+    """Where to insert one permission entry into ``permissions.allow`` of ``text``, and what to insert.
+
+    Without a ``permissions`` object one goes at the end of the top-level object; without an ``allow`` list one
+    goes at the end of the ``permissions`` object; otherwise the entry is appended to the list."""
+    settings = json.loads(text, object_pairs_hook=_strict_pairs)
+    root = _open_box(text, _scan_space(text, 0), "the top-level object")
+    if "permissions" not in settings:
+        return _splice_in(text, root, "permissions", {"allow": [entry]}, unit, newline)
+    perm_box = _open_box(text, root.members[_member_named(text, root, "permissions")][2], 'the "permissions" object')
+    if "allow" not in settings["permissions"]:
+        return _splice_in(text, perm_box, "allow", [entry], unit, newline)
+    list_box = _open_box(text, perm_box.members[_member_named(text, perm_box, "allow")][2],
+                         'the "allow" list of "permissions"')
+    return _splice_in(text, list_box, None, entry, unit, newline)
+
+
 def _add_range(ranges: List[Tuple[int, int]], pos: int, length: int) -> List[Tuple[int, int]]:
     """Record an insertion at ``pos``: shift the earlier ranges that follow it, split one that holds it."""
     moved: List[Tuple[int, int]] = []
@@ -1506,10 +1539,10 @@ def _without_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
 
 
 def _splice_rows(text: str, settings: Any, to_add: List[_Registration], platform: str, unit: str,
-                 newline: str) -> str:
-    """The text with every row of ``to_add`` inserted, or a _SpliceRefused. Three checks run before it returns:
-    the new text parses strictly, parsed it equals the object the in-memory merge gives, and removing the
-    inserted ranges gives back the original text."""
+                 newline: str, allow_add: Sequence[str] = ()) -> str:
+    """The text with every row of ``to_add`` and every permission entry of ``allow_add`` inserted, or a
+    _SpliceRefused. Three checks run before it returns: the new text parses strictly, parsed it equals the object
+    the in-memory merge gives, and removing the inserted ranges gives back the original text."""
     expected = copy.deepcopy(settings)
     current: str = text
     ranges: List[Tuple[int, int]] = []
@@ -1528,6 +1561,15 @@ def _splice_rows(text: str, settings: Any, to_add: List[_Registration], platform
             raise
         current = current[:pos] + inserted + current[pos:]
         ranges = _add_range(ranges, pos, len(inserted))
+    for entry in allow_add:
+        expected.setdefault("permissions", {}).setdefault("allow", []).append(entry)
+        try:
+            pos, inserted = _allow_insertion(current, entry, unit, newline)
+        except _SpliceRefused as exc:
+            exc.row = "the permission entry " + entry
+            raise
+        current = current[:pos] + inserted + current[pos:]
+        ranges = _add_range(ranges, pos, len(inserted))
     try:
         parsed = json.loads(current, object_pairs_hook=_strict_pairs)
     except ValueError as exc:
@@ -1539,8 +1581,8 @@ def _splice_rows(text: str, settings: Any, to_add: List[_Registration], platform
     return current
 
 
-def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Registration]
-                        ) -> Tuple[Optional[Result], Dict[str, Any]]:
+def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Registration],
+                        allow: Sequence[str] = ()) -> Tuple[Optional[Result], Dict[str, Any]]:
     """The one settings.json merge both the vendored hooks step and an add-on install use.
 
     Reads the project's settings.json strictly, finds which of ``regs`` no layer registers yet, and builds
@@ -1558,6 +1600,10 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
     ``project-hook-launcher-missing`` before it reads the settings file, whatever the plan would add: the
     identity reader cannot read a launcher row without the launcher, so "nothing to add" could not be
     trusted. An install with no row to write (``regs`` empty) needs no launcher and is not refused.
+
+    ``allow`` lists permission entries the install wants in the project's ``permissions.allow``. Those the project
+    layer lists already add nothing; the rest are spliced in with the rows (same preview, same plan hash, same
+    bytes-outside-the-insertion guarantee). The edit carries ``allow-add`` and ``allow-listed``.
     """
     if regs and _launcher_api() is None:
         return _launcher_missing_refusal(project), {}
@@ -1574,6 +1620,21 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
     existing, disabled, problem = _existing_registrations(project, home)
     if problem:
         return problem, {}
+    allow_add: List[str] = []
+    allow_listed: List[str] = []
+    if allow:
+        permissions = settings.get("permissions") if isinstance(settings, dict) else None
+        listed = permissions.get("allow") if isinstance(permissions, dict) else None
+        if (isinstance(settings, dict) and "permissions" in settings and not isinstance(permissions, dict)) or (
+                isinstance(permissions, dict) and "allow" in permissions and not isinstance(listed, list)):
+            return refusal("unexpected-settings-shape",
+                           "settings.json: permissions.allow is not a list of entries, so the permission entry "
+                           "could not be added and nothing was written. Add it by hand", target), {}
+        for entry in allow:
+            if entry in (listed or []) or entry in allow_add:
+                allow_listed.append(entry)
+            else:
+                allow_add.append(entry)
     to_add: List[_Registration] = []
     present: List[Dict[str, Any]] = []
     notes: List[str] = []
@@ -1594,9 +1655,11 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
     indent_match = re.search(r"\n([ \t]+)\S", text)
     indent = indent_match.group(1) if indent_match else "  "
     new_text = ""
-    if to_add and old_bytes is None:
+    if (to_add or allow_add) and old_bytes is None:
         # No file yet: nothing to keep, so the new file is rendered whole.
         new_settings = settings
+        if allow_add:
+            new_settings.setdefault("permissions", {}).setdefault("allow", []).extend(allow_add)
         for reg in to_add:
             groups = new_settings.setdefault("hooks", {}).setdefault(reg.event, [])
             group = next((g for g in groups if g.get("matcher") == reg.matcher), None)
@@ -1605,9 +1668,9 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
                 groups.append(group)
             group.setdefault("hooks", []).append(_written_hook(reg, platform))
         new_text = json.dumps(new_settings, indent=indent, ensure_ascii=False).replace("\n", newline) + newline
-    elif to_add:
+    elif to_add or allow_add:
         try:
-            new_text = _splice_rows(text, settings, to_add, platform, indent, newline)
+            new_text = _splice_rows(text, settings, to_add, platform, indent, newline, allow_add)
         except _SpliceRefused as exc:
             return refusal("unexpected-settings-shape",
                            "settings.json: the row for %s could not be inserted into %s (%s), so nothing was "
@@ -1619,9 +1682,10 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
                            "so nothing was written. Add the rows by hand" % exc, target), {}
     bom = b"\xef\xbb\xbf" if old_bytes is not None and old_bytes.startswith(b"\xef\xbb\xbf") else b""
     diff = "".join(difflib.unified_diff(text.splitlines(keepends=True), new_text.splitlines(keepends=True),
-                                        fromfile=str(target), tofile=str(target))) if to_add else ""
+                                        fromfile=str(target), tofile=str(target))) if (to_add or allow_add) else ""
     return None, {"target": target, "old-bytes": old_bytes, "new-bytes": bom + new_text.encode("utf-8"),
-                  "to-add": to_add, "present": present, "notes": notes, "disabled": disabled, "diff": diff}
+                  "to-add": to_add, "present": present, "notes": notes, "disabled": disabled, "diff": diff,
+                  "allow-add": allow_add, "allow-listed": allow_listed}
 
 
 def _plan_vendored(project: Path, platform: str, home: Path, plugin_root: Optional[Path],
@@ -1865,7 +1929,8 @@ def _read_addon_manifest(folder: Path) -> Tuple[Optional[Result], Dict[str, Any]
     if not all(any(r["hook"] == h for r in rows) for h in hooks):  # I-2: every hook has a row
         return _addon_manifest_problem(path, "every hook needs at least one registration row"), {}
     if not (isinstance(prerequisites, list) and all(
-            isinstance(p, dict) and p.get("kind") == "mcp-server" and isinstance(p.get("name"), str) and p["name"]
+            isinstance(p, dict) and p.get("kind") == "mcp-server" and isinstance(p.get("name"), str) and _SERVER_NAME_RE.fullmatch(p["name"]) is not None
+            and "__" not in p["name"]
             for p in prerequisites)):
         return _addon_manifest_problem(path, "prerequisites must be a list of mcp-server entries"), {}
     if "kill_switches" in data and not (isinstance(data["kill_switches"], list) and all(
@@ -1890,7 +1955,33 @@ def _read_addon_manifest(folder: Path) -> Tuple[Optional[Result], Dict[str, Any]
     problem = _disabled_entries_problem(path, folder, data.get("disabled", []), hooks)
     if problem:
         return problem, {}
+    if "permissions_allow" in data and not (isinstance(data["permissions_allow"], list) and all(
+            isinstance(p, str) and p.strip() for p in data["permissions_allow"])):
+        return _addon_manifest_problem(path, "permissions_allow, when present, must be a list of non-empty "
+                                             "permission entries"), {}
+    servers = {p["name"] for p in prerequisites}
+    for grant in data.get("permissions_allow", []):
+        if _grant_server(grant, servers) is None:
+            return _addon_manifest_problem(
+                path, "permissions_allow may hold only mcp__<server>__* or mcp__<server> for one of the add-on's own "
+                      "prerequisite servers, not %r" % grant), {}
+    if "released_sha256" in data:
+        released = data["released_sha256"]
+        if not (isinstance(released, dict) and all(
+                isinstance(hook, str) and hook in hooks and isinstance(hashes, list) and hashes
+                and all(isinstance(h, str) and _SHA256_HEX.match(h) for h in hashes)
+                for hook, hashes in released.items())):
+            return _addon_manifest_problem(path, "released_sha256, when present, must map each of the add-on's hooks "
+                                                 "to a non-empty list of lowercase hex SHA-256 values"), {}
     return None, data
+
+
+def _grant_server(grant: str, servers: Any) -> Optional[str]:
+    """The prerequisite server a permission entry grants, when it is ``mcp__<server>__*`` or ``mcp__<server>``."""
+    for server in servers:
+        if grant in ("mcp__%s__*" % server, "mcp__%s" % server):
+            return server
+    return None
 
 
 def _disabled_entries_problem(path: Path, folder: Path, disabled: Any, hooks: List[str]) -> Optional[Result]:
@@ -2082,10 +2173,14 @@ def _addon_file_ops(project: Path, root: Path, folder: Path, manifest: Dict[str,
     """What the install does to each file: copy it, find it already identical, or leave a helper alone.
 
     A hook or document file that exists in the project and differs from the plugin's is refused
-    (addon-file-differs): nothing is overwritten. A helper that exists is kept as it is, whatever it holds.
+    (addon-file-differs): nothing is overwritten. The one exception is a hook whose folded hash is listed in the
+    manifest's ``released_sha256`` for that hook (an unedited older release): its action is ``update``, and the
+    apply backs it up, then replaces it. A helper that exists is kept as it is, whatever it holds.
     A disabled hook is not in the list: no install copies it.
     """
     ops: List[Dict[str, Any]] = []
+    released = manifest.get("released_sha256", {})
+    have_bytes = b""
     entries = [("hook", ".claude/hooks/" + h, folder / "hooks" / h) for h in manifest["hooks"]]
     entries += [("document", _document_path(folder.name, d), folder / "documents" / d)
                 for d in manifest.get("documents", [])]
@@ -2108,14 +2203,27 @@ def _addon_file_ops(project: Path, root: Path, folder: Path, manifest: Dict[str,
                     have = dest.read_bytes() if dest.is_file() and not os.path.islink(str(dest)) else None
                 except OSError:
                     have = None
-                if have is None or _fold_text_bytes(have) != _fold_text_bytes(wanted):
+                if have is not None and _fold_text_bytes(have) == _fold_text_bytes(wanted):
+                    action = "present"
+                elif (have is not None and kind == "hook"
+                      and _sha256(_fold_text_bytes(have)) in released.get(src.name, ())):
+                    # An unedited copy of an older release: replaced in place, after a backup (Q3).
+                    action = "update"
+                    have_bytes = have
+                else:
                     return refusal("addon-file-differs",
-                                   "%s exists in the project and differs from the plugin's add-on file, so it "
-                                   "is left as it is and nothing was written. Compare it with %s, then rename "
-                                   "or remove it by hand if you want the add-on's copy" % (rel, src), dest), []
-                action = "present"
-        ops.append({"path": rel, "kind": kind, "action": action, "dest": dest, "data": wanted,
-                    "sha256": _sha256(wanted)})
+                                   "%s exists in the project and differs from the plugin's add-on file, and it is "
+                                   "not an unedited copy of a released version, so it is left as it is and "
+                                   "nothing was written. Compare it with %s. To take the add-on's copy, run "
+                                   "/auto-improve-%s-uninstall (it keeps an edited file), rename or remove %s by "
+                                   "hand, then run /auto-improve-%s-install again"
+                                   % (rel, src, folder.name, rel, folder.name), dest), []
+        op = {"path": rel, "kind": kind, "action": action, "dest": dest, "data": wanted,
+              "sha256": _sha256(wanted)}
+        if action == "update":
+            op["have"] = have_bytes
+            op["have-sha256"] = _sha256(have_bytes)
+        ops.append(op)
     return None, ops
 
 
@@ -2282,6 +2390,214 @@ def _plan_stylesheet(project: Path, folder: Path, manifest: Dict[str, Any], rels
     return None, {"stylesheet": plan, "writes": writes, "digest": tuple(digest)}
 
 
+# --- permission entries, the --check mode and the index-ownership note (issue #259) ---------------------------
+
+_WORKTREE_MARKER_RE = re.compile(r"/\.claude/worktrees(?:[.\ ]*|:[^/]*)/[^/]+", re.IGNORECASE)
+UNDECIDABLE_TREE_NOTE = (
+    "the shared helper _project_paths.py beside these scripts is older than the scripts (it has no hop "
+    "refusal: TREE_HOP_REFUSAL is not True and it lacks _hop_allowed or worktree_own_root), so this tree is "
+    "treated as undecidable and no index-ownership verdict is given. Bring the hooks folder to the same release "
+    "as the scripts")
+
+
+def _permission_grants(manifest: Dict[str, Any]) -> List[str]:
+    """The permission entries the manifest wants in ``permissions.allow`` (empty when it has none)."""
+    return [p for p in manifest.get("permissions_allow", []) if isinstance(p, str) and p.strip()]
+
+
+def _layer_allow_entries(data: Any) -> List[str]:
+    permissions = data.get("permissions") if isinstance(data, dict) else None
+    allow = permissions.get("allow") if isinstance(permissions, dict) else None
+    return [e for e in allow if isinstance(e, str)] if isinstance(allow, list) else []
+
+
+def _named_tool_findings(layers: List[Tuple[str, Path, Any]], grants: Sequence[str]) -> List[Dict[str, str]]:
+    """Every ``permissions.allow`` entry of a settings layer that names ONE tool of a wildcard grant's server
+    (``mcp__codegraph__<tool>`` against ``mcp__codegraph__*``). The wildcard and the server form are not findings."""
+    findings: List[Dict[str, str]] = []
+    for layer, path, data in layers:
+        for entry in _layer_allow_entries(data):
+            for grant in grants:
+                if grant.endswith("__*") and entry.startswith(grant[:-1]) and entry != grant:
+                    findings.append({"code": "codegraph-tool-named", "layer": layer, "file": str(path),
+                                     "entry": entry})
+                    break
+    return findings
+
+
+_ENTRY_UNSAFE_CATEGORIES = ("Cf", "Cc", "Cs", "Zl", "Zp")  # format (bidi, zero-width, soft hyphen), control, surrogate, separators
+_ENTRY_SHOWN_MAX = 200
+
+
+def _entry_shown(entry: str) -> str:
+    """A settings entry as echoed in a refusal: control, format (bidi, zero-width, soft hyphen), surrogate and line or
+    paragraph separator characters and backticks escaped (the entry stays inside its own finding line, cannot close the
+    code span, and cannot reorder or hide text), and capped in length. It is text from a file the user may not own."""
+    def one(ch: str) -> str:
+        invisible = ch == "͏" or "︀" <= ch <= "️" or "\U000e0100" <= ch <= "\U000e01ef"  # Mn, but invisible
+        if ch != "`" and not invisible and unicodedata.category(ch) not in _ENTRY_UNSAFE_CATEGORIES:
+            return ch
+        return "\\x%02x" % ord(ch) if ord(ch) < 0x80 else "\\u%04x" % ord(ch) if ord(ch) < 0x10000 else "\\U%08x" % ord(ch)
+    shown = "".join(one(ch) for ch in entry)
+    return shown if len(shown) <= _ENTRY_SHOWN_MAX else shown[:_ENTRY_SHOWN_MAX] + "..."
+
+
+def _tool_named_refusal(findings: List[Dict[str, str]], name: str, grants: Sequence[str]) -> Result:
+    listed = "\n".join("`%s` in the %s layer (%s)" % (_entry_shown(f["entry"]), f["layer"], f["file"]) for f in findings)
+    return refusal(
+        "codegraph-tool-named",
+        "a settings layer's permissions.allow names an individual tool. A server's tools change from one release "
+        "to the next, so a named tool can stop matching and silently leave the agent without access:\n%s\n"
+        "One step fixes it: replace each entry above with `%s`, which covers every CodeGraph tool, including "
+        "future ones, and run this again. Nothing was written for the %s add-on."
+        % (listed, "` / `".join(grants), name), findings[0]["file"])
+
+
+def check_addon(
+    project: Path,
+    name: str,
+    claude_home: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+    provider: str = "claude",
+) -> Dict[str, Any]:
+    """Read-only ``addon --check``: do the settings layers allow the add-on's permission entry and name no single tool?
+
+    Returns ``{"status": "checked", "ok": bool, "findings": [...]}`` (exit 0 clean, 1 with findings), or a refusal
+    (exit 2) when an add-on or a settings layer could not be read. Writes nothing."""
+    project = Path(project)
+    problem, found = _resolve_addon(project, name, claude_home, plugin_root, provider, "install")
+    if problem:
+        return problem
+    grants = _permission_grants(found["manifest"])
+    problem, layers = _load_layers(project, found["home"])
+    if problem:
+        return problem
+    findings = _named_tool_findings(layers, grants)
+    accepted = set(grants) | {g[:-3] for g in grants if g.endswith("__*")}
+    if grants and not any(entry in accepted for _l, _p, data in layers for entry in _layer_allow_entries(data)):
+        findings.append({"code": "codegraph-wildcard-missing", "layer": "project",
+                         "file": str(project / ".claude" / "settings.json"), "entry": grants[0]})
+    return {"status": "checked", "add-on": name, "ok": not findings, "findings": findings,
+            "layers": [str(path) for _layer, path, _data in layers],
+            "message": ("the settings allow %s and name no single tool" % " / ".join(grants)) if not findings else
+            "; ".join("%s: %s (%s)" % (f["code"], _entry_shown(f["entry"]), f["file"]) for f in findings)}
+
+
+def _has_project_index(folder: str) -> bool:
+    """A Project index: ``<folder>/.codegraph/codegraph.db`` is a regular file and neither it nor ``.codegraph`` is a
+    link. A ``.codegraph`` folder without ``codegraph.db`` (CodeGraph's per-user folder) is NOT an index."""
+    import stat as _stat
+
+    def link(st: os.stat_result) -> bool:
+        return _stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0)
+                                                 & getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    try:
+        cg = os.lstat(os.path.join(folder, ".codegraph"))
+        if link(cg) or not _stat.S_ISDIR(cg.st_mode):
+            return False
+        db = os.lstat(os.path.join(folder, ".codegraph", "codegraph.db"))
+        return _stat.S_ISREG(db.st_mode) and not link(db)
+    except (OSError, ValueError):
+        return False
+
+
+def _remote_host(text: str) -> Optional[str]:
+    """``None`` for a local path. For a UNC or device path (a leading pair of separators, either kind) the
+    lower-cased host; ``"?c:"`` for a device path on a local drive; ``""`` when a device path names no host."""
+    slashed = text.replace("\\", "/")
+    if not slashed.startswith("//"):
+        return None
+    parts = [p for p in slashed[2:].split("/") if p]
+    if parts and parts[0] in ("?", "."):
+        if len(parts) > 2 and parts[0] == "?" and parts[1].upper() == "UNC":
+            return parts[2].lower()
+        if len(parts) > 1 and len(parts[1]) == 2 and parts[1][1] == ":" and parts[1][0].isalpha():
+            return "?" + parts[1].lower()
+        return ""
+    return parts[0].lower() if parts else ""
+
+
+def _hop_allowed(target: str, own: str, *also: str) -> bool:
+    """A pointer hop may be looked at when it is local, or a UNC or device path whose host is the host of the tree's
+    own path or of any other spelling given (``also``: its ``os.path.realpath`` form). The text AND its normal form
+    are judged, and a ``..`` segment inside a UNC or device path is never allowed: the text checked is the text opened."""
+    allowed = {h for h in (_remote_host(o) for o in (own,) + also) if h}
+    climbs = ".." in target.replace("\\", "/").split("/")
+    for text in (target, os.path.normpath(target)):
+        host = _remote_host(text)
+        if host is not None and (not host or host not in allowed or climbs):
+            return False
+    return True
+
+
+def _own_spellings(path: str) -> tuple:
+    """The spellings of a tree's own path that count for the same-host rule: the written form, plus its
+    ``os.path.realpath`` form when the written form is local (a mapped drive resolves to ``\\\\server\\share``).
+    A path already written as UNC or device is never resolved: that would touch its host."""
+    return (path,) if _remote_host(path) is not None else (path, os.path.realpath(path))
+
+
+def _codegraph_index_notes(project: Path) -> List[str]:
+    """The preview's index-ownership note: the same rule the guard applies (Index ownership), from ``.git`` entries
+    and ``stat`` calls only. Empty when the project's tree owns an index."""
+    api = _launcher_api()
+    if api is None or getattr(api, "TREE_HOP_REFUSAL", False) is not True:
+        return [UNDECIDABLE_TREE_NOTE]
+    here = os.path.abspath(str(project))
+    own_root, tree_kind, main_root = api.worktree_own_root, api.tree_kind, api.main_checkout_root
+
+    def main_candidate(path: str) -> Optional[str]:
+        try:
+            found = main_root(path)
+            if found and _hop_allowed(found, *_own_spellings(path)):
+                return found
+        except Exception:  # noqa: BLE001 - undecidable: fall to the next rule
+            pass
+        gitdir = own_root(path)[1]
+        if gitdir and _hop_allowed(gitdir, *_own_spellings(path)):
+            at = gitdir.replace("\\", "/").lower().find("/.git/worktrees/")
+            if at > 0:
+                return gitdir.replace("\\", "/")[:at]
+        norm = path.replace("\\", "/")
+        marks = list(_WORKTREE_MARKER_RE.finditer(norm))
+        return (norm[:marks[-1].start()] or None) if marks else None
+
+    search: List[str] = []
+    current = here
+    while True:
+        search.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    candidate = main_candidate(here)
+    if candidate:
+        search.append(candidate)
+    if not any(_has_project_index(folder) for folder in dict.fromkeys(search)):
+        notes = ["no index: the guard lets every read through until one exists. Build one with `codegraph init -i` "
+                 "in %s" % here]
+        for folder in dict.fromkeys([here] + ([candidate] if candidate else [])):
+            if os.path.isdir(os.path.join(folder, ".codegraph")):
+                notes.append("%s is not an index (it holds no codegraph.db)" % os.path.join(folder, ".codegraph"))
+        return notes
+    root = own_root(here)[0]
+    if root is not None:
+        try:
+            if tree_kind(root) == "linked-worktree":
+                main = main_root(root)
+                if (main and _hop_allowed(main, *_own_spellings(root)) and os.path.normcase(os.path.realpath(main)) != os.path.normcase(os.path.realpath(root))
+                        and not _has_project_index(root) and _has_project_index(main)):
+                    gitdir = own_root(root)[1] or ""
+                    at = gitdir.lower().find("/.git/worktrees/")
+                    shown = gitdir[:at] if at > 0 else main
+                    return ["the index at %s belongs to the main checkout, so the guard lets reads through in this "
+                            "worktree. Run `codegraph init -i` here to build this tree's own index and bring the "
+                            "gate back" % os.path.join(shown, ".codegraph")]
+        except Exception:  # noqa: BLE001 - undecidable: no claim
+            pass
+    return []
+
+
 def _resolve_addon(project: Path, name: str, claude_home: Optional[Path], plugin_root: Optional[Path],
                    provider: str, verb: str) -> Tuple[Optional[Result], Dict[str, Any]]:
     """The checks the install and the removal share: provider, project, not the plugin's checkout, a known
@@ -2336,6 +2652,14 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
     problem = _disabled_hook_refusal(project, home, name, manifest)
     if problem:
         return problem, {}
+    grants = _permission_grants(manifest)
+    if grants:
+        problem, layers = _load_layers(project, home)
+        if problem:
+            return problem, {}
+        named = _named_tool_findings(layers, grants)
+        if named:
+            return _tool_named_refusal(named, name, grants), {}
     problem, ops = _addon_file_ops(project, root, folder, manifest)
     if problem:
         return problem, {}
@@ -2350,11 +2674,17 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
                           "py", r["hook"], "command",
                           tuple((k, r[k]) for k in ADDON_ROW_KEYS if k in r))
             for r in manifest["registrations"]]
-    problem, edit = _plan_settings_edit(project, platform, home, regs)
+    problem, edit = _plan_settings_edit(project, platform, home, regs, grants)
     if problem:
         return problem, {}
-    ops_digest = "\n".join("%s|%s|%s" % (o["action"], o["path"], o["sha256"]) for o in ops).encode("utf-8")
+    # An update also binds the bytes it will replace, so a file that changed after the preview changes the hash.
+    ops_digest = "\n".join("%s|%s|%s%s" % (o["action"], o["path"], o["sha256"],
+                                          "|" + o["have-sha256"] if "have-sha256" in o else "")
+                           for o in ops).encode("utf-8")
     old_bytes, new_bytes, to_add = edit["old-bytes"], edit["new-bytes"], edit["to-add"]
+    index_notes = (_codegraph_index_notes(project)
+                   if any(isinstance(n, dict) and n.get("name") == "codegraph" for n in manifest["prerequisites"])
+                   else [])
     # I-9: the digest covers the settings, profile and stylesheet bytes (before and after) and every file to copy.
     profile_digest = (profile["old-bytes"] if profile["old-bytes"] is not None else b"absent",
                       profile["new-bytes"] if profile["new-bytes"] is not None else b"absent")
@@ -2376,11 +2706,21 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
                     "args": _written_hook(r, platform)["args"], "registration-key": r.key} for r in to_add],
         "already-present": edit["present"], "interpreter": "py -3" if platform == "win32" else "python3",
         "disable-all-hooks": edit["disabled"], "unified-diff": edit["diff"],
-        "notes": list(edit["notes"]) + approval_notes,
+        "notes": list(edit["notes"]) + approval_notes + index_notes + [
+            "%s is an unedited copy of an older release of this add-on. The apply saves it as %s.bak-<UTC stamp> "
+            "beside it, then replaces it with the add-on's current file" % (o["path"], posixpath.basename(o["path"]))
+            for o in ops if o["action"] == "update"],
         "kill-switches": [k for k in manifest.get("kill_switches", []) if isinstance(k, str)],
         "new-session-note": NEW_SESSION_NOTE,
     }
-    return plan, {"old-bytes": old_bytes, "new-bytes": new_bytes, "to-add": to_add, "ops": ops,
+    if grants:
+        plan["permissions-allow"] = {"add": list(edit["allow-add"]), "already-listed": list(edit["allow-listed"])}
+        granted = sorted({_grant_server(g, {n["name"] for n in manifest["prerequisites"]}) or "" for g in grants} - {""})
+        plan["notes"] = list(plan["notes"]) + [
+            "the permission entry covers every current and future tool of a server named %s, and it is written to "
+            "the committed settings file %s" % (server, edit["target"].name) for server in granted]
+    return plan, {"old-bytes": old_bytes, "new-bytes": new_bytes, "to-add": to_add,
+                  "settings-changes": bool(to_add or edit["allow-add"]), "ops": ops,
                   "profile": profile, "stylesheet-writes": sheets["writes"]}
 
 
@@ -2431,19 +2771,21 @@ def apply_addon(
                        "what would be written changed since it was previewed (settings.json, the add-on's "
                        "files in the project or in the plugin differ); run the preview again", target)
     copies = [o for o in payload["ops"] if o["action"] == "copy"]
+    updates = [o for o in payload["ops"] if o["action"] == "update"]
     profile = payload["profile"]
     profile_changes = bool(profile["adds"])
     sheet_writes = payload["stylesheet-writes"]
-    if not copies and not payload["to-add"] and not profile_changes and not sheet_writes:
+    settings_changes = payload["settings-changes"]
+    if not copies and not updates and not settings_changes and not profile_changes and not sheet_writes:
         return {"status": "nothing-to-do", "target": str(target), "add-on": name}
-    destinations = [posixpath.dirname(op["path"]) for op in copies]
+    destinations = [posixpath.dirname(op["path"]) for op in copies + updates]
     destinations += [posixpath.dirname(write["path"]) for write in sheet_writes]
     linked = _linked_folder_refusal(project, list(dict.fromkeys(list(WRITE_FOLDERS) + destinations)), target)
     if linked:
         return linked
-    if payload["to-add"]:
+    if settings_changes:
         launcher = "py" if platform == "win32" else "python3"
-        if not shutil.which(launcher):
+        if payload["to-add"] and not shutil.which(launcher):
             return refusal("interpreter-not-found", "%s is not on PATH; a missing program fails open silently"
                            % launcher, target)
         if os.path.islink(str(target)):
@@ -2460,7 +2802,34 @@ def apply_addon(
         if os.path.lexists(str(op["dest"])):
             return refusal("changed-since-preview", "%s appeared while the apply was running; nothing more "
                            "was written" % op["path"], op["dest"])
+    for op in updates:
+        # Every update is checked before the first write: the file must still hold the bytes the plan saw.
+        try:
+            now = op["dest"].read_bytes() if op["dest"].is_file() and not os.path.islink(str(op["dest"])) else None
+        except OSError:
+            now = None
+        if now != op["have"]:
+            return refusal("changed-since-preview", "%s changed while the apply was running; nothing was written"
+                           % op["path"], op["dest"])
     copied: List[str] = []
+    updated: List[str] = []
+    file_backups: List[str] = []
+    for op in updates:
+        try:
+            backup_path = _backup_write(op["dest"], op["have"])
+        except OSError as exc:
+            return refusal("write-failed", "the backup of %s could not be written: %s (nothing of it was replaced)"
+                           % (op["path"], exc), op["dest"])
+        error = _atomic_write(op["dest"], op["data"])
+        if error:
+            try:
+                backup_path.unlink()  # the original is untouched, so the backup would only be clutter
+            except OSError:
+                pass
+            return refusal("write-failed", "%s could not be replaced: %s (updated so far: %s)"
+                           % (op["path"], error, ", ".join(updated) or "none"), op["dest"])
+        updated.append(op["path"])
+        file_backups.append(str(backup_path))
     for op in copies:
         error = _atomic_write(op["dest"], op["data"])
         if error:
@@ -2468,7 +2837,8 @@ def apply_addon(
                            % (op["path"], error, ", ".join(copied) or "none"), op["dest"])
         copied.append(op["path"])
     result: Dict[str, Any] = {"status": "applied", "target": str(target), "add-on": name,
-                              "copied": copied, "added": len(payload["to-add"]), "backup": None,
+                              "copied": copied, "updated": updated, "file-backups": file_backups,
+                              "added": len(payload["to-add"]), "backup": None,
                               "registered": [], "new-session-note": NEW_SESSION_NOTE}
     if profile_changes:
         # The documents are on disk, so the profile never lists a file that is not there. The slot was
@@ -2501,7 +2871,7 @@ def apply_addon(
                            % (write["path"], error, ", ".join(copied) or "none"), write["dest"])
         written.append(write["path"])
     result["stylesheets"] = written
-    if not payload["to-add"]:
+    if not settings_changes:
         return result
     old_bytes = payload["old-bytes"]
     backup: Optional[Path] = None
@@ -2540,6 +2910,8 @@ REMOVAL_SESSION_NOTE = (
     "Claude Code reads the hook rows once, when a session starts. Start a new session so the removed "
     "add-on's hooks stop running.")
 HELPER_KEPT_REASON = "a helper other hooks may use; the removal never deletes helpers"
+PERMISSION_KEPT_REASON = ("a permission entry in permissions.allow; the removal keeps it (it is harmless without the "
+                          "hooks), delete the line by hand if you want it gone")
 SNIPPET_KEPT_REASON = ("the stylesheet snippet lives in the project's own stylesheet; the removal never "
                        "removes it, delete the marked block by hand if you want it gone")
 KEPT_REASONS = {
@@ -2793,10 +3165,11 @@ def _removal_file_ops(project: Path, folder: Path, manifest: Dict[str, Any], ref
             action = "kept-referenced"
         ops.append({"path": rel, "kind": kind, "action": action, "dest": dest, "sha256": digest})
 
+    released = manifest.get("released_sha256", {})
     for hook in manifest["hooks"]:
         copy_hash = _folded_sha256(folder / "hooks" / hook)
         add("hook", project / ".claude" / "hooks" / hook, ".claude/hooks/" + hook,
-            {copy_hash} if copy_hash else set())
+            ({copy_hash} if copy_hash else set()) | set(released.get(hook, [])))
     hooks_dir = project / ".claude" / "hooks"
     for entry in manifest.get("disabled", []):
         copy_hash = _folded_sha256(folder / "hooks" / entry["hook"])
@@ -2874,6 +3247,7 @@ def _plan_addon_removal(project: Path, name: str, claude_home: Optional[Path], p
     kept: List[Dict[str, str]] = [{"path": o["path"], "reason": KEPT_REASONS[o["action"]]}
                                   for o in ops if o["action"] in KEPT_REASONS]
     kept += [{"path": h, "reason": HELPER_KEPT_REASON} for h in manifest["helpers"]]
+    kept += [{"path": g, "reason": PERMISSION_KEPT_REASON} for g in _permission_grants(manifest)]
     snippet = manifest.get("stylesheet_snippet")
     if isinstance(snippet, dict):
         kept.append({"path": snippet["file"], "reason": SNIPPET_KEPT_REASON})
@@ -3187,6 +3561,9 @@ def build_parser() -> argparse.ArgumentParser:
     addon.add_argument("--provider", choices=PROVIDERS, default="claude")
     addon.add_argument("--stylesheet", action="append", default=[], metavar="PATH",
                        help="global stylesheet (relative to the project) that gets the add-on's snippet (repeatable)")
+    addon.add_argument("--check", action="store_true",
+                       help="read-only: judge the settings layers against the add-on's permission entry "
+                            "(exit 0 clean, 1 findings, 2 could not check)")
 
     remove = sub.add_parser("addon-remove", parents=[common], help="remove one opt-in add-on")
     remove.add_argument("--name", required=True, help="the add-on to remove (a folder under .claude/addons/)")
@@ -3202,6 +3579,13 @@ def _render_text(result: Result) -> str:
     if _is_refusal(result):
         return "REFUSED %s: %s\n  path: %s" % (result["code"], result["message"], result["path"])
     out = ["status: %s" % result.get("status")]
+    for finding in result.get("findings", []):
+        out.append("  finding %s: %s (%s)" % (finding.get("code"), _entry_shown(str(finding.get("entry"))),
+                                                    finding.get("file")))
+    allow = result.get("permissions-allow")
+    if allow:
+        out.append("permissions.allow: add %s; already listed %s" % (", ".join(allow["add"]) or "none",
+                                                                      ", ".join(allow["already-listed"]) or "none"))
     for p in result.get("proposals", []):
         out.append("  %-26s %-14s %s" % (p["slot"], p["basis"], ", ".join(p["values"])))
     if "ready" in result:
@@ -3258,7 +3642,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             result = propose_profile(project, home)
     elif args.command == "addon":
-        if args.apply:
+        if args.check and args.apply:
+            parser.error("argument --check: not allowed with argument --apply (--check is read-only)")
+        if args.check and args.stylesheet:
+            parser.error("argument --check: not allowed with argument --stylesheet (--check is read-only)")
+        if args.check and args.expect_sha256:
+            parser.error("argument --check: not allowed with argument --expect-sha256 (--check is read-only)")
+        if args.check:
+            result = check_addon(project, args.name, home, provider=args.provider)
+        elif args.apply:
             result = apply_addon(project, args.name, args.expect_sha256 or "", args.platform, home,
                                  provider=args.provider, stylesheets=args.stylesheet)
         else:
@@ -3280,7 +3672,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         result = plan_hooks(project, args.platform or sys.platform, args.provider, home, skip=args.skip)
     print(json.dumps(result, indent=2) if args.json else _render_text(result))
-    return EXIT_CLASS[result["code"]] if _is_refusal(result) else EXIT_OK
+    if result.get("status") == "checked" and not result.get("ok"):
+        return EXIT_FINDINGS
+    if _is_refusal(result):
+        # addon --check promises 0 clean, 1 findings, 2 could not check: every refusal is 2, never 3.
+        return EXIT_REFUSED if (args.command == "addon" and args.check) else EXIT_CLASS[result["code"]]
+    return EXIT_OK
 
 
 if __name__ == "__main__":

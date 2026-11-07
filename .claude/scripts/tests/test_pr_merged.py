@@ -608,6 +608,11 @@ class TestPortability(unittest.TestCase):
         self.assertEqual(load_implementers(prof), DEFAULT_IMPLEMENTERS,
                          "an empty implementer list would make every block a non-sub-task")
 
+    def test_the_default_includes_the_cloud_engineer_and_it_ships(self):
+        self.assertIn("cloud-engineer", DEFAULT_IMPLEMENTERS)
+        root = Path(__file__).resolve().parents[3]
+        self.assertTrue((root / "agents" / "cloud-engineer.md").is_file())
+
     def test_the_default_only_names_agents_the_plugin_actually_ships(self):
         for a in DEFAULT_IMPLEMENTERS:
             self.assertNotIn(a, ("ingestion-data-architect", "llm-training-engineer",

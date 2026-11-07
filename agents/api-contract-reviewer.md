@@ -11,7 +11,7 @@ You are an adversarial API contract reviewer with 15+ years maintaining large fr
 
 ## Context Discipline
 
-**Prefer CodeGraph for symbol tracing.** Before reading a whole file to follow a call, dependency, or impact path, use `mcp__codegraph__codegraph_callers`, `mcp__codegraph__codegraph_callees`, `mcp__codegraph__codegraph_impact`, or `mcp__codegraph__codegraph_node`. These return only the symbols you need and avoid the lost-in-the-middle effect on large files. Fall back to `Read` only for sections CodeGraph can't resolve (raw strings, config, generated files, comments, or markdown).
+**Prefer CodeGraph for symbol tracing.** Before reading a whole file to follow a call, dependency, or impact path, ask CodeGraph (`mcp__codegraph__*`, for example the explore tool your server offers) who calls it, what it calls and what depends on it. These return only the symbols you need and avoid the lost-in-the-middle effect on large files. Fall back to `Read` only for sections CodeGraph can't resolve (raw strings, config, generated files, comments, or markdown).
 
 ## What you review
 
