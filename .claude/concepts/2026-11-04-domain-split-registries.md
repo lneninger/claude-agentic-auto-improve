@@ -7,8 +7,8 @@
 **Work Item Brief:** .claude/work-items/2026-11-04-235-domain-split-registries.md
 **Tracking issue:** pending (opened by `/design-first` Step 3.4)
 **Budget:** 18,000 tokens (XL contract). Superseded text and every critique round live in `.claude/contract-history/2026-11-04-domain-split-registries.round-{1,2,3}.md`.
-**Amendment:** 5 (2026-11-07). The landing halted (run `20261107T114850Z-c28a69`, outcome `unresolvable-conflict`, gate P7, on `.claude/hooks/journal-post-approval-tracker.py`), so this amendment adds sub-tasks 12 (merge the default branch into the parent branch), 13 (the t11 W1 fix and N2 wording) and 14 (superseding review). Status went from `approved` back to `draft`; the owner accepted every amendment-5 critique finding and answered Q21 and Q22 on 2026-11-07 (folded into the body), and re-approves at the approval gate. Blocks 1–11 and their completion records are unchanged. See "Amendment 5 record".
-**Previous amendment:** 4 (2026-11-06). The t9 review returned `**Verdict:** blocked`, so this amendment adds sub-tasks 10 (fixes) and 11 (superseding review). Status went from `approved` back to `draft`; the owner answered Q19 (a) and Q20 (yes) and accepted every amendment-4 critique finding (2026-11-06), and the owner re-approved on 2026-11-06 (Status back to `approved`; the owner also approved the reader re-seed and the `conflicting-entry` refusal). Amendment 3 (2026-11-04) was approved; blocks 1–9 and their completion records are unchanged. See "Amendment 4 record".
+**Amendment:** 6 (2026-11-07). Sub-task 12's engineer stopped `has-issues` after committing the merge (merge commit `8558879`): two registry lint findings, a red bridge test and a red version-rule row that block 12 did not cover. This amendment changes block 12 only, plus I-7, Adjacent Areas (one follow-up row), Uncertain Assumptions, Failure Modes, Confidence, Lessons and block 14's CONTEXT line and amendment-6 check. It adds no block; block 12 re-runs on the same branch. Status went from `approved` back to `draft`; the owner answered "amend" to all three recommendations (2026-11-07). See "Amendment 6 record".
+**Previous amendments:** 5 (2026-11-07: blocks 12–14 after the landing halted; "Amendment 5 record") and 4 (2026-11-06: blocks 10–11 after the t9 review; "Amendment 4 record"). The owner re-approved both. Amendment 3 (2026-11-04) was approved. Blocks 1–11, 13 and their completion records are unchanged.
 
 > **Protocol:** filled in by `data-architect`. Implementers refuse to run unless `Status: approved`. `concept-gate.py` reads `Files to touch`. Lifecycle, budget rule and management commands: `.claude/templates/concept-contract.md`.
 
@@ -43,7 +43,7 @@ Not applicable. Reason: no Angular UI surface is touched; `Files to touch` holds
 | Name | Fields | Invariants | Ownership |
 |------|--------|------------|-----------|
 | Registry (mechanisms, vocabulary, journal) | name; root file; domain files (`general`, then alphabetical); layout state | **I-1** over the three root files under the resolved `.claude/registries/`: `absent` = none exists. `unknown` = one or two missing (reason `registry-missing:<NAME>`), a marker with another value, or mixed marked/unmarked roots. `pending` = all three exist, none marked. `current` = all three marked on line 1, no root holds a `## Project:` heading or any entry or leftover below its pointer, and every `<REG>/general.md` exists. `stale-sync` = all marked but a `current` condition fails. **I-2** a layout-2 root's last section is the fixed pointer `## Project tier`: it names `<REGISTRY>/<domain>.md`, says `general.md` always exists and every `.md` in the folder is read, and lists no domain (generic, syncable). **I-3** domain files resolve from the same `.claude` root as the root file; never a union of roots. **I-4** `INTEGRATION.md` is outside the layout; the digest indexes it and R6 hashes it when present. **Tier heading** = `## Project: <name>` (layout 1) or `## Project tier` (the pointer). | the project |
-| Registry entry | registry; tier (`universal`, `project:<name>` on layout 1, `domain:<slug>`); file; line; title; key; text; tags; source contract; status (`active`, `archived-title-only`, `legacy`) | **I-5** has a body unless `archived-title-only` or `legacy` (body per grammar below). **I-6** keys unique per registry. **I-7** append-only from layout 2 on: an entry is never reordered or rewritten; allowed appends are a new entry, an indented `Correction (<date>, <source>)` line, and an indented `Status: archived-title-only` line under a bodiless entry. Exceptions: sub-task 1's pre-layout reconciliation (block 12 rule (4) keeps it through the merge: the default branch's copies of the three entries it folded are deleted, not re-added); *amendment 5, block 12:* the Q22 fold, which deletes the default branch's 2026-11-05 "CodeGraph (amendment)" entry and re-adds its text verbatim as the last Correction line of the 2026-10-30 entry, and rule (5)'s move of any default-branch journal entry that git placed below the pointer to the end of the Universal tier, text unchanged. No other rewrite or reorder is allowed; header prose and leftover blocks are not entries. **I-8** fenced code blocks are never parsed. **I-8b** non-entry heading: a journal `###` heading not starting with a `YYYY-MM-DD` shape (e.g. `### Tag conventions`), or a `#`/`##` heading that is neither a tier heading nor a legacy dated heading. Its **section** runs to the next heading of the same or higher level, and every line in it is prose: never an entry, never an R1/A1 finding. **I-8c** a legacy entry is keyed (R2 applies), indexed by the digest under its tier, returned to readers, exempt from R1/A1, printed as `advisory: legacy <file>:<line>`, never converted, and never fires the tracker. | its registry |
+| Registry entry | registry; tier (`universal`, `project:<name>` on layout 1, `domain:<slug>`); file; line; title; key; text; tags; source contract; status (`active`, `archived-title-only`, `legacy`) | **I-5** has a body unless `archived-title-only` or `legacy` (body per grammar below). **I-6** keys unique per registry. **I-7** append-only from layout 2 on: an entry is never reordered or rewritten; allowed appends are a new entry, an indented `Correction (<date>, <source>)` line, and an indented `Status: archived-title-only` line under a bodiless entry. Exceptions: sub-task 1's pre-layout reconciliation (block 12 rule (4) keeps it through the merge: the default branch's copies of the three entries it folded are deleted, not re-added); *amendment 5, block 12:* the Q22 fold, which deletes the default branch's 2026-11-05 "CodeGraph (amendment)" entry and re-adds its text verbatim as the last Correction line of the 2026-10-30 entry, and rule (5)'s move of any default-branch journal entry that git placed below the pointer to the end of the Universal tier, text unchanged; *amendment 6, block 12 rule (9):* the fold of the default branch's 2026-11-06 "CodeGraph (correction)" entry (issue #271) as the last Correction line of the 2026-11-05 "CodeGraph (correction)" entry, and the move of its column-0 VOCABULARY "Correction (2026-11-06, issue #271)" line to the last indented line of "Investigation Turn (amendment)", text unchanged. No other rewrite or reorder is allowed; header prose and leftover blocks are not entries. **I-8** fenced code blocks are never parsed. **I-8b** non-entry heading: a journal `###` heading not starting with a `YYYY-MM-DD` shape (e.g. `### Tag conventions`), or a `#`/`##` heading that is neither a tier heading nor a legacy dated heading. Its **section** runs to the next heading of the same or higher level, and every line in it is prose: never an entry, never an R1/A1 finding. **I-8c** a legacy entry is keyed (R2 applies), indexed by the digest under its tier, returned to readers, exempt from R1/A1, printed as `advisory: legacy <file>:<line>`, never converted, and never fires the tracker. | its registry |
 | Registry migration | number (0001); from; to; plan; plan hash; report | **I-9** dry-run writes nothing under `.claude/registries/`. **I-10** apply writes only when the recomputed plan hash equals `--expect-sha256`. **I-11** idempotent: after a successful apply the tree is `current`; on `current` the plan is empty and exit is 0, checked before any git check (see Commands). **I-12** no loss, checked on the plan before any write. *Entries:* every input (key, text) maps to an output entry with that key holding every input line (merges per step 4), and per registry `occurrences in = kept + moved + merged away`. *Text:* after folding line endings, dropping the BOM and trimming trailing spaces, the multiset of non-blank source lines equals the multiset of non-blank destination lines, minus the lines 0001 adds and plus the removed lines, both **counted per instance** (multiset subtraction). Added lines: marker, pointer section, skeleton header, leftover heading, provenance and fence lines. Removed lines are a closed set, each listed with file:line and reason: `project-heading`; `replaced-sync-section` (the marker and pointer-section lines a stale sync delivered; on `stale-sync`, "project content" starts after the pointer section, so these lines are counted once); `merged-duplicate` (a line of a duplicate copy that also appears verbatim in the kept copy). Mismatch → `content-loss-detected`, nothing written. *Per entry (amendment 4, W3):* with the same normalisation (line endings folded, BOM dropped, trailing spaces trimmed, blank lines ignored), each key's output entry holds, as a multiset, every input line of every occurrence of that key minus that key's `merged-duplicate` lines; else `content-loss-detected`. Two output entries with one key → `conflicting-entry` naming both output locations and their first lines. **I-13** a refusal leaves every registry file byte-identical and still writes the report. | plugin (code); project (result) |
 
 ### Value Objects
@@ -169,6 +169,7 @@ The architect has no shell and did not run the scanner; `.claude/area-mapping.js
 | Area | Decision | Implication / Reason | Handle |
 |------|----------|----------------------|--------|
 | sync-tool (other repository) | follow-up handle | `tools/sync-plugin.ps1` must halt on `pending`/`stale-sync`, refuse cross-layout publishing, record the applied layout only on `current`, add the new modules to its `files` arrays, and handle the plugin-owned-token loop. Not in this repository. | `.claude/concepts/followups/2026-11-04-sync-tool-registry-layout-gate.followup.md` |
+| version-rule (amendment 6) | follow-up handle | The default branch's INV-O1 row in `test_plugin_manifests.py` contradicts the Parent Branch Delivery Rule for every parent-branch sub-task, not only t12 to t14. This contract accepts its own red row; the rule conflict needs its own contract. | `.claude/concepts/followups/2026-11-07-inv-o1-parent-branch-conflict.followup.md` |
 
 ## UI Implications
 
@@ -189,7 +190,7 @@ Not applicable. Reason: no REST endpoint or SignalR event is added or changed.
 
 ## Confidence
 
-Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plugin_root` and its helpers `:284-377`, `_atomic_write` `:380-394`, `checkout_equivalent_path` `_project_paths.py:486`, and the `.gitignore` entry for `.claude/cache/`). Medium on multi-file rollback on Windows and on M/V header bullets parsing (Uncertain Assumptions). Full rationale: round-3 history, Part C. Amendment 4 re-read `accuracy_update.py:40-78,404-438` (the old `_ENTRY_HEADER` and its body cut), `critic-verdict-tracker.py:66-72` and `contract-status-watcher.py:68` (fail-soft imports of `accuracy_update`), and `test_registry_layout.py:737-749` (the this-repository pin). Medium on whether the first post-upgrade re-seed lands before a client's next hand-written `post-*` entry (Accepted guard limit). Amendment 5 re-read both copies of `journal-post-approval-tracker.py` (the parent's thin wrapper; the default branch's caller of `generate_registry_digest.journal_entries`), the default branch's `generate_registry_digest.py:55-184` (`entry_blocks`, `journal_entries`, `_source_value`), `memory_boundary.py:28-61,499-568` (its `_bind` of those names and its fixed-`DOMAINS` file list), `test_registry_entries.py`, `accuracy_update.py:404-446,525-610`, `_registry_layout.py:440-481` (`registry_files_in`) and `check_version_bump.py:62-182` (parent mode). The default branch's copies were read from a checkout of a branch cut from it, not from `origin/master` itself, so block 12 re-reads each one with `git show origin/master:<path>`. Medium on the size of the default branch's other changes (153 commits; only the conflicting files and the reader overlap were read). The critique fold (2026-11-07) re-read `_registry_layout.parse_text`, `_field_map`, `_make_entry` and `fence_mask` (`:153-437`), and, in the default-branch-derived tree `20261107-docs-journal-moving-base-stop-list`, `generate_registry_digest.py:55-184`, `memory_boundary.py:51-61,499-568`, `VOCABULARY.md:79-94` and `JOURNAL.md:411-416`; the adapter differences in block 12 come from that reading. Medium-Low on the merge method holding, because only an instruction to the owner controls it (block 13's Run-first line catches a failure, it does not prevent one), and on the default branch staying conflict-free until the landing.
+Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plugin_root` and its helpers `:284-377`, `_atomic_write` `:380-394`, `checkout_equivalent_path` `_project_paths.py:486`, and the `.gitignore` entry for `.claude/cache/`). Medium on multi-file rollback on Windows and on M/V header bullets parsing (Uncertain Assumptions). Full rationale: round-3 history, Part C. Amendment 4 re-read `accuracy_update.py:40-78,404-438` (the old `_ENTRY_HEADER` and its body cut), `critic-verdict-tracker.py:66-72` and `contract-status-watcher.py:68` (fail-soft imports of `accuracy_update`), and `test_registry_layout.py:737-749` (the this-repository pin). Medium on whether the first post-upgrade re-seed lands before a client's next hand-written `post-*` entry (Accepted guard limit). Amendment 5 re-read both copies of `journal-post-approval-tracker.py` (the parent's thin wrapper; the default branch's caller of `generate_registry_digest.journal_entries`), the default branch's `generate_registry_digest.py:55-184` (`entry_blocks`, `journal_entries`, `_source_value`), `memory_boundary.py:28-61,499-568` (its `_bind` of those names and its fixed-`DOMAINS` file list), `test_registry_entries.py`, `accuracy_update.py:404-446,525-610`, `_registry_layout.py:440-481` (`registry_files_in`) and `check_version_bump.py:62-182` (parent mode). The default branch's copies were read from a checkout of a branch cut from it, not from `origin/master` itself, so block 12 re-reads each one with `git show origin/master:<path>`. Medium on the size of the default branch's other changes (153 commits; only the conflicting files and the reader overlap were read). The critique fold (2026-11-07) re-read `_registry_layout.parse_text`, `_field_map`, `_make_entry` and `fence_mask` (`:153-437`), and, in the default-branch-derived tree `20261107-docs-journal-moving-base-stop-list`, `generate_registry_digest.py:55-184`, `memory_boundary.py:51-61,499-568`, `VOCABULARY.md:79-94` and `JOURNAL.md:411-416`; the adapter differences in block 12 come from that reading. Medium-Low on the merge method holding, because only an instruction to the owner controls it (block 13's Run-first line catches a failure, it does not prevent one), and on the default branch staying conflict-free until the landing. Amendment 6 read the t12 branch's `MECHANISMS.md:119-120`, `VOCABULARY.md:140-146`, `_claude_paths.py:61-117,200-209` and the call sites of `registry_files` / `registry_files_in` (`accuracy_update.py:559`, the tracker's `is_journal`, `memory_boundary.py:500-505`, `validate_registries.py:62`), the Q-hop rows of `test_codegraph_first_guard.py:3195-3240` and `test_plugin_manifests.py:1331-1395`. High on the two folds and the version row. The critique fold (2026-11-07) re-read, in the t12 tree, `_claude_paths.py:55-117,200-216`, the Q-hop rows `test_codegraph_first_guard.py:3178-3264` (with the `643b667` precedent at `:2145-2166`), `test_plugin_manifests.py:1331-1397`, `accuracy_update.py:486-583` and `journal-post-approval-tracker.py:40-114`. Medium-High on the bridge now: the closed set rests on the caller's verified fact (neither helper defines `registry_files` / `registry_files_in`), on the default branch's bridge passing the Q-hop rows beside both helpers, and on one ASSUMED fact (`checkout_equivalent_path` is in both helpers), which the frozen-helper and Q-hop rows prove at import.
 
 ## Alternatives Considered & Why Rejected
 
@@ -203,6 +204,7 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - `VERIFIED via _project_paths.py:486`: `checkout_equivalent_path` strips `.claude/worktrees/<name>/` segments.
 - `FALSIFIED` (t9 review W5, 2026-11-06): on this repository `separate_plugin_root` returns none unless a cache copy exists. A cache copy does exist (`~/.claude/plugins/cache/auto-improve`, an older installed release), so the plugin's own new Universal entries read as client-authored and print 9 `R3 universal-candidate` advisories (exit 0). Tokens are empty, so nothing moves. The remedy is Q19 (answered (a): skip only that advisory when the project holds the plugin's own manifest). `ASSUMED`: M/V header bullets parse as the digest's `BULLET` reads them today. Verification for both: sub-task 3 runs `--check-structure`; any non-R4 finding is reported as AMENDMENT, never suppressed.
 - *Amendment 5.* `VERIFIED via check_version_bump.py:163-174`: in parent mode the allowed versions are the base's and the one at `merge-base(origin/<default>, HEAD)`. After the merge, that merge base is the merged default-branch commit, so a head that carries the default branch's version passes. `VERIFIED via the default branch's MECHANISMS.md:93,106`: the default branch holds two entries titled "CodeGraph (amendment)" (dated 2026-10-30 and 2026-11-05), which form one key (Q22). `VERIFIED via memory_boundary.py:60,500`: the adapter binds `DOMAINS` and falls back to its own default list, so a domain file outside that list is never read. `VERIFIED by the amendment-5 critic via concept_changed_check.py and concept-gate.py:201-222` (critic NIT; not re-read by the architect): the Changed-file check judges every changed file (turn end) and staged file (`--staged`, from `/git-commit` and `/verify-before-done`) against Files to touch, but every code path the default branch changed lies under `.claude/` or has a doc or config extension, which the gate allows, so the t12 merge passes it. The t12 diff holds every file the default branch changed; if that check, or any loop or CI gate, still rejects a file, block 12 stops and reports instead of narrowing the merge. `VERIFIED via a default-branch-derived tree (VOCABULARY.md:79,86,91,94)`: the default branch's copies of the three entries block 1 folded are byte-equal to the text block 1 kept, so rule (4) deletes them with nothing to carry over.
+- *Amendment 6.* `VERIFIED by the caller's shell (2026-11-07)`: neither `e4f392c` nor `643b667` defines `registry_files` or `registry_files_in` in `.claude/hooks/_project_paths.py`; `e4f392c` defines `worktree_own_root`, `643b667` does not. `VERIFIED via the Q-hop rows (test_codegraph_first_guard.py:3214-3236)`: the default branch's bridge imports beside both helpers, so every bare name it reads (the resolver names and the five launcher names, checked at import by `_claude_paths.py:74-87`) exists in both. `VERIFIED via the t12 _claude_paths.py:97-101`: the parent branch added three bare reads to the bridge: `registry_files`, `registry_files_in` and `checkout_equivalent_path`. `ASSUMED`: both helpers define `checkout_equivalent_path` (the hooks have bound it with `getattr` since before both pins, `concept-gate.py:96-105`, and amendment 3 read it in the parent's base tree). Check: PowerShell `git show 643b667:.claude/hooks/_project_paths.py | Select-String "def checkout_equivalent_path"`, and the same for `e4f392c`; block 12's frozen-helper row and the two Q-hop rows fail at import if it is false.
 
 ## Failure Modes & Mitigations
 
@@ -224,6 +226,9 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - **The merge pull request is squashed or rebased** (amendment 5) → the default-branch parent is lost, and the landing conflicts again. No tool can prevent it: the repository allows merge commit, squash and rebase, and the Merge-direction check judges targets, not methods. The controls are: block 12 proves its own head (two-parent merge commit, `git merge-tree --write-tree origin/master HEAD` clean) and its pull request body tells the owner to merge with "Create a merge commit"; block 13's Run-first line refuses to start when the parent's merge base with `origin/master` is still `9a1b452a`, so a lost parent is caught before more work is built on it.
 - **The default branch moves again before the landing** (amendment 5) → the landing configuration declares no `unionPaths` and no `regenerators` (`land_contract.py:1028-1040`), so any conflicting path halts it. The three registries and `README.md` are the default branch's busiest files, and a journal-append branch (`20261107-docs-journal-moving-base-stop-list`) is in flight. Mitigation: block 14's last check is a live `git merge-tree --write-tree --name-only origin/master origin/fix/235-domain-split-registries`, so a conflict that returned after t12 is caught at review time and blocks the verdict, and its report ends with the exact landing command. The remedy for a returned conflict is a second, small merge block added by amendment, written like block 12.
 - **Moving entries re-keys memory capture candidates** (amendment 5, critic NIT) → `memory_boundary.py:546,551` keys an M/V candidate by `file|tier|title|line`, so block 12's placement (and 0001 on clients) changes those keys, and a contract whose capture ran before the move is offered its entries again. Accepted: receipts are per contract brief, and the user clears every offered item; journal candidates keep `sig`, which does not change.
+- **The default branch adds registry text that breaks the lint on the merged tree** (amendment 6: a second "CodeGraph (correction)" key, R2, and a column-0 VOCABULARY Correction line, A1) → block 12 rule (9) folds both as I-7 exceptions. The lint must print no R1/R2/R3/R5/A1 line, and a new merge of `origin/master` repeats the check. The lint is a real gate: `/verify-before-done` runs Step 5.6 on every scope. The folds also re-key memory capture candidates (`memory_boundary.py` keys an M/V candidate by `file|tier|title|line`), as the amendment-5 move does: the folded entry's line becomes a Correction line, so its old key is offered once more. Accepted on the same grounds (per-brief receipts, the user clears every item).
+- **The bridge meets an older `_project_paths.py`** (amendment 6) → the closed set of names that can be missing is `registry_files` and `registry_files_in` (Uncertain Assumptions). The bridge binds those two with `getattr`; a missing one becomes a stand-in that raises `ImportError` on each call. Every constant and every other name stays a bare read, and none is missing. Outcomes: `accuracy_update.process_journal_change` catches it (empty list); `memory_boundary` refuses `reader-unavailable`; the tracker hook calls the hooks-side helper directly, gets `AttributeError` and now logs `journal-tracker-reader-missing` before it returns (block 12). The registry CLI scripts (`validate_registries`, `cross_area_scan`, `north_star_review`, `generate_registry_digest`, `registry_append`, `registry_migrate`) now stop at their first registry read with a traceback, exit 1. That is NEW behaviour: the default branch's bridge imports beside both helpers, and those scripts ran there. The owner accepted it (2026-11-07) over a root-only fallback. Frozen-helper, CLI and hook rows pin it.
+- **The merge-base version row is red until the landing** (amendment 6) → the INV-O1 row of `test_plugin_manifests.py` needs a raised version, and parent mode forbids a sub-task to raise it. The owner accepted it (2026-11-07) as the only expected-red row. **No gate checks it:** `/verify-before-done` treats `.claude/` and `.md` changes as docs-only (`skills/verify-before-done/SKILL.md:26`, Steps 6 and 7), and the landing's four verification steps (`version-bump`, `test_pr_merged.py`, `test_check_hook_registrations.py`, `.claude/hooks/tests`; `work-item-conventions.json` ~88-124) do not include it. The real gates are the registry lint (Step 5.6, every scope) and the hooks-tests folder (which holds `test_codegraph_first_guard.py`), so rule (9) and the bridge fix are required. The real version proof is the landing's own `--raise` then `--exact` (P7b) and its `version-bump` step. Blocks 12 and 14 run the suite by hand so the single red row is on record. A re-run after the landing proves nothing, because the merge base is then the head itself. The rule conflict is general, so it has a follow-up: `.claude/concepts/followups/2026-11-07-inv-o1-parent-branch-conflict.followup.md`.
 
 ## Open Questions for User
 
@@ -258,6 +263,10 @@ Moved to `.claude/contract-history/2026-11-04-domain-split-registries.round-4.md
 
 Moved to `.claude/contract-history/2026-11-04-domain-split-registries.round-5.md` (1 BLOCKER / 6 WARN / 5 NIT, every finding accepted by the owner on 2026-11-07 and addressed in blocks 12 to 14; the "Addressed by" trail is in that file). Moved to bring the contract back under its token budget.
 
+### Amendment 6 critique
+
+Moved to `.claude/contract-history/2026-11-04-domain-split-registries.round-6.md` (0 BLOCKER / 7 WARN / 6 NIT, every finding accepted by the owner on 2026-11-07 and addressed in block 12, block 14 and the Amendment 6 record; the "Addressed by" trail is in that file).
+
 ## Lessons referenced
 
 - **2026-10-04 — A root locator can return the consumer itself under vendoring** — heeded by `separate_plugin_root`, the Plugin root resolution VO and the vendored fixtures.
@@ -276,6 +285,7 @@ Moved to `.claude/contract-history/2026-11-04-domain-split-registries.round-5.md
 - **Amendment 4:** *2026-10-30 One shared reader must own the filtering* and *2026-11-01 A shared reader reused by a stricter consumer…* are heeded by block 10's W1 (the tracker reads through `rl.parse_text`, and the signatures are pinned on the 41 existing entries). *2026-10-04 A root locator can return the consumer itself under vendoring* is heeded by Q19 (a): only an advisory is dropped. *2026-10-04 A VERIFIED parser claim must be tested on the unfilled and the missing case* is heeded by the fence, path-length, misattached-line and domain-only fixtures, and by the client-shaped signature-parity row with the reader re-seed (critic WARN 2). *2026-10-22 An accepted critic WARN … must amend the contract body* is heeded: each t9 finding and each amendment-4 critique finding changes the body or a block, and the TASK block carries no conditional text. *2026-11-01 A shared reader reused by a stricter consumer…* is also heeded by the default mode ignoring leftovers (critic WARN 6). *2026-10-30 A delivery rule must name every route into delivery* is heeded by naming PR #288's head and the Run-first line (critic WARN 8). The t9 C1 lesson (Q20, appended by block 10) is heeded by block 10 putting `test_registry_layout.py` on its list, widening its pin for the skip line and running all 13 t9 suites.
 - **Amendment 5:** *2026-10-30 One shared reader must own the filtering* is heeded by Q21 (a): one grammar, and the default branch's names become adapters. *2026-11-02 A sweep … must route EVERY local reader* is heeded by routing `memory_boundary.py`, a reader the default branch added, through `registry_files_in`. *2026-11-01 After merging a base that changes the row shape a feature reads …* is heeded by block 12's layout-2 round-trip test for the memory adapter and by its rerun of the default branch's suites. *2026-10-15 Reuse the existing brief-linkage reader; a second one misses edge cases* is heeded by keeping the default branch's Source contract rule and its `subs` shape instead of a second reader. *2026-10-30 A delivery rule must name every route into delivery* is heeded by naming the merge route, which is a task branch, a merge commit and a pull request merged with a merge commit, never squash, plus the landing re-run. *2026-10-17 Judge "identical to master" by git's view* is heeded by the `git merge-tree` clean check. The t9 C1 lesson (a sub-task that flips the state an earlier pin reads must re-run that suite) is heeded by block 12 running every t11 suite and every suite the default branch changed.
 - **Amendment 5 critique fold (2026-11-07):** *2026-11-03 When resolving a conflict hunk by keeping both sides, drop the base lines the other side rewrote* (default branch, `JOURNAL.md:411`; it arrives with this merge and is not yet in the parent's journal) is heeded by block 12 rule (0) and its Base-line check. *2026-11-01 A shared reader reused by a stricter consumer must be re-checked …* and *2026-10-04 A VERIFIED parser claim must be tested …* are heeded by block 12's Adapter differences D1–D5 and J1–J5 and their fixture rows. *2026-10-22 An accepted critic WARN … must amend the contract body* is heeded by I-7, "Import chain", Failure Modes and rule (4) changing in the body, with no conditional left in blocks 12–14. *2026-11-03 A stop list checked against a moving default branch needs a rule for changes outside the edited lines* (default branch) is heeded by block 14's final live `git merge-tree` check. *2026-11-02 A revision that adds a path adds its failure modes* (default branch) is heeded by the merge-method and moving-branch Failure Modes citing a mechanism. *2026-11-02 Keep a review-fix block to the review's findings* (default branch) is heeded by block 13's TASK line naming the lesson batch as a second, stated purpose. *2026-10-30 A delivery rule must name every route into delivery* is heeded by the merge-method route being checked at block 12's head and at block 13's start.
+- **Amendment 6:** *2026-11-05 A bridge re-export that silently falls back to an inline copy must also say which one it gave* is heeded: the stand-in is no inline copy, and the `ImportError` it raises is the one signal callers read, so no new export is needed. *2026-11-05 An "older release" test fixture must be pinned to a fixed commit or a frozen copy, never to HEAD* is heeded in full by the frozen-helper, CLI and hook rows: they read the helper at the fixed commit `643b667`, check it with `git cat-file -e`, and SKIP with a printed reason when it is absent, as the Q-hop rows do. *2026-11-05 A hardening fix applied to a shared classifier must be checked against every consumer* and *2026-11-06 An exception sentence that names the outcome of a later call must list every outcome that call can have* are heeded by the closed name list, the per-name call-site rule, and the INV-O1 exception naming every gate and its outcome (critique fold). *2026-11-06 A sub-task that flips the state an earlier sub-task's test pins must re-run that suite* is heeded by naming the merge-base version row and its exit at the landing. *2026-10-22 An accepted critic WARN or answered Open Question must amend the contract body* is heeded by I-7 and Failure Modes changing in the body.
 - Orthogonal to north-stars: none active.
 
 ## Amendment 4 record (2026-11-06)
@@ -299,6 +309,17 @@ Moved to `.claude/contract-history/2026-11-04-domain-split-registries.round-5.md
 - **Ordering:** block 12 depends on 11 (`pass-with-findings` releases, per `compute_released`). Block 13 depends on 12, because both change `accuracy_update.py`, `MECHANISMS.md` and `JOURNAL.md`, and W1's test must run on the merged tracker. Block 14 depends on 12 and 13 and supersedes t11.
 - **Budget:** the contract was already above its 18,000-token budget before this amendment. Before the owner re-approves, the main session moves `### Amendment 4 critique` into `.claude/contract-history/2026-11-04-domain-split-registries.round-4.md` and leaves a one-line pointer. This amendment may write only the contract file, so it does not move it.
 - **Critique resolution (owner, 2026-11-07):** the BLOCKER, all 6 WARNs and all 5 NITs accepted and fixed in the body (see the "-> Addressed by" lines under `### Amendment 5 critique`); Q21 answered (a) and Q22 answered (fold), both 2026-11-07. Body changes: I-7 exceptions; "Import chain" (memory adapter); Uncertain Assumptions (Changed-file check, VOCABULARY copies byte-equal); three Failure Modes rewritten or added; block 12 gains rule (0), the Base-line check, the Adapter differences with fixtures, the fail-soft `registry_files_in` test, the head proof and the expected `pr_merged` report, and rule (4) loses its conditional; block 13 gains a Run-first merge-base check and the critique's three lessons; block 14 ends with the live `git merge-tree` check and the landing command. Registry appends stay planned in block 13, which ships under the landing's version raise.
+
+## Amendment 6 record (2026-11-07)
+
+- **Reason:** sub-task 12 (issue 304) stopped `has-issues` on its branch `task/2026-11-04-domain-split-registries/t12-merge-the-default-branch-into-the-parent-branch`. It had already committed the merge of `origin/master` (`28f0b18`, version 0.16.3) as `8558879`, then `5d82089`, `b201dac`, `20d1a80` and `8cfa2c0`. It found three problems block 12 did not cover. The owner answered "amend" to each recommendation (2026-11-07).
+- **(1) Lint, verified by re-running `--check-structure --project .` (exit 1):** R2: the default branch added two top-level "CodeGraph (correction)" entries (2026-11-05, issue #259, and 2026-11-06, issue #271; `MECHANISMS.md:119-120` on the t12 branch). A1: it added a column-0 line "Correction (2026-11-06, issue #271):" with no separator (`VOCABULARY.md:146`). That line corrects the Investigation Turn amendment first, then Retry escape and CodeGraph unavailability reason. The fix is block 12 rule (9), with both folds recorded as I-7 exceptions (shaped like Q22).
+- **(2) Bridge:** two Q-hop rows of `test_codegraph_first_guard.py`, a test the default branch changed, fail with `AttributeError("module '_project_paths' has no attribute 'registry_files'")`. They copy the current `_claude_paths.py` beside an older `_project_paths.py`, whose bare reads at `:99-100` raise at import. The fix is the bridge constraint of block 12, `_claude_paths.py` and `test_script_path_resolution.py` added to its Files to touch, and a frozen-helper row written red first.
+- **(3) Version row:** `test_plugin_manifests.py` (INV-O1, "the version obeys the merge-base rule") requires a tree that differs from its merge base with `origin/master` to carry a higher version, and parent mode (`check_version_bump.py`) requires a sub-task to keep it. Both cannot hold before the landing's raise. No gate runs that suite: `/verify-before-done` treats `.claude/` and `.md` changes as docs-only (`skills/verify-before-done/SKILL.md:26`, Steps 6 and 7), and the landing's verification runs four steps (`version-bump`, `test_pr_merged.py`, `test_check_hook_registrations.py`, all of `.claude/hooks/tests`; `work-item-conventions.json` ~88-124), none of them `test_plugin_manifests.py`. The real blockers are elsewhere: `/verify-before-done` Step 5.6 (the registry lint) runs on every scope, which makes (1) required, and the hooks-tests folder holds `test_codegraph_first_guard.py`, which makes (2) required. The real version proof is the landing's own `--raise` then `--exact` (P7b) and its `version-bump` step. This is an owner-accepted exception: one row is expected red from t12 to the landing, checked by no gate. Blocks 12 and 14 run the suite by hand and record that it is the only red row (191 pass and 1 fail on the head at amendment time). After the landing, the merge base is the head itself, so the row passes trivially and proves nothing; the landing report's raise and exact outcomes are the check. The conflict is structural (every parent-branch sub-task fails the row), so it has a follow-up: `.claude/concepts/followups/2026-11-07-inv-o1-parent-branch-conflict.followup.md` (Issue pending).
+- **Moving default branch:** block 12 keeps the re-fetch and the `git merge-tree --write-tree origin/master HEAD` proof. If `origin/master` moves again before the pull request merges, the engineer merges it onto the same branch as a second, ordinary merge commit. Never amend, rebase or force-push.
+- **Body changes:** header, I-7, three Failure Modes, Confidence and Lessons. Block 12 gains the Resume constraint, rule (9), the Bridge constraint, two test rows and the expected-red row, and adds two files to its Files to touch. Block 14 gains one check line. No registry append (the lessons heeded already exist). Critique fold: Adjacent Areas (one row), Uncertain Assumptions (one line), Failure Modes (three rewritten), Confidence, Lessons; block 12's Resume, Route, rule (9), Bridge (closed list, call sites, hook event), Base-line check, three test rows, Run exception and Expected report; block 14's CONTEXT line and amendment-6 check. One follow-up stub.
+- **Budget:** the contract is over its 18,000-token budget. The caller moves the `### Amendment 6 critique` text to `.claude/contract-history/2026-11-04-domain-split-registries.round-6.md` and leaves a one-line pointer, as for rounds 4 and 5.
+- **Critique resolution (owner, 2026-11-07):** all accepted (0 BLOCKER, 7 WARN, 6 NIT); see the "-> Addressed by" lines under `### Amendment 6 critique`.
 
 ---
 
@@ -882,11 +903,13 @@ PRIOR_FINDINGS:
 - `.claude/scripts/_registry_layout.py`
 - `.claude/scripts/accuracy_update.py`
 - `.claude/scripts/memory_boundary.py`
+- `.claude/scripts/_claude_paths.py`
 - `.claude/scripts/tests/test_plugin_text_scans.py`
 - `.claude/scripts/tests/test_skill_script_lookup.py`
 - `.claude/scripts/tests/test_registry_entries.py`
 - `.claude/scripts/tests/test_registry_layout.py`
 - `.claude/scripts/tests/test_memory_boundary.py`
+- `.claude/scripts/tests/test_script_path_resolution.py`
 - `skills/design-first/SKILL.md`
 - `skills/verify-before-done/SKILL.md`
 - `skills/auto-improve-finish-install/SKILL.md`
@@ -897,13 +920,27 @@ TASK: Merge origin/master into the parent branch fix/235-domain-split-registries
   resolve the 8 conflicting files by the per-file rules below, compose the two shared registry readers per Q21 (a),
   and leave every suite green, so that the re-run landing's merge of the default branch is clean.
 CONTEXT: concept contract amendment 5 ("Amendment 5 record", Q21, Q22, Reused Mechanisms "Memory adapter",
-  Extension Points, Failure Modes); the blocked landing run 20261107T114850Z-c28a69 (gate P7); the t11 review
+  Extension Points, Failure Modes) and amendment 6 ("Amendment 6 record"); the blocked landing run
+  20261107T114850Z-c28a69 (gate P7); the t11 review
   .claude/reviews/2026-11-04-domain-split-registries/t11-review-fullstack-code-reviewer.md (its Evidence table).
 FILES: as listed. Every other file the merge changes arrives from origin/master through git, not by an edit.
 CONSTRAINTS:
-  - Route. This sub-task's head is the loop's task branch task/2026-11-04-domain-split-registries/t12-..., cut from
-    origin/fix/235-domain-split-registries. Run: git fetch origin ; git merge --no-ff origin/master. Resolve, then
-    commit the merge ON THE TASK BRANCH (two parents: the parent-branch tip and the origin/master commit). Put the
+  - Resume (amendment 6). The branch task/2026-11-04-domain-split-registries/t12-merge-the-default-branch-into-the-
+    parent-branch already holds the merge commit 8558879 (origin/master 28f0b18) and 5d82089, b201dac, 20d1a80 and
+    8cfa2c0. Keep them. Make every amendment-6 change as a new commit on top. Never amend, rebase or force-push.
+    Run git fetch origin. If origin/master is past the commit you merged, run git merge --no-ff origin/master on
+    the same branch: a second, ordinary merge commit, resolved by the per-file rules below, with the full Run list
+    re-run after it. Repeat whenever it moves before the pull request merges. Each merge has its own base: before
+    that merge, run git merge-base HEAD origin/master and record the commit (for a second merge it is 28f0b18, the
+    first merged origin/master commit, or whichever commit it prints). For that merge, rule (0) and the Base-line
+    check use that base wherever they say 9a1b452a, and "the parent tip" means HEAD just before that merge. Run them
+    per merge commit, each with its own base, and paste each output in the pull request. The head proof, the Route
+    line's remerge-diff and the Expected report name every merge commit of origin/master on the branch, and
+    git merge-tree --write-tree origin/master HEAD exits 0 on the final head.
+  - Route. Done for t12 by 8558879: do not merge again except as the Resume constraint says. This sub-task's head is
+    the loop's task branch task/2026-11-04-domain-split-registries/t12-..., cut from
+    origin/fix/235-domain-split-registries. The first merge was: git fetch origin ; git merge --no-ff origin/master.
+    Resolve, then commit the merge ON THE TASK BRANCH (two parents: the parent-branch tip and the origin/master commit). Put the
     conflict resolutions in the merge commit. Make the Q21 composition and the test changes as separate commits after
     it, so that git show --remerge-diff <merge> shows the resolutions alone. Open the pull request into
     fix/235-domain-split-registries. It must be merged with a merge commit, never squash or rebase (squashing drops
@@ -911,8 +948,8 @@ CONSTRAINTS:
     "Owner: merge this pull request with Create a merge commit, never Squash and merge or Rebase and merge." No tool
     enforces the method (the repository allows all three); that sentence is the only control, and block 13's
     Run-first line detects a failure. Never rebase the task branch. Never push to the parent branch directly.
-  - Head proof, before opening the pull request, each output in your report and the pull request: git rev-list
-    --parents -n 1 <merge commit> prints three hashes (the commit and its two parents: the parent-branch tip and the
+  - Head proof, before opening the pull request, each output in your report and the pull request: for each merge
+    commit of origin/master on the branch, git rev-list --parents -n 1 <merge commit> prints three hashes (the commit and its two parents: the parent-branch tip and the
     origin/master commit you merged; name both); git merge-tree --write-tree origin/master HEAD exits 0.
   - Read both sides first: for each conflicting path, git show origin/master:<path> and git show
     origin/fix/235-domain-split-registries:<path>, and git log --oneline 9a1b452a..origin/master -- <path>. In the
@@ -975,14 +1012,73 @@ CONSTRAINTS:
         is united under rule (0), not chosen: each side's added and changed lines, and no base line either side
         removed or rewrote. Rules (3)-(5) follow rule (0) too: an entry or Correction line either side removed
         from a root (the parent's moves into <REG>/general.md included) is not restored there.
+    (9) Amendment 6 folds (I-7 exceptions, like Q22; one commit after the merge, the lines quoted in the pull
+        request). MECHANISMS.md: the 2026-11-06 "CodeGraph (correction)" entry (issue #271) becomes the last
+        indented line of the 2026-11-05 "CodeGraph (correction)" entry, exactly "  - **Correction (2026-11-06,
+        issue #271, `.claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md`):** " followed by its text
+        after the separator, verbatim. VOCABULARY.md: the column-0 line "- **Correction (2026-11-06, issue #271):**
+        the Investigation Turn amendment now places …" moves to the last indented line of the "Investigation Turn
+        (amendment)" entry (2026-11-05). Only its indentation changes: it starts with exactly two spaces,
+        "  - **Correction (2026-11-06, issue #271):**", as the M/V Correction form does. Read both lines with git show
+        origin/master:<path> first; a text that differs from the t12 branch's copy stops the sub-task with
+        AMENDMENT. No other entry text changes.
+  - Bridge (amendment 6). .claude/scripts/_claude_paths.py reads registry_files and registry_files_in with getattr,
+    as it reads worktree_own_root. When the helper beside it has a name, the bridge re-exports the helper's
+    function itself, so case 12's identity pin holds. When it lacks one, the bridge binds a stand-in of that name
+    that raises ImportError on every call. The message names the function, the helper's file and the launcher
+    check's remedy ("Bring the hooks folder to the same release as the scripts"). Never an inline copy and never a
+    root-file-only fallback: block 3 has one resolver, and a root-only list is the "reader keeps reading one flat
+    file" failure. The ImportError is the only signal callers read; add no export. Both names stay in __all__.
+    Closed list (verified 2026-11-07; Uncertain Assumptions, amendment 6). The only names that can be missing
+    beside e4f392c or 643b667 are registry_files and registry_files_in: neither helper defines them, and every
+    other name the default branch's bridge reads is present in both (the Q-hop rows import that bridge beside
+    both). Stand-ins go to those two functions only. Every other name stays a bare read, exactly as now:
+      - checkout_equivalent_path, the third name this contract added to the bridge (_claude_paths.py:101), is
+        present in both helpers (VERIFIED 2026-11-07 by `git show <commit>:.claude/hooks/_project_paths.py`:
+        `def checkout_equivalent_path` is at line 486 in both e4f392c and 643b667; re-run the check once and put
+        its output in the pull request). It gets no stand-in, because journal_file_key calls it outside any try (accuracy_update.py:545,
+        the first statement that touches it in process_journal_change), and a stand-in there would turn a degraded
+        run into an exception. If the check finds it absent, stop with AMENDMENT.
+      - The constants PROJECT_HOOK_LAUNCHER_SOURCE, HOOK_CLASS_BLOCK and HOOK_CLASS_WARN, and the two launcher
+        functions, are never missing beside either helper: the launcher-surface check (_claude_paths.py:74-87)
+        refuses a helper without them at import with its own ImportError, on purpose. Leave that check and those
+        reads unchanged; a constant cannot raise "on call". The frozen-helper row asserts the three constants are
+        the helper's own values.
+    Call sites of the two names, each outcome beside an older helper:
+      - the tracker hook's is_journal calls the hooks-side helper directly (_pp.registry_files, not the bridge;
+        journal-post-approval-tracker.py:80-84), so it gets AttributeError, not the stand-in. Today its except
+        returns False and the hook exits 0 in silence. Fix (this file is on the list): when that call raises and
+        the path's name looks like a journal (JOURNAL.md, or JOURNAL/<x>.md), write one stderr line naming
+        registry_files and the helper's file, call log_event(hook="journal-post-approval-tracker",
+        event="journal-tracker-reader-missing", ...) (the default branch's event name, as block 13 uses), and
+        return False: the edit goes untracked and nothing is seeded. Any other path returns False with no output.
+      - accuracy_update.process_journal_change: registry_files is called inside try (:558-561), so the listed
+        files are empty; the changed files are still keyed by journal_file_key (checkout_equivalent_path, present).
+        It is reached only from the script path (registry_append), because the hook stops at is_journal first.
+      - _registry_layout.py:25 imports registry_files_in from the bridge and gets the stand-in; its two calls
+        (:568, :596) raise ImportError to their callers. memory_boundary binds _registry_layout.registry_files_in
+        through _bind and so receives the stand-in, not None: memory_boundary._registry_files turns an ImportError
+        from its lister into Refusal("reader-unavailable", …), and the "lister is None" branch (:503-505) stays
+        for a missing module.
+      - registry_migrations/m0001_domain_split.py:36 imports registry_files_in and calls it while building the
+        plan (_plan_registry, :426), so registry_migrate refuses plan-build-failed, exit 2, with the ImportError
+        in the report's error (amendment 4); no registry file is touched.
+      - validate_registries, cross_area_scan, north_star_review, generate_registry_digest and registry_append stop
+        at their first registry read with an uncaught ImportError: traceback, exit 1, its last line naming the
+        function, the helper's file and the remedy. This is NEW behaviour (the default branch's bridge imports
+        beside both helpers and those scripts run), accepted by the owner on 2026-11-07 over a root-only
+        fallback. cross_area_scan and north_star_review feed the data-architect's Step 4.5 and the critic, so the
+        message must name the remedy.
   - Base-line check (BLOCKER fix), for each of the seven united paths (MECHANISMS.md, VOCABULARY.md, JOURNAL.md,
     test_plugin_text_scans.py, test_skill_script_lookup.py, skills/design-first/SKILL.md,
     skills/verify-before-done/SKILL.md): for each side B in {origin/master, the parent tip} and the other side A,
     take the non-blank base lines B removed (the "-" lines of git diff --unified=0 9a1b452a <B> -- <path>). Each
     such line must occur in the merged file no more often than in B's version plus the copies A added beyond the
     base (multiset counts). Write the check as a throwaway script outside the repository (for example under
-    $env:TEMP), run it on the merge commit, and paste its output in the pull request: zero surviving lines, or each
-    one named with the reason it is also present on side B. A surviving line is fixed in the merge commit.
+    $env:TEMP), run it on each merge commit of origin/master with that merge's own base and parent tip (Resume),
+    and paste each output in the pull request: zero surviving lines, or each one named with the reason it is also
+    present on side B. A surviving line is fixed in that merge commit while it is uncommitted, otherwise in a new
+    commit on top (never amend).
   - Q21 (a) composition (not a conflict, but required for a working merge):
     _registry_layout gains source_value(raw), the default branch's _source_value rule unchanged (the rest of the
     line, backticks and padding trimmed; '', none, n/a, na, unknown, tbd and anything starting with "<" read
@@ -1052,7 +1148,30 @@ CONSTRAINTS:
     before the token rule. A domain file named outside the old DOMAINS list (e.g. JOURNAL/ops.md) is read.
     A hidden-module row: in a subprocess with _registry_layout hidden, import memory_boundary succeeds, a
     retrieval subcommand still runs, and capture-candidates refuses reader-unavailable. Keep every existing row
-    green.
+    green. Amendment 6 adds a stand-in row. With registry_files_in bound to a function that raises ImportError,
+    capture-candidates refuses reader-unavailable and a retrieval subcommand still runs.
+    test_script_path_resolution.py (amendment 6): add case "registry_files beside an older helper". Read the
+    helper text of git show 643b667:.claude/hooks/_project_paths.py (a fixed commit) as the Q-hop precedent does
+    (test_codegraph_first_guard.py:2153-2166, 3179-3191): git cat-file -e 643b667^{commit} first; when it fails,
+    or git show fails, the row SKIPS and prints the reason (for example "commit 643b667 is not available (shallow
+    clone?)"), per JOURNAL 2026-11-05; it never fails on a missing commit and never reads HEAD. Write the text into a
+    temporary hooks folder, with a copy of the current _claude_paths.py in a scripts folder beside it, laid out as
+    the Q-hop rows do. In a subprocess: import _claude_paths succeeds; registry_files("JOURNAL.md") and
+    registry_files_in(<folder>, "JOURNAL.md") each raise ImportError whose message names the function and that
+    helper's file; both names are in __all__; checkout_equivalent_path is the helper's own function; and
+    PROJECT_HOOK_LAUNCHER_SOURCE, HOOK_CLASS_BLOCK and HOOK_CLASS_WARN equal the helper's values (no stand-in).
+    Two more rows share that helper text and its skip: (CLI) copy the current .claude/scripts folder (without
+    tests) as the scripts folder and run py -3 validate_registries.py --check-structure --project <temporary
+    layout-2 project> there: exit 1, stderr holds no AttributeError, and its last line is the ImportError naming
+    registry_files, the helper's file and "Bring the hooks folder to the same release as the scripts". (hook) copy
+    the current journal-post-approval-tracker.py and _error_log.py into the hooks folder and run it with an Edit
+    payload on <project>/.claude/registries/JOURNAL.md, a temporary home and the log folder redirected as test (d)
+    of test_journal_post_approval_tracker.py does: exit 0, one stderr line naming registry_files, one
+    journal-tracker-reader-missing event, and no tracker cache file. Write all three first and watch them fail
+    (AttributeError at import; the CLI row's last line is an AttributeError; the hook row sees no stderr line and
+    no event) before the bridge and hook changes. Then the two Q-hop rows of
+    .claude/hooks/tests/test_codegraph_first_guard.py ("Q-hop [0.15.2 helper (e4f392c)]" and "Q-hop [older helper
+    (643b667)]: the bridge imports beside that helper") pass, with no edit to that file.
   - Older-test search, one question per change, each with its own grep and its result in the pull request: (1) tests
     or scripts that call grd.tier_split, grd.read, grd.entries, grd.DOMAINS or grd.OUT; (2) tests that read the
     hook's parse_entries or _journal_entries; (3) tests that assert accuracy_update's source_contract for a
@@ -1067,10 +1186,25 @@ CONSTRAINTS:
     test_validate_registries_default.py, each under .claude/scripts/tests/ unless named), plus
     py -3 .claude/scripts/tests/test_registry_entries.py ; py -3 .claude/scripts/tests/test_memory_boundary.py, plus
     every test file listed by git diff --name-only 9a1b452a..origin/master -- .claude/scripts/tests .claude/hooks/tests
-    (list them with their exits in the pull request). Live: py -3 .claude/scripts/registry_migrate.py --check
+    (list them with their exits in the pull request), plus py -3 .claude/scripts/tests/test_script_path_resolution.py.
+    The one exception (amendment 6, accepted by the owner on 2026-11-07) is
+    py -3 .claude/scripts/tests/test_plugin_manifests.py. Run it anyway, by hand: no gate runs it
+    (/verify-before-done treats this diff as docs-only; the landing's four verification steps do not include it).
+    It exits non-zero with exactly one failing row, printed as "the version obeys the merge-base rule: tree differs
+    from the merge base (0.16.3), so all five declarations exceed it" (the version in parentheses is the version at
+    git merge-base HEAD origin/master, 0.16.3 at amendment time; it changes with a second merge). At amendment time
+    that was 191 pass and 1 fail. The count may change; the single failing row may not. That row needs a raised
+    version, and parent mode forbids a sub-task to raise it. Paste the suite's summary and its failing line in the
+    pull request, so the exception is on record. Any other red row in that suite is a real failure. The pull
+    request description says, in a paragraph of its own: "Expected red, owner-accepted (contract amendment 6):
+    test_plugin_manifests.py INV-O1 'the version obeys the merge-base rule' cannot pass on a parent-branch sub-task.
+    No gate runs this suite. The version proof is the landing's check_version_bump.py --raise then --exact and its
+    version-bump step. The general conflict is tracked by
+    .claude/concepts/followups/2026-11-07-inv-o1-parent-branch-conflict.followup.md." The real gates for this diff
+    are the registry lint below (verify-before-done Step 5.6) and .claude/hooks/tests (the landing). Live: py -3 .claude/scripts/registry_migrate.py --check
     --project . (exit 0, current); py -3 .claude/scripts/validate_registries.py --check-structure --project . (exit
     0; only R4, digest: and at most one "advisory: R3 universal-candidate skipped" line; any R1, R2, R3, R5, A1 line
-    -> stop and report AMENDMENT, never suppressed); py -3 .claude/scripts/plugin_doctor.py --project . ;
+    -> stop and report AMENDMENT, never suppressed; after rule (9), none may remain); py -3 .claude/scripts/plugin_doctor.py --project . ;
     py -3 .claude/scripts/generate_registry_digest.py (exit 0); single definitions: git grep -n "def _atomic_write\|def
     _plan_digest\|def _separate_plugin_root" .claude/scripts shows only _preview_apply.py and _plugin_root.py.
   - Clean landing proof: git merge-tree --write-tree --name-only origin/master HEAD exits 0 and lists no conflict.
@@ -1085,8 +1219,9 @@ CONSTRAINTS:
     Assumptions, amendment 5).
   - Expected report: after this pull request merges, pr_merged reports the merge commit's hand-resolved files
     (skills/pr-merged/SKILL.md:255-269; it reports, it does not block). Say in the pull request that the report is
-    expected, and list the files it should name: the files resolved or edited in the merge commit (the 8
-    conflicting files, JOURNAL.md when rule (5) moved an entry, and any file rule (6) fixed there).
+    expected, and list the files it should name for each merge commit of origin/master on the branch: the files
+    resolved or edited in that merge commit (for 8558879: the 8 conflicting files, JOURNAL.md when rule (5) moved an
+    entry, and any file rule (6) fixed there; for any later merge, the files it resolved).
   - Registry append: after the merge commit, run registry_append.py --project . --registry mechanisms
     --correction-of "Memory adapter" --source "amendment 5, Q21" with an entry file saying its registry reads go
     through _registry_layout (registry_files_in; entry_blocks and journal_entries adapters re-exported by
@@ -1198,7 +1333,8 @@ PRIOR_FINDINGS:
 ```
 TASK: Review sub-tasks 12 and 13 (the merge of the default branch and the t11 fixes), and write a review artefact
   that supersedes t11.
-CONTEXT: concept contract at .claude/concepts/2026-11-04-domain-split-registries.md (amendment 5); superseded report
+CONTEXT: concept contract at .claude/concepts/2026-11-04-domain-split-registries.md (amendments 5 and 6; "Amendment 6
+  record" and its critique fold); superseded report
   .claude/reviews/2026-11-04-domain-split-registries/t11-review-fullstack-code-reviewer.md.
 FILES: .claude/reviews/2026-11-04-domain-split-registries/t14-review-fullstack-code-reviewer.md
 CONSTRAINTS:
@@ -1228,8 +1364,19 @@ CONSTRAINTS:
     zero; the journal-tracker-reader-missing event logged); t11 N2 (README sentence; Correction line under
     "Registry migration runner" made by registry_append); all five 2026-11-07 lessons appended;
     no version file edited by hand; the parent branch's version equals origin/master's at the merged commit;
-    check_version_bump.py in parent mode exits 0; every t11 "Met" item still holds.
-  - Re-run every suite in the t11 Evidence table, plus test_registry_entries.py, test_memory_boundary.py and every
+    check_version_bump.py in parent mode exits 0; every t11 "Met" item still holds;
+    amendment 6: rule (9)'s two folds exact; stand-ins only for registry_files and registry_files_in (the closed
+    list), checkout_equivalent_path and the launcher constants bare; the frozen-helper, CLI and hook rows and the
+    Q-hop rows pass or SKIP with a printed reason (a skip is recorded, never counted as a pass); the tracker hook
+    logs journal-tracker-reader-missing; every t12 merge of origin/master read with --remerge-diff, each with its
+    own Base-line check output; test_plugin_manifests.py fails exactly one row, the merge-base-rule row. That row
+    is the owner-accepted exception, not a finding, and no gate runs the suite. Any other red row is one. Write in
+    "## Evidence" that the version proof is the landing's own check_version_bump.py --raise then --exact (P7b) and
+    its version-bump verification step, not a re-run of test_plugin_manifests.py after the landing (the merge base
+    is then the head itself, so the row passes trivially), and that the operator reads the landing report's raise
+    and exact outcomes (each must exit 0, with the raised version minor + 1, patch 0, over origin/master's).
+  - Re-run every suite in the t11 Evidence table, plus test_registry_entries.py, test_memory_boundary.py,
+    test_plugin_manifests.py (the one expected-red row above) and every
     test file the default branch changed since 9a1b452a, and the live commands --check, --check-structure (with and
     without --strict), the digest generator, plugin_doctor --project . (--json too) and check_version_bump.py in
     parent mode.
