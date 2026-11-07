@@ -443,6 +443,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract or addendum asks a test to compare against "HEAD's", "the current", or "the last release's" copy of a file that the same change edits
 - **Tags:** test-fixture, older-helper, git-show, head, self-invalidating-test
 
+### 2026-11-03 — A stop list checked against a moving default branch needs a rule for changes outside the edited lines
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When a block stops on "master changed a file on the stop list", say in the block which kind of change still allows it to go on (for example a hunk outside the lines the block edits, proven by a quoted git diff and a clean git merge-tree), so a busy default branch does not force a contract amendment for every changelog paragraph.
+- **Apply when:** a fix or merge block's pre-check compares origin/<default> against a stop list of shared, often-edited files such as README.md
+- **Tags:** pre-check, stop-list, moving-base, merge-tree, amendment
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
