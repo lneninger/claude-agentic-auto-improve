@@ -327,6 +327,54 @@ class GrammarTests(TrackerCase):
         self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
         self.assertIn(b"ok", done.stdout)
 
+    def _run_probe(self, code: str, hide_layout: bool) -> subprocess.CompletedProcess:
+        head = ("import sys\n"
+                f"sys.path.insert(0, {str(SCRIPTS)!r})\n"
+                + ("sys.modules['_registry_layout'] = None\n" if hide_layout else ""))
+        return subprocess.run([sys.executable, "-c", head + code], capture_output=True, env=self.p.env(),
+                              cwd=str(self.p.base), timeout=120)
+
+    def test_a_degraded_tracker_seeds_nothing_and_a_later_run_with_the_module_seeds_once(self):
+        """t11 W1: with _registry_layout missing, process_journal_change reads and writes no cache (d1, d2, d3)."""
+        logs = self.p.base / ".claude" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        call = ("import accuracy_update as a\n"
+                f"out = a.process_journal_change([{str(self.general)!r}])\n"
+                "assert out == [], out\n"
+                "print('ok')\n")
+        cache_path = self.home / ".claude" / "state" / "journal-entries-seen.json"
+        key = _accuracy_update().journal_file_key(self.general)
+
+        # (d2) no cache: none is created, one stderr line names the module, the log event is written
+        done = self._run_probe(call, hide_layout=True)
+        self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
+        self.assertIn(b"ok", done.stdout)
+        lines = [ln for ln in done.stderr.decode("utf-8", "replace").splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("_registry_layout", lines[0])
+        self.assertFalse(cache_path.exists())
+        self.assertFalse(self.p.fires() > 0)
+        log_text = (logs / "accuracy.jsonl").read_text(encoding="utf-8") if (logs / "accuracy.jsonl").exists() else ""
+        self.assertIn("journal-tracker-reader-missing", log_text)
+
+        # (d1) a cache that holds the file as seeded under the old reader stays byte-identical
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(json.dumps({"_initialized": True, "sigs": {},
+                                           "seeded_files": {key: True}}).encode("utf-8"))
+        before = cache_path.read_bytes()
+        done = self._run_probe(call, hide_layout=True)
+        self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
+        self.assertEqual(cache_path.read_bytes(), before)
+
+        # (d3) a fresh process with the module present: an unrelated line appended, the file processed -> no fire,
+        # and the file is now recorded under reader 2
+        append_text(self.general, "An unrelated line.\n")
+        done = self._run_probe(call, hide_layout=False)
+        self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
+        self.assertIn(b"ok", done.stdout)
+        self.assertEqual(self.p.fires(), 0)
+        self.assertEqual(self.p.cache()["seeded_files"][key], {"reader": 2})
+
 
 class WorktreeTests(TrackerCase):
     def test_same_journal_file_from_two_worktrees_seeds_once_and_fires_once(self):
