@@ -648,11 +648,16 @@ class CodegraphAddonTests(AddonCase):
 
         def git(*args):
             return subprocess.run(["git", *args], capture_output=True, cwd=root)
-        commits = git("log", "--reverse", "--format=%H", "-G", '"version"', "--", "plugin.json")
+        # -m: a merge commit that brings in a version bump (a release that landed on master) counts as a version-setting
+        # commit too; the label of a hash is the LOWEST version at which any such commit shows it.
+        commits = git("log", "-m", "--format=%H", "-G", '"version"', "--", "plugin.json")
         if commits.returncode != 0 or not commits.stdout.strip():
             raise AssertionError("git history of plugin.json is not available (fetch the full history)")
-        labels, seen_version = {}, None
-        for commit in commits.stdout.decode().split():
+
+        def key(version):
+            return tuple(int(part) for part in version.split("."))
+        labels = {}
+        for commit in dict.fromkeys(commits.stdout.decode().split()):
             plugin = git("show", "%s:plugin.json" % commit)
             if plugin.returncode != 0:
                 continue
@@ -660,14 +665,15 @@ class CodegraphAddonTests(AddonCase):
                 version = json.loads(plugin.stdout.decode("utf-8-sig")).get("version")
             except ValueError:
                 continue
-            if not isinstance(version, str) or version == seen_version:
+            if not (isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+", version)):
                 continue
-            seen_version = version
             shown = git("show", "%s:.claude/addons/codegraph/hooks/%s" % (commit, hook))
             if shown.returncode != 0:
                 continue
             data = shown.stdout[3:] if shown.stdout.startswith(b"\xef\xbb\xbf") else shown.stdout
-            labels.setdefault(hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest(), version)
+            digest = hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+            if digest not in labels or key(version) < key(labels[digest]):
+                labels[digest] = version
         return labels
 
     def test_every_released_hash_has_a_version_label_and_no_label_is_orphaned(self):
