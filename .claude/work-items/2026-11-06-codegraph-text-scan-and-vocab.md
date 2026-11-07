@@ -1,6 +1,6 @@
 ---
 id: none
-issue_offer: pending
+issue_offer: declined
 title: Fix the codegraph text-scan failure and add the four codegraph vocabulary terms
 type: BUG
 source: free-text
@@ -13,9 +13,9 @@ branch: fix/codegraph-text-scan-and-vocab
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261106-bug-codegraph-text-scan-and-vocab
 north_stars: none
 contract: none
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/297
+issue_link: none
+status: shipped
 created: 2026-11-06
 ---
 
