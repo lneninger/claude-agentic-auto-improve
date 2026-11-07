@@ -47,7 +47,7 @@ Not applicable. Reason: no Angular UI surface is touched. The change is hook beh
 | Turn marker (amended) | `turn.json`: `{ts, tool, summary, pid, route}`; `route` is `mcp` or `cli` only. For `cli`, `tool` is `codegraph <subcommand>` and `summary` the subcommand plus its first argument, neutralised like the Copyable command | Written only by the tracker, deleted only by the reset hook. Each counted call rewrites it; `route` is `mcp` once any MCP call of the turn wrote it (`mcp` > `cli`: "cli, then MCP" ends as `mcp`; "MCP, then cli" stays `mcp`). A failed Bash or MCP call arrives as `PostToolUseFailure`, for which no row is registered, so it never reaches the tracker and writes no marker (L1, L7). The guard's decision reads presence only; only the Shadow section reads `route`. No `route` (older tracker) means `mcp`. | tracker |
 | MCP-seen flag | `mcp-seen`, empty file, sticky for the session | Created by the tracker after any `mcp__codegraph__*` PostToolUse (only successful calls arrive there; L7). Deleted only by the pruner. | tracker |
 | CLI-fallback flag | `logged-cli-fallback` (the `logged-<reason>` form) | Created only after the record landed (`log_event` did not return False). | tracker |
-| Add-on manifest (amended) | (a) new row `{event: PostToolUse, matcher: Bash, hook: codegraph-turn-tracker.py, args: ["cli"], if: "Bash(codegraph *)"}`; (b) optional `released_versions: {<hook>: {<folded sha256>: <release label>}}` | (a) The install matches rows on `(event, file, compare_extras)`, not matcher (`auto_improve_finish_install.py:1742`); the `cli` argument gives the row its own key, so the old MCP tracker row does not count as it. The tracker decides by `tool_name`; the argument is row identity only. `if` joins `ADDON_ROW_KEYS`, a non-empty string when present. (b) `released_sha256[h]` lists **released copies only** (`MECHANISMS.md:108`): the hook as shipped at each commit that set a plugin release version. Unreleased in-between commits are never listed. Every listed hash has a `released_versions` label: the EARLIEST release that shipped that copy (a copy unchanged across 0.9.9-0.15.1 is labelled `0.9.9`), so the finding reads "your copy is from 0.9.9; the plugin is 0.16.2", and every label key is listed (test-enforced for each manifest carrying `released_sha256`). An already-listed hash that matches no release: the implementer stops and reports; no invented label. | addon.json |
+| Add-on manifest (amended) | (a) new row `{event: PostToolUse, matcher: Bash, hook: codegraph-turn-tracker.py, args: ["cli"], if: "Bash(codegraph *)"}`; (b) optional `released_versions: {<hook>: {<folded sha256>: <release label>}}` | (a) The install matches rows on `(event, file, compare_extras)`, not matcher (`auto_improve_finish_install.py:1742`); the `cli` argument gives the row its own key, so the old MCP tracker row does not count as it. The tracker decides by `tool_name`; the argument is row identity only. `if` joins `ADDON_ROW_KEYS`, a non-empty string when present. (b) `released_sha256[h]` lists **released copies only** (`MECHANISMS.md:108`): the hook as shipped at each commit that set a plugin release version. Unreleased in-between commits are never listed. Every listed hash has a `released_versions` label: the EARLIEST release that shipped that copy (a copy unchanged across 0.9.9-0.15.1 is labelled `0.9.9`), so the finding reads "your copy is from 0.9.9; the plugin is 0.16.4", and every label key is listed (test-enforced for each manifest carrying `released_sha256`). An already-listed hash that matches no release: the implementer stops and reports; no invented label. | addon.json |
 
 ### Value Objects
 
@@ -117,7 +117,7 @@ None. The Connection probe stays a private function of the reset hook; promotion
 - **Bench:** a new `--reset-budget` mode in `bench_codegraph_guard.py`. It never builds the #259 `Workspace`, so `_check_old_is_259` does not run and the default mode is unchanged. It reads the baseline reset hook (and its helpers) with `git show` at the constant `RESET_BASELINE_REF = "db61fd7"`, runs the completion check, checks T1 and T2, and exits 1 on an incomplete run, a breach, or when that commit is absent (with "fetch the full history"). No CI workflow runs the bench or the suites (`.github/workflows/` holds only `version-bump.yml`); the gate is the TASK block's run and the reviewer's re-run.
 - **Shadow (Q5):** `marker_route` (`mcp` / `cli` / `null`); `codegraph_shadow_report.py` groups `shadow-more-closed` by it, labelling `cli` "explained (command-line route)"; one line in the cut-over stub.
 - **Skills:** codegraph install skill (Step 0 → `FIP`; four rows; the route; the notice and a possible first-prompt false notice; upgrade-age row for 0.16.1; re-record a Hook registration profile with `record-registrations`); uninstall skill (Step 0 → `FIP`; four rows); `/verify-before-done` Step 5.8 (`FIP`; the four finding codes and the note; a result without `freshness` reads "could not check", NOT READY).
-- **Docs:** `codegraph-decision-table.md`; README "Changed in 0.16.2" (with the profile note); the `hooks.json` add-on cost text (the tracker also starts after each Bash call the `if` admits, or every Bash call on a host that ignores `if`; JOURNAL 2026-10-28).
+- **Docs:** `codegraph-decision-table.md`; README "Changed in 0.16.4" (with the profile note); the `hooks.json` add-on cost text (the tracker also starts after each Bash call the `if` admits, or every Bash call on a host that ignores `if`; JOURNAL 2026-10-28).
 - **Registries (post-approval):** a dated CodeGraph amendment ("run a Counted command in Bash") and the five terms.
 
 ## Integration Surfaces
@@ -245,7 +245,7 @@ Confidence: Medium. High on R-1/R-2/R-5, the row key, the Row reader and `--chec
 
 ## Implementation Handoff
 
-One mergeable block (Q1). The review runs as `/flow`'s reviewer step. The patch raise to 0.16.2 is in this pull request.
+One mergeable block (Q1). The review runs as `/flow`'s reviewer step. The patch raise to 0.16.4 is in this pull request.
 
 ### 1. Command-line route, connection notice and hook freshness check (`python-ai-developer`)
 
@@ -287,7 +287,7 @@ One mergeable block (Q1). The review runs as `/flow`'s reviewer step. The patch 
 TASK: Add the CodeGraph command-line route to the existing tracker (new Bash row, args ["cli"], if), the
 two-route banner, the per-prompt Connection notice, the once-per-session cli-fallback record, the Hook freshness
 result in addon --check, the plugin-only FIP lookup in three skills, the bench's --reset-budget mode, the Shadow
-record's marker_route, docs, and raise to 0.16.2.
+record's marker_route, docs, and raise to 0.16.4.
 CONTEXT: concept contract .claude/concepts/2026-11-07-295-codegraph-gate-dropped-mcp.md (Data Shapes, R-1..R-5,
   Uncertain Assumptions); brief .claude/work-items/2026-11-07-295-codegraph-gate-dropped-mcp.md.
 FILES: see Files to touch.
@@ -343,7 +343,7 @@ CONSTRAINTS:
     skills. A text-scan row asserts Step 5.8 names the four finding codes, the note and the freshness rule.
   - Shadow marker_route; report grouping; one line in the cut-over stub.
   - Answer F1-F8 by reading the hits before editing; fix only fixtures, never a guarded state.
-  - Docs as in Extension Points. Raise all four version files to 0.16.2; run py -3 .claude/scripts/check_version_bump.py.
+  - Docs as in Extension Points. Raise all four version files to 0.16.4; run py -3 .claude/scripts/check_version_bump.py.
   - Run py -3 .claude/hooks/tests/test_codegraph_first_guard.py, test_codegraph_shadow.py, test_addons.py,
     test_worktree_path_guards.py, py -3 .claude/hooks/tests/bench_codegraph_guard.py --reset-budget, and
     py -3 -m unittest discover -s .claude/scripts/tests -p "test_*.py"; all must pass.
@@ -362,6 +362,7 @@ The live trials (`C:\Users\lneni\.claude\jobs\beed435b\tmp\trials\RESULTS.md`) f
 2. **Success signal is the event name.** `PostToolUse` alone means success. A Bash `tool_response` is an object with no exit-code field, and an MCP `tool_response` is a list, so the draft's "`tool_response` is an object" rule is dropped. Exit-0 soft failures count (output is never read).
 3. **The row's `if` is not a starts-with test.** `Bash(codegraph *)` matches each sub-command of a compound command and strips `VAR=` prefixes, so the tracker applies its own strict token-0 test (Command-line route term, Counted command test step 4).
 4. **Probe shape from L4.** One server appears as three descendant processes (a `cmd` shim and two `node` processes), with `^"` and `"` quoting that the probe strips before matching. The known-host set is `{claude}`, compared case-insensitively with `.exe` stripped.
+5. **Release number.** Master moved on to 0.16.3 (#271, per-user session parent) while this change was in progress, and it was merged into the branch, so this change releases as 0.16.4. `released_versions` labels are the earliest release on master's first-parent line: 0.9.10 for the three oldest copies, and 0.16.3 for all three master 0.16.3 copies, the tracker included.
 
 ---
 

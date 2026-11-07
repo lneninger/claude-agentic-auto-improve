@@ -648,9 +648,12 @@ class CodegraphAddonTests(AddonCase):
 
         def git(*args):
             return subprocess.run(["git", *args], capture_output=True, cwd=root)
-        # -m: a merge commit that brings in a version bump (a release that landed on master) counts as a version-setting
-        # commit too; the label of a hash is the LOWEST version at which any such commit shows it.
-        commits = git("log", "-m", "--format=%H", "-G", '"version"', "--", "plugin.json")
+        # A release is a version bump on the DEFAULT BRANCH's first-parent line (origin/master; HEAD's own first-parent line when
+        # there is no origin/master). `--first-parent` diffs a merge against its first parent, so a merge that carries the bump
+        # counts, and a bump made only on a side branch does not. The label of a hash is the LOWEST version at which any such
+        # commit shows it.
+        ref = "origin/master" if git("rev-parse", "--verify", "--quiet", "origin/master").returncode == 0 else "HEAD"
+        commits = git("log", "--first-parent", "--format=%H", "-G", '"version"', ref, "--", "plugin.json")
         if commits.returncode != 0 or not commits.stdout.strip():
             raise AssertionError("git history of plugin.json is not available (fetch the full history)")
 
