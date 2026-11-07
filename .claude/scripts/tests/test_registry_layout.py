@@ -798,6 +798,42 @@ class SpecTests(unittest.TestCase):
             self.assertIn(rule, text, rule)
 
 
+class SourceValueAndAdapterTierTests(unittest.TestCase):
+    """Block 12 (Q21): source_value and the tier rule of the two adapters that serve the memory readers."""
+
+    def test_source_value_trims_backticks_and_padding_and_keeps_the_whole_value(self):
+        self.assertEqual(rl.source_value("  `.claude/concepts/my folder/x y.md`  "), ".claude/concepts/my folder/x y.md")
+        self.assertEqual(rl.source_value(" .claude/concepts/a b.md"), ".claude/concepts/a b.md")
+        self.assertEqual(rl.source_value(r"D:\Dev\X\.claude\concepts\c.md"), r"D:\Dev\X\.claude\concepts\c.md")
+
+    def test_source_value_reads_the_unset_forms_as_empty(self):
+        for raw in ("", "   ", "none", "None", "N/A", "n/a", " `N/A` ", "na", "unknown", "TBD", "tbd",
+                    "<path to the contract>", " `<slug>`"):
+            self.assertEqual(rl.source_value(raw), "", "form %r must read as unset" % raw)
+
+    def test_a_root_entry_under_a_universal_heading_is_universal_in_both_adapters(self):
+        mv = "## Universal Patterns\n\n- **Alpha** — body\n"
+        jr = "## Universal lessons\n\n### 2026-01-01 — Lesson\n- **Trigger:** manual\n"
+        self.assertEqual([b["tier"] for b in rl.entry_blocks(mv)], ["Universal"])
+        self.assertEqual([e["tier"] for e in rl.journal_entries(jr)], ["Universal"])
+
+    def test_a_root_entry_before_any_heading_is_project_in_both_adapters(self):
+        mv = "- **Alpha** — body\n"
+        jr = "### 2026-01-01 — Lesson\n- **Trigger:** manual\n"
+        self.assertEqual([b["tier"] for b in rl.entry_blocks(mv)], ["Project"])
+        self.assertEqual([e["tier"] for e in rl.journal_entries(jr)], ["Project"])
+
+    def test_a_domain_file_entry_is_project_even_under_a_universal_heading(self):
+        mv = "## Universal Patterns\n\n- **Alpha** — body\n"
+        jr = "## Universal lessons\n\n### 2026-01-01 — Lesson\n- **Trigger:** manual\n"
+        self.assertEqual([b["tier"] for b in rl.entry_blocks(mv, per_domain=True)], ["Project"])
+        self.assertEqual([e["tier"] for e in rl.journal_entries(jr, per_domain=True)], ["Project"])
+
+    def test_the_adapters_take_text_and_return_lists(self):
+        self.assertEqual(rl.entry_blocks(""), [])
+        self.assertEqual(rl.journal_entries(""), [])
+
+
 class ThisRepositoryTests(unittest.TestCase):
     def test_check_structure_exits_zero_with_only_layout_and_r4_output(self):
         env = dict(os.environ)

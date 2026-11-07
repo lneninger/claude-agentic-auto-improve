@@ -1201,6 +1201,109 @@ class ChangedItemsTests(Base):
         self.assertEqual((code, data["notices"]), (0, []))
 
 
+# ------------------------------------------------------------------------------- registry layout 2 (block 12)
+LAYOUT_MARK = "<!-- registry-layout: 2 -->"
+POINTER = ("## Project tier\n\nThis file holds only the Universal tier. Project entries live in domain files beside "
+           "it, one file per domain.\n")
+
+
+def layout2_journal_entry(date, title, trigger="pre-approval critic"):
+    return ("### %s — %s\n- **Trigger:** %s\n- **Source contract:** .claude/concepts/%s.md\n"
+            "- **Lesson:** a lesson.\n- **Apply when:** always.\n- **Tags:** `x`\n" % (date, title, trigger, SLUG))
+
+
+class LayoutTwoRoundTripTests(CaptureBase):
+    """JOURNAL 2026-11-01: a reader that is tested only on fixtures in the old shape passes while the live shape fails.
+    This project is on registry layout 2: Universal entries in the roots, project entries in domain files."""
+
+    def fixture2(self):
+        p = self.fixture(registries=False)
+        named = "names `.claude/concepts/%s.md` in its own text" % SLUG
+        p.write(".claude/registries/MECHANISMS.md",
+                "%s\n# Mechanisms\n\n## Universal Patterns\n\n- **Root mechanism** — %s.\n\n%s" % (LAYOUT_MARK, named, POINTER))
+        p.write(".claude/registries/VOCABULARY.md",
+                "%s\n# Vocabulary\n\n## Universal Vocabulary\n\n- **Root term** — nothing here.\n\n%s" % (LAYOUT_MARK, POINTER))
+        p.write(".claude/registries/JOURNAL.md",
+                "%s\n# Journal\n\n## Universal lessons\n\n%s\n%s" % (
+                    LAYOUT_MARK, layout2_journal_entry("2026-11-01", "Root lesson"), POINTER))
+        p.write(".claude/registries/MECHANISMS/general.md", "- **General mechanism** — nothing here.\n")
+        p.write(".claude/registries/MECHANISMS/backend.md", "- **Backend mechanism** — %s.\n" % named)
+        p.write(".claude/registries/JOURNAL/general.md", layout2_journal_entry("2026-11-02", "General lesson"))
+        p.write(".claude/registries/JOURNAL/ops.md", layout2_journal_entry("2026-11-03", "Ops lesson"))
+        return p
+
+    def test_domain_file_entries_are_offered_as_project_and_the_root_entry_as_universal(self):
+        code, data, _ = self.candidates(self.fixture2())
+        self.assertEqual(code, 0, data)
+        got = self.by_title(data)
+        self.assertEqual(sorted(got), ["Backend mechanism", "General lesson", "Ops lesson", "Root lesson",
+                                       "Root mechanism"])
+        for title, path in (("Backend mechanism", ".claude/registries/MECHANISMS/backend.md"),
+                            ("General lesson", ".claude/registries/JOURNAL/general.md"),
+                            ("Ops lesson", ".claude/registries/JOURNAL/ops.md")):
+            self.assertEqual(got[title]["scope"], "project", title)
+            self.assertEqual(got[title]["source_ref"]["file"], path, title)
+        for title in ("Root mechanism", "Root lesson"):
+            self.assertEqual(got[title]["scope"], "global", title)
+            self.assertIsNone(got[title]["scope_lowered"], "the root entry is Universal before the token rule")
+
+    def test_a_domain_file_outside_the_old_domain_list_is_read(self):
+        _, data, _ = self.candidates(self.fixture2())
+        self.assertIn(".claude/registries/JOURNAL/ops.md", {c["source_ref"]["file"] for c in data["candidates"]})
+
+    def test_the_candidate_keys_are_distinct_and_the_journal_key_is_the_signature(self):
+        _, data, _ = self.candidates(self.fixture2())
+        got = self.by_title(data)
+        self.assertEqual(len({c["key"] for c in data["candidates"]}), len(data["candidates"]))
+        self.assertEqual(got["Ops lesson"]["key"], sha("2026-11-03|Ops lesson"))
+
+
+class HiddenLayoutModuleTests(Base):
+    """With _registry_layout unavailable the adapter still imports and still serves retrieval; only the registry
+    readers degrade, to the refusal reader-unavailable ("Import chain", amendment 5)."""
+
+    SCRIPT = (
+        "import json, sys\n"
+        "sys.path.insert(0, %r)\n"
+        "sys.modules['_registry_layout'] = None\n"      # a None entry makes `import _registry_layout` raise
+        "import memory_boundary as mb\n"
+        "out = {}\n"
+        "for name, argv in json.loads(sys.argv[1]).items():\n"
+        "    import io, contextlib\n"
+        "    buf = io.StringIO()\n"
+        "    with contextlib.redirect_stdout(buf):\n"
+        "        code = mb.main(argv)\n"
+        "    out[name] = [code, json.loads(buf.getvalue())]\n"
+        "print(json.dumps(out))\n")
+
+    def test_import_succeeds_retrieval_runs_and_capture_candidates_refuses_reader_unavailable(self):
+        p = self.project()
+        brief = p.write(BRIEF_REL, BRIEF)
+        p.write(".claude/concepts/%s.md" % SLUG, "# Contract\n\n**Work Item Brief:** %s\n" % BRIEF_REL)
+        p.write(".claude/registries/MECHANISMS.md", MECHANISMS)
+        report = p.write(".scratch/report.json", json.dumps({"contract": SLUG, "completion": {"verdict": "flipped"},
+                                                              "written_files": [BRIEF_REL]}))
+        calls = {
+            "retrieve": ["retrieve-request", "--project", str(p.root), "--brief", str(brief)],
+            "capture": ["capture-candidates", "--project", str(p.root), "--contract", SLUG, "--run-report",
+                        str(report), "--default-branch", "master"],
+        }
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", self.SCRIPT % str(SCRIPTS_DIR), json.dumps(calls)],
+                              capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["retrieve"][0], 0, out["retrieve"])
+        self.assertEqual(out["retrieve"][1]["tool"], "mcp__central-memory__recall")
+        self.assertEqual(out["capture"][0], 1)
+        self.assertEqual(out["capture"][1]["refused"], "reader-unavailable")
+
+    def test_the_file_list_comes_from_the_layout_module_not_a_fixed_domain_list(self):
+        source = (SCRIPTS_DIR / "memory_boundary.py").read_text(encoding="utf-8")
+        self.assertNotIn("DEFAULT_DOMAINS", source)
+        self.assertNotIn('"DOMAINS"', source)
+        self.assertIn('_bind("_registry_layout", "registry_files_in")', source)
+
+
 # -------------------------------------------------------------------------------------------- source rules
 class SourceRulesTests(unittest.TestCase):
     def test_the_adapter_loads_nothing_dynamically_and_inserts_nothing_on_the_path(self):
