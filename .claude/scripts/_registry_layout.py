@@ -451,6 +451,101 @@ def parse_entries(path: Path, registry: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Reader adapters (Q21 (a)): the memory adapter and the journal tracker read through these
+# ---------------------------------------------------------------------------
+#: The top-level mechanism / vocabulary bullet. Re-exported by the digest generator for the memory adapter, which
+#: passes it to ``entry_blocks`` for signature compatibility; the adapters use the one grammar, not this pattern.
+BULLET = _BULLET
+_SUB_BULLET = re.compile(r"^(\s+)[-*]\s")
+_UNSET_SOURCES = ("", "none", "n/a", "na", "unknown", "tbd")
+
+
+def source_value(raw: str) -> str:
+    """A Source contract value: the rest of the line, backticks and padding trimmed; unset forms read empty."""
+    value = (raw or "").strip().strip("`").strip()
+    if value.lower() in _UNSET_SOURCES or value.startswith("<"):
+        return ""
+    return value
+
+
+def _first_universal_heading(pf: ParsedFile) -> Optional[int]:
+    """The 1-based line of the first ``## Universal...`` heading outside a fence, or None."""
+    for idx, ln in enumerate(pf.lines):
+        if pf.fence[idx]:
+            continue
+        hm = _HEADING.match(ln)
+        if hm and len(hm.group(1)) == 2 and re.match(r"Universal", hm.group(2), re.IGNORECASE):
+            return idx + 1
+    return None
+
+
+def _adapter_tier(pf: ParsedFile, entry: Entry, per_domain: bool) -> str:
+    """``Universal`` only for a root entry that a ``## Universal`` heading precedes; otherwise ``Project``.
+
+    The fail-closed rule for memory scope: an entry before any heading, below the pointer, under a project heading or
+    in a domain file is Project.
+    """
+    if per_domain or entry.tier != "universal":
+        return "Project"
+    first = _first_universal_heading(pf)
+    return "Universal" if first is not None and first < entry.line else "Project"
+
+
+def entry_blocks(text: str, pattern: Any = None, per_domain: bool = False) -> list:
+    """Every entry of a mechanism or vocabulary TEXT, with its full shape, read through ``parse_text``.
+
+    One dict per entry (legacy entries included, I-8c): ``title``, ``line`` (1-based), ``tier`` (``Universal`` or
+    ``Project``), ``text`` (the entry's own text, up to its first indented sub-bullet) and ``subs`` (each indented
+    sub-bullet as ``line`` and ``text``, with deeper continuation lines folded in). A legacy entry keeps all its lines
+    in ``text`` and has no subs. ``pattern`` is accepted for signature compatibility and not used: there is one
+    grammar. Takes text, never a path.
+    """
+    pf = parse_text(text, "MECHANISMS", kind="domain" if per_domain else "root")
+    blocks: list = []
+    for entry in pf.entries:
+        raw = pf.lines[entry.line - 1:entry.end_line]
+        own, subs, sub_indent = [raw[0]], [], None
+        if entry.kind == "legacy":
+            own = list(raw)
+        else:
+            for offset, ln in enumerate(raw[1:], 1):
+                sub = _SUB_BULLET.match(ln)
+                if sub and (sub_indent is None or len(sub.group(1)) <= sub_indent):
+                    sub_indent = len(sub.group(1))
+                    subs.append({"line": entry.line + offset, "text": ln.strip()})
+                elif subs:
+                    subs[-1]["text"] += ("\n" + ln.strip()) if ln.strip() else ""
+                else:
+                    own.append(ln)
+        blocks.append({"title": entry.title.strip(), "line": entry.line, "tier": _adapter_tier(pf, entry, per_domain),
+                       "text": "\n".join(own).rstrip(), "subs": subs})
+    return blocks
+
+
+def journal_entries(text: str, per_domain: bool = False) -> list:
+    """Every ``### YYYY-MM-DD`` entry of a journal TEXT, read through ``parse_text`` (entries only, never legacy).
+
+    One dict per entry, malformed ones included: ``sig`` (sha1 of ``date|title``), ``date``, ``title``, ``line``,
+    ``tier`` (see ``_adapter_tier``), ``trigger`` (trimmed, lower-cased), ``source`` (``source_value`` of the Source
+    contract field, empty when unset) and ``text`` (the heading line plus every line of the entry).
+    """
+    pf = parse_text(text, "JOURNAL", kind="domain" if per_domain else "root")
+    found: list = []
+    for entry in pf.entries:
+        if entry.kind != "entry":
+            continue
+        found.append({
+            "sig": hashlib.sha1(f"{entry.date}|{entry.title}".encode("utf-8", errors="ignore")).hexdigest(),
+            "date": entry.date, "title": entry.title, "line": entry.line,
+            "tier": _adapter_tier(pf, entry, per_domain),
+            "trigger": entry.fields.get("trigger", "").strip().lower(),
+            "source": source_value(entry.fields.get("source contract", "")),
+            "text": "\n".join(pf.lines[entry.line - 1:entry.end_line]),
+        })
+    return found
+
+
+# ---------------------------------------------------------------------------
 # Whole-registry reads
 # ---------------------------------------------------------------------------
 def display_for(registries_dir: Path, project_root: Optional[Path]):

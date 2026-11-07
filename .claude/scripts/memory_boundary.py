@@ -25,9 +25,10 @@ Only `record` writes, and only the one brief it is given (replace-then-rename). 
 `not-enabled` and writes nothing, so a project that never switched memory on sees no change in any brief. With
 memory unconfigured it writes the one `Memory: unconfigured (<reason>)` line, the reason read from the profile.
 
-The registry readers (entry_blocks, journal_entries), the profile slot reader (load_slot), the brief selector
-(select_linked_brief) and the shipped-path test (is_shipped) are other scripts' functions. They are bound fail-soft
-with getattr, so a missing or stale one degrades to a refusal, never a crash. This file parses no registry text.
+The registry readers (entry_blocks, journal_entries), the registry file lister (registry_files_in), the profile slot
+reader (load_slot), the brief selector (select_linked_brief) and the shipped-path test (is_shipped) are other scripts'
+functions. They are bound fail-soft with getattr, so a missing or stale one degrades to a refusal, never a crash. This
+file parses no registry text.
 """
 from __future__ import annotations
 
@@ -57,7 +58,8 @@ def _bind(module_name: str, *names: str) -> Dict[str, Any]:
 
 
 _PR = _bind("pr_merged", "load_slot", "select_linked_brief", "parse_brief_frontmatter", "default_branch_or_none")
-_GRD = _bind("generate_registry_digest", "entry_blocks", "journal_entries", "BULLET", "DOMAINS")
+_GRD = _bind("generate_registry_digest", "entry_blocks", "journal_entries", "BULLET")
+_RL = _bind("_registry_layout", "registry_files_in")
 _CVB = _bind("check_version_bump", "is_shipped")
 
 # --- shape profiles ----------------------------------------------------------------------------------------------
@@ -100,7 +102,6 @@ RETRIEVED_LINE = re.compile(r"^Retrieved:[ \t]+(%s)@(%s)[ \t]*\|[ \t]*[a-z]+[ \t
                             r"(applies|does-not-apply)\b" % (_TOKEN, _TOKEN), re.M)
 RECEIPT_KEY_LINE = re.compile(r"^(?:Captured|Not sent):[ \t]+([0-9a-f]{40})\b", re.M)
 MEMORY_ITEM_LINE = re.compile(r"Memory item[ \t]+(%s)@(%s)" % (_TOKEN, _TOKEN))
-DEFAULT_DOMAINS = ("backend", "frontend", "data", "trading", "general")
 
 
 class Refusal(Exception):
@@ -497,12 +498,20 @@ def _sha(text: str) -> str:
 
 
 def _registry_files(project: Path, name: str) -> List[Tuple[str, bool]]:
-    domains = _GRD["DOMAINS"] or DEFAULT_DOMAINS
-    found = [(".claude/registries/%s.md" % name, False)]
-    found += [(".claude/registries/%s/%s.md" % (name, d), True) for d in domains]
+    """The registry's files in resolver order (root, general, the other domain files): (project-relative path,
+    per_domain). A file under <NAME>/ is per_domain. Raises reader-unavailable when the layout module is missing."""
+    lister = _RL["registry_files_in"]
+    if lister is None:
+        raise Refusal("reader-unavailable", "_registry_layout.registry_files_in is unavailable")
     shipped = _CVB["is_shipped"]
-    return [(rel, per) for rel, per in found
-            if (Path(project) / rel).is_file() and (shipped is None or shipped(rel))]
+    registries = Path(project) / ".claude" / "registries"
+    found: List[Tuple[str, bool]] = []
+    for path in lister(registries, name + ".md"):
+        rel = _rel(Path(project), path)
+        per_domain = path.parent != registries
+        if shipped is None or shipped(rel):
+            found.append((rel, per_domain))
+    return found
 
 
 def _candidate(kind: str, key: str, rel: str, line: int, title: str, when: Optional[str], provenance: str,

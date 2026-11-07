@@ -46,6 +46,12 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 HEADING = re.compile(r'^(#{2,3}) (.+)$')          # INTEGRATION
+
+# Public names that the memory adapter (memory_boundary.py) binds. They are re-exports of the adapters over the one
+# grammar in _registry_layout.py (Q21 (a)); this file keeps no registry reader of its own.
+entry_blocks = rl.entry_blocks
+journal_entries = rl.journal_entries
+BULLET = rl.BULLET
 SECTION_TITLES = {"MECHANISMS": "Mechanisms", "VOCABULARY": "Vocabulary", "JOURNAL": "Journal (lessons)"}
 
 

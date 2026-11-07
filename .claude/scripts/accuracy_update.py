@@ -401,8 +401,6 @@ def record_from_contract(contract_path: str, verdict_or_source: str, is_failure:
 #: contract was already approved when the issue surfaced -- the same accuracy signal.
 POST_APPROVAL_TOKENS = ("post-approval", "post-impl", "post-implementation")
 
-_SOURCE_VALUE = re.compile(r"^\s*`?([^\s`]+)")
-
 #: The reader of the journal grammar that seeded a file (I-14). Each ``seeded_files`` value records it; a file whose
 #: value holds no reader (or a lower one) is seeded again on its next read, with every signature marked seen.
 JOURNAL_READER = 2
@@ -433,14 +431,13 @@ def parse_journal_entries(text: str) -> list[dict]:
     for entry in rl.parse_text(text, "JOURNAL").entries:
         if entry.kind != "entry":
             continue
-        src_m = _SOURCE_VALUE.match(entry.fields.get("source contract", ""))
         title = entry.title.strip()
         entries.append({
             "sig": journal_signature(entry.date, title),
             "date": entry.date,
             "title": title,
             "trigger": entry.fields.get("trigger", "").strip().lower(),
-            "source_contract": (src_m.group(1).strip() if src_m else ""),
+            "source_contract": rl.source_value(entry.fields.get("source contract", "")),
             "body": entry.text,
         })
     return entries
