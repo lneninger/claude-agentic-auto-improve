@@ -13,9 +13,9 @@ branch: fix/271-session-folder-owner-and-tool-named
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261106-bug-271-windows-session-owner-check
 north_stars: none
 contract: .claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md
-pr: UNKNOWN
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/303
+issue_link: closes
+status: shipped
 created: 2026-11-06
 ---
 
