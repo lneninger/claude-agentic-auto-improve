@@ -14,9 +14,17 @@ pays it). Runs are interleaved round by round across all cases, so a slow minute
         ``master`` branch can be stale) into a temp folder, with the helpers of the same ref
   new   this working tree's guard, reset hook and tracker, copied into a second temp folder
 
-Everything the hooks touch lives under one private temp folder: TMP/TEMP/TMPDIR (so the Session folders and the reset hook's
-pruner never see the real temp folder), USERPROFILE/HOME/CLAUDE_CONFIG_DIR (so no real settings enable or disable the server),
-and a throwaway project with a Project index and a configured server. The folder is removed at the end unless ``--keep``.
+Everything the hooks touch lives under one private scratch folder: TMP/TEMP/TMPDIR (the OLD design's Session folders and the
+reset hook's pruner never see the real temp folder), LOCALAPPDATA and XDG_CACHE_HOME (and HOME) pointing at ``<scratch>/home``
+(the NEW design keeps its Session folders under the Per-user session parent, ``<base>/auto-improve-codegraph``, created 0700
+with the same helper the test fixtures use; the bench NEVER writes into the real %LOCALAPPDATA% or ~/.cache),
+USERPROFILE/CLAUDE_CONFIG_DIR (so no real settings enable or disable the server), and a throwaway project with a Project index
+and a configured server. The folder is removed at the end unless ``--keep``. The "new" marker is stamped (writer + session)
+as the merged tracker writes it.
+
+--old-ref MUST name a PRE-SHADOW ref (for example c8653e3, the #259 guard): the default origin/master now contains the shadow
+(and the Per-user session parent), so ``_check_old_is_259`` stops a plain run before it starts. The OLD design keeps its
+Session folders in the temp folder; the NEW design (this working tree) keeps them under the Per-user session parent.
 
 Cases (guard): allowlisted target; gated target with the Turn marker present; gated target with the marker absent (a block);
 new only: marker present with the transcript open, at each size, warm and cold cursor. Also the reset hook and the tracker.
@@ -42,6 +50,9 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _addon_fixture as af  # noqa: E402  (session_parent / session_folder / write_marker; import only registers an atexit cleanup)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GUARD_REL = ".claude/addons/codegraph/hooks/codegraph-first-guard.py"
@@ -139,6 +150,9 @@ class Workspace:
         self.project_nolog = root / "project_nolog"
         for folder in (self.tmp, self.home / ".claude", self.transcripts):
             folder.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":  # the base is <home>/AppData/Local; af.session_parent creates it (0700) but not its parent
+            (self.home / "AppData").mkdir(exist_ok=True)
+        self.parent = af.session_parent(self.home)  # the Per-user session parent inside the scratch home (0700 where applicable)
         for project, with_claude in ((self.project, True), (self.project_nolog, False)):
             self._make_project(project, with_claude)
         self.old_dir = self._install(root / "old_hooks", from_ref=old_ref)
@@ -175,14 +189,31 @@ class Workspace:
 
     # -- environment of the child processes ------------------------------------------------------------------------
     def env(self, project: Path) -> dict:
+        """The child environment. Both the temp folder (the OLD design's Session folders) and the per-user base
+        (LOCALAPPDATA / XDG_CACHE_HOME, the NEW design's) point inside the scratch area, so a run never writes into the
+        real %LOCALAPPDATA% or ~/.cache."""
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
         env.update({"CLAUDE_PROJECT_DIR": str(project), "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
                     "TMP": str(self.tmp), "TEMP": str(self.tmp), "TMPDIR": str(self.tmp),
-                    "USERPROFILE": str(self.home), "HOME": str(self.home)})
+                    "USERPROFILE": str(self.home), "HOME": str(self.home),
+                    "LOCALAPPDATA": str(self.home / "AppData" / "Local"), "XDG_CACHE_HOME": str(self.home / ".cache")})
         return env
 
-    def folder(self, session: str) -> Path:
-        return self.tmp / (SESSION_PREFIX + session)
+    def folder(self, session: str, design: str) -> Path:
+        """The Session folder by design: ``old`` (the #259 guard) keeps it in the temp folder; every other design (new,
+        new-nolog) keeps it under the Per-user session parent inside the scratch home."""
+        if design == "old":
+            return self.tmp / (SESSION_PREFIX + session)
+        return af.session_folder(self.parent, session)
+
+    def put_marker_file(self, session: str, design: str) -> None:
+        """The Turn marker as the tracker of that design writes it (the new one is stamped: writer + session)."""
+        if design == "old":
+            folder = self.folder(session, design)
+            folder.mkdir(exist_ok=True)
+            (folder / "turn.json").write_text('{"ts":1,"tool":"mcp__codegraph__bench","summary":"","pid":1}\n')
+        else:
+            af.write_marker(self.parent, session, tool="mcp__codegraph__bench")
 
     # -- cases -------------------------------------------------------------------------------------------------------
     def cases(self) -> list[Case]:
@@ -199,22 +230,20 @@ class Workspace:
                                "tool_input": {"file_path": str(project / target)}, "transcript_path": str(transcript),
                                "prompt_id": "bench-prompt"}).encode("utf-8")
 
-        def put_marker(session: str) -> Callable[[], None]:
+        def put_marker(session: str, design: str) -> Callable[[], None]:
             def go() -> None:
-                folder = self.folder(session)
-                folder.mkdir(exist_ok=True)
-                (folder / "turn.json").write_text('{"ts":1,"tool":"mcp__codegraph__bench","summary":"","pid":1}\n')
+                self.put_marker_file(session, design)
             return go
 
-        def drop_tickets(session: str) -> Callable[[], None]:
+        def drop_tickets(session: str, design: str) -> Callable[[], None]:
             def go() -> None:
-                for f in self.folder(session).glob("ticket-*"):
+                for f in self.folder(session, design).glob("ticket-*"):
                     f.unlink()
             return go
 
-        def drop_cursor(session: str) -> Callable[[], None]:
+        def drop_cursor(session: str, design: str) -> Callable[[], None]:
             def go() -> None:
-                (self.folder(session) / "transcript-cursor.json").unlink(missing_ok=True)
+                (self.folder(session, design) / "transcript-cursor.json").unlink(missing_ok=True)
             return go
 
         def guard_case(design: str, key: str, label: str, target: str, expected: int, prepare, *, project: Path | None = None,
@@ -231,11 +260,11 @@ class Workspace:
         for design in ("old", "new"):
             s_marker, s_block = f"bench-{design}-marker-present", f"bench-{design}-marker-absent"
             out.append(guard_case(design, "allowlisted", "allowlisted target (README.md), no marker", "README.md", 0, lambda: None))
-            put_marker(s_marker)()
+            put_marker(s_marker, design)()
             out.append(guard_case(design, "marker-present", "gated target (src/app.py), marker present", "src/app.py", 0,
                                   lambda: None))
             out.append(guard_case(design, "marker-absent", "gated target (src/app.py), marker absent: block", "src/app.py", 2,
-                                  drop_tickets(s_block), prime=True))
+                                  drop_tickets(s_block, design), prime=True))
         # new, shadow cost removed (no <project>/.claude, so no log is written): splits the G-1 saving from the shadow's cost
         for key, label, target, expected in (("allowlisted", "allowlisted target (README.md), no marker", "README.md", 0),
                                              ("marker-present", "gated target (src/app.py), marker present", "src/app.py", 0)):
@@ -243,25 +272,24 @@ class Workspace:
             case.design, case.key, case.session = "new-nolog", f"new-nolog:{key}", f"bench-new-nolog-{key}"
             case.payload = guard_payload(case.session, self.project_nolog, target, small)
             if key == "marker-present":
-                put_marker(case.session)()
+                put_marker(case.session, "new")()
             out.append(case)
         for mb in self.sizes:
             for cursor in ("warm", "cold"):
                 key = f"transcript-{mb}mb-{cursor}"
                 session = f"bench-new-{key}"
-                put_marker(session)()
+                put_marker(session, "new")()
                 out.append(guard_case("new", key, f"marker present, transcript open, {mb} MB, {cursor} cursor", "src/app.py", 0,
-                                      drop_cursor(session) if cursor == "cold" else (lambda: None),
+                                      drop_cursor(session, "new") if cursor == "cold" else (lambda: None),
                                       prime=(cursor == "warm"), transcript=big[mb], mb=mb, cursor=cursor))
         # reset hook and tracker, both designs
         for design in ("old", "new"):
             hooks = self.old_dir if design == "old" else self.new_dir
             s_reset, s_track = f"bench-{design}-reset", f"bench-{design}-tracker"
 
-            def reset_prepare(session=s_reset) -> None:
-                folder = self.folder(session)
-                folder.mkdir(exist_ok=True)
-                (folder / "turn.json").write_text('{"ts":1}\n')
+            def reset_prepare(session=s_reset, design=design) -> None:
+                self.put_marker_file(session, design)
+                folder = self.folder(session, design)
                 (folder / ("ticket-" + "0" * 64)).write_text("{}\n")
             out.append(Case(key=f"{design}:reset", label="reset hook start (UserPromptSubmit)", design=design, hook="reset",
                             argv=[sys.executable, str(hooks / Path(RESET_REL).name)], cwd=str(self.project), env=self.env(self.project),

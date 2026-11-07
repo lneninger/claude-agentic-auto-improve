@@ -303,23 +303,55 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
-**Changed in 0.15.2 (the `codegraph` guard fails open, issue #259):** the guard is a nudge, never a wall.
+**Changed in 0.16.3 (the `codegraph` session folder moves to a per-user parent and fails closed, issue #271):**
+
+- **The move.** The `codegraph` add-on's hooks keep every session folder under the Per-user session parent: `%LOCALAPPDATA%\auto-improve-codegraph\`
+  on Windows; `$XDG_CACHE_HOME/auto-improve-codegraph/`, else `~/.cache/auto-improve-codegraph/` (mode `0700`, owned by
+  you), on POSIX. Nothing in the system temp folder is read, written or pruned any more, so a `TMP` shared between users
+  cannot carry a planted `turn.json` that opens your gate, and your pruner cannot delete another user's folders. The
+  folders `auto-improve-codegraph-*` that 0.15.2 left in the system temp folder are inert (no longer read); delete them by
+  hand if you want.
+- **It fails closed.** When the parent or the session folder cannot be used (a link, a file, another user's folder, a folder
+  open to other users, a network path (this check runs on Windows only), an unset or relative `LOCALAPPDATA` on Windows, a relative `XDG_CACHE_HOME`, or neither `XDG_CACHE_HOME` nor `HOME` set), a source read is blocked as
+  `session-state-unusable`: the message names the folder, the problem in plain words and its fix, and offers no retry. The
+  tracker writes no marker and the reset hook prunes nothing, and each prints that the gate stays shut. A ticket write that
+  fails blocks as `retry-ticket-unwritten` (usually a passing lock or a full disk). This reverses 0.15.2's
+  `state-unwritable` fail-open. A subagent, a project with no index and a project with no configured server are still let
+  through.
+- **A Foreign marker is logged.** The tracker stamps `turn.json` with `writer` and `session`. A marker without this
+  session's stamp still opens the gate (it sits in a parent proven to be yours), and the guard logs it once per session
+  (`foreign-marker`, with the cause).
+- **The refusal says what to do.** `codegraph-tool-named` stays a refusal; its message now lists each entry with its layer and
+  file, then the one step that fixes it: replace each entry with `mcp__codegraph__*`. One capability constant,
+  `TREE_HOP_REFUSAL`, replaces `WORKTREE_OWN_ROOT_NATIVE`.
+- **Upgrading.** The 0.15.2 and 0.16.2 hook copies are in `released_sha256`, so the route is the in-place one:
+  re-run `/auto-improve-codegraph-install` (it backs up an unedited older copy as `<hook>.bak-<UTC stamp>` and replaces
+  it), then start a new session.
+
+| Install age | What it has | Route |
+|---|---|---|
+| 0.15.2 or 0.16.0 to 0.16.2, hook files unedited | session folders in the system temp folder, the older hooks | re-run the install, new session; the old temp folders are ignored |
+| an upgraded project that keeps its 0.15.2 `_project_paths.py` | a helper with `_hop_allowed` and `worktree_own_root`, no `TREE_HOP_REFUSAL` | nothing to do: it passes the Hop proof, so `index-other-tree` keeps firing |
+| installed from this release | nothing to do | run `addon --name codegraph --check` |
+
+**Changed in 0.15.2 (the `codegraph` guard fails open, issue #259):** the guard lets reads through when CodeGraph is provably unavailable.
 
 - **It lets reads through when CodeGraph is provably unavailable**, and prints one
   `[codegraph-first-guard] allowed (fail-open:<reason>)` line, logged once per session per reason in
-  `errors.jsonl`. The reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or
+  `errors.jsonl`. While the session folder cannot be used, these lines print on every call and nothing is logged. The reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or
   the main checkout; a `.codegraph` folder without `codegraph.db` is not an index), `index-other-tree`
   (a linked worktree with no index of its own, whose only index belongs to the main checkout),
   `server-not-configured`, `server-disabled` and `subagent` (the payload carries an `agent_id`).
-  `state-unwritable` is the sixth line: the guard's session folder cannot be used. Every other reason logs
-  once per session; `state-unwritable` logs on every call, because there is no writable state to rate-limit it.
+  Since 0.16.3 an unusable session folder blocks instead (`session-state-unusable`); see below.
 - **The retry escape replaces the shell advice.** The block message no longer teaches reading through
   the shell. Repeat the identical blocked call once and it is allowed and logged as `retry-escape`;
-  the next prompt clears it. No environment variable is involved.
+  the next prompt clears it. Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed. No environment variable is involved.
 - **The turn marker belongs to the session.** It is `turn.json` in
-  `<system temp folder>/auto-improve-codegraph-<session id>/`, no longer
+  `<Per-user session parent>/auto-improve-codegraph-<session id>/` (the parent is `%LOCALAPPDATA%\auto-improve-codegraph\`
+  on Windows, `$XDG_CACHE_HOME/auto-improve-codegraph/` or `~/.cache/auto-improve-codegraph/` on POSIX; 0.15.2 used
+  the system temp folder), no longer
   `<cwd>/.claude/.codegraph-used-this-turn`, so `cd` or `EnterWorktree` does not close the gate. The reset
-  hook prunes old session folders in the temp folder once per session (never through a link, never a
+  hook prunes old session folders in that parent once per session (never through a link, never a
   folder holding a file it does not know, only after 7 days).
 - **Wildcard only.** No shipped file names an individual CodeGraph tool; the server now offers only
   its explore tool. `addon.json` gains `permissions_allow` (`mcp__codegraph__*`, written to
@@ -569,7 +601,7 @@ The table describes rows in the earlier form, which name the file directly. A la
 A session with no `mcp__codegraph__*` tool is not a failure of the hook. Since 0.15.2 the guard
 lets the read through when it can prove CodeGraph is unavailable (no index, no configured server,
 a disabled server, a subagent, an index that belongs to another working tree); in any other
-session, repeat the blocked call once and it is allowed and logged. `/auto-improve-codegraph-uninstall`
+session, repeat the blocked call once and it is allowed and logged. Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed. `/auto-improve-codegraph-uninstall`
 followed by a new session removes the guard. If the CodeGraph index is stale, run `codegraph sync`
 or `codegraph init -i`.
 
@@ -1006,7 +1038,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 394 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 408 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 

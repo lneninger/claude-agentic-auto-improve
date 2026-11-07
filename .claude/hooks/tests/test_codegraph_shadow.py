@@ -150,7 +150,7 @@ class World:
         return project
 
     def folder(self, session: str, create: bool = True) -> Path:
-        folder = af.session_folder(self.sb.tmp, session)
+        folder = af.session_folder(af.session_parent(self.sb.home), session)
         if create:
             folder.mkdir(parents=True, exist_ok=True)
         return folder
@@ -338,14 +338,14 @@ def run_states(w: World) -> None:
     # the Turn marker is read (turn_marker bool) once step 0 passed
     check("SH-C8 turn_marker is false when no marker exists", rec.get("turn_marker") is False, rec)
     s = sid()
-    af.write_marker(w.sb.tmp, s)
+    af.write_marker(af.session_parent(w.sb.home), s)
     proc = w.run(project, s, t)
     rec = last_record(project)
     check("SH-C9 marker present: live turn-marker-present, turn_marker true, shadow (closed) blocks -> shadow-more-closed",
           proc.returncode == 0 and rec.get("live_reason") == "turn-marker-present" and rec.get("turn_marker") is True
           and rec.get("shadow_decision") == "block" and rec.get("outcome") == "shadow-more-closed", "%s %s" % (rec, describe(proc)))
 
-    # step-0 failed open (a Session folder that is a link): no cursor read or written, turn_marker null
+    # step 0 found the Session state unusable (a Session folder that is a link; the live gate blocks, issue #271): no cursor read or written, turn_marker null
     s = sid()
     target = w.sb.root / "linktarget"
     target.mkdir()
@@ -360,8 +360,8 @@ def run_states(w: World) -> None:
         proc = w.run(project, s, t)
         rec = last_record(project)
         after = sorted(p.name for p in target.iterdir())
-        check("SH-K1 link folder: live fails open (state-unwritable) and turn_marker is null (not read)",
-              proc.returncode == 0 and rec.get("live_reason") == "fail-open:state-unwritable" and rec.get("turn_marker") is None,
+        check("SH-K1 link folder: live blocks (session-state-unusable, issue #271) and turn_marker is null (not read)",
+              proc.returncode == 2 and rec.get("live_reason") == "session-state-unusable" and rec.get("turn_marker") is None,
               "%s %s" % (rec, describe(proc)))
         check("SH-K1 link folder: the planted cursor was not read (a cold scan answered open, not the planted closed)",
               rec.get("transcript_turn") == "open", rec)
@@ -660,8 +660,13 @@ def run_log(w: World) -> None:
     found = set(tree_has_log(w.sb.root)) - before
     check("SH-L1 CLAUDE_PROJECT_DIR unset: the live call is unchanged (blocked as before), no record anywhere",
           not found and proc.returncode == 2 and "internal error" not in proc.stderr, "%s %s" % (found, describe(proc)))
-    check("SH-L1 CLAUDE_PROJECT_DIR unset: nothing was written under the home folder",
-          not any(w.sb.home.rglob("*")), [str(p) for p in w.sb.home.rglob("*")][:5])
+    # The live gate keeps its Session state in the Per-user session parent, which sits inside the fixture home
+    # (LOCALAPPDATA / XDG_CACHE_HOME): that subtree is the gate's, not the shadow's. Everything else must stay empty.
+    parent = af.session_parent(w.sb.home, create=False)
+    own_state = {parent, *parent.parents}
+    outside = [p for p in w.sb.home.rglob("*") if p not in own_state and parent not in p.parents]
+    check("SH-L1 CLAUDE_PROJECT_DIR unset: nothing was written under the home folder (outside the Per-user session parent)",
+          not outside, [str(p) for p in outside][:5])
 
     # <project>/.claude absent: no record and no .claude created
     bare = w.project(claude_dir=False)
@@ -875,7 +880,7 @@ def run_g2(w: World) -> None:
     project = w.project()
     s = sid()
     folder = w.folder(s)
-    af.write_marker(w.sb.tmp, s)
+    af.write_marker(af.session_parent(w.sb.home), s)
     proc = w.run(project, s, closed)
     rec = last_record(project)
     check("SH-G2c the shadow computed a block from the availability verdicts (shadow-more-closed)...",
@@ -910,7 +915,7 @@ def run_g2(w: World) -> None:
                             patch = mock.patch.object(guard, "shadow_section", mock.Mock(side_effect=SystemExit(7)))
                         with patch:
                             run = run_main(guard, payload_for(project, s, closed))
-                        results[mode] = (run, folder_snapshot(af.session_folder(sandbox.tmp, s)))
+                        results[mode] = (run, folder_snapshot(af.session_folder(af.session_parent(sandbox.home), s)))
                 finally:
                     w.sb.home, w.sb.tmp = saved
             finally:
@@ -970,7 +975,7 @@ def run_g1(w: World) -> None:
     project = w.project()
     source = {"file_path": str(project / "src" / "Thing.cs")}
     s = sid()
-    af.write_marker(w.sb.tmp, s)
+    af.write_marker(af.session_parent(w.sb.home), s)
     pp, el, proc = probe(w, project, s, source)
     check("SH-G1a marker present, a source Read: allowed and _project_paths is left unimported", pp is False and proc.returncode == 0, describe(proc))
     check("SH-G1a marker present, a source Read: _error_log is left unimported too", el is False, describe(proc))
@@ -978,7 +983,7 @@ def run_g1(w: World) -> None:
     check("SH-G1a control: with no marker the same Read is classified/blocked and _project_paths IS imported (the probe bites)",
           pp is True, describe(proc))
     s = sid()
-    af.write_marker(w.sb.tmp, s)
+    af.write_marker(af.session_parent(w.sb.home), s)
     pp, el, proc = probe(w, project, s, {"file_path": str(project / "docs" / "n.md")})
     check("SH-G1a marker present, a non-source Read: _project_paths is left unimported", pp is False, describe(proc))
 
@@ -986,7 +991,7 @@ def run_g1(w: World) -> None:
     with inproc(w, project):
         guard = load_module(w.guard, "cg_shadow_g1")
         s2 = sid()
-        af.write_marker(w.sb.tmp, s2)
+        af.write_marker(af.session_parent(w.sb.home), s2)
         both = guard.decide("Read", {"file_path": str(project / "docs" / "n.md")}, {"session_id": s2, "cwd": str(project)})
         check("SH-G1b marker present and a non-source target: allowed, reason is the marker's (checked first)",
               both == ("allow", "turn-marker-present"), both)
@@ -995,7 +1000,7 @@ def run_g1(w: World) -> None:
         check("SH-G1c decide() keeps its signature (tool_name, tool_input, payload=None)",
               list(sig.parameters) == ["tool_name", "tool_input", "payload"] and sig.parameters["payload"].default is None, sig)
         s3 = sid()
-        folder = af.session_folder(w.sb.tmp, s3)
+        folder = af.session_folder(af.session_parent(w.sb.home), s3)
         payload = {"session_id": s3, "cwd": str(project)}
         first = guard.decide("Read", {"file_path": str(project / "src" / "Thing.cs")}, payload)
         tickets = [p.name for p in folder.iterdir() if p.name.startswith("ticket-")]
