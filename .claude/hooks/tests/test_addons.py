@@ -363,7 +363,7 @@ class CodegraphAddonTests(AddonCase):
                 marker = self.marker(session)
                 self.assertTrue(marker.is_file(), msg="any mcp__codegraph__ tool opens the turn: " + str(marker))
                 data = json.loads(marker.read_text(encoding="utf-8"))
-                self.assertEqual(sorted(data), ["pid", "summary", "tool", "ts"], msg="the marker shape: " + repr(data))
+                self.assertEqual(sorted(data), ["pid", "route", "summary", "tool", "ts"], msg="the marker shape (issue #295 adds route): " + repr(data))
                 self.assertEqual(data["tool"], tool)
 
     def test_the_tracker_ignores_a_tool_that_is_not_a_codegraph_tool(self):
@@ -477,6 +477,119 @@ class CodegraphAddonTests(AddonCase):
             self.assertIn(folded, released[name],
                           msg="%s as released at %s (folded) must be in released_sha256, so addon-remove can delete an "
                               "unedited old copy" % (name, self.BASELINE_COMMIT))
+
+
+    # --- issue #295: the command-line route, the Bash row and the version labels ------------------------------------
+    BASH_OK = {"stdout": "", "stderr": "", "interrupted": False, "isImage": False, "noOutputExpected": False}
+
+    def bash_payload(self, command: str, event: str = "PostToolUse", **extra) -> dict:
+        body = self.payload("Bash", {"command": command, "description": "x"}, hook_event_name=event, **extra)
+        if event == "PostToolUse":
+            body["tool_response"] = dict(self.BASH_OK)
+        else:
+            body.update({"error": "Exit code 1\nnope", "is_interrupt": False})
+        return body
+
+    def test_a_successful_counted_codegraph_command_opens_the_gate_like_an_mcp_call(self):
+        blocked = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(blocked.rc, 2, msg="control: blocked first: " + blocked.describe())
+        tracked = self.run_hook(self.TRACKER, self.bash_payload('codegraph explore "Thing"'))
+        self.assertEqual(tracked.rc, 0, msg=tracked.describe())
+        self.assertTrue(self.marker().is_file(), msg="a counted command-line call must write the Turn marker")
+        self.assertEqual(json.loads(self.marker().read_text(encoding="utf-8")).get("route"), "cli", msg="with route cli")
+        allowed = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(allowed.rc, 0, msg=allowed.describe())
+        self.assertNotIn("allowed (", allowed.err, msg="allowed by the marker, not the retry escape: " + allowed.describe())
+
+    def test_a_failed_or_compound_or_uncounted_codegraph_command_does_not_open_the_gate(self):
+        for label, payload in (("a failed call (PostToolUseFailure)", self.bash_payload("codegraph explore Thing", "PostToolUseFailure")),
+                               ("a compound command", self.bash_payload("cd src && codegraph explore Thing")),
+                               ("an uncounted subcommand", self.bash_payload("codegraph status")),
+                               ("a path form", self.bash_payload("/c/bin/codegraph explore Thing"))):
+            with self.subTest(label):
+                self.run_hook(self.TRACKER, payload)
+                self.assertFalse(self.marker().exists(), msg="%s must not write a marker" % label)
+
+    def test_the_manifest_registers_the_tracker_on_a_bash_row_with_its_own_cli_argument_and_if(self):
+        rows = [r for r in af.registrations("codegraph") if r.get(af.ROW_HOOK) == self.TRACKER]
+        by_args = {tuple(r.get(af.ROW_ARGS) or []): r for r in rows}
+        self.assertEqual(sorted(by_args), [(), ("cli",)], msg="the tracker has the MCP row (no args) and the cli row: %r" % rows)
+        cli = by_args[("cli",)]
+        self.assertEqual((cli.get(af.ROW_EVENT), cli.get(af.ROW_MATCHER), cli.get(af.ROW_IF)),
+                         ("PostToolUse", "Bash", "Bash(codegraph *)"), msg="the Bash row: %r" % cli)
+        self.assertEqual(by_args[()].get(af.ROW_MATCHER), "mcp__codegraph__.*", msg="the MCP row is unchanged")
+        self.assertIsNone(by_args[()].get(af.ROW_IF), msg="and carries no if")
+        self.assertEqual(len(af.registrations("codegraph")), 4, msg="four rows in all")
+        self.assertEqual(sorted(af.hook_files("codegraph")), sorted([self.GUARD, self.RESET, self.TRACKER]),
+                         msg="still exactly three hook files (AC8)")
+
+    @staticmethod
+    def earliest_release_labels(hook: str) -> dict:
+        """{folded sha256: earliest release version} for the hook as shipped at each commit that set the plugin version.
+        A missing history FAILS the caller (never a skip)."""
+        root = str(af.PROJECT_ROOT)
+
+        def git(*args):
+            return subprocess.run(["git", *args], capture_output=True, cwd=root)
+        commits = git("log", "--reverse", "--format=%H", "-G", '"version"', "--", "plugin.json")
+        if commits.returncode != 0 or not commits.stdout.strip():
+            raise AssertionError("git history of plugin.json is not available (fetch the full history)")
+        labels, seen_version = {}, None
+        for commit in commits.stdout.decode().split():
+            plugin = git("show", "%s:plugin.json" % commit)
+            if plugin.returncode != 0:
+                continue
+            try:
+                version = json.loads(plugin.stdout.decode("utf-8-sig")).get("version")
+            except ValueError:
+                continue
+            if not isinstance(version, str) or version == seen_version:
+                continue
+            seen_version = version
+            shown = git("show", "%s:.claude/addons/codegraph/hooks/%s" % (commit, hook))
+            if shown.returncode != 0:
+                continue
+            data = shown.stdout[3:] if shown.stdout.startswith(b"\xef\xbb\xbf") else shown.stdout
+            labels.setdefault(hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest(), version)
+        return labels
+
+    def test_every_released_hash_has_a_version_label_and_no_label_is_orphaned(self):
+        released = af.released_hashes("codegraph")
+        versions = af.released_versions("codegraph")
+        self.assertEqual(sorted(versions), sorted(released), msg="released_versions has one entry per hook that has released hashes")
+        for hook, hashes in released.items():
+            self.assertEqual(sorted(versions[hook]), sorted(hashes),
+                             msg="%s: every listed hash has a label and every label names a listed hash" % hook)
+
+    def test_released_versions_label_each_hash_with_the_earliest_release_that_shipped_it(self):
+        released = af.released_hashes("codegraph")
+        versions = af.released_versions("codegraph")
+        for hook in af.hook_files("codegraph"):
+            earliest = self.earliest_release_labels(hook)
+            self.assertTrue(earliest, msg="no release history could be read for %s (the full history is required)" % hook)
+            for h, label in versions[hook].items():
+                if h in earliest:
+                    self.assertEqual(label, earliest[h],
+                                     msg="%s: hash %s... shipped first in %s, not %s" % (hook, h[:10], earliest[h], label))
+            for h in released[hook]:
+                current = hashlib.sha256(af.source("codegraph", hook).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+                self.assertTrue(h in earliest or h == current,
+                                msg="%s: released_sha256 lists %s..., which is neither a released copy nor the current one "
+                                    "(unreleased in-between commits are never listed)" % (hook, h[:10]))
+
+    def test_the_0_16_1_copies_at_the_pinned_baseline_are_listed_and_labelled(self):
+        released = af.released_hashes("codegraph")
+        versions = af.released_versions("codegraph")
+        for hook in af.hook_files("codegraph"):
+            shown = subprocess.run(["git", "show", "db61fd7:.claude/addons/codegraph/hooks/%s" % hook], capture_output=True,
+                                   cwd=str(af.PROJECT_ROOT))
+            self.assertEqual(shown.returncode, 0, msg="the pinned commit db61fd7 is absent: fetch the full history "
+                                                      "(this row fails, it never skips)")
+            data = shown.stdout[3:] if shown.stdout.startswith(b"\xef\xbb\xbf") else shown.stdout
+            folded = hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+            self.assertIn(folded, released[hook], msg="%s at db61fd7 (0.16.1) is a released copy and must be listed" % hook)
+            self.assertIn(folded, versions.get(hook, {}), msg="and labelled")
+            self.assertRegex(versions[hook][folded], r"^0\.(?:9\.9|9\.\d+|1\d\.\d+)$", msg="with a release label that is not later than 0.16.1")
 
 
 class StrictShellGateAddonTests(AddonCase):

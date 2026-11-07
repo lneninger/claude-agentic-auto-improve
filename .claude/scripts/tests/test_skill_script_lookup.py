@@ -70,6 +70,13 @@ SCRIPT = re.compile(r"\.claude/scripts/([A-Za-z0-9_]+\.py)")
 #: Scripts whose snippet is the plugin-only form (dedupe contract, Revision 8, G and I.4): the project copy is
 #: never looked up, because a file under .claude/ is trivial to both gates and a project copy could be forged.
 PLUGIN_ONLY_SCRIPTS = {"concept_changed_check.py"}
+#: Issue #295 (contract 2026-11-07-295-codegraph-gate-dropped-mcp): the snippets whose variable is `FIP` are the plugin-only
+#: form too, although the script they look up (auto_improve_finish_install.py) stays project-first for every other skill
+#: (variable `FI`). /verify-before-done Step 5.8 and Step 0 of both codegraph add-on skills use it, so a stale vendored
+#: installer can neither hide nor recreate a stale hook.
+PLUGIN_ONLY_VARS = ("FIP",)
+FIP_SKILLS = ("skills/verify-before-done/SKILL.md", "skills/auto-improve-codegraph-install/SKILL.md",
+              "skills/auto-improve-codegraph-uninstall/SKILL.md")
 
 
 def find_bash() -> str | None:
@@ -411,7 +418,7 @@ class TestSkillScriptLookup(unittest.TestCase):
                                  "%s looks up the plugin install before the current worktree's copy: %r"
                                  % (snip["var"], got))
                 return
-            if snip["script"] in PLUGIN_ONLY_SCRIPTS:
+            if snip["script"] in PLUGIN_ONLY_SCRIPTS or snip["var"] in PLUGIN_ONLY_VARS:
                 # RULE CHANGED (Revision 8, I.4): "a vendored project finds its own copy first" no longer
                 # holds for a plugin-only script; the answer is the plugin's, never the project copy.
                 self.assertEqual(norm(got), self.expected_script(installed, snip),
@@ -450,7 +457,33 @@ class TestSkillScriptLookup(unittest.TestCase):
         self.assertIn("PRM", {s["var"] for s in others}, "the pr_merged lookup (PRM) keeps the project copy first")
 
     def plugin_only_snippets(self) -> list[dict]:
-        return [s for s in self.snips if s["script"] in PLUGIN_ONLY_SCRIPTS]
+        return [s for s in self.snips if s["script"] in PLUGIN_ONLY_SCRIPTS or s["var"] in PLUGIN_ONLY_VARS]
+
+    def test_each_of_the_three_skills_has_a_plugin_only_FIP_block(self):
+        # Non-vacuity (issue #295): the plugin-only rows loop over plugin_only_snippets(), and a loop over none passes.
+        for rel in FIP_SKILLS:
+            with self.subTest(skill=rel):
+                blocks = [s for s in self.snips if s["file"] == rel]
+                fip = [s for s in blocks if s["var"] in PLUGIN_ONLY_VARS]
+                self.assertEqual(len(fip), 1, "%s must hold exactly one lookup block into FIP (found %d block(s); variables: %s)"
+                                 % (rel, len(fip), [s["var"] for s in blocks]))
+                self.assertEqual(fip[0]["script"], "auto_improve_finish_install.py",
+                                 "the FIP block looks up the installer: %r" % fip[0]["script"])
+                self.assertIsNone(re.search(r'\[ -f "?\$S"? \]\s*;?\s*then\s+FIP=\$S', fip[0]["text"]),
+                                  "FIP never takes the project's own copy")
+
+    def test_the_two_codegraph_add_on_skills_no_longer_look_the_installer_up_project_first(self):
+        for rel in FIP_SKILLS[1:]:
+            with self.subTest(skill=rel):
+                left = [s for s in self.snips if s["file"] == rel and s["var"] == "FI"]
+                self.assertEqual(left, [], "%s still has a project-first FI block; Step 0 must be the plugin-only FIP form" % rel)
+
+    def test_the_fip_variable_is_the_one_the_skills_run(self):
+        for rel in FIP_SKILLS:
+            text = (PLUGIN_ROOT / rel).read_text(encoding="utf-8")
+            with self.subTest(skill=rel):
+                self.assertRegex(text, r'py\s+-3\s+"\$\{?FIP\}?"\s+', "%s must run the installer through $FIP" % rel)
+                self.assertIsNone(re.search(r'py\s+-3\s+"\$\{?FI\}?"', text), "%s must not run the installer through the project-first $FI" % rel)
 
     def test_at_least_one_snippet_is_for_a_plugin_only_script(self):
         # Non-vacuity (Revision 8, I.4): the plugin-only rows below loop over these snippets, and a loop over

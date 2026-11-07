@@ -800,12 +800,13 @@ ANGULAR_FORMER_NAMES = ["architecture-advisor.py"]
 #: Events that run once per prompt or per turn. No angular-tailwind row may sit on one (I-4).
 PER_PROMPT_EVENTS = {"UserPromptSubmit", "UserPromptExpansion", "Stop", "SubagentStop"}
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
-#: (event, matcher) of every registration row, per file. A matcher of None is an event that takes none.
+#: The set of (event, matcher) of every registration row, per file. A matcher of None is an event that takes none. Issue #295:
+#: the tracker has two rows (the MCP row and the Bash row with its own `cli` argument), so a file maps to a set of rows.
 EXPECTED_ADDON_ROWS = {
-    "codegraph-first-guard.py": ("PreToolUse", "Read|Grep|Glob"),
-    "codegraph-turn-reset.py": ("UserPromptSubmit", None),
-    "codegraph-turn-tracker.py": ("PostToolUse", "mcp__codegraph__.*"),
-    "bash-gate.py": ("PreToolUse", "Bash"),
+    "codegraph-first-guard.py": {("PreToolUse", "Read|Grep|Glob")},
+    "codegraph-turn-reset.py": {("UserPromptSubmit", None)},
+    "codegraph-turn-tracker.py": {("PostToolUse", "mcp__codegraph__.*"), ("PostToolUse", "Bash")},
+    "bash-gate.py": {("PreToolUse", "Bash")},
 }
 
 
@@ -1020,6 +1021,51 @@ def released_hash_problems(name: str, data) -> list:
     return problems
 
 
+#: Issue #295 (contract 2026-11-07-295-codegraph-gate-dropped-mcp): ``released_versions`` {<hook>: {<folded sha256>: <release
+#: label>}} labels EVERY hash of ``released_sha256`` (and only those) with a release version, and a registration row may carry an
+#: ``if`` that is a non-empty string.
+VERSION_LABEL = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def released_version_problems(name: str, data) -> list:
+    """Every way ``released_versions`` fails to label exactly the hashes of ``released_sha256``; [] means it holds."""
+    if not isinstance(data, dict) or af.KEY_RELEASED not in data:
+        return []  # the add-on carries no released hashes: nothing to label
+    if af.KEY_RELEASED_VERSIONS not in data:
+        return ["%s: carries %r but no %r (every released hash needs a release label)" % (name, af.KEY_RELEASED, af.KEY_RELEASED_VERSIONS)]
+    labels = data[af.KEY_RELEASED_VERSIONS]
+    released = data[af.KEY_RELEASED]
+    if not isinstance(labels, dict) or not isinstance(released, dict):
+        return ["%s: %r is not an object {hook: {hash: label}}" % (name, af.KEY_RELEASED_VERSIONS)]
+    problems = []
+    for hook, hashes in released.items():
+        per_hook = labels.get(hook)
+        if not isinstance(per_hook, dict):
+            problems.append("%s: %r has no entry for %s" % (name, af.KEY_RELEASED_VERSIONS, hook))
+            continue
+        for h in hashes if isinstance(hashes, list) else []:
+            if h not in per_hook:
+                problems.append("%s: the hash %s... of %s has no release label" % (name, str(h)[:10], hook))
+        for h, label in per_hook.items():
+            if h not in (hashes if isinstance(hashes, list) else []):
+                problems.append("%s: the label for %s... of %s names a hash that released_sha256 does not list" % (name, str(h)[:10], hook))
+            if not (isinstance(label, str) and VERSION_LABEL.match(label)):
+                problems.append("%s: the label %r of %s is not a release version x.y.z" % (name, label, hook))
+    for hook in labels:
+        if hook not in released:
+            problems.append("%s: %r names %s, which has no released hashes" % (name, af.KEY_RELEASED_VERSIONS, hook))
+    return sorted(set(problems))
+
+
+def row_if_problems(name: str, data) -> list:
+    """A row's ``if``, when present, is a non-empty string."""
+    problems = []
+    for row in (data.get(af.KEY_ROWS) or []) if isinstance(data, dict) else []:
+        if isinstance(row, dict) and af.ROW_IF in row and not (isinstance(row[af.ROW_IF], str) and row[af.ROW_IF].strip()):
+            problems.append("%s: the row for %s has an if that is not a non-empty string (%r)" % (name, row.get(af.ROW_HOOK), row[af.ROW_IF]))
+    return problems
+
+
 _default_hooks = default_hook_names(ROOT)
 check("the add-on folder holds exactly the three add-ons",
       ADDONS_DIR.is_dir() and sorted(p.name for p in ADDONS_DIR.iterdir() if p.is_dir()) == sorted(EXPECTED_ADDON_HOOKS),
@@ -1040,8 +1086,10 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
     check("%s: the manifest names real files, exec-form rows, no default hook, no dispatcher member" % _name,
           not _problems, "\n".join(_problems))
     if isinstance(_data, dict) and isinstance(_data.get(af.KEY_ROWS), list):
-        _rows = {r.get(af.ROW_HOOK): (r.get(af.ROW_EVENT), r.get(af.ROW_MATCHER) or None)
-                 for r in _data[af.KEY_ROWS] if isinstance(r, dict)}
+        _rows = {}
+        for r in _data[af.KEY_ROWS]:
+            if isinstance(r, dict):
+                _rows.setdefault(r.get(af.ROW_HOOK), set()).add((r.get(af.ROW_EVENT), r.get(af.ROW_MATCHER) or None))
         check("%s: the rows register each hook on the contract's event and matcher" % _name,
               _rows == {h: EXPECTED_ADDON_ROWS[h] for h in _expected_hooks}, "rows %r" % (_rows,))
         _all_addon_hook_files |= set(_data.get(af.KEY_HOOKS) or [])
@@ -1095,6 +1143,33 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
                              ("an empty list of hashes", {"a.py": [], "b.py": ["f" * 64]})):
             check("control: released_sha256 with %s is rejected" % _label,
                   bool(released_hash_problems("demo", {**_base, af.KEY_RELEASED: _bad})))
+        _version_problems = released_version_problems(_name, _data)
+        check("codegraph: released_versions labels every hash of released_sha256 with a release version, and only those",
+              af.KEY_RELEASED_VERSIONS in _data and not _version_problems,
+              "\n".join(_version_problems) or "no %r key" % af.KEY_RELEASED_VERSIONS)
+        check("codegraph: every registration row's if is a non-empty string, and the tracker's Bash row carries Bash(codegraph *)",
+              not row_if_problems(_name, _data) and any(
+                  r.get(af.ROW_HOOK) == "codegraph-turn-tracker.py" and r.get(af.ROW_MATCHER) == "Bash"
+                  and r.get(af.ROW_IF) == "Bash(codegraph *)" and r.get(af.ROW_ARGS) == ["cli"]
+                  for r in _data.get(af.KEY_ROWS) or []),
+              "rows: %r" % (_data.get(af.KEY_ROWS),))
+        _vbase = {af.KEY_HOOKS: ["a.py"], af.KEY_RELEASED: {"a.py": ["0" * 64, "f" * 64]},
+                  af.KEY_RELEASED_VERSIONS: {"a.py": {"0" * 64: "0.9.9", "f" * 64: "0.16.1"}}}
+        check("control: a fully labelled released_versions is accepted", not released_version_problems("demo", _vbase))
+        for _label, _bad in (("a hash without a label", {"a.py": {"0" * 64: "0.9.9"}}),
+                             ("a label for an unlisted hash", {"a.py": {"0" * 64: "0.9.9", "f" * 64: "0.16.1", "1" * 64: "0.1.0"}}),
+                             ("a label that is not a version", {"a.py": {"0" * 64: "latest", "f" * 64: "0.16.1"}}),
+                             ("a hook with no entry", {}),
+                             ("a hook without released hashes", {"a.py": {"0" * 64: "0.9.9", "f" * 64: "0.16.1"}, "b.py": {"2" * 64: "0.1.0"}})):
+            check("control: released_versions with %s is rejected" % _label,
+                  bool(released_version_problems("demo", {**_vbase, af.KEY_RELEASED_VERSIONS: _bad})))
+        check("control: released_sha256 with no released_versions is rejected",
+              bool(released_version_problems("demo", {k: v for k, v in _vbase.items() if k != af.KEY_RELEASED_VERSIONS})))
+        for _label, _bad_if in (("an empty string", ""), ("a number", 5), ("a blank string", "  ")):
+            check("control: a row whose if is %s is rejected" % _label,
+                  bool(row_if_problems("demo", {af.KEY_ROWS: [{af.ROW_HOOK: "a.py", af.ROW_IF: _bad_if}]})))
+        check("control: a row with a real if, and a row with none, are accepted",
+              not row_if_problems("demo", {af.KEY_ROWS: [{af.ROW_HOOK: "a.py", af.ROW_IF: "Bash(x *)"}, {af.ROW_HOOK: "b.py"}]}))
         check("codegraph: the manifest names the CodeGraph MCP server as a prerequisite",
               "mcp-server" in json.dumps(_data.get(af.KEY_PREREQUISITES)) and
               "codegraph" in json.dumps(_data.get(af.KEY_PREREQUISITES)),

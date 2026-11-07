@@ -6,7 +6,7 @@ user_invocable: true
 
 # /auto-improve-codegraph-uninstall — remove the codegraph add-on
 
-This skill takes the `codegraph` add-on out of a project: the three rows in `.claude/settings.json` (`PreToolUse` on `Read|Grep|Glob`, `UserPromptSubmit`, and `PostToolUse` on the CodeGraph tools) and the three hook files `codegraph-first-guard.py`, `codegraph-turn-reset.py` and `codegraph-turn-tracker.py` in `.claude/hooks/`.
+This skill takes the `codegraph` add-on out of a project: the four rows in `.claude/settings.json` (`PreToolUse` on `Read|Grep|Glob`, `UserPromptSubmit`, `PostToolUse` on the CodeGraph tools, and `PostToolUse` on `Bash` with `if: "Bash(codegraph *)"`) and the three hook files `codegraph-first-guard.py`, `codegraph-turn-reset.py` and `codegraph-turn-tracker.py` in `.claude/hooks/`.
 
 This skill proposes first. It writes only after one yes, and it reads and touches only `agentic-auto-improve`.
 
@@ -32,15 +32,13 @@ What the script will not do:
 
 ## Step 0: Find the script
 
-The script sits at a different path under a vendored copy and under a plugin install. Test
-the places **in this order** and keep the first hit. Do not use `ls` on all three paths:
-`ls` sorts its operands, so the order you meant is lost.
+Find the script through the plugin install **only**. A copy under the project's own `.claude/scripts/` is never used here: a vendored installer can be older than the hooks it manages. Without a separate plugin install the removal already refuses, so nothing is lost. Test the places **in this order** and keep the first hit. Do not use
+`ls` on all the paths: `ls` sorts its operands, so the order you meant is lost.
 
 ```bash
-FI=
+FIP=
 S=.claude/scripts/auto_improve_finish_install.py
-if [ -f "$S" ]; then FI=$S
-elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then FI=$CLAUDE_PLUGIN_ROOT/$S
+if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then FIP=$CLAUDE_PLUGIN_ROOT/$S
 else
   # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
   CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -51,14 +49,14 @@ else
     [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
   done)
   NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
-  FI=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+  FIP=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
     [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
   done)
 fi
-py -3 "$FI" --help   # macOS and Linux: python3 "$FI" --help
+py -3 "$FIP" --help   # macOS and Linux: python3 "$FIP" --help
 ```
 
-**If `FI` is empty, stop and say so.** Say that the script was not found in the project, in
+**If `FIP` is empty, stop and say so.** Say that the script was not found in
 `$CLAUDE_PLUGIN_ROOT` or in the plugin cache. Then stop. Without the script there is nothing
 to run, and a skill that guesses is worse than one that stops.
 
@@ -70,12 +68,12 @@ PY="py -3"        # Windows
 PY="python3"      # macOS and Linux
 ```
 
-Every command below is `$PY "$FI" addon-remove --name codegraph --project . ...`.
+Every command below is `$PY "$FIP" addon-remove --name codegraph --project . ...`.
 
 ## Step 1: Preview (writes nothing)
 
 ```bash
-$PY "$FI" addon-remove --name codegraph --project . --json
+$PY "$FIP" addon-remove --name codegraph --project . --json
 ```
 
 The answer carries:
@@ -108,7 +106,7 @@ Declining writes nothing.
 On a yes, apply with the `plan-sha256` from the preview:
 
 ```bash
-$PY "$FI" addon-remove --name codegraph --project . --apply --expect-sha256 <plan-sha256 from the preview>
+$PY "$FIP" addon-remove --name codegraph --project . --apply --expect-sha256 <plan-sha256 from the preview>
 ```
 
 The answer lists `removed-rows`, `deleted`, `kept` and the `backup` path. Tell the user to **start a new session**: Claude Code reads the hook rows once, when a session starts, so this session still runs the guard until then.

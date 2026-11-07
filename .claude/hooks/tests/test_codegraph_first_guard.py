@@ -36,8 +36,10 @@ WHAT THIS PINS DOWN
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import inspect
+import io
 import json
 import os
 import re
@@ -2284,6 +2286,936 @@ def run_review_round_three(w: World) -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------
+# Issue #295 (contract 2026-11-07-295-codegraph-gate-dropped-mcp): the command-line route, the two-route banner, the
+# connection probe and notice, the cli-fallback record, AC7/AC8, the bench's --reset-budget mode.
+#
+# The payload shapes are the LIVE TRIAL shapes (L1, L3, L7), not the contract's working rule:
+#   * a successful Bash call arrives as event PostToolUse with tool_response {stdout, stderr, interrupted, isImage,
+#     noOutputExpected} and NO exit-code field; a FAILED Bash call arrives as event PostToolUseFailure with `error`
+#     ("Exit code N ...") and `is_interrupt`, and no tool_response. The success signal is the event name.
+#   * a successful MCP call is a PostToolUse whose tool_response is a LIST of {type: text, text}; a hard-errored MCP
+#     call is a PostToolUseFailure with `error`.
+#   * the host's `if: "Bash(codegraph *)"` also fires for compound commands and VAR=val prefixes, so the TRACKER applies
+#     its own strict token-0 test; those payloads are fed straight to it here.
+# Names this suite pins (the implementer must provide them): reset hook module-level `connection_probe(table, start_pid)`
+# -> "present" | "absent" | "undecidable" over a list of (pid, parent_pid, image, command line or None);
+# `read_process_table()` -> that list (the ONLY thing tests replace, R-4); `notice_section(payload)` -> one of the closed
+# outcomes, printing the notice JSON itself when it is "shown"; guard module-level `server_starts_process(path)` -> bool.
+# --------------------------------------------------------------------------------------------------------------
+BASH_OK_RESPONSE = {"stdout": "", "stderr": "", "interrupted": False, "isImage": False, "noOutputExpected": False}
+MCP_EXPLORE = "mcp__codegraph__" + "codegraph_explore"
+SENTENCE = "A project instruction or a skill's explicit gate that forbids shell commands wins over this notice; follow that rule instead."
+
+
+def bash_ok(w: World, sb: af.Sandbox, project: Path, session: str, command: str, extra_input: dict | None = None,
+            response=None, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+    tool_input = {"command": command, "description": "run it"}
+    if extra_input:
+        tool_input.update(extra_input)
+    return run_hook(w.tracker, sb, project, "Bash", tool_input, session, event="PostToolUse", extra_env=extra_env,
+                    payload_extra={"tool_response": dict(BASH_OK_RESPONSE) if response is None else response,
+                                   "tool_use_id": "toolu_01", "duration_ms": 12, "permission_mode": "auto",
+                                   "prompt_id": "p1"})
+
+
+def bash_failed(w: World, sb: af.Sandbox, project: Path, session: str, command: str) -> subprocess.CompletedProcess:
+    return run_hook(w.tracker, sb, project, "Bash", {"command": command, "description": "run it"}, session,
+                    event="PostToolUseFailure",
+                    payload_extra={"error": "Exit code 1\n✗ CodeGraph isn't available here", "is_interrupt": False,
+                                   "tool_use_id": "toolu_02", "duration_ms": 9, "permission_mode": "auto"})
+
+
+def mcp_ok(w: World, sb: af.Sandbox, project: Path, session: str) -> subprocess.CompletedProcess:
+    return run_hook(w.tracker, sb, project, MCP_EXPLORE, {"query": "foo"}, session, event="PostToolUse",
+                    payload_extra={"tool_response": [{"type": "text", "text": "**Exploration: foo**"}],
+                                   "tool_use_id": "toolu_03"})
+
+
+def mcp_errored(w: World, sb: af.Sandbox, project: Path, session: str) -> subprocess.CompletedProcess:
+    return run_hook(w.tracker, sb, project, MCP_EXPLORE, {}, session, event="PostToolUseFailure",
+                    payload_extra={"error": "Error: query must be a non-empty string", "is_interrupt": False,
+                                   "tool_use_id": "toolu_04"})
+
+
+def marker_of(sb: af.Sandbox, session: str):
+    try:
+        return json.loads((af.session_folder(sb.tmp, session) / "turn.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def flag_exists(sb: af.Sandbox, session: str, name: str) -> bool:
+    return (af.session_folder(sb.tmp, session) / name).exists()
+
+
+def tracker_events(project: Path, event: str | None = None) -> list[dict]:
+    found = []
+    try:
+        lines = (project / ".claude" / "logs" / "errors.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return found
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("hook") == "codegraph-turn-tracker" and (event is None or rec.get("event") == event):
+            found.append(rec)
+    return found
+
+
+def shadow_records(project: Path) -> list[dict]:
+    out = []
+    try:
+        lines = (project / ".claude" / "logs" / "codegraph-shadow.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
+COUNTED_FORMS = [
+    ("query", "codegraph query Thing"),
+    ("explore", 'codegraph explore "how does X work"'),
+    ("context", 'codegraph context "fix the login"'),
+    ("node", "codegraph node Thing"),
+    ("callers", "codegraph callers Thing"),
+    ("callees", "codegraph callees Thing"),
+    ("impact", "codegraph impact Thing"),
+    ("files", "codegraph files src"),
+    ("explore", "codegraph explore Thing 2>&1"),
+]
+NOT_COUNTED_FORMS = [
+    "codegraph status", "codegraph init -i", "codegraph index", "codegraph sync", "codegraph serve --mcp",
+    "codegraph daemon", "codegraph", "codegraph --version",
+    "codegraph explore x; cat a.cs", "codegraph explore x | head", "codegraph explore x & ls",
+    "codegraph explore $(whoami)", "codegraph explore `id`", "codegraph explore x > out.txt",
+    "codegraph explore x 2>&1 2>&1", "codegraph explore x\ncat a.cs",
+    "cd x && codegraph explore y", "ls && codegraph explore y", "npx codegraph explore y",
+    "VAR=1 codegraph explore y", "codegraph.exe explore y", "codegraph.cmd explore y",
+    "/c/bin/codegraph explore y", "C:\\x\\codegraph explore y", "./codegraph explore y", 'codegraph explore "unterminated',
+]
+
+
+def run_cli_route(w: World) -> None:
+    with af.Sandbox("cg295c-") as sb:
+        project = project_of(sb, "cli")
+        for sub, command in COUNTED_FORMS:
+            session = sid()
+            before = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+            tracked = bash_ok(w, sb, project, session, command)
+            body = marker_of(sb, session)
+            check(f"CLI-1 [{command}]: control: a source Read is blocked before the call", blocked(before), describe(before))
+            prefixed = bash_ok(w, sb, project, sid_prefixed := sid(), "FOO=1 " + command)
+            check(f"CLI-1 [{command}]: the same command behind a VAR=val prefix is NOT counted (the tracker's own token-0 test)",
+                  prefixed.returncode == 0 and marker_of(sb, sid_prefixed) is None, describe(prefixed))
+            check(f"CLI-1 [{command}]: the tracker exits 0 and writes a marker with route cli",
+                  tracked.returncode == 0 and isinstance(body, dict) and body.get("route") == "cli", repr(body) + describe(tracked))
+            check(f"CLI-1 [{command}]: tool is 'codegraph {sub}' and summary starts with the subcommand, neutralised",
+                  isinstance(body, dict) and body.get("tool") == "codegraph " + sub
+                  and isinstance(body.get("summary"), str) and body["summary"].startswith(sub)
+                  and re.fullmatch(r"[A-Za-z0-9_. \-]*", body["summary"]) is not None, repr(body))
+            after = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+            check(f"CLI-1 [{command}]: the same Read is now allowed by the MARKER (no `allowed (` line)",
+                  silent_allow(after), describe(after))
+            check(f"CLI-1 [{command}]: a successful CLI call does NOT set mcp-seen", not flag_exists(sb, session, "mcp-seen"))
+        for command in NOT_COUNTED_FORMS:
+            session = sid()
+            tracked = bash_ok(w, sb, project, session, command)
+            check(f"CLI-2 [{command!r}]: no marker (not a Counted command in the strict form)",
+                  tracked.returncode == 0 and marker_of(sb, session) is None, describe(tracked) + repr(marker_of(sb, session)))
+        session = sid()
+        tracked = bash_failed(w, sb, project, session, "codegraph explore Thing")
+        check("CLI-3: a PostToolUseFailure payload (L1 shape: error, no tool_response) never opens the gate",
+              tracked.returncode == 0 and marker_of(sb, session) is None, describe(tracked))
+        gate = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        check("CLI-3: and the Read stays BLOCKED", blocked(gate), describe(gate))
+        session = sid()
+        tracked = bash_ok(w, sb, project, session, "codegraph explore Thing", extra_input={"run_in_background": True})
+        check("CLI-4: a run_in_background call writes no marker", marker_of(sb, session) is None, describe(tracked))
+        session = sid()
+        interrupted = dict(BASH_OK_RESPONSE, interrupted=True)
+        tracked = bash_ok(w, sb, project, session, "codegraph explore Thing", response=interrupted)
+        check("CLI-4: an interrupted call writes no marker", marker_of(sb, session) is None, describe(tracked))
+        session = sid()
+        tracked = bash_ok(w, sb, project, session, "codegraph explore Thing", response="not an object")
+        check("CLI-4: a tool_response that is not an object writes no marker", marker_of(sb, session) is None,
+              describe(tracked))
+        # a subagent's call opens the gate for the parent (shared Session folder), CLI route too
+        session = sid()
+        run_hook(w.tracker, sb, project, "Bash", {"command": "codegraph explore Thing"}, session, event="PostToolUse",
+                 payload_extra={"tool_response": dict(BASH_OK_RESPONSE), "agent_id": "a1", "agent_type": "general-purpose"})
+        parent = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        check("CLI-5: a subagent's counted CLI call opens the gate for the parent session", silent_allow(parent), describe(parent))
+        # no kill switch: the route works with every plausible switch set (R-4)
+        session = sid()
+        bash_ok(w, sb, project, session, "codegraph explore Thing",
+                extra_env={"CLAUDE_SKIP_CG": "1", "CODEGRAPH_OFF": "1", "CLAUDE_CODEGRAPH_ROUTE": "off"})
+        body = marker_of(sb, session)
+        check("CLI-6: no environment variable turns the command-line route off", isinstance(body, dict) and body.get("route") == "cli",
+              repr(body))
+
+
+def run_marker_routes(w: World) -> None:
+    with af.Sandbox("cg295r-") as sb:
+        project = project_of(sb, "routes")
+        cases = [
+            ("cli then successful mcp -> mcp", [("cli",), ("mcp",)], "mcp", True),
+            ("mcp then cli -> mcp", [("mcp",), ("cli",)], "mcp", True),
+            ("cli alone -> cli", [("cli",)], "cli", False),
+            ("successful mcp alone -> mcp", [("mcp",)], "mcp", True),
+        ]
+        for label, steps, route, seen in cases:
+            session = sid()
+            for (step,) in steps:
+                if step == "cli":
+                    bash_ok(w, sb, project, session, "codegraph explore Thing")
+                elif step == "mcp":
+                    mcp_ok(w, sb, project, session)
+                else:
+                    mcp_errored(w, sb, project, session)
+            body = marker_of(sb, session)
+            check(f"RT-1 [{label}]: the marker's route is {route}", isinstance(body, dict) and body.get("route") == route, repr(body))
+            check(f"RT-1 [{label}]: mcp-seen exists exactly when a SUCCESSFUL mcp call ran ({seen})",
+                  flag_exists(sb, session, "mcp-seen") is seen)
+            gate = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+            check(f"RT-1 [{label}]: the gate is open (any route opens it; presence only)", silent_allow(gate), describe(gate))
+        # route values are only mcp and cli (an errored MCP call arrives as PostToolUseFailure and never reaches the tracker row)
+        routes = set()
+        for steps in ([("cli",)], [("mcp",)], [("cli",), ("mcp",)], [("mcp",), ("cli",)]):
+            session = sid()
+            for (step,) in steps:
+                bash_ok(w, sb, project, session, "codegraph explore Thing") if step == "cli" else mcp_ok(w, sb, project, session)
+            body = marker_of(sb, session)
+            routes.add(body.get("route") if isinstance(body, dict) else None)
+        check("RT-2: route values are only mcp and cli", routes == {"mcp", "cli"}, repr(routes))
+        # a PostToolUseFailure payload (MCP or Bash) never writes a marker and never sets mcp-seen
+        for label, fire in (("MCP", lambda s: mcp_errored(w, sb, project, s)),
+                            ("Bash codegraph", lambda s: bash_failed(w, sb, project, s, "codegraph explore Thing"))):
+            session = sid()
+            proc = fire(session)
+            check(f"RT-3 [{label}]: a PostToolUseFailure payload exits 0, writes no marker and sets no mcp-seen",
+                  proc.returncode == 0 and marker_of(sb, session) is None and not flag_exists(sb, session, "mcp-seen"), describe(proc))
+            gate = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+            check(f"RT-3 [{label}]: and the Read stays BLOCKED", blocked(gate), describe(gate))
+
+
+def run_cli_fallback_record(w: World) -> None:
+    with af.Sandbox("cg295f-") as sb:
+        def fresh():
+            project = project_of(sb, "r5-%s" % uuid.uuid4().hex[:6])
+            make_logs(project)
+            return project
+
+        project, session = fresh(), sid()
+        bash_ok(w, sb, project, session, "codegraph explore Thing")
+        got = tracker_events(project, "cli-fallback")
+        check("R5-1: an accepted counted CLI call with no mcp-seen writes exactly ONE cli-fallback record",
+              len(got) == 1, repr(tracker_events(project)))
+        detail = got[0].get("details", {}) if got else {}
+        check("R5-1: the record carries reason mcp-unavailable and the subcommand, nothing else of the command",
+              detail.get("reason") == "mcp-unavailable" and detail.get("command") == "explore", repr(got))
+        check("R5-1: and the logged-cli-fallback flag exists after the record landed", flag_exists(sb, session, "logged-cli-fallback"))
+        bash_ok(w, sb, project, session, "codegraph callers Thing")
+        run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "again"})
+        bash_ok(w, sb, project, session, "codegraph impact Thing")
+        check("R5-2: a second CLI call, and a CLI call in a second turn, add no further record",
+              len(tracker_events(project, "cli-fallback")) == 1, repr(tracker_events(project)))
+
+        project, session = fresh(), sid()
+        mcp_ok(w, sb, project, session)
+        bash_ok(w, sb, project, session, "codegraph explore Thing")
+        check("R5-3: a successful MCP call before the CLI call: no record", len(tracker_events(project, "cli-fallback")) == 0,
+              repr(tracker_events(project)))
+
+        project, session = fresh(), sid()
+        bash_failed(w, sb, project, session, "codegraph explore Thing")
+        bash_ok(w, sb, project, session, "codegraph status")
+        bash_ok(w, sb, project, session, "cd x && codegraph explore y")
+        check("R5-5: a failed, an uncounted and a compound call write no record", len(tracker_events(project, "cli-fallback")) == 0,
+              repr(tracker_events(project)))
+
+        # log_event returns False (no logs folder): the flag is NOT set, and the next accepted call records
+        project = project_of(sb, "r5-nolog")
+        session = sid()
+        bash_ok(w, sb, project, session, "codegraph explore Thing")
+        check("R5-6: when nothing could be logged (no logs folder) no logged-cli-fallback flag is set",
+              not flag_exists(sb, session, "logged-cli-fallback"))
+        make_logs(project)
+        bash_ok(w, sb, project, session, "codegraph explore Thing")
+        check("R5-6: and once the log can be written the next accepted call records exactly once",
+              len(tracker_events(project, "cli-fallback")) == 1 and flag_exists(sb, session, "logged-cli-fallback"),
+              repr(tracker_events(project)))
+
+        # the pruner knows mcp-seen and logged-cli-fallback
+        reset = load_reset_module(sb, w)
+        names = ("turn.json", "mcp-seen", "logged-cli-fallback", "pruned")
+        check("R5-7: KEY: mcp-seen is a known name of the reset hook's pruner",
+              reset.KNOWN_FILE_RE.fullmatch("mcp-seen") is not None)
+        check("R5-7: logged-cli-fallback is a known name", reset.KNOWN_FILE_RE.fullmatch("logged-cli-fallback") is not None)
+        folder = old_session(sb.tmp, "r5-old", files=names)
+        removed = reset.prune_session_folders(sb.tmp)
+        check("R5-7: an old session folder holding mcp-seen and logged-cli-fallback is pruned whole",
+              af.CODEGRAPH_SESSION_PREFIX + "r5-old" in removed and not folder.exists(), "removed %r; left %s" % (
+                  removed, sorted(os.listdir(folder)) if folder.exists() else []))
+        session = sid()
+        bash_ok(w, sb, project, session, "codegraph explore Thing")
+        mcp_ok(w, sb, project, session)
+        run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "again"})
+        check("R5-8: the next prompt deletes turn.json but keeps mcp-seen (sticky for the session)",
+              marker_of(sb, session) is None and flag_exists(sb, session, "mcp-seen"))
+
+
+def run_cli_ac2(w: World) -> None:
+    with af.Sandbox("cg295a-") as sb:
+        for label, extra in (("main session", {}), ("subagent (agent_id)", {"agent_id": "a1", "agent_type": "general-purpose"})):
+            project = project_of(sb, "ac2-%s" % label[:4])
+            make_logs(project)
+            session = sid()
+            bash_ok(w, sb, project, session, "codegraph explore Thing")
+            proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session, payload_extra=extra)
+            recs = shadow_records(project)
+            check(f"AC2 [{label}]: no MCP call, index present, server configured, one counted CLI call: a source Read is allowed",
+                  allowed(proc) and "BLOCKED" not in proc.stderr, describe(proc))
+            check(f"AC2 [{label}]: with reason turn-marker-present (the Shadow record) and marker_route cli",
+                  bool(recs) and recs[-1].get("live_reason") == "turn-marker-present" and recs[-1].get("marker_route") == "cli",
+                  repr(recs[-1:]) + describe(proc))
+            stranger = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), payload_extra=extra)
+            if not extra:
+                check(f"AC2 [{label}]: another session is still BLOCKED [control]", blocked(stranger), describe(stranger))
+
+
+def banner_term(stderr: str):
+    found = re.findall(r'codegraph explore "([^"\n]*)"', stderr)
+    return found[0] if len(found) == 1 else None
+
+
+def run_banner(w: World) -> None:
+    with af.Sandbox("cg295b-") as sb:
+        project = project_of(sb, "banner")
+        for label, tool, tool_input in calls(project)[::2]:
+            proc = run_hook(w.guard, sb, project, tool, tool_input, sid())
+            text = proc.stderr
+            check(f"AC3 [{label}]: the banner still names the MCP route (mcp__codegraph__*)", blocked(proc) and "mcp__codegraph__*" in text, text)
+            check(f"AC3 [{label}]: and holds exactly one copyable command: codegraph explore \"<term>\"",
+                  blocked(proc) and banner_term(text) is not None, text)
+            check(f"AC3 [{label}]: and names which index a worktree reads (the main checkout's, unless one was built there)",
+                  re.search(r"worktree", text, re.I) is not None and re.search(r"main checkout", text, re.I) is not None, text)
+            check(f"AC3 [{label}]: I-2 holds: no `cat`/`sed`, no 'through the shell', no individual tool name",
+                  re.search(r"\b(cat|sed)\s", text) is None and "through the shell" not in text
+                  and "mcp__codegraph__codegraph_" not in text and LEGACY_NAME_RE.search(text) is None, text)
+        proc = run_hook(w.guard, sb, project, "Read", read_cs(project), sid())
+        check("AC3: a Read of Thing.cs yields codegraph explore \"Thing\"", banner_term(proc.stderr) == "Thing", proc.stderr)
+        hostile = [("foo; rm -rf /", "foo rm -rf"), ("$(whoami)", "whoami"), ("`id`", "id"), ("a|b", "a b"), ("a\nb", "a b"),
+                   ("-x", "x"), ("--help", "help"), (".hidden", "hidden"), ("---", "Symbol"), ("!!!", "Symbol"),
+                   ("A" * 200, "A" * 80)]
+        for pattern, want in hostile:
+            proc = run_hook(w.guard, sb, project, "Grep", {"pattern": pattern, "path": str(project / "src"), "glob": "*.cs"}, sid())
+            term = banner_term(proc.stderr)
+            tidy = " ".join(term.split()) if term is not None else None
+            check(f"AC3 [Grep pattern {pattern[:12]!r}]: the term is neutralised to {want[:20]!r}: only [A-Za-z0-9_.- ], no leading - or ., "
+                  "at most 80 characters",
+                  blocked(proc) and term is not None and re.fullmatch(r"[A-Za-z0-9_. \-]+", term) is not None
+                  and len(term) <= 80 and not term.lstrip().startswith(("-", ".")) and tidy == want,
+                  "term=%r\n%s" % (term, proc.stderr))
+        long_name = "B" * 200
+        proc = run_hook(w.guard, sb, project, "Read", {"file_path": str(project / "src" / (long_name + ".cs"))}, sid())
+        term = banner_term(proc.stderr)
+        check("AC3 [Read of a 200-character file name]: the term is at most 80 characters",
+              term is not None and 0 < len(term) <= 80, "term=%r" % term)
+
+
+# ---- the connection probe over a synthetic process table --------------------------------------------------------
+SERVER_CMD = 'C:\\WINDOWS\\system32\\cmd.exe /d /s /c "codegraph ^"serve^" ^"--mcp^""'
+SERVER_NODE_1 = ('"C:\\Users\\u\\AppData\\Local\\codegraph\\current\\bin\\..\\node.exe" --liftoff-only '
+                 '--disable-warning=ExperimentalWarning "C:\\Users\\u\\AppData\\Local\\codegraph\\current\\bin\\..\\lib\\dist\\bin\\codegraph.js" "serve" "--mcp"')
+SERVER_NODE_2 = ('C:\\Users\\u\\AppData\\Local\\codegraph\\current\\node.exe --liftoff-only --disable-warning=ExperimentalWarning '
+                 'C:\\Users\\u\\AppData\\Local\\codegraph\\current\\lib\\dist\\bin\\codegraph.js serve --mcp --path D:\\proj')
+
+
+def host_chain(me: int, hops: int = 4, host: str = "claude.exe") -> tuple[list, int]:
+    """Rows for the hook (pid ``me``, python) up to a host ``hops`` parents above it, and one process above the host.
+    The processes between are bash.exe (the L4 shape for hops=4: python <- py <- bash <- bash <- claude)."""
+    images = ["python.exe"] + (["py.exe"] if hops > 1 else []) + ["bash.exe"] * max(0, hops - 2)
+    images = images[:hops]
+    rows, pid = [], me
+    for i, image in enumerate(images):
+        parent = me + 1000 + i
+        rows.append((pid, parent, image, "C:\\x\\%s fixture-%d" % (image, i)))
+        pid = parent
+    rows.append((pid, pid + 500, host, "C:\\Users\\u\\.local\\bin\\claude.exe -p"))
+    rows.append((pid + 500, 1, "powershell.exe", "powershell.exe -NoProfile"))
+    return rows, pid
+
+
+def chain_to_host(me: int, depth_images: list, host: str = "claude.exe") -> tuple[list, int]:
+    rows, pid = [], me
+    for i, image in enumerate(depth_images):
+        parent = me + 2000 + i
+        rows.append((pid, parent, image, "C:\\x\\%s hop-%d" % (image, i)))
+        pid = parent
+    rows.append((pid, pid + 500, host, "C:\\Users\\u\\.local\\bin\\claude.exe"))
+    return rows, pid
+
+
+def real_servers(host_pid: int, which=("cmd", "n1", "n2")) -> list:
+    rows = []
+    if "cmd" in which:
+        rows.append((host_pid + 11, host_pid, "cmd.exe", SERVER_CMD))
+    if "n1" in which:
+        rows.append((host_pid + 12, host_pid + 11 if "cmd" in which else host_pid, "node.exe", SERVER_NODE_1))
+    if "n2" in which:
+        rows.append((host_pid + 13, host_pid + 12 if "n1" in which else host_pid, "node.exe", SERVER_NODE_2))
+    return rows
+
+
+def fn_of(mod, name: str):
+    return getattr(mod, name, None)
+
+
+def run_probe_rows(w: World) -> None:
+    with af.Sandbox("cg295p-") as sb:
+        reset = load_reset_module(sb, w)
+        probe = fn_of(reset, "connection_probe")
+        check("PR-0: the reset hook defines connection_probe(table, start_pid)", callable(probe),
+              "no module-level connection_probe in %s" % w.reset.name)
+        if not callable(probe):
+            return
+        me = 5000
+
+        def verdict(table, label, want):
+            try:
+                got = probe(table, me)
+            except Exception as exc:  # noqa: BLE001
+                got = "raised %r" % exc
+            check(f"PR [{label}]: {want}", got == want, "got %r" % (got,))
+
+        base, host_pid = host_chain(me, 4)
+        verdict(base + real_servers(host_pid), "the real L4 table: cmd.exe + two node.exe, quotes and carets", "present")
+        for which in (("cmd",), ("n1",), ("n2",)):
+            verdict(base + real_servers(host_pid, which), "only %s of the three server processes" % which[0], "present")
+        verdict(base, "host trusted, no server process", "absent")
+        verdict(base + [(host_pid + 20, host_pid, "node.exe", "node.exe C:\\x\\codegraph\\dist\\bin\\codegraph.js daemon --root D:\\proj")],
+                "a daemon only (no serve --mcp)", "absent")
+        verdict(base + [(host_pid + 21, host_pid, "codegraph.exe", "codegraph serve")], "serve without --mcp", "absent")
+        verdict(base + [(host_pid + 22, host_pid, "codegraph.exe", "codegraph serve --mcp")], "native 'codegraph serve --mcp'", "present")
+        verdict(base + [(host_pid + 23, host_pid, "node.exe",
+                         "node C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@x\\codegraph\\dist\\x.js serve --mcp")],
+                "npm: node ...\\node_modules\\...\\codegraph\\dist\\x.js serve --mcp (a codegraph folder segment)", "present")
+        verdict(base + [(host_pid + 24, host_pid, "node.exe", "node other.js serve --mcp")],
+                "node other.js serve --mcp (no CodeGraph token)", "undecidable")
+        verdict(base + [(host_pid + 25, host_pid, "node.exe", None)], "a candidate with an unreadable command line", "undecidable")
+        verdict(base + [(host_pid + 25, host_pid, "node.exe", None)] + real_servers(host_pid, ("cmd",)),
+                "an unreadable candidate beside a matching server: the match wins", "present")
+        # the hook's own ancestor chain is never a candidate
+        chain_rows = list(base)
+        chain_rows[2] = (chain_rows[2][0], chain_rows[2][1], "bash.exe", 'bash -c "codegraph serve --mcp"')
+        verdict(chain_rows, "the hook's own ancestor (a bash whose command line says codegraph serve --mcp) is not a server", "absent")
+        # host image set: .exe stripped, case-insensitive; an unknown image is undecidable
+        for image, want in (("claude", "present"), ("CLAUDE.EXE", "present"), ("Claude.exe", "present"),
+                            ("node.exe", "undecidable"), ("code.exe", "undecidable"), ("claude-helper.exe", "undecidable")):
+            rows, hp = host_chain(me, 4, host=image)
+            verdict(rows + real_servers(hp), "host image %r with a matching server" % image, want)
+        rows, hp = host_chain(me, 4, host="mystery.exe")
+        verdict(rows, "an unknown host image and no server", "undecidable")
+        # skip list: shells and launchers between the hook and the host
+        for image in ("python", "python3", "pythonw", "py", "bash", "sh", "dash", "zsh", "cmd", "powershell", "pwsh", "env"):
+            rows, hp = chain_to_host(me, ["python.exe", image + ".exe", "bash.exe"])
+            verdict(rows + real_servers(hp), "skip list: %s.exe between the hook and the host" % image, "present")
+        # hop limit: the host at 8 hops is found, at 9 it is not
+        rows, hp = chain_to_host(me, ["python.exe"] + ["bash.exe"] * 7)
+        verdict(rows + real_servers(hp), "the host exactly 8 hops above the hook", "present")
+        rows, hp = chain_to_host(me, ["python.exe"] + ["bash.exe"] * 8)
+        verdict(rows + real_servers(hp), "the host 9 hops above the hook: not found", "undecidable")
+        # depth 4 below the host
+        deep = [(host_pid + 31, host_pid, "cmd.exe", "cmd.exe /c x"), (host_pid + 32, host_pid + 31, "cmd.exe", "cmd.exe /c y"),
+                (host_pid + 33, host_pid + 32, "cmd.exe", "cmd.exe /c z")]
+        verdict(base + deep + [(host_pid + 34, host_pid + 33, "codegraph.exe", "codegraph serve --mcp")],
+                "a server at depth 4 below the host", "present")
+        verdict(base + deep + [(host_pid + 34, host_pid + 33, "cmd.exe", "cmd.exe /c w"),
+                               (host_pid + 35, host_pid + 34, "codegraph.exe", "codegraph serve --mcp")],
+                "a server at depth 5 is not a candidate", "absent")
+        # another session's server (a different host) is not ours
+        other = [(9000, 1, "claude.exe", "claude.exe"), (9001, 9000, "codegraph.exe", "codegraph serve --mcp")]
+        verdict(base + other, "a server under ANOTHER claude.exe is not this session's", "absent")
+
+
+# ---- the notice -------------------------------------------------------------------------------------------------
+@contextmanager
+def notice_env(sb: af.Sandbox, project: Path, extra: dict | None = None):
+    saved_temp, saved_cwd, saved_bytecode = tempfile.tempdir, os.getcwd(), sys.dont_write_bytecode
+    tempfile.tempdir = str(sb.tmp)
+    try:
+        with mock.patch.dict(os.environ, af.isolated_env(sb.home, sb.tmp, project, extra), clear=True):
+            os.chdir(str(project))
+            yield
+    finally:
+        os.chdir(saved_cwd)
+        tempfile.tempdir = saved_temp
+        sys.dont_write_bytecode = saved_bytecode
+
+
+@contextmanager
+def bytecode_allowed():
+    """sys.dont_write_bytecode False for the block (so a stray __pycache__ would show), restored in a finally."""
+    saved = sys.dont_write_bytecode
+    sys.dont_write_bytecode = False
+    try:
+        yield
+    finally:
+        sys.dont_write_bytecode = saved
+
+
+def load_fresh_hooks(sb: af.Sandbox, tag: str):
+    """A new installed copy of the three hooks (its own folder, no bytecode yet) and the reset module loaded from it
+    with bytecode writing OFF, so any __pycache__ later is the notice section's doing."""
+    paths = {p.name: p for p in af.install(ADD_ON, sb.root / ("inst-" + tag))}
+    saved = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        reset = load_module(paths[RESET_FILE], "cg295_reset_" + tag)
+    finally:
+        sys.dont_write_bytecode = saved
+    return reset, paths
+
+
+def table_reader(reset, rows=None, exc=None, delay: float = 0.0):
+    def reader(*args, **kwargs):
+        if delay:
+            time.sleep(delay)
+        if exc is not None:
+            raise exc
+        return list(rows)
+    return mock.patch.object(reset, "read_process_table", reader, create=True)
+
+
+def call_notice(reset, payload: dict) -> tuple:
+    fn = fn_of(reset, "notice_section")
+    if not callable(fn):
+        return None, ""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            outcome = fn(payload)
+        except BaseException as exc:  # noqa: BLE001
+            outcome = "raised %r" % (exc,)
+    return outcome, out.getvalue()
+
+
+def run_reset_main(reset, payload: dict) -> tuple:
+    out, err = io.StringIO(), io.StringIO()
+    code = None
+    with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
+            contextlib.redirect_stderr(err):
+        try:
+            reset.main()
+        except SystemExit as exc:
+            code = exc.code if exc.code is not None else 0
+    return code, out.getvalue(), err.getvalue()
+
+
+def run_notice_rows(w: World) -> None:
+    with af.Sandbox("cg295n-") as sb:
+        reset, paths = load_fresh_hooks(sb, "a")
+        check("NT-0: the reset hook defines notice_section(payload)", callable(fn_of(reset, "notice_section")),
+              "no module-level notice_section in " + RESET_FILE)
+        project = project_of(sb, "nt-ok")
+        me = os.getpid()
+        chain, host_pid = host_chain(me, 4)
+        absent_table = chain
+        present_table = chain + real_servers(host_pid)
+        prompt_text = "SECRET-PROMPT-TEXT-123"
+
+        def payload(proj=project, **extra):
+            body = {"session_id": sid(), "cwd": str(proj), "prompt": prompt_text, "hook_event_name": "UserPromptSubmit"}
+            body.update(extra)
+            return body
+
+        def outcome_for(rows, proj=project, label="", **extra):
+            with notice_env(sb, proj):
+                with table_reader(reset, rows):
+                    return call_notice(reset, payload(proj, **extra))
+
+        outcome, out = outcome_for(present_table)
+        check("NT-1: a server process under this session's host: silent:probe-present, nothing printed",
+              outcome == "silent:probe-present" and out == "", "%r %r" % (outcome, out))
+        outcome, out = outcome_for(absent_table)
+        check("NT-2: no server process, all preconditions met: outcome shown", outcome == "shown", "%r %r" % (outcome, out))
+        parsed = None
+        try:
+            parsed = json.loads(out)
+        except ValueError:
+            pass
+        check("NT-2: and stdout is ONE JSON object", isinstance(parsed, dict) and out.strip().count("\n") == 0, repr(out))
+        if isinstance(parsed, dict):
+            hso = parsed.get("hookSpecificOutput") or {}
+            msg, ctx = parsed.get("systemMessage"), hso.get("additionalContext")
+            check("NT-2: it carries systemMessage and hookSpecificOutput.hookEventName UserPromptSubmit with additionalContext",
+                  isinstance(msg, str) and msg and hso.get("hookEventName") == "UserPromptSubmit" and isinstance(ctx, str), repr(parsed))
+            check("NT-2: the user text and the model text are the same fixed text", msg == ctx, repr(parsed))
+            check("NT-2: it ends with the exact precedence sentence", isinstance(ctx, str) and ctx.endswith(SENTENCE), repr(ctx))
+            check("NT-2: it echoes nothing from the prompt or the payload",
+                  prompt_text not in out and str(project) not in out and "SECRET" not in out, out)
+            low = (ctx or "").lower()
+            for needle in ("serve --mcp", "/mcp", "bash", "codegraph explore", "main checkout", "worktree"):
+                check(f"NT-2: the notice says {needle!r}", needle in low, repr(ctx))
+            check("NT-2: it advises no shell route to source files (no `cat`)", re.search(r"\bcat\b", low) is None, repr(ctx))
+        # silent cases
+        cases = [
+            ("agent_id present (a subagent)", dict(table=absent_table, extra={"agent_id": "a1"}), "silent:precondition"),
+            ("undecidable: an unknown host image", dict(table=host_chain(me, 4, host="mystery.exe")[0]), "silent:host-untrusted"),
+            ("undecidable: a candidate whose command line cannot be read",
+             dict(table=absent_table + [(host_pid + 50, host_pid, "node.exe", None)]), "silent:undecidable"),
+            ("undecidable: serve --mcp with no CodeGraph token",
+             dict(table=absent_table + [(host_pid + 51, host_pid, "node.exe", "node other.js serve --mcp")]), "silent:undecidable"),
+        ]
+        for label, spec, want in cases:
+            outcome, out = outcome_for(spec["table"], **spec.get("extra", {}))
+            check(f"NT-3 [{label}]: {want}, nothing printed", outcome == want and out == "", "%r %r" % (outcome, out))
+        no_index = project_of(sb, "nt-noidx", index=False)
+        if clean_above("NT-3 no-index", no_index):
+            outcome, out = outcome_for(absent_table, no_index)
+            check("NT-3 [no project index]: silent:precondition", outcome == "silent:precondition" and out == "", "%r %r" % (outcome, out))
+        no_server = project_of(sb, "nt-nosrv", server=False)
+        outcome, out = outcome_for(absent_table, no_server)
+        check("NT-3 [server not configured]: silent:precondition", outcome == "silent:precondition" and out == "", "%r %r" % (outcome, out))
+        disabled = project_of(sb, "nt-dis", server=False)
+        af.plant_server(disabled, disabled=True)
+        outcome, out = outcome_for(absent_table, disabled)
+        check("NT-3 [server disabled]: silent:precondition", outcome == "silent:precondition" and out == "", "%r %r" % (outcome, out))
+        url_only = project_of(sb, "nt-url", server=False)
+        (url_only / ".mcp.json").write_text(json.dumps({"mcpServers": {"codegraph": {"url": "http://localhost:1/mcp"}}}), encoding="utf-8")
+        outcome, out = outcome_for(absent_table, url_only)
+        check("NT-3 [url-only server: nothing for the session to start]: silent:precondition", outcome == "silent:precondition" and out == "",
+              "%r %r" % (outcome, out))
+        # the closed-set outcomes for the failure paths
+        with notice_env(sb, project):
+            with table_reader(reset, absent_table, delay=0.4):
+                outcome, out = call_notice(reset, payload())
+        check("NT-4: a table read that takes longer than the 100 ms budget: silent:budget, nothing printed",
+              outcome == "silent:budget" and out == "", "%r %r" % (outcome, out))
+        for exc in (RuntimeError("boom"), OSError("denied"), ValueError("bad")):
+            with notice_env(sb, project):
+                with table_reader(reset, exc=exc):
+                    outcome, out = call_notice(reset, payload())
+            check(f"NT-4: a table reader raising {type(exc).__name__}: silent:error, nothing printed",
+                  outcome == "silent:error" and out == "", "%r %r" % (outcome, out))
+        lone = sb.root / "lone"
+        lone.mkdir()
+        shutil.copyfile(paths[RESET_FILE], lone / RESET_FILE)
+        saved = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            lone_reset = load_module(lone / RESET_FILE, "cg295_reset_lone")
+        finally:
+            sys.dont_write_bytecode = saved
+        with notice_env(sb, project):
+            with table_reader(lone_reset, absent_table):
+                outcome, out = call_notice(lone_reset, payload())
+        check("NT-4: the sibling guard file missing: silent:import-failed, nothing printed",
+              outcome == "silent:import-failed" and out == "", "%r %r" % (outcome, out))
+        check("NT-4: the failed import left no __pycache__ beside the lone copy", not (lone / "__pycache__").exists())
+        # no kill switch (R-4): every plausible switch set, the notice still shows
+        with notice_env(sb, project, {"CLAUDE_SKIP_CG": "1", "CODEGRAPH_NOTICE": "off", "CLAUDE_CODEGRAPH_NOTICE": "0"}):
+            with table_reader(reset, absent_table):
+                outcome, out = call_notice(reset, payload())
+        check("NT-5: no environment variable silences the notice", outcome == "shown", "%r %r" % (outcome, out))
+        # nothing written: the notice section creates no __pycache__ in the hooks folder
+        with bytecode_allowed(), notice_env(sb, project):
+            with table_reader(reset, absent_table):
+                call_notice(reset, payload())
+        check("NT-6: the notice section writes no bytecode (no __pycache__ in the hooks folder)",
+              not (paths[RESET_FILE].parent / "__pycache__").exists(),
+              "found %s" % sorted(p.name for p in (paths[RESET_FILE].parent / "__pycache__").glob("*")))
+
+
+def run_notice_main_rows(w: World) -> None:
+    with af.Sandbox("cg295m-") as sb:
+        reset, paths = load_fresh_hooks(sb, "m")
+        project = project_of(sb, "nm")
+        me = os.getpid()
+        chain, host_pid = host_chain(me, 4)
+        folder_of = lambda session: af.session_folder(sb.tmp, session)  # noqa: E731
+        ticket = "ticket-" + "c" * 64
+
+        def seed(session):
+            af.write_marker(sb.tmp, session)
+            (folder_of(session) / ticket).write_text("{}\n", encoding="utf-8")
+
+        body = lambda session: {"session_id": session, "cwd": str(project), "prompt": "go"}  # noqa: E731
+        for label, kwargs in (("a table reader raising SystemExit", dict(exc=SystemExit(7))),
+                              ("a table reader raising RuntimeError", dict(exc=RuntimeError("boom"))),
+                              ("a table reader raising KeyboardInterrupt", dict(exc=KeyboardInterrupt()))):
+            session = sid()
+            seed(session)
+            with bytecode_allowed(), notice_env(sb, project):
+                with table_reader(reset, **kwargs):
+                    code, out, err = run_reset_main(reset, body(session))
+            check(f"NM-1 [{label}]: main exits 0 with an empty stdout", code == 0 and out == "", "code=%r out=%r err=%r" % (code, out, err))
+            check(f"NM-1 [{label}]: and the marker and the ticket were still deleted",
+                  not (folder_of(session) / "turn.json").exists() and not (folder_of(session) / ticket).exists(),
+                  str(sorted(os.listdir(folder_of(session)))))
+            check(f"NM-1 [{label}]: and no __pycache__ appeared in the hooks folder", not (paths[RESET_FILE].parent / "__pycache__").exists())
+        session = sid()
+        seed(session)
+        with notice_env(sb, project):
+            with table_reader(reset, chain):
+                code, out, err = run_reset_main(reset, body(session))
+        check("NM-2: main with no session server prints ONE notice JSON object and exits 0; marker and ticket deleted",
+              code == 0 and out.strip().startswith("{") and out.count("\n") <= 1
+              and not (folder_of(session) / "turn.json").exists() and not (folder_of(session) / ticket).exists(),
+              "code=%r out=%r err=%r" % (code, out, err))
+        session = sid()
+        with notice_env(sb, project):
+            with table_reader(reset, chain + real_servers(host_pid)):
+                code, out, err = run_reset_main(reset, body(session))
+        check("NM-3: main with a session server present prints nothing", code == 0 and out == "", "code=%r out=%r" % (code, out))
+        for outcome in ("silent:probe-present", "silent:precondition", "silent:host-untrusted", "silent:undecidable",
+                        "silent:import-failed", "silent:budget", "silent:error"):
+            session = sid()
+            with notice_env(sb, project):
+                with mock.patch.object(reset, "notice_section", lambda payload, _o=outcome: _o, create=True):
+                    code, out, err = run_reset_main(reset, body(session))
+            check(f"NM-4: main prints nothing when the section returns {outcome}", code == 0 and out == "", "code=%r out=%r" % (code, out))
+        # a subprocess row with the real probe: only exit 0 and 'empty or one JSON object' can be asserted
+        project2 = project_of(sb, "nm-sub")
+        proc = run_hook(w.reset, sb, project2, "", {}, sid(), event="UserPromptSubmit", payload_extra={"prompt": "hi"})
+        ok = proc.returncode == 0
+        if proc.stdout.strip():
+            try:
+                ok = ok and isinstance(json.loads(proc.stdout), dict)
+            except ValueError:
+                ok = False
+        check("NM-5: the reset hook as a process (real probe) exits 0 and prints nothing or one JSON object", ok, describe(proc))
+
+
+def run_server_starts_process(w: World) -> None:
+    with af.Sandbox("cg295s-") as sb:
+        guard = load_module(w.guard, "cg295_guard_ssp")
+        fn = fn_of(guard, "server_starts_process")
+        check("SSP-0: the guard defines server_starts_process(path)", callable(fn), "missing")
+        if not callable(fn):
+            return
+        cases = []
+        cmd = project_of(sb, "ssp-cmd")
+        cases.append(("a command server", cmd, True))
+        url = project_of(sb, "ssp-url", server=False)
+        (url / ".mcp.json").write_text(json.dumps({"mcpServers": {"codegraph": {"url": "http://x/mcp"}}}), encoding="utf-8")
+        cases.append(("a url-only server", url, False))
+        both = project_of(sb, "ssp-both", server=False)
+        (both / ".mcp.json").write_text(json.dumps({"mcpServers": {"codegraph": {"command": "codegraph", "url": "http://x"}}}), encoding="utf-8")
+        cases.append(("command and url", both, True))
+        blank = project_of(sb, "ssp-blank", server=False)
+        (blank / ".mcp.json").write_text(json.dumps({"mcpServers": {"codegraph": {"command": "  ", "url": "http://x"}}}), encoding="utf-8")
+        cases.append(("an empty command with a url", blank, False))
+        none = project_of(sb, "ssp-none", server=False)
+        cases.append(("no server entry", none, False))
+        for label, project, want in cases:
+            with notice_env(sb, project):
+                try:
+                    got = fn(str(project))
+                except Exception as exc:  # noqa: BLE001
+                    got = "raised %r" % exc
+            check(f"SSP [{label}]: server_starts_process is {want}", got is want, "got %r" % (got,))
+
+
+# ---- AC7 / AC8 text scans --------------------------------------------------------------------------------------
+ENV_READ_RE = re.compile(r"""(?:environ\.get\(\s*|environ\[\s*|getenv\(\s*)["']([A-Za-z_][A-Za-z0-9_]*)["']""")
+ALLOWED_HOOK_ENV = {"CLAUDE_PROJECT_DIR", "CLAUDE_CONFIG_DIR"}
+
+
+def run_ac7_ac8(w: World) -> None:
+    texts = {p.name: p.read_text(encoding="utf-8") for p in (w.guard, w.tracker, w.reset)}
+    for name, text in texts.items():
+        found = set(ENV_READ_RE.findall(text))
+        check(f"AC7 [{name}]: reads no environment variable beyond the #259 allow-list {sorted(ALLOWED_HOOK_ENV)}",
+              found <= ALLOWED_HOOK_ENV, "reads %s" % sorted(found - ALLOWED_HOOK_ENV))
+        check(f"AC7 [{name}]: names no kill-switch variable", re.search(r"CLAUDE_SKIP|CODEGRAPH_(?:OFF|DISABLE|SKIP|NOTICE)|NO_CODEGRAPH", text) is None)
+    check("AC7: the tracker implements the route (it mentions the cli route and mcp-seen) - non-vacuity for the scan above",
+          '"cli"' in texts[TRACKER_FILE] and "mcp-seen" in texts[TRACKER_FILE],
+          "tracker text lacks the cli route / mcp-seen")
+    check("AC7: the reset hook implements the notice (notice_section) - non-vacuity", "notice_section" in texts[RESET_FILE])
+    manifest = af.manifest(ADD_ON, HOOK_FILE)
+    check("AC8: addon.json lists exactly the three hook files", sorted(manifest.get("hooks", [])) == sorted([HOOK_FILE, TRACKER_FILE, RESET_FILE]),
+          repr(manifest.get("hooks")))
+    writer = re.compile(r"(?:create_flag|os\.replace|write\w*|open|replace|touch|mkdir|rename|symlink|link)\s*\("
+                        r"[^)\n]*(?:MARKER_NAME|MCP_SEEN_NAME|turn\.json|mcp-seen|MCP_SEEN|\btarget\b)")
+
+    def writes(text: str) -> list:
+        return [ln.strip() for ln in text.splitlines() if writer.search(ln) and not ln.strip().startswith(("#", "def "))]
+
+    found = writes(texts[TRACKER_FILE])
+    check("AC8 positive control: the pattern finds the tracker's os.replace onto the marker target",
+          any("os.replace" in ln for ln in found), repr(found))
+    check("AC8 positive control: and its create_flag(..., MCP_SEEN_NAME)",
+          any("create_flag" in ln and "MCP_SEEN_NAME" in ln for ln in found), repr(found))
+    for name in (HOOK_FILE, RESET_FILE):
+        lines = writes(texts[name])
+        check(f"AC8 [{name}]: writes neither turn.json nor mcp-seen (only the tracker does; the reset hook may delete)",
+              not lines, "\n".join(lines))
+    check("AC8 [tracker]: the tracker is the writer of mcp-seen", "mcp-seen" in texts[TRACKER_FILE])
+
+
+# ---- review follow-ups (issue #295 code review) ----------------------------------------------------------------
+def tracker_raw(w: World, sb: af.Sandbox, project: Path, payload: dict, argv: tuple = ()) -> subprocess.CompletedProcess:
+    """The tracker as a process, with exactly the argv the manifest row gives it and an arbitrary payload."""
+    return subprocess.run([sys.executable, "-B", str(w.tracker), *argv], input=json.dumps(payload), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", cwd=str(project), env=af.isolated_env(sb.home, sb.tmp, project), timeout=60)
+
+
+def run_review_followups(w: World) -> None:
+    with af.Sandbox("cg295v-") as sb:
+        project = project_of(sb, "rv")
+        make_logs(project)
+
+        def base(session, tool, tool_input, **extra):
+            body = {"session_id": session, "cwd": str(project), "tool_name": tool, "tool_input": tool_input}
+            body.update(extra)
+            return body
+
+        counted = {"command": "codegraph explore Thing"}
+        # (4) the tracker started with argv `cli`, as the manifest row does
+        session = sid()
+        proc = tracker_raw(w, sb, project, base(session, "Bash", counted, hook_event_name="PostToolUse",
+                                                tool_response=dict(BASH_OK_RESPONSE)), argv=("cli",))
+        body = marker_of(sb, session)
+        check("CLI-7: the tracker started with argv `cli` (the manifest's Bash row) writes the cli marker",
+              proc.returncode == 0 and isinstance(body, dict) and body.get("route") == "cli", describe(proc) + repr(body))
+        session = sid()
+        proc = tracker_raw(w, sb, project, base(session, "Bash", counted, hook_event_name="PostToolUseFailure", error="Exit code 1",
+                                                is_interrupt=False), argv=("cli",))
+        check("CLI-7: and with argv `cli` a PostToolUseFailure payload still writes nothing", proc.returncode == 0 and marker_of(sb, session) is None,
+              describe(proc))
+        # (6) a payload with no hook_event_name is read as a success
+        session = sid()
+        tracker_raw(w, sb, project, base(session, "Bash", counted, tool_response=dict(BASH_OK_RESPONSE)), argv=("cli",))
+        body = marker_of(sb, session)
+        check("TB-1: a Bash payload naming no event is treated as a success (marker route cli)",
+              isinstance(body, dict) and body.get("route") == "cli", repr(body))
+        session = sid()
+        tracker_raw(w, sb, project, base(session, "Bash", counted))
+        check("TB-1: but a Bash payload with no tool_response writes nothing", marker_of(sb, session) is None)
+        session = sid()
+        tracker_raw(w, sb, project, base(session, MCP_EXPLORE, {"query": "q"}, tool_response=[{"type": "text", "text": "x"}]))
+        check("TB-2: an MCP payload naming no event opens the gate and sets mcp-seen",
+              marker_of(sb, session) is not None and flag_exists(sb, session, "mcp-seen"))
+        # the dict-shaped error flag
+        for key in ("isError", "is_error"):
+            session = sid()
+            tracker_raw(w, sb, project, base(session, MCP_EXPLORE, {"query": "q"}, hook_event_name="PostToolUse", tool_response={key: True}))
+            check(f"TB-3: an MCP PostToolUse whose tool_response says {key}: true still opens the gate but sets no mcp-seen",
+                  marker_of(sb, session) is not None and not flag_exists(sb, session, "mcp-seen"))
+            session = sid()
+            tracker_raw(w, sb, project, base(session, "Bash", counted, hook_event_name="PostToolUse", tool_response=dict(BASH_OK_RESPONSE, **{key: True})),
+                        argv=("cli",))
+            check(f"TB-3: a Bash PostToolUse whose tool_response says {key}: true writes no marker", marker_of(sb, session) is None)
+
+        # (5) F3: when the marker write raises OSError, no cli-fallback record and no mcp-seen flag follow
+        for label, fire in (("cli", lambda s: bash_ok(w, sb, project, s, "codegraph explore Thing")),
+                            ("mcp", lambda s: mcp_ok(w, sb, project, s))):
+            session = sid()
+            folder = af.session_folder(sb.tmp, session)
+            folder.mkdir(parents=True)
+            (folder / "turn.json").mkdir()  # os.replace onto an existing directory raises OSError
+            before = len(tracker_events(project, "cli-fallback"))
+            proc = fire(session)
+            check(f"F3 [{label}]: a marker write that raises OSError still exits 0 and leaves the blocking directory alone",
+                  proc.returncode == 0 and (folder / "turn.json").is_dir(), describe(proc))
+            check(f"F3 [{label}]: and writes no cli-fallback record and no logged-cli-fallback flag",
+                  len(tracker_events(project, "cli-fallback")) == before and not flag_exists(sb, session, "logged-cli-fallback"),
+                  repr(tracker_events(project)))
+            check(f"F3 [{label}]: and no mcp-seen flag", not flag_exists(sb, session, "mcp-seen"))
+            check(f"F3 [{label}]: and no temp sibling is left behind", not [n for n in os.listdir(folder) if n.startswith(".tmp-")], str(sorted(os.listdir(folder))))
+
+
+def run_process_table_real(w: World) -> None:
+    """The real Windows reader sees a real child: its pid, its parent, a python image and, through the module-level
+    ``command_line(pid)``, its exact command line (F1)."""
+    if sys.platform != "win32":
+        skip("PT-1 real process table with a codegraph serve --mcp look-alike child", "Windows-only row (Toolhelp32 + NtQueryInformationProcess)")
+        return
+    with af.Sandbox("cg295w-") as sb:
+        reset = load_reset_module(sb, w)
+        args = [sys.executable, "-c", "import time;time.sleep(5)", "codegraph", "serve", "--mcp"]
+        expected = subprocess.list2cmdline(args)
+        child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(0.3)
+            table = reset.read_process_table()
+            rows = [r for r in table if r[0] == child.pid]
+            check("PT-1: the real read_process_table() holds the child, with this process as its parent and a python image",
+                  len(rows) == 1 and rows[0][1] == os.getpid() and str(rows[0][2]).lower().startswith("python"),
+                  "rows=%r (me=%d)" % (rows, os.getpid()))
+            check("PT-1: and its command-line column is the child's exact command line (or None when not examined)",
+                  len(rows) == 1 and rows[0][3] in (None, expected), "got %r want %r" % (rows[0][3] if rows else None, expected))
+            fn = getattr(reset, "command_line", None)
+            check("PT-2: the reset hook has a MODULE-LEVEL command_line(pid)", callable(fn), "no module-level command_line")
+            if callable(fn):
+                got = fn(child.pid)
+                check("PT-2: command_line(child_pid) returns the child's exact command line", got == expected, "got %r want %r" % (got, expected))
+        finally:
+            child.kill()
+            try:
+                child.wait(timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+# ---- the bench's --reset-budget mode (unit rows) ---------------------------------------------------------------
+def run_bench_rows(w: World) -> None:
+    bench_path = Path(__file__).resolve().parent / "bench_codegraph_guard.py"
+    spec = importlib.util.spec_from_file_location("cg295_bench", bench_path)
+    bench = importlib.util.module_from_spec(spec)
+    sys.modules["cg295_bench"] = bench  # @dataclass reads the module back from sys.modules
+    saved_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(bench)
+    finally:
+        sys.dont_write_bytecode = saved_bytecode
+        sys.modules.pop("cg295_bench", None)
+    check("BN-1: the bench pins its baseline: RESET_BASELINE_REF == 'db61fd7'", getattr(bench, "RESET_BASELINE_REF", None) == "db61fd7",
+          repr(getattr(bench, "RESET_BASELINE_REF", None)))
+    check("BN-1: db61fd7 (the 0.16.1 baseline) is present in this checkout (a missing commit FAILS, never skips)",
+          subprocess.run(["git", "cat-file", "-e", "db61fd7^{commit}"], cwd=str(af.PROJECT_ROOT), capture_output=True).returncode == 0,
+          "fetch the full history")
+    err, out = io.StringIO(), io.StringIO()
+    code = None
+
+    class NoWorkspace:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("--reset-budget must never build the #259 Workspace")
+
+    with mock.patch.object(bench, "RESET_BASELINE_REF", "0" * 40, create=True), mock.patch.object(bench, "Workspace", NoWorkspace), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = bench.main(["--reset-budget"])
+        except SystemExit as exc:
+            code = "SystemExit(%r)" % (exc.code,)
+        except BaseException as exc:  # noqa: BLE001
+            code = "raised %r" % (exc,)
+    check("BN-2: --reset-budget with the baseline commit absent exits 1 (not an argparse error, not a Workspace build)",
+          code == 1, "code=%r stderr=%r" % (code, err.getvalue()[-300:]))
+    check("BN-2: and the message says to fetch the full history", "fetch the full history" in (err.getvalue() + out.getvalue()),
+          err.getvalue()[-300:])
+    helped, herr = io.StringIO(), io.StringIO()
+    code = None
+    with contextlib.redirect_stdout(helped), contextlib.redirect_stderr(herr):
+        try:
+            bench.main(["--help"])
+        except SystemExit as exc:
+            code = exc.code
+    usage = helped.getvalue()
+    check("BN-3: the default mode is untouched: the bench's parser still accepts --old-ref, --runs, --sizes, --json, --keep "
+          "(--help exits 0 and lists them) and now also --reset-budget",
+          code == 0 and all(opt in usage for opt in ("--old-ref", "--runs", "--sizes", "--json", "--keep", "--reset-budget")),
+          "exit=%r usage=%r" % (code, usage[-300:]))
+
+
+# --------------------------------------------------------------------------------------------------------------
 def guarded(name: str, fn, *args) -> None:
     """One section: a crash inside it is ONE failing check naming the section, and the runner goes on."""
     try:
@@ -2316,6 +3248,19 @@ def run() -> None:
         guarded("X-8", run_prune_once, world)
         guarded("S", run_state, world)
         guarded("L", run_link_writes, world)
+        guarded("CLI", run_cli_route, world)
+        guarded("RT", run_marker_routes, world)
+        guarded("R5", run_cli_fallback_record, world)
+        guarded("AC2", run_cli_ac2, world)
+        guarded("AC3", run_banner, world)
+        guarded("PR", run_probe_rows, world)
+        guarded("NT", run_notice_rows, world)
+        guarded("NM", run_notice_main_rows, world)
+        guarded("SSP", run_server_starts_process, world)
+        guarded("AC7-8", run_ac7_ac8, world)
+        guarded("BN", run_bench_rows, world)
+        guarded("RV", run_review_followups, world)
+        guarded("PT", run_process_table_real, world)
     finally:
         world.close()
         leftovers = [p for p in af.LEFTOVERS]

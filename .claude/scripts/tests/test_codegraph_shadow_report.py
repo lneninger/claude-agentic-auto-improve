@@ -325,5 +325,48 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(json.loads(ok.stdout)["records"], 13)
 
 
+class MarkerRouteGroupingTests(unittest.TestCase):
+    """Issue #295 (contract 2026-11-07-295-codegraph-gate-dropped-mcp, "Shadow (Q5)"): shadow-more-closed rows are also
+    grouped by the record's marker_route (mcp / cli / none when the field is absent), and a command-line
+    marker is labelled 'explained (command-line route)' in the text report."""
+
+    RECORDS = [
+        rec(session="a", shadow_decision="block", shadow_reason="source-target", transcript_turn="closed",
+            outcome="shadow-more-closed", marker_route="cli"),
+        rec(session="a", fp="g1", shadow_decision="block", shadow_reason="source-target", transcript_turn="closed",
+            outcome="shadow-more-closed", marker_route="cli"),
+        rec(session="b", shadow_decision="block", shadow_reason="source-target", transcript_turn="closed",
+            outcome="shadow-more-closed", marker_route="mcp"),
+        rec(session="d", shadow_decision="block", shadow_reason="source-target", transcript_turn="closed",
+            outcome="shadow-more-closed"),                                   # an older record: no marker_route
+        rec(session="e", marker_route="cli"),                                # agree: not part of the grouping
+    ]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        lines = [json.dumps(r).encode("utf-8") for r in cls.RECORDS]
+        cls.rep = report.build_report(lines)
+
+    def test_more_closed_rows_are_grouped_by_marker_route(self) -> None:
+        got = {}
+        for row in self.rep["more_closed"]:
+            self.assertIn("marker_route", row, "every more_closed row names its marker_route: %r" % (row,))
+            got[(row["live_reason"], row["transcript_turn"], row["marker_route"])] = row["count"]
+        self.assertEqual(got, {("turn-marker-present", "closed", "cli"): 2, ("turn-marker-present", "closed", "mcp"): 1,
+                               ("turn-marker-present", "closed", "none"): 1})
+
+    def test_the_text_report_labels_the_command_line_route_as_explained(self) -> None:
+        text = report.render_text(dict(self.rep, log="x"))
+        self.assertIn("explained (command-line route)", text)
+        self.assertEqual(text.count("explained (command-line route)"), 1, "only the cli group carries the label")
+
+    def test_a_report_without_any_cli_marker_has_no_explained_label(self) -> None:
+        rep = report.build_report([json.dumps(r).encode("utf-8") for r in self.RECORDS[2:5]])
+        self.assertNotIn("explained (command-line route)", report.render_text(dict(rep, log="x")))
+
+    def test_the_outcome_counts_are_unchanged_by_the_grouping(self) -> None:
+        self.assertEqual(self.rep["outcomes"], {"agree": 1, "shadow-more-open": 0, "shadow-more-closed": 4})
+
+
 if __name__ == "__main__":
     unittest.main()

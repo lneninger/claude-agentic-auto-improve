@@ -6308,6 +6308,19 @@ class TestCodegraphPermissionInsert(CodegraphHarness):
 class TestCodegraphCheck(CodegraphHarness):
     """--check is a read-only mode of ``addon``: exit 0 clean, 1 with findings, 2 when it could not check."""
 
+    def setUp(self):
+        super().setUp()
+        # Issue #295 (F3): --check also judges hook freshness, so a fixture that stands for a clean install holds the plugin's own
+        # hook copies and the manifest's rows. Installing is the honest way to get both; write_layer keeps the rows in the
+        # project layer when a test replaces that layer's other content.
+        self.install_addon("codegraph")
+        self.installed_rows = copy.deepcopy(self.read_settings().get("hooks"))
+
+    def write_layer(self, layer, data):
+        if layer == "project" and isinstance(data, dict) and "hooks" not in data and self.installed_rows:
+            data = dict(data, hooks=copy.deepcopy(self.installed_rows))
+        return super().write_layer(layer, data)
+
     def test_a_project_that_allows_the_wildcard_exits_0_and_writes_nothing(self):
         for form in (WILDCARD, SERVER_FORM):
             with self.subTest(allowed=form):
@@ -6901,6 +6914,249 @@ class TestCodegraphUpgradeInPlace(CodegraphHarness):
         }
         self.assertTrue(guard_hashes <= set(shipped["codegraph-first-guard.py"]), msg=repr(shipped))
         self.assertTrue(reset_hashes <= set(shipped["codegraph-turn-reset.py"]), msg=repr(shipped))
+
+
+# ======================================================================================================================
+# Issue #295 (concept contract 2026-11-07-295-codegraph-gate-dropped-mcp): the `if` key of a registration row, the
+# Bash row of the codegraph add-on, and the Hook freshness result of `addon --check`.
+#
+# These rows run the REAL codegraph add-on (its addon.json and its three hooks, copied into the fake plugin), because
+# the finding is about the real manifest's rows and the real hooks' released hashes. The fake plugin carries the plugin
+# version in a root plugin.json (the first of check_version_bump.MANIFESTS) and a different one in
+# .claude-plugin/plugin.json, so the "first manifest" rule is also pinned.
+# ======================================================================================================================
+REAL_REPO = Path(__file__).resolve().parents[3]
+FRESH_PLUGIN_VERSION = "0.16.2"
+BASELINE_REF = "db61fd7"  # the 0.16.1 release; a missing commit FAILS, never skips, and never falls back to HEAD
+BASELINE_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "codegraph-db61fd7"
+BASH_IF = "Bash(codegraph *)"
+FRESH_HOOKS = ("codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py")
+
+
+class CodegraphFreshnessHarness(AddonHarness):
+    def setUp(self):
+        super().setUp()
+        folder = self.plugin / ".claude" / "addons" / "codegraph"
+        shutil.rmtree(folder)
+        shutil.copytree(REAL_REPO / ".claude" / "addons" / "codegraph", folder, ignore=shutil.ignore_patterns("__pycache__"))
+        real = json.loads((folder / "addon.json").read_text(encoding="utf-8"))
+        for rel in real.get("helpers", []):
+            target = self.plugin / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REAL_REPO / rel, target)
+        (self.plugin / "plugin.json").write_text(json.dumps({"name": PLUGIN_NAME, "version": FRESH_PLUGIN_VERSION}), encoding="utf-8")
+        self.manifest = real
+        self.configure_mcp("project")
+        self.install_addon("codegraph")
+        self.hooks_dir = self.project / ".claude" / "hooks"
+
+    # --- helpers --------------------------------------------------------------------------------------------
+    def check_argv(self, project=None, name="codegraph"):
+        return ["addon", "--name", name, "--project", str(project or self.project), "--json",
+                "--claude-home", str(self.home), "--check"]
+
+    def run_check(self, name="codegraph"):
+        return self.cli(self.check_argv(name=name))
+
+    def findings(self, parsed):
+        return list((parsed or {}).get("findings") or [])
+
+    def of_code(self, parsed, code):
+        return [f for f in self.findings(parsed) if f.get("code") == code]
+
+    def baseline_hook(self, hook):
+        # Read from a committed fixture (the copy at db61fd7, written verbatim once): `git show` inside the checkout is
+        # refused under `unittest discover` by test_land_contract_identity.py's Popen guard. A missing fixture FAILS.
+        path = BASELINE_FIXTURES / hook
+        self.assertTrue(path.is_file(), msg="the %s fixture %s is absent (this row fails, it never skips)" % (BASELINE_REF, path))
+        data = path.read_bytes()
+        folded = hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+        listed = json.loads((REAL_REPO / ".claude" / "addons" / "codegraph" / "addon.json").read_text(encoding="utf-8"))
+        self.assertIn(folded, listed.get("released_sha256", {}).get(hook, []),
+                      msg="the %s fixture of %s must equal a copy that addon.json lists in released_sha256" % (BASELINE_REF, hook))
+        return data
+
+    def write_settings(self, layer, data):
+        path = {"project": self.settings_path(), "local": self.project / ".claude" / "settings.local.json",
+                "user": self.home / "settings.json"}[layer]
+        write_json(path, data)
+        return path
+
+    def strip_new_row(self, settings):
+        """The settings of a 0.16.1 install: the Bash row (args cli / an if) removed from the installed settings."""
+        out = copy.deepcopy(settings)
+        for event, groups in list(out.get("hooks", {}).items()):
+            kept = []
+            for group in groups:
+                group["hooks"] = [h for h in group.get("hooks", []) if "if" not in h and "cli" not in json.dumps(h.get("args", [])) and
+                                  ' cli' not in str(h.get("command", ""))]
+                if group["hooks"]:
+                    kept.append(group)
+            out["hooks"][event] = kept
+        return out
+
+    def rows_in_form(self, form):
+        hooks = {}
+        for r in self.manifest["registrations"]:
+            path = "${CLAUDE_PROJECT_DIR}/.claude/hooks/%s" % r["hook"]
+            if form == "exec":
+                entry = {"type": "command", "command": "py", "args": ["-3", path] + list(r["args"])}
+            else:
+                entry = {"type": "command", "command": " ".join(['py -3 "%s"' % path] + list(r["args"]))}
+            if r.get("if"):
+                entry["if"] = r["if"]
+            group = {"hooks": [entry]}
+            if r.get("matcher"):
+                group["matcher"] = r["matcher"]
+            hooks.setdefault(r["event"], []).append(group)
+        return {"hooks": hooks}
+
+
+class TestAddonRowIfKey(CodegraphFreshnessHarness):
+    def test_the_install_keys_include_if(self):
+        self.assertIn("if", fi.ADDON_ROW_KEYS, msg="an add-on row's `if` must survive into the written registration")
+
+    def test_a_manifest_row_with_an_if_is_written_with_its_if(self):
+        regs = flat_registrations(self.read_settings())
+        bash = [r for r in regs if r[2] == "codegraph-turn-tracker.py" and r[0] == "PostToolUse" and r[1] == "Bash"]
+        self.assertEqual(len(bash), 1, msg="the manifest's Bash row is installed; rows: %r" % ([(r[0], r[1], r[2]) for r in regs],))
+        self.assertEqual(bash[0][4].get("if"), BASH_IF, msg="and carries the manifest's if")
+
+    def test_an_if_that_is_not_a_non_empty_string_is_refused(self):
+        path = self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
+        for bad in ("", "   ", 5, ["Bash(x)"]):
+            with self.subTest(bad=bad):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                for row in data["registrations"]:
+                    if row.get("args") == ["cli"]:
+                        row["if"] = bad
+                path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+                self.assertEqual((parsed or {}).get("status"), "refused", msg="a bad if is a manifest problem: %r" % (parsed or out))
+                self.assertNotEqual(rc, 0)
+
+    def test_a_0_16_1_install_gets_exactly_one_to_add_row_and_the_apply_writes_it_with_its_if(self):
+        old = self.strip_new_row(self.read_settings())
+        self.assertTrue(old != self.read_settings(), "control: the installed settings carry a Bash row to strip "
+                                                     "(the manifest has the cli row)")
+        self.write_settings("project", old)
+        plan = self.preview("codegraph")
+        self.assertEqual([r["registration-key"] for r in plan["to-add"]], ["PostToolUse|codegraph-turn-tracker.py|cli"],
+                         msg="the cli argument gives the row its own key, so an old install has exactly one to-add: %r" % (plan["to-add"],))
+        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
+        self.assertEqual(rc, 0, msg=repr(parsed or out))
+        bash = [r for r in flat_registrations(self.read_settings()) if r[2] == "codegraph-turn-tracker.py" and r[1] == "Bash"]
+        self.assertEqual([r[4].get("if") for r in bash], [BASH_IF], msg="the added row carries the if")
+
+
+class TestCodegraphHookFreshness(CodegraphFreshnessHarness):
+    def test_a_fresh_install_checks_clean_and_says_it_checked(self):
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.run_check()
+        self.assertEqual((parsed or {}).get("freshness"), "checked", msg="the JSON always carries freshness: %r" % (parsed or out))
+        self.assertEqual((rc, self.findings(parsed)), (0, []), msg="a fresh install has no finding: %r" % (parsed or out))
+        self.assertTreeSame(before, "--check only reads")
+
+    def test_a_registered_row_is_never_reported_missing_in_any_of_its_forms_or_layers(self):
+        wildcard = {"permissions": {"allow": [WILDCARD]}}
+        cases = [("exec form, project layer", "exec", "project"), ("shell string, project layer", "shell", "project"),
+                 ("exec form, user layer", "exec", "user"), ("shell string, local layer", "shell", "local")]
+        for label, form, layer in cases:
+            with self.subTest(label):
+                for gone in (self.settings_path(), self.project / ".claude" / "settings.local.json", self.home / "settings.json"):
+                    if gone.exists():
+                        gone.unlink()
+                rows = self.rows_in_form(form)
+                if layer == "project":
+                    self.write_settings("project", dict(wildcard, **rows))
+                else:
+                    self.write_settings("project", wildcard)
+                    self.write_settings(layer, rows)
+                rc, out, parsed = self.run_check()
+                self.assertEqual(self.of_code(parsed, "addon-row-missing") + self.of_code(parsed, "addon-row-outdated"), [],
+                                 msg="%s: a row registered in this form must not be reported: %r" % (label, parsed or out))
+                self.assertEqual((rc, (parsed or {}).get("freshness")), (0, "checked"), msg="%s: %r" % (label, parsed or out))
+
+    def test_0_16_1_settings_report_the_bash_row_missing(self):
+        self.write_settings("project", self.strip_new_row(self.read_settings()))
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.run_check()
+        self.assertEqual(rc, 1, msg="exit 1 with a finding: %r" % (parsed or out))
+        found = self.of_code(parsed, "addon-row-missing")
+        self.assertEqual(len(found), 1, msg="exactly one row is missing: %r" % (parsed or out))
+        self.assertEqual({k: found[0].get(k) for k in ("event", "matcher", "hook", "args")},
+                         {"event": "PostToolUse", "matcher": "Bash", "hook": "codegraph-turn-tracker.py", "args": ["cli"]})
+        self.assertTreeSame(before, "--check only reads")
+
+    def test_a_registered_bash_row_without_its_if_is_outdated(self):
+        settings = self.read_settings()
+        for groups in settings["hooks"].values():
+            for group in groups:
+                for entry in group["hooks"]:
+                    entry.pop("if", None)
+        self.write_settings("project", settings)
+        rc, out, parsed = self.run_check()
+        self.assertEqual(rc, 1, msg="exit 1 with a finding: %r" % (parsed or out))
+        found = self.of_code(parsed, "addon-row-outdated")
+        self.assertEqual(len(found), 1, msg="one row is outdated: %r" % (parsed or out))
+        self.assertEqual((found[0].get("key"), found[0].get("want"), found[0].get("hook"), found[0].get("args")),
+                         ("if", BASH_IF, "codegraph-turn-tracker.py", ["cli"]))
+        self.assertIn("have", found[0], msg="and says what it has")
+        self.assertEqual(self.of_code(parsed, "addon-row-missing"), [], msg="a registered row is outdated, not missing")
+
+    def test_a_missing_hook_file_is_reported(self):
+        (self.hooks_dir / "codegraph-turn-reset.py").unlink()
+        rc, out, parsed = self.run_check()
+        self.assertEqual(rc, 1, msg=repr(parsed or out))
+        self.assertEqual([f.get("file") for f in self.of_code(parsed, "addon-hook-missing")].count("codegraph-turn-reset.py"), 1,
+                         msg=repr(parsed or out))
+
+    def test_a_hook_copy_from_an_older_release_is_outdated_with_both_versions(self):
+        for hook in FRESH_HOOKS:
+            baseline = self.baseline_hook(hook)
+            (self.hooks_dir / hook).write_bytes(baseline)
+        rc, out, parsed = self.run_check()
+        self.assertEqual(rc, 1, msg="exit 1: %r" % (parsed or out))
+        found = {f.get("file"): f for f in self.of_code(parsed, "addon-hook-outdated")}
+        current = {h: (self.plugin / ".claude" / "addons" / "codegraph" / "hooks" / h).read_bytes() for h in FRESH_HOOKS}
+        differs = [h for h in FRESH_HOOKS if self.baseline_hook(h).replace(b"\r\n", b"\n") != current[h].replace(b"\r\n", b"\n")]
+        self.assertTrue(differs, msg="control: this change alters at least one hook relative to %s" % BASELINE_REF)
+        for hook in differs:
+            self.assertIn(hook, found, msg="%s (the %s copy) must be outdated: %r" % (hook, BASELINE_REF, parsed or out))
+            self.assertEqual(found[hook].get("plugin-version"), FRESH_PLUGIN_VERSION,
+                             msg="the plugin's version is read from the first manifest of the plugin root: %r" % (found[hook],))
+            self.assertRegex(str(found[hook].get("project-version")), r"^\d+\.\d+\.\d+$",
+                             msg="the project's copy is labelled with the release that shipped it: %r" % (found[hook],))
+            folded = hashlib.sha256(self.baseline_hook(hook).replace(b"\r\n", b"\n")).hexdigest()
+            listed = json.loads((REAL_REPO / ".claude" / "addons" / "codegraph" / "addon.json").read_text(encoding="utf-8"))
+            self.assertEqual(found[hook].get("project-version"), listed["released_versions"][hook][folded],
+                             msg="and it is exactly the label released_versions gives that hash")
+            self.assertNotEqual(found[hook].get("project-version"), found[hook].get("plugin-version"))
+        for hook in set(FRESH_HOOKS) - set(differs):
+            self.assertNotIn(hook, found, msg="an unchanged hook is not outdated")
+        self.assertIn(FRESH_PLUGIN_VERSION, out, msg="the printed result names the plugin version")
+
+    def test_an_edited_copy_is_a_note_not_a_finding_and_never_not_ready(self):
+        guard = self.hooks_dir / "codegraph-first-guard.py"
+        guard.write_bytes(guard.read_bytes() + b"\n# a local edit\n")
+        rc, out, parsed = self.run_check()
+        self.assertEqual((rc, self.findings(parsed)), (0, []), msg="the exit code and findings are unchanged: %r" % (parsed or out))
+        self.assertIn("addon-hook-unrecognised", out, msg="but the result carries the note: %r" % out)
+        self.assertEqual((parsed or {}).get("freshness"), "checked")
+
+    def test_an_add_on_without_released_hashes_is_not_applicable_and_keeps_its_output(self):
+        self.install_addon("strict-shell-gate")
+        rc, out, parsed = self.run_check(name="strict-shell-gate")
+        self.assertEqual(rc, 0, msg=repr(parsed or out))
+        self.assertEqual((parsed or {}).get("freshness"), "not-applicable", msg=repr(parsed or out))
+        self.assertEqual(self.findings(parsed), [])
+        for code in ("addon-hook-outdated", "addon-hook-missing", "addon-row-missing", "addon-row-outdated", "addon-hook-unrecognised"):
+            self.assertNotIn(code, out)
+
+    def test_the_check_names_the_repair_route(self):
+        self.write_settings("project", self.strip_new_row(self.read_settings()))
+        rc, out, parsed = self.run_check()
+        self.assertIn("auto-improve-codegraph-install", out, msg="a missing row is repaired by re-running the install: %r" % out)
 
 
 if __name__ == "__main__":

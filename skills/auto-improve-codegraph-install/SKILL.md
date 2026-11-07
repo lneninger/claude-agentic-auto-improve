@@ -26,15 +26,14 @@ and replaced (the upgrade, below). It copies a helper file only when the project
 
 ## Step 0: Find the script
 
-The script sits at a different path under a vendored copy and under a plugin install. Test
-the places **in this order** and keep the first hit. Do not use `ls` on all three paths:
-`ls` sorts its operands, so the order you meant is lost.
+Find the script through the plugin install **only**. A copy under the project's own `.claude/scripts/` is never used here: a vendored installer can be older than the hooks it manages, so it
+would hide a stale hook, or write a stale row (one without its `if`). Without a separate plugin install the install, the removal and the check already refuse, so nothing is lost. Test the places **in this order** and keep the first hit. Do not use
+`ls` on all the paths: `ls` sorts its operands, so the order you meant is lost.
 
 ```bash
-FI=
+FIP=
 S=.claude/scripts/auto_improve_finish_install.py
-if [ -f "$S" ]; then FI=$S
-elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then FI=$CLAUDE_PLUGIN_ROOT/$S
+if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then FIP=$CLAUDE_PLUGIN_ROOT/$S
 else
   # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
   CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -45,14 +44,14 @@ else
     [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
   done)
   NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
-  FI=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+  FIP=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
     [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
   done)
 fi
-py -3 "$FI" --help   # macOS and Linux: python3 "$FI" --help
+py -3 "$FIP" --help   # macOS and Linux: python3 "$FIP" --help
 ```
 
-**If `FI` is empty, stop and say so.** Say that the script was not found in the project, in
+**If `FIP` is empty, stop and say so.** Say that the script was not found in
 `$CLAUDE_PLUGIN_ROOT` or in the plugin cache. Then stop. Without the script there is nothing
 to run, and a skill that guesses is worse than one that stops.
 
@@ -64,15 +63,19 @@ PY="py -3"        # Windows
 PY="python3"      # macOS and Linux
 ```
 
-Every command below is `$PY "$FI" addon --name codegraph --project . ...`.
+Every command below is `$PY "$FIP" addon --name codegraph --project . ...`.
 
 ## What this add-on does
 
-Three hooks work together:
+Three hooks, with four rows, work together:
 
 - `codegraph-first-guard.py` runs before `Read`, `Grep` and `Glob`. It blocks a call on a source-code path while no CodeGraph tool has run in this turn. Markdown, JSON, YAML and a few other file kinds are always allowed.
-- `codegraph-turn-tracker.py` runs after any `mcp__codegraph__*` tool. It writes the marker `turn.json` in the session's folder under the system temp folder (`auto-improve-codegraph-<session id>/`), which opens the gate. The marker belongs to the session, so a `cd` or `EnterWorktree` does not close the gate again.
-- `codegraph-turn-reset.py` runs at each new prompt and deletes the marker and any retry ticket, so every turn starts closed. Once per session it also prunes old session folders in the temp folder.
+- `codegraph-turn-tracker.py` runs after any successful `mcp__codegraph__*` tool, and after a successful `codegraph query|explore|context|node|callers|callees|impact|files ...` command in the Bash tool (the command-line route; a second row, `PostToolUse` on `Bash` with `if: "Bash(codegraph *)"` and the argument `cli`). It writes the marker `turn.json` in the session's folder under the system temp folder (`auto-improve-codegraph-<session id>/`), which opens the gate. The marker belongs to the session, so a `cd` or `EnterWorktree` does not close the gate again. A failed call never opens the gate.
+- `codegraph-turn-reset.py` runs at each new prompt and deletes the marker and any retry ticket, so every turn starts closed. Once per session it also prunes old session folders in the temp folder. It also runs the **connection notice**: when the server is configured and the index exists but no `codegraph serve --mcp` process belongs to this session, it tells the user and the model that the MCP connection is likely gone (`/mcp` can reconnect it) and that a command such as `codegraph explore "SymbolName"` in the Bash tool opens the gate meanwhile. It is silent on a healthy session, never blocks, and yields to a project instruction or a skill's gate that forbids shell commands.
+
+**The command-line route.** When the MCP tools are gone but the `codegraph` program works, the block message names a copyable command, `codegraph explore "<term>"`. Run it on its own: no pipe, no `&&`, no `cd`, no variable prefix, nothing after an optional `2>&1`. A command that is not in that plain form, or that fails, opens nothing. In a worktree the command line reads the main checkout's index unless one was built there. The first time such a call opens the gate in a session with no successful MCP call, the tracker logs one `cli-fallback` record (`reason: mcp-unavailable`).
+
+**The notice can be wrong on the first prompt.** A server that is still starting may not be visible yet, so on the first prompt of a session the notice can appear although the server is fine. That is accepted: it is one message, it never blocks, and `/mcp` shows the real state. On an install of Claude Code the notice does not know (another host program), it stays silent.
 
 It needs two helpers, `.claude/hooks/_project_paths.py` and `.claude/hooks/_error_log.py`, which the install copies only if the project lacks them.
 
@@ -115,7 +118,7 @@ session starts, and until the server is approved the guard would ask for a tool 
 ## Step 1: Preview (writes nothing)
 
 ```bash
-$PY "$FI" addon --name codegraph --project . --json
+$PY "$FIP" addon --name codegraph --project . --json
 ```
 
 The answer carries `files` (each file with its action: `copy`, `present`, `update` or `keep-existing`),
@@ -153,7 +156,7 @@ Declining writes nothing.
 On a yes, apply with the `plan-sha256` from the preview:
 
 ```bash
-$PY "$FI" addon --name codegraph --project . --apply --expect-sha256 <plan-sha256 from the preview>
+$PY "$FIP" addon --name codegraph --project . --apply --expect-sha256 <plan-sha256 from the preview>
 ```
 
 The script copies the hook files first and writes the rows last, so a row never points at a file
@@ -169,11 +172,13 @@ The guard has no bypass variable. In a session with no `mcp__codegraph__*` tool,
 
 What an install of each age holds, so the preview is read correctly:
 
-- **0.9.9 to 0.15.1:** the same three rows this install writes now (`PreToolUse` on `Read|Grep|Glob`, `UserPromptSubmit`, `PostToolUse` on `mcp__codegraph__.*`), the older hook files, and no `mcp__codegraph__*` entry in `permissions.allow`. The earliest of these releases declared a kill switch (`CLAUDE_SKIP_CG`); none exists now. The re-run shows the three rows as `already-present`, the hook files as `update`, and the permission entry under `permissions-allow.add`.
-- **0.15.2 (the fail-open guard):** the same rows and the permission entry. The re-run updates the guard and the reset hook (the tracker is unchanged, so it shows `present`) and adds no row.
-- **Current:** every file `present`; the re-run writes nothing.
+- **0.9.9 to 0.15.1:** three rows (`PreToolUse` on `Read|Grep|Glob`, `UserPromptSubmit`, `PostToolUse` on `mcp__codegraph__.*`), the older hook files, and no `mcp__codegraph__*` entry in `permissions.allow`. The earliest of these releases declared a kill switch (`CLAUDE_SKIP_CG`); none exists now. The re-run shows those three rows as `already-present`, the hook files as `update`, the permission entry under `permissions-allow.add`, and the Bash row (`cli`) under `to-add`.
+- **0.15.2 to 0.16.1:** the same three rows and the permission entry. The re-run updates the hook files and adds exactly one row, the tracker's Bash row (`PostToolUse` on `Bash`, argument `cli`, `if: "Bash(codegraph *)"`). The 0.16.1 row of this list is the one most installs are at.
+- **Current (0.16.2):** four rows; every file `present`; the re-run writes nothing.
 
-A row is never rewritten by an upgrade; only files are replaced.
+A row is never rewritten by an upgrade; only files are replaced and a missing row is added. A Bash row that an older installer wrote without its `if` is reported by `addon --check` as `addon-row-outdated`: run `/auto-improve-codegraph-uninstall`, then this skill again.
+
+**A project with a Hook registration profile** (one recorded with `record-registrations`) must re-record it after this install, because the profile counts the rows and the install added a fourth: `$PY "$FIP" record-registrations --project .` to preview, then the same command with `--apply --expect-sha256 <plan hash>`. Otherwise its row-count check fails.
 
 A project with a CodeGraph index builds it with the `codegraph` command line tool (`codegraph init -i`). This skill does not build the index.
 
