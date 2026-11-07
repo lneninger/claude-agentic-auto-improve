@@ -161,6 +161,23 @@ worktree workflow.
   means halt. A sync tool that does not do this yet is a follow-up outside this repository.
 - Any pull request that touches a registry file raises the plugin version (see CLAUDE.md).
 
+## Naming a memory tool
+
+**No shipped file but `.claude/scripts/memory_boundary.py` names a memory tool.** "Shipped"
+means what `check_version_bump.is_shipped` says: the files the plugin delivers, such as skills,
+agents, hooks, scripts, templates, references, agreements, add-ons and the registries. The
+Central Memory System's
+tool names and shapes belong to the one adapter and to the profile slots it reads
+(`memory.retrieve-tool`, `memory.capture-tool`, `memory.shape`). Everywhere else, say "the
+configured retrieve tool" and "the configured capture tool".
+
+- A scan in `.claude/scripts/tests/test_plugin_text_scans.py` enforces it:
+  run it before committing a change to a shipped file. It is not yet run in CI.
+- **The registries are shipped and get no exemption.** A mechanism entry, a vocabulary term or
+  a journal lesson about memory must not use the literal tool names.
+- This file, the README, contracts, work-item briefs and `.claude/scripts/tests/` are not
+  shipped by that definition, so they may name the tools.
+
 ## Proposing a new generic asset
 
 1. Satisfy yourself it is genuinely generic, not domain-specific wearing a general name.

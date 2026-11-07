@@ -248,6 +248,22 @@ class TestScriptsSideBridge(RootCase):
         self.assertIn("installed_plugin_root", getattr(_claude_paths, "__all__", []),
                       "the bridge lists the new name in __all__ with its other re-exports")
 
+    def test_the_bridge_exports_tree_hop_refusal_and_no_longer_worktree_own_root_native(self):
+        # Issue #271: the capability constant is TREE_HOP_REFUSAL (the Hop proof computed on the helper beside the
+        # scripts); WORKTREE_OWN_ROOT_NATIVE is removed.
+        import _claude_paths
+        exported = list(getattr(_claude_paths, "__all__", []))
+        self.assertIn("TREE_HOP_REFUSAL", exported, "the bridge lists TREE_HOP_REFUSAL in __all__: %r" % exported)
+        self.assertNotIn("WORKTREE_OWN_ROOT_NATIVE", exported, "and no longer lists the removed constant: %r" % exported)
+        self.assertFalse(hasattr(_claude_paths, "WORKTREE_OWN_ROOT_NATIVE"),
+                         "the removed constant is not defined on the bridge either")
+        self.assertIs(getattr(_claude_paths, "TREE_HOP_REFUSAL", None), True,
+                      "beside the current helper the Hop proof holds: the bridge exports True")
+
+    def test_the_helper_declares_tree_hop_refusal(self):
+        self.assertIs(getattr(_project_paths, "TREE_HOP_REFUSAL", None), True,
+                      "_project_paths.py declares TREE_HOP_REFUSAL = True (this file carries the hop refusal)")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

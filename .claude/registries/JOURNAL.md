@@ -326,6 +326,153 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract adds a deleter, mover or sweep over a folder that one or more local loaders read, and its evidence rule names only some of those loaders
 - **Tags:** sweep, delete, evidence, local-reader, delivery-record
 
+### 2026-11-02 — A skill written around an adapter refusal hides a contract divergence
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When a later block's skill text says a refusal "is expected" for a case the contract says must succeed, stop and report the divergence; do not document around it. Name a test after only what it asserts.
+- **Apply when:** a handoff block writes skill text that calls a subcommand an earlier block delivered, for a state the contract's Commands table does not list as a refusal.
+- **Tags:** contract-divergence, refusal, skill-text, test-name, adapter
+
+### 2026-11-02 — A rule every session needs goes in a shipped agreement, not a once-run step
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before putting a standing instruction in an onboarding skill or one design step, check Session-start context delivery and list the routes (direct edit, `/debug`, `/journal-add`, sessions that never design) that would never see it.
+- **Apply when:** a contract adds a standing instruction to `/auto-improve-finish-install`, one skill step or any once-run path
+- **Tags:** agreements, session-start, standing-guidance, reach
+
+### 2026-11-02 — Search a proposed term against agent frontmatter and host docs before adding it
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** If the words already name something else (`memory: project`, the host's "project memory"), rename the term instead of adding "it is not X" to its definition.
+- **Apply when:** a contract proposes a VOCABULARY term that reuses a word the repository or host already uses
+- **Tags:** vocabulary, term-collision, naming, agent-memory
+
+### 2026-11-02 — Describe a fixer a skill runs by everything it writes, and keep the skill's confirm-first promise
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Describe `plugin_doctor.py --fix` (or any list-driven fixer) from its own requirement list (`REQUIREMENTS`, `apply_fixes`), and run it only after the user confirms the listed set.
+- **Apply when:** a contract triggers `--fix` or another fixer that creates every missing item
+- **Tags:** plugin-doctor, fix-scope, confirmation, side-effects
+
+### 2026-11-02 — Name the tests a fix may change by the state they guard, after reading them
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before telling an implementer to change tests "around" given lines, read each one; a test that guards a neighbouring invariant (here `disabled`, I-M0) is named as unchangeable.
+- **Apply when:** a fix block's CONSTRAINTS tell the implementer to change or relax tests by line number
+- **Tags:** tests, invariant, fix-scope, line-reference
+
+### 2026-11-02 — A path that calls a command must say how it finds the command's input
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When a step calls a command that needs an input (`record --brief`), state on that same path how the input is found and what happens when it is absent; a rule that lives only on a sibling path turns a normal case into a reported failure.
+- **Apply when:** one branch of a skill step (unconfigured, disabled, error) calls a command whose argument is resolved only on another branch
+- **Tags:** skill-steps, missing-input, brief-linkage, degradation
+
+### 2026-11-02 — A revision that adds a path adds its failure modes
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** For each new script call, fixer run or degraded path a revision adds, add a Failure Modes entry whose mitigation cites a mechanism.
+- **Apply when:** a contract revision adds blocks or Extension Points and leaves `## Failure Modes & Mitigations` unchanged
+- **Tags:** failure-modes, amendment, revision, completeness
+
+### 2026-11-02 — After amending a contract, update every summary of the block graph
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Re-check the header Revision line, the Handoff intro's block count and graph, and the prioritised plan's Depends on against the new blocks.
+- **Apply when:** a revision adds, removes or re-links handoff blocks
+- **Tags:** amendment, summary-drift, handoff-graph
+
+### 2026-11-02 — Edit a reversed sentence where it stands
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When an amendment reverses an earlier claim, edit that sentence; do not keep it and add a later bullet that contradicts it.
+- **Apply when:** a revision changes a claim made earlier in the same section
+- **Tags:** amendment, self-contradiction, scope-note
+
+### 2026-11-02 — Keep a review-fix block to the review's findings
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Put text for a new requirement in the block that owns the requirement, so each block's review judges one thing.
+- **Apply when:** one revision adds both review fixes and a new user requirement
+- **Tags:** block-scope, review-fix, separation
+
+### 2026-11-02 — A rule titled 'every' must list every line it covers
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** A rule for "every state" or "every printed line" names each line, including failure and skipped lines, and a test pins each.
+- **Apply when:** a contract adds text to every output line or state of a step
+- **Tags:** every-claim, printed-lines, coverage
+
+### 2026-11-02 — A "fails the build" claim must name the workflow that runs the check
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before documenting that a test "fails the build" or "is enforced", find the CI workflow or hook that runs it; if none does, say "run it before committing" instead.
+- **Apply when:** documentation or a contract states that a scan or test suite enforces a rule
+- **Tags:** ci, enforcement-claim, readme-drift, text-scan
+
+### 2026-11-03 — When resolving a conflict hunk by keeping both sides, drop the base lines the other side rewrote
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** Before keeping both sides of a conflict hunk, diff each side against the merge base; lines one side left unchanged and the other side rewrote belong to the rewrite only, or the merge restores deleted text beside its replacement.
+- **Apply when:** a merge resolves a prose or procedure conflict "keeping both behaviours", especially numbered steps
+- **Tags:** merge, conflict-resolution, base-text, duplicate-steps
+
+### 2026-11-05 — A bridge re-export that silently falls back to an inline copy must also say which one it gave
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
+- **Lesson:** When a contract asks a re-export to fall back to an inline copy AND asks a caller to behave differently when the native function is missing, specify the signal the caller reads (an exported flag such as `WORKTREE_OWN_ROOT_NATIVE`); without it the two requirements contradict and the implementer has to invent a new export.
+- **Apply when:** a contract or addendum adds a `getattr`-with-fallback re-export to `_claude_paths.py` (or any bridge) and, in the same breath, a "missing helper" branch in a consumer
+- **Tags:** bridge, re-export, fallback, older-helper, contract-addendum
+
+### 2026-11-05 — A hardening fix applied to a shared classifier must be checked against every consumer of that classifier
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
+- **Lesson:** Before you narrow what a shared classifier accepts (here `_git_file_kind`, under `tree_kind`) for a security reason, list its callers and the action each takes on the new outcome. A rule that is safe for the new caller (the add-on's guard, which fails open on `undecidable`) can wall an existing enforcing caller (the main-checkout guard, which blocks on `undecidable`). Bare-repository worktrees and `--separate-git-dir` checkouts went from decidable to blocked.
+- **Apply when:** a review or security fix asks for "the same refusal" in a function the contract lists as "consumed as-is", or in any helper behind `tree_kind`, `main_checkout_root` or another MECHANISMS.md classifier
+- **Tags:** shared-classifier, tree-kind, hardening, regression, consumers
+
+### 2026-11-05 — A same-host path rule must compare against both the written and the realpath form of the tree's own path
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
+- **Lesson:** On Windows `os.path.realpath` turns a mapped network drive (`Z:\`) into its UNC form (`\\server\share`). A rule that refuses a UNC target "unless it names the same host as the tree's own path" must take the host set from both the unresolved and the realpath'd own path, and must judge a hop after `realpath` against the folder it hops from. Otherwise a repository on a mapped drive whose worktree sits on another volume reads `undecidable`, and an enforcing caller walls it. Separately, a caller-side check placed after a call into an older helper only discards that helper's answer; the probe has already happened. Gate the call itself on the helper's release.
+- **Apply when:** a contract adds a host, drive or "same location" comparison on paths, or a caller-side check meant to protect against an older shared helper
+- **Tags:** unc, mapped-drive, realpath, older-helper, path-hardening
+
+### 2026-11-05 — An "older release" test fixture must be pinned to a fixed commit or a frozen copy, never to HEAD
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-05-codegraph-guard-fail-open.md
+- **Lesson:** Do not load "the previous release" of a file with `git show HEAD:<path>` in a test. Before the commit HEAD is the old release and the test passes; the moment the change is committed HEAD IS the new release, and every row that asserts "this helper lacks X" fails (five W-13 rows did, simulated by the pass-4 reviewer). Pin the fixture to the last release's commit or tag (checked with `git cat-file -e`, skipped when absent), or check in a frozen copy under the test's fixtures.
+- **Apply when:** a contract or addendum asks a test to compare against "HEAD's", "the current", or "the last release's" copy of a file that the same change edits
+- **Tags:** test-fixture, older-helper, git-show, head, self-invalidating-test
+
+### 2026-11-06 — An exception sentence that names the outcome of a later call must list every outcome that call can have
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md
+- **Lesson:** The contract's E1 and I-7b sentences say the repeat after a `retry-ticket-unwritten` block "is blocked once more (as `source-target`)". The guard's ticket step gives `ambiguous-target` when every target is of the unknown class (a Grep with only a pattern, a generic Glob), so the sentence is false for those calls at ten shipped sites and in the guard's own banner. Before you write a sentence that predicts which reason a later call gets, read the branch that picks the reason and name every value it can return, or name the outcome without the reason ("blocked once more, this time with the retry recorded").
+- **Apply when:** a contract adds a message or doc sentence that predicts the block reason, exit code or log event of a future call
+- **Tags:** guard-message, block-reason, exception-sentence, doc-drift
+
+### 2026-11-06 — Judge a drive letter with a no-I/O check before any realpath, because realpath of a mapped drive can block
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md
+- **Lesson:** The contract assumed `os.path.realpath` of a mapped network drive returns `\\server\share` (ASSUMED, to be recorded). The recorded row found a real mapped `Z:` on the developer machine (`net use`: Disconnected), and `os.path.realpath('Z:\\')` gave no answer in 10 seconds; measured again, `realpath('Z:\\x')` took 21.1 s and returned `Z:\x` unchanged, not the share, so the rule judged it local. A hook that resolves a drive before judging it can hang until the host's hook timeout, and a timed-out hook is a non-blocking error, which is an allow. When a rule must decide whether a drive letter is remote, ask the local drive table first (`GetDriveTypeW`, no network I/O) and refuse `DRIVE_REMOTE` there. Call `realpath` only after that check, and only for a drive the table calls fixed.
+- **Apply when:** a contract adds a Windows path rule that calls `realpath`, `resolve()`, `samefile` or any opening call on a path whose drive letter may be a mapped network drive, inside a hook with a timeout
+- **Tags:** windows, mapped-drive, realpath, hook-timeout, fail-closed
+
+### 2026-11-07 — A contract that reorders a hook's decision steps must be re-read against every contract that reorders the same steps before either merges
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md
+- **Lesson:** #271 put "no source target, allow" first so that nothing is resolved for a markdown read, while #261 (merged first) had moved the Turn marker check ahead of target classification for a cheaper hot path. A marker may only be read from a folder proven usable, so the merge had to resolve the per-user session folder on every call, non-source reads included: the contract's step 1 became false, the parent is now created on a markdown read, and every guard call pays the Windows drive check (about 8 ms for the `ctypes` import on first use). The bench and the docs written for #261 still described its order and its temp-folder layout. When two open contracts change the order or the state location of the same hook, name the other contract in each one's Preconditions, restate the merged order and its per-call cost in whichever lands second, and re-run the first one's measurement on the merged code.
+- **Apply when:** a contract renumbers or reorders decision steps, or moves the state, of a hook or guard that another open (unmerged) contract also edits
+- **Tags:** merge, decision-order, hot-path, concurrent-contracts, bench
+
+### 2026-11-03 — A stop list checked against a moving default branch needs a rule for changes outside the edited lines
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md
+- **Lesson:** When a block stops on "master changed a file on the stop list", say in the block which kind of change still allows it to go on (for example a hunk outside the lines the block edits, proven by a quoted git diff and a clean git merge-tree), so a busy default branch does not force a contract amendment for every changelog paragraph.
+- **Apply when:** a fix or merge block's pre-check compares origin/<default> against a stop list of shared, often-edited files such as README.md
+- **Tags:** pre-check, stop-list, moving-base, merge-tree, amendment
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

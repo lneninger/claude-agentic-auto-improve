@@ -1,0 +1,73 @@
+contract: 2026-11-01-memory-client-and-cloud-engineering
+started_at: '2026-11-02T10:51:37.834368+00:00'
+sub_tasks:
+  t1-profile-slots:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 166
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-166-t1-profile-slots.md
+  t2-memory-adapter-and-degradation-tests:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 167
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-167-t2-memory-adapter-and-degradation-tests.md
+  t3-retrieval-at-design-time:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 168
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-168-t3-retrieval-at-design-time.md
+  t4-capture-at-delivery:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 169
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-169-t4-capture-at-delivery.md
+  t5-review-memory-boundary:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 170
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-170-t5-review-memory-boundary.md
+  t6-cloud-skill-and-provider-references:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 171
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-171-t6-cloud-skill-and-provider-references.md
+  t7-cloud-agent-and-review-coverage:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 172
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-172-t7-cloud-agent-and-review-coverage.md
+  t8-review-cloud-capability:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 173
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-173-t8-review-cloud-capability.md
+  t9-documentation:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 174
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-174-t9-documentation.md
+  t10-review-documentation:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 175
+    base: feature/memory-client-and-cloud-engineering
+    brief: .claude/work-items/2026-11-02-175-t10-review-documentation.md

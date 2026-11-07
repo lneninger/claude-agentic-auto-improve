@@ -20,10 +20,15 @@ This add-on has no kill switch and no bypass variable. This skill is the way out
 
 What the script will not do:
 
-- It deletes a hook file only when it is identical to the plugin's copy (line endings and a leading byte order mark are ignored). A file you edited is kept and reported as `kept-differs`; its row is still removed.
+- It deletes a hook file only when it is identical to the plugin's copy or to a released copy listed in the manifest's `released_sha256` (line endings and a leading byte order mark are ignored). So an unedited copy from an older release is deleted too. A file you edited is kept and reported as `kept-differs`; its row is still removed.
 - It keeps a hook file that a `settings.local.json` or user settings row still names (`kept-referenced`).
 - It never deletes a helper. `_project_paths.py` and `_error_log.py` stay: other hooks use them.
-- It does not delete `.claude/.codegraph-used-this-turn`. That sentinel is a leftover of a turn; the user may delete it.
+- It keeps the `mcp__codegraph__*` permission entry in `permissions.allow` and lists it under `kept`.
+- It does not delete the session folder `auto-improve-codegraph-<session id>` under the Per-user session parent (`%LOCALAPPDATA%\auto-improve-codegraph\` on Windows, `~/.cache/auto-improve-codegraph/` or `$XDG_CACHE_HOME/auto-improve-codegraph/` on POSIX): that is a leftover, and the reset hook prunes it. Folders `auto-improve-codegraph-*` left in the system temp folder by 0.15.2 are no longer read; delete them by hand if wanted (an older `.claude/.codegraph-used-this-turn` is a leftover of a turn the user may delete).
+
+- It keeps the shadow log, `<project>/.claude/logs/codegraph-shadow.jsonl`, and everything else under `.claude/logs/`. The log is measurement data the report (`py -3 .claude/scripts/codegraph_shadow_report.py`) reads; the user deletes it by hand if they want it gone. Hook backups an upgrade took (`.claude/hooks/*.bak-*`) are kept too.
+
+**Upgrade route.** An uninstall is not needed to upgrade: re-running `/auto-improve-codegraph-install` backs up and replaces an unedited older hook copy (a hash listed in the manifest's `released_sha256`). The route through this skill is for a hook file you edited, which the install refuses as `addon-file-differs`: run this skill (it keeps the edited file; rename or remove it by hand), run `/auto-improve-codegraph-install`, then start a new session.
 
 ## Step 0: Find the script
 
@@ -91,7 +96,7 @@ Show the user, in plain words:
 
 - the rows it would remove from `.claude/settings.json`, and that a backup is taken first.
 - the files it would delete, and the files it would keep with the reason.
-- what it leaves: the helpers.
+- what it leaves: the helpers, and the `mcp__codegraph__*` permission entry (it is harmless without the hooks).
 - that after the removal a source `Read`, `Grep` or `Glob` is no longer held back until a CodeGraph tool has run.
 
 State your recommendation first, in one or two sentences. Then ask **once**: remove this add-on?
@@ -136,6 +141,6 @@ End with a short summary: which rows were removed, which files were deleted, whi
 ## When NOT to use
 
 - To install the add-on. That is `/auto-improve-codegraph-install`.
-- To pause the guard for one turn. There is no pause; call a CodeGraph tool, or read through the shell.
+- To pause the guard for one turn. There is no pause; call a CodeGraph tool, or repeat the blocked call once (the retry escape: it is allowed and logged). Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
 - On Cursor or Codex. Hooks are Claude-only in this release.

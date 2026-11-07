@@ -2358,6 +2358,158 @@ def case12_registry_files(env) -> None:
               err or f"got {files!r}")
 
 
+# ---------------------------------------------------------------------------
+# Case 13 (amendment 6) -- registry_files / registry_files_in beside an OLDER helper.
+#
+# 643b667 is the last release whose _project_paths.py has neither name, yet imports cleanly and has every other
+# name the bridge reads (checkout_equivalent_path, the launcher surface). The bridge must still import, and the
+# two functions must raise ImportError ON CALL (a stand-in), never AttributeError at import. The helper text is
+# read from that FIXED commit, never from HEAD; when the commit is unavailable (shallow clone) the three rows SKIP
+# and print why (JOURNAL 2026-11-05).
+# ---------------------------------------------------------------------------
+_OLDER_HELPER_COMMIT = "643b667"
+_OLDER_HELPER_PATH = ".claude/hooks/_project_paths.py"
+_REMEDY = "Bring the hooks folder to the same release as the scripts"
+
+_STAND_IN_DRIVER = '''\
+import json, sys
+sys.path.insert(0, sys.argv[1])
+out = {}
+try:
+    import _claude_paths as cp
+    import _project_paths as pp
+except BaseException as exc:
+    out["import"] = type(exc).__name__ + ": " + str(exc)
+else:
+    out["import"] = None
+    out["pp_file"] = pp.__file__
+    out["in_all"] = [n in cp.__all__ for n in ("registry_files", "registry_files_in")]
+    for label, fn, args in (("registry_files", cp.registry_files, ("JOURNAL.md",)),
+                            ("registry_files_in", cp.registry_files_in, (sys.argv[2], "JOURNAL.md"))):
+        try:
+            fn(*args)
+            out[label] = "returned"
+        except ImportError as exc:
+            out[label] = "ImportError: " + str(exc)
+        except BaseException as exc:
+            out[label] = "WRONG " + type(exc).__name__ + ": " + str(exc)
+    out["ceq_is_helpers"] = cp.checkout_equivalent_path is pp.checkout_equivalent_path
+    out["constants_are_helpers"] = [cp.PROJECT_HOOK_LAUNCHER_SOURCE == pp.PROJECT_HOOK_LAUNCHER_SOURCE,
+                                    cp.HOOK_CLASS_BLOCK == pp.HOOK_CLASS_BLOCK,
+                                    cp.HOOK_CLASS_WARN == pp.HOOK_CLASS_WARN]
+print("RESULT " + json.dumps(out))
+'''
+
+
+def _older_helper_text():
+    """(text, "") for the helper of the fixed commit, or (None, reason) when it cannot be read."""
+    try:
+        probe = subprocess.run(["git", "-C", str(_REPO_ROOT), "cat-file", "-e", _OLDER_HELPER_COMMIT + "^{commit}"],
+                               capture_output=True, timeout=60)
+        if probe.returncode != 0:
+            return None, f"commit {_OLDER_HELPER_COMMIT} is not available (shallow clone?)"
+        shown = subprocess.run(["git", "-C", str(_REPO_ROOT), "show", f"{_OLDER_HELPER_COMMIT}:{_OLDER_HELPER_PATH}"],
+                               capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, repr(exc)
+    if shown.returncode != 0:
+        return None, "git show failed: " + shown.stderr.decode("utf-8", "replace").strip()[:200]
+    return shown.stdout.decode("utf-8"), ""
+
+
+def _layout2_project(root: Path) -> Path:
+    reg = root / ".claude" / "registries"
+    for name in ("MECHANISMS", "VOCABULARY", "JOURNAL"):
+        _write_text(reg / f"{name}.md", f"<!-- registry-layout: 2 -->\n# {name.title()}\n\n## Universal\n\n"
+                                        "## Project tier\n\nThis file holds only the Universal tier.\n")
+        _write_text(reg / name / "general.md", f"# {name} - general\n\n")
+    (root / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _child_env(project: Path, home: Path) -> dict:
+    e = dict(os.environ)
+    e.pop("PYTHONPATH", None)
+    e.update({"CLAUDE_PROJECT_DIR": str(project), "HOME": str(home), "USERPROFILE": str(home),
+              "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"})
+    return e
+
+
+def case13_registry_files_beside_an_older_helper(env) -> None:
+    print("\ncase 13 -- registry_files / registry_files_in beside an older helper (643b667): stand-ins, not AttributeError")
+    sandbox = env["sandbox"]
+    text, why = _older_helper_text()
+    if text is None:
+        print(f"  SKIP  case13: {why}; the three rows (frozen helper, CLI, hook) need that commit")
+        return
+    hooks = sandbox / "older_helper" / "hooks"
+    scripts = sandbox / "older_helper" / "scripts"
+    hooks.mkdir(parents=True, exist_ok=True)
+    _write_text(hooks / "_project_paths.py", text)
+    shutil.copy2(_HOOKS_DIR / "_error_log.py", hooks / "_error_log.py")
+    shutil.copytree(_SCRIPTS_DIR, scripts, ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"))
+    home = sandbox / "older_helper_home"
+    home.mkdir(parents=True, exist_ok=True)
+    proj = _layout2_project(sandbox / "older_helper_project")
+
+    # (frozen helper) the bridge imports, the two names raise ImportError on call.
+    driver = _write_text(sandbox / "stand_in_driver.py", _STAND_IN_DRIVER)
+    proc = subprocess.run([sys.executable, str(driver), str(scripts), str(proj / ".claude" / "registries")],
+                          cwd=str(proj), env=_child_env(proj, home), capture_output=True, text=True, timeout=120)
+    out = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT "):
+            out = json.loads(line[len("RESULT "):])
+    detail = f"stdout={proc.stdout[-300:]!r} stderr={proc.stderr[-300:]!r}"
+    check("case13 [frozen helper]: the bridge imports beside the older helper",
+          out is not None and out.get("import") is None, (out or {}).get("import") or detail)
+    out = out or {}
+    for label in ("registry_files", "registry_files_in"):
+        got = str(out.get(label))
+        check(f"case13 [frozen helper]: {label}() raises ImportError naming the function, the helper's file and the remedy",
+              got.startswith("ImportError") and label in got and "_project_paths.py" in got and _REMEDY in got, got)
+    check("case13 [frozen helper]: both names are in __all__", out.get("in_all") == [True, True], repr(out.get("in_all")))
+    check("case13 [frozen helper]: checkout_equivalent_path is the helper's own function (no stand-in)",
+          out.get("ceq_is_helpers") is True, repr(out.get("ceq_is_helpers")))
+    check("case13 [frozen helper]: the three launcher constants equal the helper's values (no stand-in)",
+          out.get("constants_are_helpers") == [True, True, True], repr(out.get("constants_are_helpers")))
+
+    # (CLI) a registry script stops at its first registry read with the ImportError, not an AttributeError.
+    cli = subprocess.run([sys.executable, str(scripts / "validate_registries.py"), "--check-structure", "--project", str(proj)],
+                         cwd=str(proj), env=_child_env(proj, home), capture_output=True, text=True, timeout=120)
+    err_lines = [ln for ln in cli.stderr.splitlines() if ln.strip()]
+    last = err_lines[-1] if err_lines else ""
+    # The block text expects an uncaught traceback and exit 1; validate_registries.py's own __main__ wrapper (not on this
+    # sub-task's file list) catches every Exception, prints "[validate-registries] error: <message>" and exits 2. The row
+    # pins what the script does today; the deviation is reported in the hand-off.
+    check("case13 [CLI]: validate_registries --check-structure stops with exit 2 (its wrapper's code for an error)",
+          cli.returncode == 2, f"exit {cli.returncode}; {cli.stderr[-300:]!r}")
+    check("case13 [CLI]: stderr holds no AttributeError", "AttributeError" not in cli.stderr, cli.stderr[-300:])
+    check("case13 [CLI]: the last line carries the ImportError message naming registry_files, the helper's file and the remedy",
+          last.startswith("[validate-registries] error: _claude_paths:") and "registry_files" in last and "_project_paths.py" in last and _REMEDY in last,
+          last or cli.stderr[-300:])
+
+    # (hook) the tracker hook says so once, logs the event and tracks nothing.
+    shutil.copy2(HOOK_TRACKER, hooks / HOOK_TRACKER.name)
+    journal = proj / ".claude" / "registries" / "JOURNAL.md"
+    payload = json.dumps({"tool_name": "Edit", "tool_input": {"file_path": str(journal)}}).encode("utf-8")
+    done = subprocess.run([sys.executable, str(hooks / HOOK_TRACKER.name)], input=payload, cwd=str(proj),
+                          env=_child_env(proj, home), capture_output=True, timeout=120)
+    stderr_lines = [ln for ln in done.stderr.decode("utf-8", "replace").splitlines() if ln.strip()]
+    events = 0
+    for log in (proj / ".claude" / "logs").glob("*.jsonl"):
+        events += sum(1 for ln in log.read_text(encoding="utf-8").splitlines() if "journal-tracker-reader-missing" in ln)
+    caches = [p for base in (home, proj) for p in base.rglob("journal-entries-seen.json")]
+    check("case13 [hook]: the tracker hook exits 0", done.returncode == 0, f"exit {done.returncode}")
+    check("case13 [hook]: exactly one stderr line, naming registry_files",
+          len(stderr_lines) == 1 and "registry_files" in stderr_lines[0], repr(stderr_lines))
+    check("case13 [hook]: one journal-tracker-reader-missing event is logged", events == 1, f"{events} events")
+    check("case13 [hook]: no tracker cache file is written", not caches, repr([str(p) for p in caches]))
+
+
+HOOK_TRACKER = _HOOKS_DIR / "journal-post-approval-tracker.py"
+
+
 def case_inv10_no_real_writes(before: dict) -> None:
     print("\nINV-10 -- no real data tree was READ, modified or written")
 
@@ -2692,6 +2844,7 @@ def main() -> int:
         case10_project_alias_matching(env)
         case11_same_answer_from_any_directory()
         case12_registry_files(env)
+        case13_registry_files_beside_an_older_helper(env)
         case_inv10_no_real_writes(before)
         case_inv10c_accuracy_sentinel_watches_and_fires()
 

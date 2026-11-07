@@ -16,7 +16,8 @@ parent_issue: 235
 base: fix/235-domain-split-registries
 contract: .claude/concepts/2026-11-04-domain-split-registries.md
 issue_link: deferred
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/309
+status: shipped
 created: 2026-11-07
 ---
 

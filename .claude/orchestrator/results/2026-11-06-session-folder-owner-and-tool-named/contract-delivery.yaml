@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/303
+number: 303
+head_ref: fix/271-session-folder-owner-and-tool-named
+base_ref: master
+base_is_default: true
+commit: 28f0b1850ae68dc286c98d298abf48963dbac5b2
+merged_at: '2026-11-07T12:46:59Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-07T13:50:54.667900+00:00'
+blocks_recorded:
+- t1-per-user-session-parent-fail-closed-refusal-message-housekeeping-and-version
+blocks_already_recorded: []

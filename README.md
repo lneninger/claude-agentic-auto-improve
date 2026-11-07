@@ -303,6 +303,75 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.16.3 (the `codegraph` session folder moves to a per-user parent and fails closed, issue #271):**
+
+- **The move.** The `codegraph` add-on's hooks keep every session folder under the Per-user session parent: `%LOCALAPPDATA%\auto-improve-codegraph\`
+  on Windows; `$XDG_CACHE_HOME/auto-improve-codegraph/`, else `~/.cache/auto-improve-codegraph/` (mode `0700`, owned by
+  you), on POSIX. Nothing in the system temp folder is read, written or pruned any more, so a `TMP` shared between users
+  cannot carry a planted `turn.json` that opens your gate, and your pruner cannot delete another user's folders. The
+  folders `auto-improve-codegraph-*` that 0.15.2 left in the system temp folder are inert (no longer read); delete them by
+  hand if you want.
+- **It fails closed.** When the parent or the session folder cannot be used (a link, a file, another user's folder, a folder
+  open to other users, a network path (this check runs on Windows only), an unset or relative `LOCALAPPDATA` on Windows, a relative `XDG_CACHE_HOME`, or neither `XDG_CACHE_HOME` nor `HOME` set), a source read is blocked as
+  `session-state-unusable`: the message names the folder, the problem in plain words and its fix, and offers no retry. The
+  tracker writes no marker and the reset hook prunes nothing, and each prints that the gate stays shut. A ticket write that
+  fails blocks as `retry-ticket-unwritten` (usually a passing lock or a full disk). This reverses 0.15.2's
+  `state-unwritable` fail-open. A subagent, a project with no index and a project with no configured server are still let
+  through.
+- **A Foreign marker is logged.** The tracker stamps `turn.json` with `writer` and `session`. A marker without this
+  session's stamp still opens the gate (it sits in a parent proven to be yours), and the guard logs it once per session
+  (`foreign-marker`, with the cause).
+- **The refusal says what to do.** `codegraph-tool-named` stays a refusal; its message now lists each entry with its layer and
+  file, then the one step that fixes it: replace each entry with `mcp__codegraph__*`. One capability constant,
+  `TREE_HOP_REFUSAL`, replaces `WORKTREE_OWN_ROOT_NATIVE`.
+- **Upgrading.** The 0.15.2 and 0.16.2 hook copies are in `released_sha256`, so the route is the in-place one:
+  re-run `/auto-improve-codegraph-install` (it backs up an unedited older copy as `<hook>.bak-<UTC stamp>` and replaces
+  it), then start a new session.
+
+| Install age | What it has | Route |
+|---|---|---|
+| 0.15.2 or 0.16.0 to 0.16.2, hook files unedited | session folders in the system temp folder, the older hooks | re-run the install, new session; the old temp folders are ignored |
+| an upgraded project that keeps its 0.15.2 `_project_paths.py` | a helper with `_hop_allowed` and `worktree_own_root`, no `TREE_HOP_REFUSAL` | nothing to do: it passes the Hop proof, so `index-other-tree` keeps firing |
+| installed from this release | nothing to do | run `addon --name codegraph --check` |
+
+**Changed in 0.15.2 (the `codegraph` guard fails open, issue #259):** the guard lets reads through when CodeGraph is provably unavailable.
+
+- **It lets reads through when CodeGraph is provably unavailable**, and prints one
+  `[codegraph-first-guard] allowed (fail-open:<reason>)` line, logged once per session per reason in
+  `errors.jsonl`. While the session folder cannot be used, these lines print on every call and nothing is logged. The reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or
+  the main checkout; a `.codegraph` folder without `codegraph.db` is not an index), `index-other-tree`
+  (a linked worktree with no index of its own, whose only index belongs to the main checkout),
+  `server-not-configured`, `server-disabled` and `subagent` (the payload carries an `agent_id`).
+  Since 0.16.3 an unusable session folder blocks instead (`session-state-unusable`); see below.
+- **The retry escape replaces the shell advice.** The block message no longer teaches reading through
+  the shell. Repeat the identical blocked call once and it is allowed and logged as `retry-escape`;
+  the next prompt clears it. Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed. No environment variable is involved.
+- **The turn marker belongs to the session.** It is `turn.json` in
+  `<Per-user session parent>/auto-improve-codegraph-<session id>/` (the parent is `%LOCALAPPDATA%\auto-improve-codegraph\`
+  on Windows, `$XDG_CACHE_HOME/auto-improve-codegraph/` or `~/.cache/auto-improve-codegraph/` on POSIX; 0.15.2 used
+  the system temp folder), no longer
+  `<cwd>/.claude/.codegraph-used-this-turn`, so `cd` or `EnterWorktree` does not close the gate. The reset
+  hook prunes old session folders in that parent once per session (never through a link, never a
+  folder holding a file it does not know, only after 7 days).
+- **Wildcard only.** No shipped file names an individual CodeGraph tool; the server now offers only
+  its explore tool. `addon.json` gains `permissions_allow` (`mcp__codegraph__*`, written to
+  `permissions.allow` by the install, kept on uninstall) and `released_sha256` (so the uninstall deletes an
+  unedited old hook copy). `auto_improve_finish_install.py addon --name codegraph --check` is a read-only
+  check: exit 0 clean, 1 with findings (`codegraph-wildcard-missing`, `codegraph-tool-named`), 2 when it could not
+  check (any refusal: a settings layer or the project cannot be read, the add-on manifest is missing or unusable). The install refuses with `codegraph-tool-named` when a layer names a
+  single tool. `/verify-before-done` runs the check when the guard is registered.
+- **Upgrading.** The rows an old install carries are the same three, but the old hook files differ from the new
+  ones, so the install refuses with `addon-file-differs`. By install age:
+
+| Install age | What it has | Route |
+|---|---|---|
+| 0.9.9 to 0.15.1, hook files unedited | the old hooks, the sentinel under `<cwd>/.claude/` | `/auto-improve-codegraph-uninstall` (deletes the unedited old copies through the released hashes), then `/auto-improve-codegraph-install`, then a new session |
+| a copy from before 0.9.9, when the guard was a core hook | the guard file under `.claude/hooks/` that no add-on put there | the uninstall keeps it (`kept-differs`) unless it matches a released hash; compare it with the plugin's copy, delete it by hand, then install |
+| any age, a hook file edited by your team | your edited copy | the uninstall keeps it (`kept-differs`); compare it with the plugin's copy, move your edits over, delete it, then install |
+| installed from this release | nothing to do | run `addon --name codegraph --check` to confirm the permission entry |
+
+The `test_auto_improve_finish_install.py` suite grows to 394 cases.
+
 **Changed in 0.14.5 (the settings writer refuses without the Project hook launcher):** four changes.
 
 - **The writer refuses instead of falling back.** When the hooks folder beside the scripts has no
@@ -400,9 +469,9 @@ parts.
   never edits that file. Three lines are now false or only partly true:
   - the CodeGraph bypass "set `CLAUDE_SKIP_CG=1`", which does nothing now;
   - "Disable the gate entirely: `CLAUDE_CONCEPT_GATE=off`", which no longer covers the shell gate;
-  - the claim that the gate "auto-bypasses until the index exists", which the hook does not do.
-    With no `mcp__codegraph__*` tool in the session, every source Read is blocked; read through
-    the shell, or uninstall the add-on and start a new session.
+  - the claim that the gate "auto-bypasses until the index exists", which was untrue of 0.12.x.
+    Since 0.15.2 it is true: with no index (`.codegraph/codegraph.db`) the guard lets reads
+    through. See "Changed in 0.15.2".
 - **Doctor.** `plugin_doctor.py --drift` reports a new kind of finding,
   `disabled-hook-installed`. A **disabled hook** is one an add-on still ships but no longer
   installs (the advisor is one). The doctor reports its file in `.claude/hooks/`, and its row in
@@ -521,7 +590,7 @@ default install runs none of them:
 | Add-on | Its hook files | What it does | Why it is not a default |
 |---|---|---|---|
 | `angular-tailwind` | no hook file is installed; four rule documents and a stylesheet snippet instead. The old `angular-tailwind-advisor.py` (formerly `architecture-advisor.py`) still ships but is disabled since 0.10.0 | copies the Angular, Material, Tailwind and UI-pattern rule documents into `.claude/references/angular-tailwind/` and lists them in `review.documents`; the guard's lines cite them by Rule ID | it only suits Angular plus Tailwind projects; `architecture-guard.py` still enforces at the write |
-| `codegraph` | `codegraph-first-guard.py`, `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | blocks `Read` / `Grep` / `Glob` on source until a CodeGraph tool has run in the turn | it blocks every source read when the CodeGraph server is missing |
+| `codegraph` | `codegraph-first-guard.py`, `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | asks for a CodeGraph call first: blocks `Read` / `Grep` / `Glob` on source until a CodeGraph tool has run in the turn, but lets reads through (with one logged line) when CodeGraph is unavailable, and allows the identical retry of a blocked call once | three program starts: on every Read, Grep and Glob, on every prompt, and after every CodeGraph call; plus one blocked round trip per new source call while the gate is closed |
 | `strict-shell-gate` | `bash-gate.py` | reads each shell command before it runs and blocks a write into a source file no approved contract covers | a program start on every shell command, and it misreads some commands (it read `--stat` as the file written in `sed -i` followed by `git diff --stat`) and cannot see what a program such as `python` or `node` writes; the Changed-file check, which stays on, catches those after the fact |
 
 **To install one in a project**, run its skill. Each one previews the files and the
@@ -573,12 +642,14 @@ The table describes rows in the earlier form, which name the file directly. A la
 | `bash-gate.py` is missing | Python's own error, exit 2, on every Bash call | the same Edit-tool route |
 | `codegraph-first-guard.py` is missing | Python's error on every Read, Grep and Glob, including the read of `settings.json` that Edit needs first | edit the row through the shell, or edit the file outside the session |
 | `codegraph-turn-reset.py` is missing | Python's error on `UserPromptSubmit`, so every prompt is blocked | edit `.claude/settings.json` outside the session, in an editor |
-| `codegraph-turn-tracker.py` is missing | an error after each CodeGraph call; the marker is never set, so reads stay blocked | as for a missing `codegraph-first-guard.py` |
+| `codegraph-turn-tracker.py` is missing | an error after each CodeGraph call; the marker is never set, so reads stay blocked until the identical retry | as for a missing `codegraph-first-guard.py` |
 
-A session with no `mcp__codegraph__*` tool is not a failure of the hook, but every source Read
-is blocked, because the guard never checks for an index. Reading through the shell works, as does
-running `/auto-improve-codegraph-uninstall` and then starting a new session. If the CodeGraph index
-is stale, run `codegraph sync` or `codegraph init -i`.
+A session with no `mcp__codegraph__*` tool is not a failure of the hook. Since 0.15.2 the guard
+lets the read through when it can prove CodeGraph is unavailable (no index, no configured server,
+a disabled server, a subagent, an index that belongs to another working tree); in any other
+session, repeat the blocked call once and it is allowed and logged. Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed. `/auto-improve-codegraph-uninstall`
+followed by a new session removes the guard. If the CodeGraph index is stale, run `codegraph sync`
+or `codegraph init -i`.
 
 The four post-edit checks are not retired: they still exist as files and run, but inside
 `post-edit-dispatcher.py` rather than as four separate hook entries.
@@ -769,10 +840,10 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 28 skills | yes | yes | yes |
-| 14 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
+| 33 skills | yes | yes | yes |
+| 15 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
 | 13 hooks | yes | no | no |
-| 6 working agreements, delivered by a hook | yes | no | no |
+| 7 working agreements, delivered by a hook | yes | no | no |
 | scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
 
 **Corrected 2026-09-13.** This row used to read `vendoring only`, and that was wrong. An
@@ -834,18 +905,18 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          32 generic skills          (plugin root -- all three providers)
-agents/          14 generic agents          (plugin root -- Claude and Cursor)
+skills/          33 generic skills          (plugin root -- all three providers)
+agents/          15 generic agents          (plugin root -- Claude and Cursor)
 .claude/
-  agreements/    6 shipped working agreements, delivered at session start
+  agreements/    7 shipped working agreements, delivered at session start
   addons/        3 opt-in add-ons (addon.json + hook files), never registered by hooks.json
   hooks/         13 generic hooks, a gate launcher, 7 shared helper modules, 6 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
-    tests/       9 hook test suites
-  scripts/       15 workflow scripts, 3 shared helper modules
-    tests/       11 suites, including the path-resolution suite
+    tests/       23 hook test suites
+  scripts/       23 workflow scripts, 3 shared helper modules
+    tests/       36 suites, including the path-resolution suite
   templates/     6 document templates
-  references/    2 reference documents
+  references/    3 reference documents
   registries/    MECHANISMS.md, VOCABULARY.md, JOURNAL.md (Universal tier only)
   area-mapping.json          TEMPLATE - schema intact, empty content set
   work-item-conventions.json TEMPLATE - schema intact, empty content set
@@ -875,7 +946,8 @@ first; ignore the second.
 data-architect, contract-critic, fullstack-code-reviewer, senior-test-engineer,
 test-strategy-critic, migration-safety-reviewer, security-auditor,
 sql-performance-reviewer, api-contract-reviewer, ui-ux-designer,
-dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scout.
+dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scout,
+cloud-engineer.
 
 ### Skills
 
@@ -886,7 +958,7 @@ validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-i
 auto-improve-angular-tailwind-install, auto-improve-angular-tailwind-uninstall,
 auto-improve-codegraph-install, auto-improve-codegraph-uninstall,
 auto-improve-strict-shell-gate-install, auto-improve-strict-shell-gate-uninstall,
-angular-ui-rules, unit-testing, application-design, website-design.
+angular-ui-rules, unit-testing, application-design, website-design, cloud-engineering.
 
 A skill or agent that mentions a skill owned by another plugin follows the rule in
 [CONTRIBUTING.md](CONTRIBUTING.md) → "Referencing another plugin's skill".
@@ -971,10 +1043,14 @@ Never copy the soft choice to a guard that blocks.
 
 A working agreement is one standing rule about how the assistant works with you, written in
 plain words in its own markdown file. When a session opens, `working-agreements.py` reads
-the files and hands their text to the assistant before its first reply. The plugin ships six
+the files and hands their text to the assistant before its first reply. The plugin ships seven
 in `.claude/agreements/`: plain language, one worktree per change, shared repository changes
-through pull requests, one-line commands for the user, stop means stop, and
-recommendations instead of question batches.
+through pull requests, one-line commands for the user, stop means stop,
+recommendations instead of question batches, and use the project history record. The
+seventh tells the assistant that the registries and the concept contracts are the project's
+memory and design history, to be read and used, and that a central memory system, when a
+project switches one on, only supplements them (see
+[Memory client and cloud engineering](#memory-client-and-cloud-engineering)).
 
 - **Add your own** by writing a markdown file in your project's `.claude/agreements/`. The
   first line is a level-one heading, and some text follows it. Project files arrive after the
@@ -1005,12 +1081,170 @@ cite scripts in `.claude/scripts/`, and every concept contract is a copy of
 `templates/concept-contract.md`. The contract sub-task loop is the newest of these:
 `pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
 both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
-`scripts/tests/test_pr_merged.py`, 539 cases including the placeholder trap that an
+`scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 344 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 408 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
+
+## Memory client and cloud engineering
+
+Two optional capabilities. Each is **off until a project switches it on** in its project
+profile. With both off, every brief, every Step 1.5 run and every capture step is what
+it was before they existed. The Project history record rule below applies whatever the switches say.
+
+### The Project history record
+
+A project's own file-based record of its design history, committed in its repository. It
+holds the registries under `.claude/registries/` (`MECHANISMS.md`, `VOCABULARY.md`,
+`JOURNAL.md`, and `INTEGRATION.md` where the project keeps one), the concept contracts and
+follow-up stubs under `.claude/concepts/`, and the Work Item Briefs under
+`.claude/work-items/`. It is not the `memory: project` agent memory under
+`.claude/agent-memory/`.
+
+- **Who reads it.** `/design-first` and the data-architect read it on every design, in every
+  memory state, including when memory is off.
+- **Who appends to it, and only after something was confirmed.** `/task` writes the brief and
+  the data-architect writes the contract. `/design-first` Steps 3 and 5 append to `JOURNAL.md`
+  only the critic findings you confirmed. `fullstack-code-reviewer` appends on a justified
+  contract divergence and, as janitor, to `MECHANISMS.md` and `VOCABULARY.md`. `/journal-add`
+  appends a manual lesson. The contract-critic appends only its Critique section to the contract under review, and never writes a registry.
+- **Who does neither.** A route with no design step (a direct edit of an extra-small or small
+  change, `/debug`, `/git-commit`, `/ship`) neither reads nor appends it. Not every flow
+  touches it.
+- **The Central Memory System only supplements it.** A memory item never replaces, hides or
+  skips a read of it, and a local entry wins a conflict until you decide.
+- **Where you meet it.** The seventh shipped working agreement states it at every session
+  start. `/auto-improve-finish-install` has a section for it, runs the doctor in report mode,
+  lists exactly what `--fix` would create, and runs `--fix` only after you say yes. Every line
+  `/design-first` Step 1.5 prints, in any state but `disabled`, ends with
+  `; design continues from the project history record (registries and concept contracts)`.
+
+### Architecture
+
+The memory capability makes the plugin a careful *client* of a **Central Memory System**: a
+separate product, in another repository, that holds engineering knowledge across projects and
+is reached only over MCP (Model Context Protocol). The plugin stores no memory, runs nothing
+in the background and adds no hook. It touches that system at two call sites only.
+
+```
+/flow  (or /task directly)
+  |
+  +-- /task               Work Item Brief      .claude/work-items/
+  |
+  +-- /design-first
+  |     Step 1.5   MEMORY CALL SITE 1: retrieve
+  |                status -> one retrieve call -> normalise -> you mark which items apply
+  |                -> the data-architect receives only the items you marked
+  |     Step 2..5  the data-architect drafts; you approve the concept contract
+  |
+  +-- /tdd-first, reviewers, /verify-before-done, /git-commit, /ship
+  |
+  (you merge the pull request)
+  |
+  +-- /pr-merged  (or /flow, at its Step 8)
+        records confirmation -> ONE writing run -> verdict "flipped"
+              |
+              +-- MEMORY CALL SITE 2: capture (its own separate question)
+                  asked only after the writing run returned flipped
+                  candidates -> you untick what not to send -> one send each
+                  -> receipts written to the linked brief -> records pull request
+```
+
+The two sites are different moments with different questions. Retrieval happens before the
+draft and is bound to non-trivial design. Capture happens after the delivery's writing run
+returned `flipped`, is **never** folded into the earlier records confirmation and is never
+built from the dry run. Under `/flow`, Step 8's single confirmation is unchanged and the
+capture question follows the writing run.
+
+**The memory boundary.** One file knows the Central Memory System's tool names and shapes:
+`.claude/scripts/memory_boundary.py`, the *Memory adapter*, with its tests in
+`.claude/scripts/tests/test_memory_boundary.py`. Everything else, the skills, the agents and
+the registries, says only "the configured retrieve tool" and "the configured capture tool". A
+scan in `test_plugin_text_scans.py` fails when any other shipped file names a memory tool.
+Every field the server returns is untrusted: the adapter validates it, caps it and strips
+anything that could pass as markup before an item is shown or written anywhere.
+
+**The configuration slots.** Nine rows in `.claude/project-profile.md`, all starting as
+placeholders, which read as off:
+
+| Slot | Meaning |
+|---|---|
+| `memory.server` | MCP server name. Unset turns memory off |
+| `memory.retrieve-tool` | tool name on that server that retrieves items |
+| `memory.capture-tool` | tool name that stores a captured item. Unset turns capture off |
+| `memory.shape` | which request and response shape the adapter speaks (`v0` is the first) |
+| `memory.project-key` | key that scopes memory to this project, or `none` |
+| `cloud.providers` | `azure`, `aws`, `gcp`, or `none`. `none` turns the cloud capability off |
+| `cloud.iac` | `terraform`, `bicep`, `docker`, `kubernetes`, or `none` |
+| `cloud.roots` | infrastructure source roots, or `none` |
+| `cloud.mcp-server` | external cloud-management MCP server name; a slot only, no adapter yet |
+
+Memory has three states. `disabled` (no server): nothing is printed and nothing is written.
+`unconfigured` (a server, but a missing retrieve tool or an unknown shape): one line is
+printed and recorded in the brief. `enabled`: retrieval runs, and capture runs only if the
+capture tool is also set.
+
+**MCP integration.**
+
+- **Main session only.** A configured MCP server is called from the main session, never from
+  a subagent. A plugin agent's tool line is fixed text and cannot name a server a project
+  chooses. Subagents receive results as findings passed to them.
+- **Tool names live in the slots**, not in any skill or agent.
+- **The shapes live in one script**, `memory_boundary.py`. A new response shape is one new
+  profile inside it plus a `memory.shape` value.
+- **One attempt, bounded by the host's MCP timeout.** There is no retry and no polling. An
+  error, a timeout or an absent tool is recorded as `unavailable`, printed as one line, and
+  design goes on. If a send fails during capture, sending stops and every remaining confirmed
+  candidate is recorded as not sent.
+
+**Lifecycle separation.** The Central Memory System owns an item's lifecycle (`proposed`,
+`validated`, `superseded`, `conflicting`). The plugin never changes an item's status. When it
+captures, it only claims `proposed`, at the weakest provenance the evidence supports
+(`user-decision` or `source-code-fact`; a manual or post-approval journal entry is never
+sent). A captured item is `global` or `project` scope: the registry tier gives the starting
+scope, and the project-name check can lower `global` to `project`, never the reverse. The
+brief records every item used and every item sent, with ids and versions, in its
+`## Memory used` section. It is also separate from three other things named "memory": agent
+memory under `.claude/agent-memory/`, the memory pager, and your private auto-memory.
+
+**Cloud engineering.** When `cloud.providers` names at least one provider, the plugin adds
+the `cloud-engineering` skill (provider references are read only for the providers you
+selected), the `cloud-engineer` agent, an infrastructure-as-code checklist in the security
+auditor, and deployment validation through the existing verification steps. The scope rule:
+they design, review, validate with non-mutating commands only, and troubleshoot. They **never
+run a deploy, apply, create, update or destroy command against a live environment**. They
+write it out, in a block labelled "for the user to run", and hand it to you. The plugin adds
+**no permission mechanism**: your normal Claude Code permission prompts and the existing
+destructive-operation guards apply to those commands unchanged.
+
+### Known limitations
+
+- **Shape `v0` is provisional.** It is a guess at what the Central Memory System returns, and
+  it can change when that system's interface is final.
+- **There is no capture retry.** A candidate recorded as not sent is not offered again
+  automatically.
+- **A changed item is found only when it is re-returned.** The change check compares retrieved
+  items with the briefs in the current worktree, which are a snapshot of the branch base.
+  An item that changed but is not returned by a later retrieval is not noticed, and briefs
+  merged later are not seen.
+- **An empty project-name token list keeps all capture project-scoped.**
+  `.claude/.project-tokens.json` ships with `"tokens": []`, and an empty or missing list fails
+  closed: every candidate is lowered to `project`. Fill the list to let a candidate stay
+  `global`.
+- **Cursor and Codex MCP naming is untested.** Only the Claude Code form of the tool id is
+  assumed, and not yet checked (next item).
+- **The tool id form and the host timeout are unverified.** The `mcp__<server>__<tool>` id form
+  and the host's MCP timeout returning an error are assumptions. The block 3 stub-server
+  trials, one with a stub server and one with a server that never answers, left no recorded
+  evidence (review item I3 of the t5 review). **A project should not set `memory.shape` until
+  that trial is run.**
+- **The cloud scope rule is enforced in text only.** The enforcement is the skill and agent
+  text, a text scan (`test_cloud_text_scans.py`), your own permission prompts and the existing
+  guards. Nothing in the plugin blocks a live-changing command by itself.
+- **A cloud-management MCP server is deferred.** `cloud.mcp-server` is a slot with no adapter;
+  nothing calls it.
 
 ## Quick start in a new project
 
@@ -1077,7 +1311,7 @@ would ship the part that can be wrong and leave behind the part that would say s
    you wrote.
 
    *By hand instead:* the profile is the only file you must author to make the
-   fourteen agents correct, and it is required under a plugin install too. A generic agent
+   fifteen agents correct, and it is required under a plugin install too. A generic agent
    cites a slot by name rather than a literal path, so every slot must be present, and an
    empty slot reads `none`.
 
@@ -1146,7 +1380,7 @@ project ships an empty `contractLanding` block in `.claude/work-item-conventions
 stops with `landing-not-configured` until the project declares its own verification steps.
 
 The rules live in `.claude/scripts/pr_merged.py`, which both a person and a caller invoke, so
-neither can drift from the other. It carries 575 tests.
+neither can drift from the other. It carries 761 tests.
 
 ### What it will refuse to do
 

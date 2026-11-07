@@ -47,6 +47,34 @@ def squash(text: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def records_step_labels(text: str) -> list[str]:
+    """Labels of the top-level steps in the "### The records pull request" section, in file order.
+
+    Takes the file's text, not a path, so a reviewer can run it on a `git show` copy of an older file.
+    Works line by line on the raw text, never through squash/flat/section (those would merge step 5a's
+    indented sub-steps into the list). Only column-0 lines such as "6. **" or "5a. **" count; indented
+    sub-steps and anything inside a fenced code block do not.
+    """
+    labels: list[str] = []
+    in_section = False
+    in_fence = False
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if not in_section:
+            in_section = line == "### The records pull request"
+            continue
+        if line.startswith("### "):
+            break
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = re.match(r"^(\d+a?)\. \*\*", line)
+        if match:
+            labels.append(match.group(1))
+    return labels
+
+
 class TextCase(unittest.TestCase):
 
     def read(self, rel: str) -> str:
@@ -356,6 +384,66 @@ class LayoutWarningSkillTextTests(TextCase):
                and re.search(r"after|next", p, re.I)]
         self.assertTrue(hit, "skills/pr-merged/SKILL.md: after a recording run, run --status to see the "
                              "layout_warnings (a recording run never prints them)")
+
+
+class CaptureAtDeliveryTextTests(TextCase):
+    """Sub-task 4 of the memory contract (.claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md,
+    Extension Points, "/pr-merged step 5a" and "/flow"). Nothing above pins the amended sentences, so these
+    pin them in the same block: the records confirmation stays before the writing run, and the one capture
+    question follows the writing run that flipped, on both routes."""
+
+    CC = "skills/pr-merged/references/contract-completion.md"
+    SENTENCE = ("when memory capture is enabled and candidates exist, one separate capture question follows "
+                "the writing run that flipped")
+
+    def test_both_routes_say_the_capture_question_follows_the_writing_run_that_flipped(self):
+        for rel in (self.CC, "skills/flow/SKILL.md"):
+            with self.subTest(file=rel):
+                self.assertIn(self.SENTENCE, self.flat(rel))
+
+    def test_the_records_confirmation_still_comes_before_any_writing_run(self):
+        self.assertIn("the confirmation always comes before any writing run", self.flat(self.CC))
+        self.assertIn("Step 8's confirmation stays BEFORE the writing run and is unchanged",
+                      self.flat("skills/flow/SKILL.md"))
+
+    def test_step_5a_is_after_the_flip_never_from_a_dry_run_and_never_blocks(self):
+        step = self.section(self.CC, "5a. **Capture", "6. **Put the stable branch")
+        self.assertMatches(r"never built from a dry run", step, "capture is never built from a dry run")
+        self.assertMatches(r"never folded into step 3", step, "capture never joins the records confirmation")
+        self.assertIn("capture-candidates", step)
+        self.assertIn("--receipts --run-report", step)
+        self.assertIn("Not sent: (stopped after <reason>)", step, "the stop rule is stated")
+        self.assertMatches(r"No outcome of this step blocks the records pull request", step, "capture never blocks")
+        self.assertMatches(r"before step 7 copies the files", step, "receipts are recorded before the copy")
+        self.assertIn("../design-first/references/central-memory.md", step)
+
+    EXPECTED_STEPS = ["1", "2", "3", "4", "5", "5a", "6", "7", "8", "9"]
+
+    def test_the_records_steps_are_one_to_nine_with_5a_each_exactly_once_in_order(self):
+        self.assertEqual(records_step_labels(self.read(self.CC)), self.EXPECTED_STEPS)
+
+    def test_records_step_labels_control_reports_a_planted_duplicate_and_skips_sub_steps(self):
+        # records_step_labels takes text, not a path, so a reviewer can run it on a `git show` copy of an older file.
+        fixture = "\n".join([
+            "### Before", "1. **Not in the section**", "### The records pull request", "1. **One**",
+            "5a. **Capture**", "   1. **Read the candidates**", "```", "1. **inside a fence**", "```",
+            "   6. **No outcome**", "6. **Six**", "### After", "7. **Not in the section**", ""])
+        self.assertEqual(records_step_labels(fixture), ["1", "5a", "6"], "indented and fenced lines are not counted")
+        planted = fixture.replace("### After", "6. **Six again**\n### After")
+        self.assertEqual(records_step_labels(planted), ["1", "5a", "6", "6"])
+        self.assertNotEqual(records_step_labels(planted), ["1", "5a", "6"], "a planted second 6 is reported")
+
+    def test_flow_lists_the_capture_question_and_commits_the_brief_after_the_receipts(self):
+        flat = self.flat("skills/flow/SKILL.md")
+        operator = self.section("skills/flow/SKILL.md", "**Always the operator's call", "**Retry budget")
+        self.assertIn("capture question", operator, "the capture question is among the operator's calls")
+        self.assertIn("Step 8 commits the brief only after the receipts are recorded", flat)
+
+    def test_pr_merged_skill_reads_the_shared_memory_reference(self):
+        self.assertIn("../design-first/references/central-memory.md", self.flat("skills/pr-merged/SKILL.md"))
+
+    def test_journal_add_is_untouched_by_capture(self):
+        self.assertNotIn("capture-candidates", self.flat("skills/journal-add/SKILL.md"))
 
 
 class VocabularyTextTests(TextCase):

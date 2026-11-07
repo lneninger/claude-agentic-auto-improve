@@ -1,0 +1,32 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/236
+number: 236
+head_ref: feature/memory-client-and-cloud-engineering
+base_ref: master
+base_is_default: true
+commit: 1d378b2708ebc44481fedbc35f67eb989ba9f502
+merged_at: '2026-11-04T13:21:16Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-04T16:08:53.626371+00:00'
+blocks_recorded: []
+blocks_already_recorded:
+- t1-profile-slots
+- t2-memory-adapter-and-degradation-tests
+- t3-retrieval-at-design-time
+- t4-capture-at-delivery
+- t5-review-memory-boundary
+- t6-cloud-skill-and-provider-references
+- t7-cloud-agent-and-review-coverage
+- t8-review-cloud-capability
+- t9-documentation
+- t10-review-documentation
+- t12-cloud-agent-skill-load-fix
+- t13-re-review-cloud-capability
+- t14-memory-boundary-review-fixes
+- t15-project-history-record-in-host-onboarding
+- t16-re-review-memory-boundary
+- t17-merge-the-default-branch-into-the-parent-branch
+- t18-review-merge-and-text-fixes
+- t19-fix-merged-records-steps-and-tree-counts
+- t20-re-review-merge-fix

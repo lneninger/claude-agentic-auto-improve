@@ -61,6 +61,8 @@ would drift the moment either changed.
 
 When a run that names a contract applies, read `references/contract-completion.md` in full before continuing. If it cannot be read, stop and report the missing file; do not continue from memory.
 
+When a writing run returns `flipped` and memory capture is enabled, that reference's step 5a asks one separate capture question and records the receipts in the linked brief. It reads `../design-first/references/central-memory.md` for the ground rules shared with `/design-first` Step 1.5. Step 5a is never built from a dry run, never joins the records confirmation, and no outcome of it blocks the records pull request.
+
 ```bash
 py -3 "$PRM" --contract <slug|path> --pr <n|link> [--pr <n|link> ...] --json
 py -3 "$PRM" --contract <slug|path> --status --json   # read-only

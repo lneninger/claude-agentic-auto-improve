@@ -1,0 +1,1 @@
+- [Worktree shell and probe habits](worktree-shell-and-probe-habits.md) — scratch scripts outside repo, background the slow scripts discover first, no concurrent hook suites

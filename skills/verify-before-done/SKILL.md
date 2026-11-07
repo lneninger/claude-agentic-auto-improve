@@ -259,6 +259,40 @@ If `VAL` comes back empty, say the lint could not run (the plugin's script was n
 - **0:** the step passes. `advisory:` lines in the output (a dead path reference, a legacy entry, a project that is not yet on registry layout 2) are reported as written, and they do **not** make the verdict NOT-READY.
 - **2:** the lint could not run; show its message and report Step 5.6 as `NOT RUN`.
 
+## Step 5.8: The codegraph add-on's settings check
+
+Run this step only when `.claude/settings.json` has a row for `codegraph-first-guard.py` (the project installed the `codegraph` add-on). Otherwise skip it.
+
+The check is `auto_improve_finish_install.py addon --name codegraph --project . --check --json`. It only reads. It finds the script the same way the install skill does (the project copy, then `CLAUDE_PLUGIN_ROOT`, then what Claude Code recorded for the plugin, then the newest cache folder):
+
+```bash
+FI=
+S=.claude/scripts/auto_improve_finish_install.py
+if [ -f "$S" ]; then FI=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then FI=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  FI=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$FI" addon --name codegraph --project . --check --json   # macOS and Linux: python3
+```
+
+**If `FI` is empty, say so and report "could not check" for this step. Never report READY on it.** Then read the exit code:
+
+- `0`: the settings allow `mcp__codegraph__*` and name no single tool. The step passes.
+- `1`: findings. `codegraph-wildcard-missing` (no settings layer allows the wildcard) or `codegraph-tool-named` (a layer's `permissions.allow` names one CodeGraph tool; the answer names the entry and the file). **NOT READY.** Tell the user to run `/auto-improve-codegraph-install` or to replace the entry with `mcp__codegraph__*` by hand.
+- `2`: it could not check (a settings layer is unreadable or malformed). **NOT READY.** Say which file the answer names.
+
 ## Step 6: HANDOFF completeness check
 
 If the caller is an agent producing a `### HANDOFF` block (see `.claude/HANDOFF_SCHEMA.md`), verify:
