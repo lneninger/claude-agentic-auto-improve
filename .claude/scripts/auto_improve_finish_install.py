@@ -94,6 +94,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2477,9 +2478,10 @@ def _plan_stylesheet(project: Path, folder: Path, manifest: Dict[str, Any], rels
 
 _WORKTREE_MARKER_RE = re.compile(r"/\.claude/worktrees(?:[.\ ]*|:[^/]*)/[^/]+", re.IGNORECASE)
 UNDECIDABLE_TREE_NOTE = (
-    "the shared helper _project_paths.py beside these scripts is older than the scripts (it has no "
-    "worktree_own_root), so this tree is treated as undecidable and no index-ownership verdict is given. Bring "
-    "the hooks folder to the same release as the scripts")
+    "the shared helper _project_paths.py beside these scripts is older than the scripts (it has no hop "
+    "refusal: TREE_HOP_REFUSAL is not True and it lacks _hop_allowed or worktree_own_root), so this tree is "
+    "treated as undecidable and no index-ownership verdict is given. Bring the hooks folder to the same release "
+    "as the scripts")
 
 
 def _permission_grants(manifest: Dict[str, Any]) -> List[str]:
@@ -2507,14 +2509,32 @@ def _named_tool_findings(layers: List[Tuple[str, Path, Any]], grants: Sequence[s
     return findings
 
 
+_ENTRY_UNSAFE_CATEGORIES = ("Cf", "Cc", "Cs", "Zl", "Zp")  # format (bidi, zero-width, soft hyphen), control, surrogate, separators
+_ENTRY_SHOWN_MAX = 200
+
+
+def _entry_shown(entry: str) -> str:
+    """A settings entry as echoed in a refusal: control, format (bidi, zero-width, soft hyphen), surrogate and line or
+    paragraph separator characters and backticks escaped (the entry stays inside its own finding line, cannot close the
+    code span, and cannot reorder or hide text), and capped in length. It is text from a file the user may not own."""
+    def one(ch: str) -> str:
+        invisible = ch == "͏" or "︀" <= ch <= "️" or "\U000e0100" <= ch <= "\U000e01ef"  # Mn, but invisible
+        if ch != "`" and not invisible and unicodedata.category(ch) not in _ENTRY_UNSAFE_CATEGORIES:
+            return ch
+        return "\\x%02x" % ord(ch) if ord(ch) < 0x80 else "\\u%04x" % ord(ch) if ord(ch) < 0x10000 else "\\U%08x" % ord(ch)
+    shown = "".join(one(ch) for ch in entry)
+    return shown if len(shown) <= _ENTRY_SHOWN_MAX else shown[:_ENTRY_SHOWN_MAX] + "..."
+
+
 def _tool_named_refusal(findings: List[Dict[str, str]], name: str, grants: Sequence[str]) -> Result:
-    listed = "; ".join("%s in %s" % (f["entry"], f["file"]) for f in findings)
+    listed = "\n".join("`%s` in the %s layer (%s)" % (_entry_shown(f["entry"]), f["layer"], f["file"]) for f in findings)
     return refusal(
         "codegraph-tool-named",
-        "a settings layer's permissions.allow names an individual tool (%s). A server's tools change from one "
-        "release to the next, so a named tool can stop matching and silently leave the agent without access. "
-        "Replace the entry with %s and run this again; nothing was written for the %s add-on"
-        % (listed, " / ".join(grants), name), findings[0]["file"])
+        "a settings layer's permissions.allow names an individual tool. A server's tools change from one release "
+        "to the next, so a named tool can stop matching and silently leave the agent without access:\n%s\n"
+        "One step fixes it: replace each entry above with `%s`, which covers every CodeGraph tool, including "
+        "future ones, and run this again. Nothing was written for the %s add-on."
+        % (listed, "` / `".join(grants), name), findings[0]["file"])
 
 
 def check_addon(
@@ -2544,7 +2564,7 @@ def check_addon(
     return {"status": "checked", "add-on": name, "ok": not findings, "findings": findings,
             "layers": [str(path) for _layer, path, _data in layers],
             "message": ("the settings allow %s and name no single tool" % " / ".join(grants)) if not findings else
-            "; ".join("%s: %s (%s)" % (f["code"], f["entry"], f["file"]) for f in findings)}
+            "; ".join("%s: %s (%s)" % (f["code"], _entry_shown(f["entry"]), f["file"]) for f in findings)}
 
 
 def _has_project_index(folder: str) -> bool:
@@ -2605,7 +2625,7 @@ def _codegraph_index_notes(project: Path) -> List[str]:
     """The preview's index-ownership note: the same rule the guard applies (Index ownership), from ``.git`` entries
     and ``stat`` calls only. Empty when the project's tree owns an index."""
     api = _launcher_api()
-    if api is None or not getattr(api, "WORKTREE_OWN_ROOT_NATIVE", False):
+    if api is None or getattr(api, "TREE_HOP_REFUSAL", False) is not True:
         return [UNDECIDABLE_TREE_NOTE]
     here = os.path.abspath(str(project))
     own_root, tree_kind, main_root = api.worktree_own_root, api.tree_kind, api.main_checkout_root
@@ -3609,7 +3629,8 @@ def _render_text(result: Result) -> str:
         return "REFUSED %s: %s\n  path: %s" % (result["code"], result["message"], result["path"])
     out = ["status: %s" % result.get("status")]
     for finding in result.get("findings", []):
-        out.append("  finding %s: %s (%s)" % (finding.get("code"), finding.get("entry"), finding.get("file")))
+        out.append("  finding %s: %s (%s)" % (finding.get("code"), _entry_shown(str(finding.get("entry"))),
+                                                    finding.get("file")))
     allow = result.get("permissions-allow")
     if allow:
         out.append("permissions.allow: add %s; already listed %s" % (", ".join(allow["add"]) or "none",

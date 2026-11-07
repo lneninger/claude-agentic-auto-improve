@@ -365,10 +365,12 @@ def make_tree() -> dict:
     af.plant_index(repo)
     for project_tree in (repo, wt, wt2):
         af.plant_server(project_tree)
-    # Fixture home and temp folder of the codegraph rows (codegraph_env): the developer's machine is never read.
+    # Fixture home (with its AppData/Local, the Windows base of the Per-user session parent) and temp folder of the
+    # codegraph rows (codegraph_env): the developer's machine is never read.
     cghome = root / "cghome"
     cgtmp = root / "cgtmp"
     cghome.mkdir(parents=True, exist_ok=True)
+    (cghome / "AppData" / "Local").mkdir(parents=True, exist_ok=True)
     cgtmp.mkdir(parents=True, exist_ok=True)
     _CG.update({"home": cghome, "tmp": cgtmp})
 
@@ -399,14 +401,16 @@ def _new_sid() -> str:
 
 
 def codegraph_env(env: dict) -> dict:
-    """The environment of a codegraph row: HOME, USERPROFILE and CLAUDE_CONFIG_DIR at a fixture home folder, TMP and
-    TEMP at a fixture temp folder. ``base_env`` is unchanged, so the concept-gate, bash-gate and
+    """The environment of a codegraph row: HOME, USERPROFILE and CLAUDE_CONFIG_DIR at a fixture home folder,
+    LOCALAPPDATA at <home>/AppData/Local and XDG_CACHE_HOME at <home>/.cache (the Per-user session parent is inside
+    the fixture), TMP and TEMP at a fixture temp folder. ``base_env`` is unchanged, so the concept-gate, bash-gate and
     db-destructive-guard rows keep the real home and task G (the real-home leak check) can still fail for them."""
     out = dict(env)
     home, tmp = _CG.get("home"), _CG.get("tmp")
     if home is None or tmp is None:
         raise RuntimeError("codegraph_env: make_tree has not run, there is no fixture home or temp folder")
     out.update({"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_CONFIG_DIR": str(home),
+                "LOCALAPPDATA": str(Path(home) / "AppData" / "Local"), "XDG_CACHE_HOME": str(Path(home) / ".cache"),
                 "TMP": str(tmp), "TEMP": str(tmp), "TMPDIR": str(tmp)})
     return out
 
@@ -1170,19 +1174,20 @@ def run_bash_gate_cases(tree: dict) -> None:
 # ===========================================================================
 # codegraph-first-guard (C1-C12)
 # ===========================================================================
-# Issue #259: the Turn marker is turn.json in the SESSION's folder under the system temp folder
-# (<TMP>/auto-improve-codegraph-<session_id>/), not <cwd>/.claude/.codegraph-used-this-turn. Each case that needs a
+# Issues #259 and #271: the Turn marker is turn.json in the SESSION's folder under the Per-user session parent
+# (<LOCALAPPDATA>\auto-improve-codegraph\ or <XDG_CACHE_HOME>/auto-improve-codegraph/, here inside the fixture home
+# tree["cghome"]), never the system temp folder and not <cwd>/.claude/.codegraph-used-this-turn. Each case that needs a
 # marker names its own session_id and writes/removes the marker for that session only.
 def _with_sid(payload: dict, session_id: str) -> dict:
     return dict(payload, session_id=session_id)
 
 
 def _write_marker(tree: dict, session_id: str) -> None:
-    af.write_marker(tree["cgtmp"], session_id)
+    af.write_marker(af.session_parent(tree["cghome"]), session_id)
 
 
 def _remove_marker(tree: dict, session_id: str) -> None:
-    af.remove_marker(tree["cgtmp"], session_id)
+    af.remove_marker(af.session_parent(tree["cghome"]), session_id)
 
 
 def _legacy_sentinel(directory: Path) -> Path:
@@ -2259,9 +2264,11 @@ def run_helper_cases() -> None:
 # ===========================================================================
 def main() -> int:
     home_before = snapshot_real_home_logs()
-    # Issue #259 review (W5): the CodeGraph hooks keep their Session folders in the system temp folder. Like task G for the
-    # home logs, snapshot the REAL temp folder's auto-improve-codegraph-* names now and fail on any new one at the end.
+    # Issues #259 (W5) and #271: the CodeGraph hooks keep their Session folders under the Per-user session parent and never
+    # in the system temp folder. Like task G for the home logs, snapshot the REAL parent's AND the REAL temp folder's
+    # auto-improve-codegraph-* names now and fail on any new one in either at the end.
     real_temp_before = af.real_temp_codegraph_entries()
+    real_parent_before = af.real_parent_codegraph_entries()
 
     tree = make_tree()
     try:
@@ -2304,6 +2311,11 @@ def main() -> int:
         check(
             f"the REAL temp folder ({af.REAL_TEMP}) gained no auto-improve-codegraph-* entry during this run",
             not leaked, f"new entries: {leaked}",
+        )
+        leaked_parent = sorted(af.real_parent_codegraph_entries() - real_parent_before)
+        check(
+            f"the REAL per-user session parent ({af.REAL_PARENT}) gained no auto-improve-codegraph-* entry during this run",
+            not leaked_parent, f"new entries: {leaked_parent}",
         )
         shutil.rmtree(tree["root"], ignore_errors=True)
 

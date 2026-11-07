@@ -1,3 +1,4 @@
 - [Concept gate blocks scratch harness](concept-gate-blocks-scratch-harness.md) — no .py scratch files; mutation verdicts by reading, stated as not executed
 - [Mutation scratch environment](reference_mutation_scratch_env.md) — scratch must live under .claude/scratch; TEMP and bash scripts are blocked
 - [Swap tests vs abort-on-failure deleters](swap-tests-vs-abort-on-failure.md) — first-processed file must exist at swap target, else re-check is untested
+- [Verdict levels and no CI](verdict-levels-and-no-ci.md) — fence each verdict level separately; no CI, so POSIX/root rows never run here

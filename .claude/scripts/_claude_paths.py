@@ -193,11 +193,15 @@ def _inline_worktree_own_root(path):
 
 
 # worktree_own_root is looked up with getattr: a `_project_paths.py` from an earlier release imports cleanly and
-# lacks it, so a bare attribute read would raise AttributeError at import. WORKTREE_OWN_ROOT_NATIVE tells a caller
-# whether the helper beside these scripts really has it (the installer then treats a missing helper as undecidable).
+# lacks it, so a bare attribute read would raise AttributeError at import. TREE_HOP_REFUSAL is the Hop proof computed
+# on the helper beside these scripts: the helper declares the constant, or it has the 0.15.2 shape (_hop_allowed and
+# worktree_own_root both callable). worktree_own_root below is the helper's only when the helper provides it, otherwise
+# the inline copy; the constant says nothing about which release the helper is (the same expression gates the
+# codegraph guard and the installer).
 _native_own_root = getattr(_pp, "worktree_own_root", None)
-WORKTREE_OWN_ROOT_NATIVE = callable(_native_own_root)
-worktree_own_root = _native_own_root if WORKTREE_OWN_ROOT_NATIVE else _inline_worktree_own_root
+TREE_HOP_REFUSAL = getattr(_pp, "TREE_HOP_REFUSAL", False) is True or (
+    callable(getattr(_pp, "_hop_allowed", None)) and callable(_native_own_root))
+worktree_own_root = _native_own_root if (TREE_HOP_REFUSAL and callable(_native_own_root)) else _inline_worktree_own_root
 # The Project hook launcher (Revision 9): the one source text, the row builder and the row reader.
 # PROJECT_HOOK_LAUNCHER_SOURCE is a constant, not a call-time function: it is fixed text.
 PROJECT_HOOK_LAUNCHER_SOURCE = _pp.PROJECT_HOOK_LAUNCHER_SOURCE
@@ -226,7 +230,7 @@ __all__ = [
     "tree_kind",
     "main_checkout_root",
     "worktree_own_root",
-    "WORKTREE_OWN_ROOT_NATIVE",
+    "TREE_HOP_REFUSAL",
     "installed_plugin_root",
     "PROJECT_HOOK_LAUNCHER_SOURCE",
     "project_hook_launcher_row",

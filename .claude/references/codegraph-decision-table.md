@@ -104,31 +104,35 @@ or `codegraph init -i`.
 ## When the `codegraph` add-on is installed
 
 A project that ran `/auto-improve-codegraph-install` has the block back, as three hooks that share
-one session folder, `<system temp folder>/auto-improve-codegraph-<session id>/`:
+one session folder, `<Per-user session parent>/auto-improve-codegraph-<session id>/`. The Per-user session
+parent is `%LOCALAPPDATA%\auto-improve-codegraph\` on Windows and `$XDG_CACHE_HOME/auto-improve-codegraph/`
+(else `~/.cache/auto-improve-codegraph/`, mode `0700`) on POSIX; the system temp folder is never used:
 
 | Hook | Event | Effect |
 |---|---|---|
 | `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the session's `turn.json` marker is missing, the target is a source path and CodeGraph is available. The message says to ask CodeGraph through a `mcp__codegraph__*` tool. |
 | `codegraph-turn-tracker.py` | PostToolUse on `mcp__codegraph__*` | Writes the session's `turn.json` marker, whatever the tool is called. |
-| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the marker and the retry tickets, so every new user turn opens a fresh investigation budget. It also prunes old session folders in the temp folder, once per session. |
+| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the marker and the retry tickets, so every new user turn opens a fresh investigation budget. It also prunes old session folders in that parent, once per session. |
 
 The marker belongs to the session, not to a directory, so `cd` or `EnterWorktree` does not close the
 gate again.
 
 **The installed guard fails open when CodeGraph is provably unavailable.** It lets the read through,
 prints `[codegraph-first-guard] allowed (fail-open:<reason>)` and logs one record per session per
-reason, for these reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or the
+reason. While the session folder cannot be used, these lines print on every call and nothing is logged. The reasons are: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or the
 main checkout; CodeGraph's own per-user `~/.codegraph` has no `codegraph.db` and does not count),
 `index-other-tree` (a linked worktree without its own index, whose only index belongs to the main
 checkout, so its answers would be stale), `server-not-configured`, `server-disabled`, and `subagent`
-(the payload carries an `agent_id`). `state-unwritable` covers an unusable session folder. A subagent
+(the payload carries an `agent_id`). An unusable session folder blocks with `session-state-unusable` and offers no retry. A subagent
 shares its parent's session, so a CodeGraph call by either opens the gate for both until the next
 prompt.
 
 **The retry escape.** In any other session where no `mcp__codegraph__*` tool is available (a
 background session, say), repeat the blocked call once, exactly: it is allowed and logged as
-`retry-escape`. A different call is blocked again, and the next prompt clears the escape. There is no
-bypass variable.
+`retry-escape`. A different call is blocked again, and the next prompt clears the escape. Not after a
+`session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was
+not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is
+allowed. There is no bypass variable.
 
 **Ways out.** Run `/auto-improve-codegraph-uninstall` and start a new session. To stop the block for
 good, that uninstall skill removes the three hooks' rows from the project's `settings.json`; only when
@@ -154,7 +158,7 @@ real ones, while `codegraph status` says "up to date". **Trust it for relationsh
 existence or inventories.** Confirm on disk before asserting a file exists or that a count is
 complete.
 
-**The gate used to have no escape without an index.** Before 0.7.0 the hook hard-blocked `Read`/`Grep`/`Glob` when the MCP server was absent, which is one reason it was retired, and the add-on's copy did the same until 0.15.2. It now fails open and offers the retry escape; see "When the `codegraph` add-on is installed" above.
+**The gate used to have no escape without an index.** Before 0.7.0 the hook hard-blocked `Read`/`Grep`/`Glob` when the MCP server was absent, which is one reason it was retired, and the add-on's copy did the same until 0.15.2. It now fails open and offers the retry escape (since 0.15.3, an unusable session folder blocks); see "When the `codegraph` add-on is installed" above.
 
 ## Index health
 

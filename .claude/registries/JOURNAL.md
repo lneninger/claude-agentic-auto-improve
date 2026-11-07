@@ -443,6 +443,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract or addendum asks a test to compare against "HEAD's", "the current", or "the last release's" copy of a file that the same change edits
 - **Tags:** test-fixture, older-helper, git-show, head, self-invalidating-test
 
+### 2026-11-06 — An exception sentence that names the outcome of a later call must list every outcome that call can have
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md
+- **Lesson:** The contract's E1 and I-7b sentences say the repeat after a `retry-ticket-unwritten` block "is blocked once more (as `source-target`)". The guard's step 8 gives `ambiguous-target` when every target is of the unknown class (a Grep with only a pattern, a generic Glob), so the sentence is false for those calls at ten shipped sites and in the guard's own banner. Before you write a sentence that predicts which reason a later call gets, read the branch that picks the reason and name every value it can return, or name the outcome without the reason ("blocked once more, this time with the retry recorded").
+- **Apply when:** a contract adds a message or doc sentence that predicts the block reason, exit code or log event of a future call
+- **Tags:** guard-message, block-reason, exception-sentence, doc-drift
+
+### 2026-11-06 — Judge a drive letter with a no-I/O check before any realpath, because realpath of a mapped drive can block
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-06-session-folder-owner-and-tool-named.md
+- **Lesson:** The contract assumed `os.path.realpath` of a mapped network drive returns `\\server\share` (ASSUMED, to be recorded). The recorded row found a real mapped `Z:` on the developer machine (`net use`: Disconnected), and `os.path.realpath('Z:\\')` gave no answer in 10 seconds; measured again, `realpath('Z:\\x')` took 21.1 s and returned `Z:\x` unchanged, not the share, so the rule judged it local. A hook that resolves a drive before judging it can hang until the host's hook timeout, and a timed-out hook is a non-blocking error, which is an allow. When a rule must decide whether a drive letter is remote, ask the local drive table first (`GetDriveTypeW`, no network I/O) and refuse `DRIVE_REMOTE` there. Call `realpath` only after that check, and only for a drive the table calls fixed.
+- **Apply when:** a contract adds a Windows path rule that calls `realpath`, `resolve()`, `samefile` or any opening call on a path whose drive letter may be a mapped network drive, inside a hook with a timeout
+- **Tags:** windows, mapped-drive, realpath, hook-timeout, fail-closed
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->

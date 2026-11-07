@@ -1,1 +1,5 @@
+- [Device-path .. collapse and strict stderr](device-path-dotdot-and-strict-stderr.md) — \\.\C:\..\UNC passes ?c: check; utf-8 reconfigure makes surrogates fail open
+- [Doubled separator and \??\ spellings](doubled-separator-and-nt-prefix-spellings.md) — \\.\\Z: and \??\UNC pass remote rules; cp1252 stdin; block() pre-try raise
+- [Rooted drive-less base and letterless volume](rooted-driveless-and-letterless-volume.md) — \x isabs on 3.12 skips drive table; \\\?\Z: and \\?z: judged local; Volume{} realpath walls
+- [Realpath-form letter and bare device drive](realpath-form-letter-and-bare-device-drive.md) — drive table skipped for realpath's Z:\ fallback; \\?\C: joins rootless; GetFullPathNameW fuzz oracle
 - [UNC host check vs normpath collapse](unc-host-check-normpath-collapse.md) — check the host after normpath; \\?\UNC\a\..\b becomes host b; older-helper probes precede caller checks

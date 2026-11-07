@@ -70,12 +70,12 @@ Every command below is `$PY "$FI" addon --name codegraph --project . ...`.
 Three hooks work together:
 
 - `codegraph-first-guard.py` runs before `Read`, `Grep` and `Glob`. It blocks a call on a source-code path while no CodeGraph tool has run in this turn. Markdown, JSON, YAML and a few other file kinds are always allowed.
-- `codegraph-turn-tracker.py` runs after any `mcp__codegraph__*` tool. It writes the marker `turn.json` in the session's folder under the system temp folder (`auto-improve-codegraph-<session id>/`), which opens the gate. The marker belongs to the session, so a `cd` or `EnterWorktree` does not close the gate again.
-- `codegraph-turn-reset.py` runs at each new prompt and deletes the marker and any retry ticket, so every turn starts closed. Once per session it also prunes old session folders in the temp folder.
+- `codegraph-turn-tracker.py` runs after any `mcp__codegraph__*` tool. It writes the marker `turn.json` in the session's folder (`auto-improve-codegraph-<session id>/`) under the Per-user session parent (`%LOCALAPPDATA%\auto-improve-codegraph\` on Windows, `~/.cache/auto-improve-codegraph/` or `$XDG_CACHE_HOME/auto-improve-codegraph/` on POSIX, mode `0700`), which opens the gate. The marker belongs to the session, so a `cd` or `EnterWorktree` does not close the gate again. The system temp folder is never read, written or pruned.
+- `codegraph-turn-reset.py` runs at each new prompt and deletes the marker and any retry ticket, so every turn starts closed. Once per session it also prunes old session folders in that parent.
 
 It needs two helpers, `.claude/hooks/_project_paths.py` and `.claude/hooks/_error_log.py`, which the install copies only if the project lacks them.
 
-**The guard is a nudge, never a wall.** It lets a read through, prints one `allowed (fail-open:<reason>)` line and logs it, when CodeGraph is provably unavailable. There are five reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or the main checkout; a `.codegraph` folder without `codegraph.db` is not an index), `index-other-tree` (a linked worktree with no index of its own, whose only index belongs to the main checkout), `server-not-configured`, `server-disabled`, and `subagent`. In any other session with no CodeGraph tool, **repeat the identical blocked call once**: it is allowed and logged as a retry escape, and the next prompt clears it.
+**The guard lets reads through when CodeGraph is provably unavailable.** It lets a read through, prints one `allowed (fail-open:<reason>)` line and logs it, when CodeGraph is provably unavailable. While the session folder cannot be used, these lines print on every call and nothing is logged. There are five reasons: `no-index` (no `.codegraph/codegraph.db` in the project, its parents or the main checkout; a `.codegraph` folder without `codegraph.db` is not an index), `index-other-tree` (a linked worktree with no index of its own, whose only index belongs to the main checkout), `server-not-configured`, `server-disabled`, and `subagent`. In any other session with no CodeGraph tool, **repeat the identical blocked call once**: it is allowed and logged as a retry escape, and the next prompt clears it. Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed. An unusable session folder blocks (`session-state-unusable`), says why and how to fix it.
 
 **The permission entry.** The install also adds `mcp__codegraph__*` to the project's `permissions.allow`, inside the same preview and plan hash (the preview's `permissions-allow` field and its `unified-diff` show it). It never adds a single tool's name. The uninstall keeps the entry.
 
@@ -153,11 +153,11 @@ back). Tell the user to add `.claude/settings.json.bak-*` to `.gitignore`.
 
 If the answer says `nothing-to-do`, the add-on was already installed. Nothing was written.
 
-The guard has no bypass variable. In a session with no `mcp__codegraph__*` tool, repeat the blocked call once (the retry escape) and it is allowed and logged; `/auto-improve-codegraph-uninstall` followed by a new session takes the guard out.
+The guard has no bypass variable. In a session with no `mcp__codegraph__*` tool, repeat the blocked call once (the retry escape) and it is allowed and logged. Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed. `/auto-improve-codegraph-uninstall` followed by a new session takes the guard out.
 
-**Upgrading an install from before 0.15.2.** The old hook files differ from the new ones, so this skill refuses with `addon-file-differs`. The route is: run `/auto-improve-codegraph-uninstall` (it deletes an unedited old copy through the manifest's released hashes and keeps an edited one), run this skill, then start a new session. `addon --name codegraph --check` then confirms the permission entry.
+**Upgrading an install from before 0.15.3.** The old hook files differ from the new ones, so this skill refuses with `addon-file-differs`. The route is: run `/auto-improve-codegraph-uninstall` (it deletes an unedited old copy through the manifest's released hashes and keeps an edited one), run this skill, then start a new session. `addon --name codegraph --check` then confirms the permission entry.
 
-A project with a CodeGraph index builds it with the `codegraph` command line tool (`codegraph init -i`). This skill does not build the index.
+A project with a CodeGraph index builds it with the `codegraph` command line tool: this skill builds an index only on a yes to its offer in Step 2 (`codegraph init -i`); otherwise the user runs it.
 
 ### Refusals
 
@@ -173,14 +173,19 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 - `write-failed`: for example `.claude/settings.json` is a symbolic link, or `.claude` or
   `.claude/hooks` is a link (a junction on Windows) to another folder. Nothing was written.
   Tell the user to edit the file the link points to by hand, or to replace the link with a real folder.
-- `codegraph-tool-named` (exit `2`): a settings layer's `permissions.allow` names an individual CodeGraph tool. The message lists each entry and the file it is in. The user replaces it with `mcp__codegraph__*` by hand, then runs this again. Nothing was written.
+- `codegraph-tool-named` (exit `2`): a settings layer's `permissions.allow` names an individual CodeGraph tool. The message lists each entry with its layer (`user`, `project` or `local`) and the file it is in, then the one step that fixes it: the user replaces each entry with `mcp__codegraph__*`, which covers every CodeGraph tool, including future ones, by hand, then runs this again. Nothing was written.
 - `plugin-source-checkout`: this folder is the plugin's own checkout. Install an add-on in a
   project that uses the plugin instead.
 - `addon-unknown`: the name matches no add-on folder in the plugin.
 
+Two more names are not installer refusals: they are the guard's own block reasons, which the user may meet after the install.
+
+- `session-state-unusable`: the Per-user session parent or the session folder cannot be used (a link, a file, another user's folder, a folder open to other users, a network path (this check runs on Windows only), an unset or relative `LOCALAPPDATA` on Windows, a relative `XDG_CACHE_HOME`, or neither `XDG_CACHE_HOME` nor `HOME` set). The guard blocks, names the folder, the problem and its fix, and offers no retry. The way out is the fix it names (for example `chmod 700 <path>`, or remove the link) followed by a new session, or `/auto-improve-codegraph-uninstall`.
+- `retry-ticket-unwritten`: the guard could not record the retry of a blocked call (usually a passing lock by an antivirus or indexer, or a full disk). The way out is to repeat the call (the guard tries again), to call a CodeGraph tool, or `/auto-improve-codegraph-uninstall`.
+
 ## How to remove it
 
-This install never removes anything. The removal is its own skill, `/auto-improve-codegraph-uninstall`. It previews, asks once, then removes the three `settings.json` rows (with a backup) and only then the three hook files. It keeps a hook file you edited, leaves `_project_paths.py` and `_error_log.py` because other hooks use them, and keeps the `mcp__codegraph__*` permission entry (listed under `kept`). The only leftover is the session folder in the system temp folder, which the reset hook prunes; an older `.claude/.codegraph-used-this-turn`, if it exists, is a leftover of a turn that the user may delete.
+This install never removes anything. The removal is its own skill, `/auto-improve-codegraph-uninstall`. It previews, asks once, then removes the three `settings.json` rows (with a backup) and only then the three hook files. It keeps a hook file you edited, leaves `_project_paths.py` and `_error_log.py` because other hooks use them, and keeps the `mcp__codegraph__*` permission entry (listed under `kept`). The only leftover is the session folder under the Per-user session parent, which the reset hook prunes. Folders `auto-improve-codegraph-*` left in the system temp folder by 0.15.2 are no longer read; delete them by hand if wanted. An older `.claude/.codegraph-used-this-turn`, if it exists, is a leftover of a turn that the user may delete.
 
 Do not delete the hook files or the rows by hand while the hooks can run: a row that points at a missing script blocks every prompt. Only when a hook cannot run (the README table, section "Ways out when a hook cannot run") does the user remove its row by hand.
 
@@ -205,7 +210,7 @@ twice.
 
 ## When NOT to use
 
-- To index the code. That is `codegraph init -i`, run by the user.
-- To bypass the guard for a turn. There is no bypass variable; call a CodeGraph tool, repeat the blocked call once (the retry escape), or remove the add-on with `/auto-improve-codegraph-uninstall`.
+- To index the code on its own. This skill builds an index only on a yes to its offer in Step 2 (`codegraph init -i`); otherwise the user runs it.
+- To bypass the guard for a turn. There is no bypass variable; call a CodeGraph tool, or repeat the blocked call once (the retry escape). Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed. Or remove the add-on with `/auto-improve-codegraph-uninstall`.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
 - On Cursor or Codex. Hooks are Claude-only in this release.
