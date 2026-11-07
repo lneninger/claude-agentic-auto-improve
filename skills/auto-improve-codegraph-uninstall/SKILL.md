@@ -24,7 +24,7 @@ What the script will not do:
 - It keeps a hook file that a `settings.local.json` or user settings row still names (`kept-referenced`).
 - It never deletes a helper. `_project_paths.py` and `_error_log.py` stay: other hooks use them.
 - It keeps the `mcp__codegraph__*` permission entry in `permissions.allow` and lists it under `kept`.
-- It does not delete the session folder `auto-improve-codegraph-<session id>` in the system temp folder: that is a leftover, and the reset hook prunes it (an older `.claude/.codegraph-used-this-turn` is a leftover of a turn the user may delete).
+- It does not delete the session folder `auto-improve-codegraph-<session id>` under the Per-user session parent (`%LOCALAPPDATA%\auto-improve-codegraph\` on Windows, `~/.cache/auto-improve-codegraph/` or `$XDG_CACHE_HOME/auto-improve-codegraph/` on POSIX): that is a leftover, and the reset hook prunes it. Folders `auto-improve-codegraph-*` left in the system temp folder by 0.15.2 are no longer read; delete them by hand if wanted (an older `.claude/.codegraph-used-this-turn` is a leftover of a turn the user may delete).
 
 - It keeps the shadow log, `<project>/.claude/logs/codegraph-shadow.jsonl`, and everything else under `.claude/logs/`. The log is measurement data the report (`py -3 .claude/scripts/codegraph_shadow_report.py`) reads; the user deletes it by hand if they want it gone. Hook backups an upgrade took (`.claude/hooks/*.bak-*`) are kept too.
 
@@ -139,6 +139,6 @@ End with a short summary: which rows were removed, which files were deleted, whi
 ## When NOT to use
 
 - To install the add-on. That is `/auto-improve-codegraph-install`.
-- To pause the guard for one turn. There is no pause; call a CodeGraph tool, or repeat the blocked call once (the retry escape: it is allowed and logged).
+- To pause the guard for one turn. There is no pause; call a CodeGraph tool, or repeat the blocked call once (the retry escape: it is allowed and logged). Not after a `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is allowed.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
 - On Cursor or Codex. Hooks are Claude-only in this release.

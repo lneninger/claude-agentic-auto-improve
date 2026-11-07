@@ -217,8 +217,8 @@ runs twice). The answer is a readiness report. Tell the user, in plain words:
 - **The code-search-first note.** Print `code-search-first-note`. In short: the guard that
   makes a CodeGraph call come first is the `codegraph` add-on. It is off by default, so the
   plugin does not block source reads. `/auto-improve-codegraph-install` turns it on. Once on,
-  the guard is a nudge: it lets reads through when CodeGraph is unavailable, and allows the
-  identical retry of a blocked call once.
+  the guard lets reads through when CodeGraph is unavailable, unless its session folder cannot be
+  used, when it blocks and says why, and allows the identical retry of a blocked call once.
 - **The add-ons.** Print the `add-ons` list from the report: each add-on's name and its
   install skill. Say they are opt-in and that this skill installs none of them.
 - **The platform note.** If the answer has `platform-note` (macOS and Linux), say plainly

@@ -9,9 +9,12 @@ PASS/FAIL/SKIP summary, non-zero exit on any failure (a skip never fails the run
 
     py -3 .claude/hooks/tests/test_codegraph_first_guard.py
 
-ISOLATION (contract 2026-11-05-codegraph-guard-fail-open, FM 1): every row that reads server state or writes a Session
-folder runs with HOME, USERPROFILE and CLAUDE_CONFIG_DIR at a fixture home folder and TMP, TEMP at a fixture temp
-folder, and a fresh session_id. The developer's real home and temp folder are never read or written.
+ISOLATION (contracts 2026-11-05-codegraph-guard-fail-open FM 1 and 2026-11-06-session-folder-owner-and-tool-named FM 1):
+every row that reads server state or writes a Session folder runs with HOME, USERPROFILE and CLAUDE_CONFIG_DIR at a
+fixture home folder, LOCALAPPDATA at <home>/AppData/Local, XDG_CACHE_HOME at <home>/.cache (so the Per-user session
+parent, the only place the hooks keep Session folders since issue #271, is inside the fixture) and TMP, TEMP at a
+fixture temp folder, and a fresh session_id. The developer's real home, real Per-user session parent and real temp
+folder are never read or written: the closing checks fail on any new auto-improve-codegraph-* entry in the last two.
 
 WHAT THIS PINS DOWN
   #612-A/B/C/D   unchanged (the in-process rows run under the same isolation)
@@ -27,7 +30,11 @@ WHAT THIS PINS DOWN
   O-*            index ownership over real and fixture git layouts, in three helper modes (bound, missing, older)
   P-*            parity between the guard and the installer (server rule, index ownership)
   U-*            worktree_own_root unit rows
-  X-*            the temp folder pruner, through the before_remove seam (X-2b and X-4 bite without file-symlink rights)
+  X-*            the session-folder pruner, through the before_remove seam (X-2b and X-4 bite without file-symlink rights);
+                 it lists the Per-user session parent only and never the system temp folder (issue #271, criterion 3)
+  Q-*  (#271)    a planted folder in the shared temp folder opens no gate; the Per-user session parent rule (pure table,
+                 every OS) and its problems on disk; fail closed (session-state-unusable, check-failed, announce,
+                 retry-ticket-unwritten, link swap); the Foreign marker; the banner by reason; hook parity; the Hop proof
   U-H            review round: a hostile gitdir line (UNC, device path, no /.git/worktrees|modules/, 4096-byte cap) is
                  undecidable in the helper, the guard's inline copy, the bridge's inline copy and _git_file_kind
   S-*            review round: index verdict cached per cwd, the logged-<reason> flag after the record, 'X.' vs 'X'
@@ -49,6 +56,7 @@ import sys
 import tempfile
 import time
 import traceback
+import types
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -114,6 +122,11 @@ def load_module(path: Path, name: str):
 def sid() -> str:
     """A fresh session id (matches the Session key grammar): no two rows share a Session folder."""
     return "s" + uuid.uuid4().hex
+
+
+def pfolder(sb: af.Sandbox, session: str, create: bool = False) -> Path:
+    """The Session folder of ``session`` under the sandbox's Per-user session parent (created only when ``create``)."""
+    return af.session_folder(af.session_parent(sb.home, create=create), session)
 
 
 def blocked(proc: subprocess.CompletedProcess) -> bool:
@@ -478,30 +491,49 @@ def run_reasons(w: World) -> None:
             check(f"I-1 positive control ({git} project): index + configured server + no agent_id + no marker -> BLOCKED",
                   blocked(proc), describe(proc))
 
-        # step 0: an unusable Session folder allows with a logged reason
+        # step 2 (was step 0, issue #271): an unusable Session folder FAILS CLOSED with session-state-unusable, says why,
+        # and offers no retry. Each row has a positive control: the same fixture with a usable folder blocks as
+        # source-target and then allows its retry.
         project = project_of(sb, "step0")
         make_logs(project)
         session = sid()
         target = sb.root / "step0-link-target"
         target.mkdir()
-        link = af.session_folder(sb.tmp, session)
+        af.session_parent(sb.home)  # a usable Per-user session parent
+        link = pfolder(sb, session)
         if af.make_dir_link(link, target):
             proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-            check("step 0: a Session folder that is a link allows, reason fail-open:state-unwritable",
-                  allowed(proc, "fail-open:state-unwritable"), describe(proc))
-            check("step 0: and nothing was written through the link", not any(target.iterdir()),
+            check("step 2: a Session folder that is a link BLOCKS (session-state-unusable), problem session-link",
+                  blocked(proc) and "session-state-unusable" in json.dumps(events(project, "block")) + proc.stderr
+                  and names_problem(proc.stderr, project, "session-link"), describe(proc))
+            check("step 2: and the block offers no retry line", "repeat this exact call" not in proc.stderr, describe(proc))
+            check("step 2: and nothing was written through the link", not any(target.iterdir()),
                   "target holds: %s" % [p.name for p in target.iterdir()])
             try:
                 os.rmdir(str(link))
             except OSError:
                 pass
         else:
-            skip("step 0: a Session folder that is a link", "the OS refused to create a folder link")
+            skip("step 2: a Session folder that is a link", "the OS refused to create a folder link")
+        # review fix round T-M3: this row has its OWN project (and so its own log), so the link row's record above can
+        # never satisfy it, and the record's problem FIELD is compared exactly
+        file_project = project_of(sb, "step0-file")
+        make_logs(file_project)
         session = sid()
-        af.session_folder(sb.tmp, session).write_text("not a folder\n", encoding="utf-8")
-        proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("step 0: a Session folder path that is a plain FILE allows, reason fail-open:state-unwritable",
-              allowed(proc, "fail-open:state-unwritable"), describe(proc))
+        pfolder(sb, session).write_text("not a folder\n", encoding="utf-8")
+        proc = run_hook(w.guard, sb, file_project, "Read", read_cs(file_project), session)
+        check("step 2: a Session folder path that is a plain FILE BLOCKS (session-state-unusable), problem "
+              "session-not-a-folder", blocked(proc) and names_problem(proc.stderr, file_project, "session-not-a-folder"),
+              describe(proc))
+        check("step 2: and the block is logged once per call with reason session-state-unusable and the exact problem "
+              "field session-not-a-folder", unusable_records(file_project) == ["session-not-a-folder"],
+              repr(events(file_project, "block")))
+        usable = sid()
+        first = run_hook(w.guard, sb, project, "Read", read_cs(project), usable)
+        retry = run_hook(w.guard, sb, project, "Read", read_cs(project), usable)
+        check("step 2 [control]: with a usable Session folder the same call blocks as source-target and its retry is "
+              "allowed", blocked(first) and "session-state-unusable" not in first.stderr
+              and allowed(retry, "retry-escape-used"), describe(first) + " / " + describe(retry))
 
         # I-4: an internal error / unreadable payload allows
         proc = run_hook(w.guard, sb, project, "Read", {}, sid(), raw="{not json")
@@ -523,21 +555,26 @@ def run_reasons(w: World) -> None:
         proc = run_hook(w.guard, sb, twin, "Read", read_cs(twin), sid())
         check("I-4 [control]: the same project without the hostile file is BLOCKED", blocked(proc), describe(proc))
 
-        # step 7: a ticket that cannot be written allows, reason fail-open:state-unwritable (a folder sits in the
-        # ticket's place, so the Session folder stays usable and only the ticket write fails)
+        # step 8 (was step 7, issue #271): a ticket that cannot be written BLOCKS with retry-ticket-unwritten, never
+        # allows (a folder sits in the ticket's place, so the Session folder stays usable and only the ticket write fails)
         project = project_of(sb, "step7")
         make_logs(project)
         guard_mod = load_module(w.guard, "codegraph_first_guard_step7")
         session = sid()
-        folder = af.session_folder(sb.tmp, session)
+        folder = pfolder(sb, session, True)
         folder.mkdir()
         (folder / ("ticket-" + guard_mod.call_fingerprint("Read", read_cs(project)))).mkdir()
         proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("step 7: a ticket that cannot be written allows, reason fail-open:state-unwritable (never a block that "
-              "cannot be retried)", allowed(proc, "fail-open:state-unwritable") and not blocked(proc), describe(proc))
+        check("step 8: a ticket that cannot be written BLOCKS (retry-ticket-unwritten) and does not allow",
+              blocked(proc) and not allowed(proc) and "fail-open:state-unwritable" not in proc.stderr, describe(proc))
+        check("step 8: and the block is logged with reason retry-ticket-unwritten",
+              any("retry-ticket-unwritten" in json.dumps(rec) for rec in events(project, "block")),
+              repr(events(project, "block")))
         project = project_of(sb, "step7-twin")
         proc = run_hook(w.guard, sb, project, "Read", read_cs(project), sid())
-        check("step 7 [control]: the same call with a writable Session folder is BLOCKED", blocked(proc), describe(proc))
+        check("step 8 [control]: the same call with a writable Session folder is BLOCKED as source-target, with its "
+              "retry line", blocked(proc) and "repeat this exact call once; it will be allowed and logged" in proc.stderr,
+              describe(proc))
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -574,14 +611,14 @@ def run_escape(w: World) -> None:
         after = run_hook(w.guard, sb, project, "Read", read_cs(project), s3)
         check("E-6: after the next prompt the ticket is gone: the identical call is BLOCKED again", blocked(after),
               describe(after))
-        tickets = list(af.session_folder(sb.tmp, s3).glob("ticket-*")) if af.session_folder(sb.tmp, s3).is_dir() else []
+        tickets = list(pfolder(sb, s3).glob("ticket-*")) if pfolder(sb, s3).is_dir() else []
         check("E-6b: the reset hook deleted the session's tickets (only the fresh block's ticket may remain)",
               len(tickets) <= 1, "tickets: %s" % [t.name for t in tickets])
         # the ticket name carries a 64 hex call fingerprint
         s4 = sid()
         run_hook(w.guard, sb, project, "Read", read_cs(project), s4)
-        names = [p.name for p in af.session_folder(sb.tmp, s4).glob("ticket-*")] \
-            if af.session_folder(sb.tmp, s4).is_dir() else []
+        names = [p.name for p in pfolder(sb, s4).glob("ticket-*")] \
+            if pfolder(sb, s4).is_dir() else []
         check("E-7: a block writes ticket-<64 hex fingerprint> in the Session folder",
               len(names) == 1 and re.fullmatch(r"ticket-[0-9a-f]{64}", names[0]) is not None, "tickets: %s" % names)
 
@@ -607,7 +644,7 @@ def run_marker(w: World) -> None:
             tracked = run_hook(w.tracker, sb, project, tool, tool_input, session, payload_extra=extra,
                                event="PostToolUse")
             check(f"T-1 [{label}]: the tracker exits 0", tracked.returncode == 0, describe(tracked))
-            marker = af.session_folder(sb.tmp, session) / "turn.json"
+            marker = pfolder(sb, session) / "turn.json"
             try:
                 body = json.loads(marker.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
@@ -615,9 +652,13 @@ def run_marker(w: World) -> None:
                 reason = "no readable marker at %s (%s)" % (marker, exc)
             else:
                 reason = ""
-            check(f"T-1 [{label}]: the tracker writes turn.json {{ts, tool, summary, pid}} in the session's folder",
-                  isinstance(body, dict) and {"ts", "tool", "summary", "pid"} <= set(body) and body.get("tool") == tool,
-                  reason or repr(body))
+            check(f"T-1 [{label}]: the tracker writes turn.json {{ts, tool, summary, pid, writer, session}} in the session's "
+                  "folder under the Per-user session parent",
+                  isinstance(body, dict) and {"ts", "tool", "summary", "pid", "writer", "session"} <= set(body)
+                  and body.get("tool") == tool, reason or repr(body))
+            check(f"T-1 [{label}]: and stamps it writer=codegraph-turn-tracker, session=<the Session key>",
+                  isinstance(body, dict) and body.get("writer") == "codegraph-turn-tracker"
+                  and body.get("session") == session, repr(body))
             check(f"T-1 [{label}]: and writes NO legacy <cwd>/.claude/.codegraph-used-this-turn",
                   not (project / ".claude" / ".codegraph-used-this-turn").exists(), "legacy sentinel exists")
             after = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
@@ -634,7 +675,7 @@ def run_marker(w: World) -> None:
             session = sid()
             run_hook(w.tracker, sb, project, tool, {"command": "ls"}, session, event="PostToolUse")
             check(f"T-2: {tool} writes no marker",
-                  not (af.session_folder(sb.tmp, session) / "turn.json").exists(), "marker exists")
+                  not (pfolder(sb, session) / "turn.json").exists(), "marker exists")
 
         # the marker survives a directory change (cd / EnterWorktree)
         session = sid()
@@ -657,7 +698,7 @@ def run_marker(w: World) -> None:
                  event="PostToolUse")
         run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "again"})
         check("T-4: the reset hook deletes this session's turn.json",
-              not (af.session_folder(sb.tmp, session) / "turn.json").exists(), "turn.json still there")
+              not (pfolder(sb, session) / "turn.json").exists(), "turn.json still there")
         check("T-4: and a legacy <cwd>/.claude/.codegraph-used-this-turn if present", not legacy.exists(),
               "legacy sentinel still there")
         closed = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
@@ -1257,7 +1298,7 @@ def run_commondir_callers(w: World, pp, base: Path) -> None:
     for with_index in (False, True):
         tag = "with an index above the tree" if with_index else "no index"
         folder, deep = hostile_tree("fi-idx" if with_index else "fi-noidx", with_index)
-        older = types.SimpleNamespace(WORKTREE_OWN_ROOT_NATIVE=True, worktree_own_root=pp.worktree_own_root,
+        older = types.SimpleNamespace(TREE_HOP_REFUSAL=True, worktree_own_root=pp.worktree_own_root,
                                       tree_kind=old_tree_kind, main_checkout_root=old_main_root)
         for helper, patch in (("current helper", None), ("older helper", lambda: older)):
             touched = []
@@ -1604,18 +1645,19 @@ def run_pruner_cases(sb: af.Sandbox, prune) -> None:
 
 
 def run_prune_once(w: World) -> None:
-    """The reset hook prunes once per session (Prune flag), as a hook process, on the first prompt only."""
+    """The reset hook prunes the Per-user session parent (never the temp folder) once per session (Prune flag), as a hook
+    process, on the first prompt only."""
     with af.Sandbox("cgy-") as sb:
         project = project_of(sb, "prune")
         session = sid()
-        first_old = old_session(sb.tmp, "first-old")
+        first_old = old_session(af.session_parent(sb.home), "first-old")
         done = run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "one"})
         check("X-8: the first prompt of a session exits 0", done.returncode == 0, describe(done))
         check("X-8: the first prompt prunes an old, known-file session folder of another session",
               not first_old.exists(), "old folder still exists")
         check("X-8: and leaves a `pruned` flag in this session's folder",
-              (af.session_folder(sb.tmp, session) / "pruned").exists(), "no pruned flag")
-        second_old = old_session(sb.tmp, "second-old")
+              (pfolder(sb, session) / "pruned").exists(), "no pruned flag")
+        second_old = old_session(af.session_parent(sb.home), "second-old")
         run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "two"})
         check("X-8: the second prompt of the SAME session does not prune again", second_old.is_dir(),
               "pruned a second time")
@@ -1686,19 +1728,19 @@ def run_link_writes(w: World) -> None:
         # controls: without a link the hooks write their files (so the rows below can only fail for the link)
         session = sid()
         done = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        folder = af.session_folder(sb.tmp, session)
+        folder = pfolder(sb, session)
         check("L control: the guard writes availability.json and a ticket-<64 hex> into the Session folder",
               blocked(done) and (folder / "availability.json").is_file() and len(list(folder.glob("ticket-*"))) == 1,
               describe(done) + " / " + str(sorted(p.name for p in folder.glob("*"))))
         session = sid()
         run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, session,
                  event="PostToolUse")
-        check("L control: the tracker writes turn.json", (af.session_folder(sb.tmp, session) / "turn.json").is_file(),
+        check("L control: the tracker writes turn.json", (pfolder(sb, session) / "turn.json").is_file(),
               "no turn.json")
         for kind_label, kind in kinds:
             for state_name in ("availability.json", "ticket", "turn.json"):
                 session = sid()
-                folder = af.session_folder(sb.tmp, session)
+                folder = pfolder(sb, session, True)
                 folder.mkdir()
                 decoy = sb.root / ("decoy-%s-%s.txt" % (kind, state_name))
                 decoy.write_text(decoy_text, encoding="utf-8")
@@ -1776,8 +1818,10 @@ PARITY_OWNS = [UNC_OWN, "//OWN-259.invalid/team/repo", "\\\\other-host-259.inval
                "\\\\?\\UNC\\own-259.invalid\\team\\repo", "\\\\.\\own-259.invalid", "/home/u/repo", ""]
 
 
-def run_hop_rows(mods) -> None:
-    """Item 11 (normalise, then check) and item 14 (the four copies agree)."""
+def run_hop_rows(mods, six=None) -> None:
+    """Item 11 (normalise, then check) and item 14 (the four copies of _hop_allowed agree; since issue #271 the SIX copies
+    of _remote_host and of _own_spellings agree: ``six`` = the four plus the codegraph tracker and reset hook)."""
+    six = six or mods
     for label, mod in mods:
         fn = getattr(mod, "_hop_allowed", None)
         if fn is None:
@@ -1790,16 +1834,16 @@ def run_hop_rows(mods) -> None:
                 got = "raised %r" % (exc,)
             check(f"W-11 [{label}] _hop_allowed({target!r}, own {own!r}) is {want}: {why}", got is want, "got %r" % (got,))
 
-    # item 14: one list of inputs through the four copies
+    # item 14: one list of inputs through the copies (_remote_host: six, since issue #271)
     for target in PARITY_TARGETS:
         answers = {}
-        for label, mod in mods:
+        for label, mod in six:
             try:
                 answers[label] = mod._remote_host(target)
             except Exception as exc:  # noqa: BLE001
                 answers[label] = "raised %r" % (exc,)
-        check(f"W-14 parity: the four copies of _remote_host agree on {target!r}",
-              len({repr(v) for v in answers.values()}) == 1, repr(answers))
+        check(f"W-14 parity: the six copies of _remote_host (helper, guard, bridge, installer, tracker, reset) agree on {target!r}",
+              len(answers) == 6 and len({repr(v) for v in answers.values()}) == 1, repr(answers))
     for own in PARITY_OWNS:
         differing = []
         for target in PARITY_TARGETS:
@@ -1843,15 +1887,15 @@ def run_hop_rows(mods) -> None:
     differing = []
     for path in spelling_inputs:
         answers = {}
-        for label, mod in mods:
+        for label, mod in six:
             try:
                 answers[label] = repr(tuple(mod._own_spellings(path)))
             except Exception as exc:  # noqa: BLE001
                 answers[label] = "raised %r" % (exc,)
-        if len(set(answers.values())) != 1:
+        if len(set(answers.values())) != 1 or len(answers) != 6:
             differing.append((path, answers))
-    check(f"W-14 parity: the four copies of _own_spellings agree on {len(spelling_inputs)} inputs",
-          not differing, "differ on: %r" % (differing[:3],))
+    check(f"W-14 parity: the six copies of _own_spellings (helper, guard, bridge, installer, tracker, reset) agree on "
+          f"{len(spelling_inputs)} inputs", not differing, "differ on: %r" % (differing[:3],))
 
 
 def unc_tree(share_root: Path, name: str, gitfile_text: str, commondir: str | None,
@@ -2084,7 +2128,9 @@ def run_review_round_three_hops(w: World) -> None:
         return
     fi = load_installer()
     mods = [("helper", pp), ("guard", guard_mod), ("bridge", bridge), ("installer", fi)]
-    run_hop_rows(mods)
+    tracker_mod = load_module(w.tracker, "codegraph_tracker_round_three")
+    reset_mod = load_module(w.reset, "codegraph_reset_round_three")
+    run_hop_rows(mods, mods + [("tracker", tracker_mod), ("reset", reset_mod)])
     copies = [("helper", getattr(pp, "worktree_own_root", None)),
               ("guard inline copy", getattr(guard_mod, "_inline_own_root", None)),
               ("bridge inline copy", getattr(bridge, "_inline_worktree_own_root", None))]
@@ -2286,6 +2332,1410 @@ def run_review_round_three(w: World) -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------
+# Q-*: issue #271 (contract 2026-11-06-session-folder-owner-and-tool-named): the Per-user session parent, fail closed,
+# the Foreign marker, the banner by reason and the Hop proof.
+#
+# SEAMS these rows require of the implementation (named by this suite because the contract fixes behaviour, not names):
+#   * each of the three hooks defines  session_parent_base(env, os_name) -> (base or None, problem or None)
+#     the pure Parent base rule; the problem is one of unset / not-absolute / remote (the text rules and the Remote rule)
+#   * the guard, tracker and reset hook keep their `main()` and, for the guard, `_atomic_write(final, data) -> bool`
+#   * the reset hook keeps `prune_session_folders(root, before_remove=..., now=None)`
+# --------------------------------------------------------------------------------------------------------------
+UNUSABLE_BANNER_FORBIDDEN = ("repeat this exact call", "through the shell")
+
+
+def parent_problem_events(project: Path, reason: str, event: str = "block") -> list:
+    return [rec for rec in events(project, event) if reason in json.dumps(rec)]
+
+
+def unusable_records(project: Path) -> list:
+    """The ``problem`` field of every ``session-state-unusable`` block record of ``project`` (exact values, in order)."""
+    return [(rec.get("details") or {}).get("problem") for rec in events(project, "block")
+            if (rec.get("details") or {}).get("reason") == "session-state-unusable"]
+
+
+def names_problem(stderr: str, project: Path, token: str) -> bool:
+    """Review fix round T-M3: the problem token is printed DELIMITED, ``(<token>)``, in the block message (the guard prints it
+    verbatim), AND the block's log record carries it as its ``problem`` field exactly. A different diagnosis, or the token
+    only inside a longer one ((link) vs (session-link)), does not satisfy it."""
+    return ("(%s)" % token) in stderr and token in unusable_records(project)
+
+
+def run_inproc(mod, payload: dict, env: dict, lstat_for: Path | None = None, stat_over: dict | None = None,
+               no_access: tuple = (), fake_uid: int | None = None) -> tuple:
+    """Run ``mod.main()`` in this process on ``payload`` with ``env`` as the whole environment; return (exit code, stderr).
+    ``lstat_for``: os.lstat raises ValueError for that path and everything inside it, and delegates for any other path
+    (the check-failed row: one path only, so no earlier step can answer first).
+    Review fix round T-H1 (runs on EVERY OS): ``fake_uid`` makes ``os.getuid`` exist and answer that id (create=True);
+    ``stat_over`` maps a path to ``{"st_uid": n, "st_mode": m}``: os.lstat of exactly that path answers its real result
+    with those two fields replaced; ``no_access`` lists paths for which ``os.access(path, W_OK)`` answers False."""
+    import contextlib
+    import io
+    real_lstat = os.lstat
+    real_access = os.access
+    fenced = os.path.normcase(os.path.abspath(str(lstat_for))) if lstat_for is not None else None
+    over = {os.path.normcase(os.path.abspath(str(k))): v for k, v in (stat_over or {}).items()}
+    denied = {os.path.normcase(os.path.abspath(str(p))) for p in no_access}
+
+    def where_of(path) -> str:
+        try:
+            return os.path.normcase(os.path.abspath(os.fspath(path)))
+        except TypeError:
+            return ""
+
+    def fake_lstat(path, *args, **kwargs):
+        if fenced is not None:
+            where = where_of(path)
+            if where == fenced or where.startswith(fenced + os.sep):
+                raise ValueError("embedded null byte (fixture)")
+        result = real_lstat(path, *args, **kwargs)
+        patch = over.get(where_of(path)) if over else None
+        if patch:
+            fields = list(result)[:10]
+            fields[0] = patch.get("st_mode", fields[0])
+            fields[4] = patch.get("st_uid", fields[4])
+            core = ("st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime", "st_ctime")
+            named = {k: getattr(result, k) for k in dir(result) if k.startswith("st_") and k not in core}
+            return os.stat_result(fields, named)  # the extra named fields (st_file_attributes ...) are kept
+        return result
+
+    def fake_access(path, mode, *args, **kwargs):
+        if denied and where_of(path) in denied and mode == os.W_OK:
+            return False
+        return real_access(path, mode, *args, **kwargs)
+
+    err = io.StringIO()
+    code = 0
+    # _error_log binds LOG_DIR once at first import, so an in-process main() would append to the REAL log. Point the module's
+    # LOG_DIR at the sandbox project's log folder for the duration of main(); record any growth of the real logs.
+    log_globals = getattr(getattr(mod, "log_event", None), "__globals__", None)
+    real_dirs = {Path.home() / ".claude" / "logs"}
+    patched_log = {}
+    if log_globals is not None and "LOG_DIR" in log_globals:
+        real_dirs.add(Path(log_globals["LOG_DIR"]))
+        patched_log = {"LOG_DIR": Path(payload["cwd"]) / ".claude" / "logs"}
+        if "LOG_PATH" in log_globals:
+            patched_log["LOG_PATH"] = patched_log["LOG_DIR"] / "errors.jsonl"
+    before = {d: real_log_size(d) for d in real_dirs}
+    # tempfile.tempdir is pinned to the fixture TMP, so even a hook that still uses the temp folder cannot reach the REAL one
+    with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+            contextlib.redirect_stderr(err), mock.patch("os.lstat", fake_lstat), \
+            mock.patch.object(tempfile, "tempdir", env.get("TMP")), \
+            mock.patch.dict(log_globals if patched_log else {}, patched_log), \
+            mock.patch("os.access", fake_access), contextlib.ExitStack() as extra:
+        if fake_uid is not None:
+            extra.enter_context(mock.patch.object(os, "getuid", create=True, return_value=fake_uid))
+        try:
+            mod.main()
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    for d in real_dirs:
+        if real_log_size(d) != before[d]:
+            INPROC_LEAKS.append(str(d))
+    return code, err.getvalue()
+
+
+INPROC_LEAKS: list = []  # real log folders that grew during any run_inproc call (must stay empty)
+
+
+def real_log_size(folder: Path) -> int:
+    try:
+        return (folder / "errors.jsonl").stat().st_size
+    except OSError:
+        return -1
+
+
+def guard_payload(project: Path, session: str, **extra) -> dict:
+    body = {"session_id": session, "cwd": str(project), "hook_event_name": "PreToolUse", "tool_name": "Read",
+            "tool_input": read_cs(project)}
+    body.update(extra)
+    return body
+
+
+# ---- criterion 2: a planted Session folder in the shared temp folder opens no gate --------------------------------
+def run_planted_state(w: World) -> None:
+    with af.Sandbox("cgq2-") as sb:
+        project = project_of(sb, "plant")
+        make_logs(project)
+        guard_mod = load_module(w.guard, "codegraph_first_guard_planted")
+        victim = sid()
+        planted = af.write_marker(sb.tmp, victim)  # an attacker's turn.json in the SHARED temp folder (stamped even)
+        planted_ticket = planted.parent / ("ticket-" + guard_mod.call_fingerprint("Read", read_cs(project)))
+        planted_ticket.write_text("{}\n", encoding="utf-8")
+        proc = run_hook(w.guard, sb, project, "Read", read_cs(project), victim)
+        check("Q-2: a turn.json planted in auto-improve-codegraph-<victim session>/ in the shared temp folder does NOT "
+              "open the victim's gate: the first source Read is BLOCKED (source-target)",
+              blocked(proc) and "allowed (" not in proc.stderr, describe(proc))
+        check("Q-2: and a retry ticket planted there is not honoured either (no retry-escape-used)",
+              "retry-escape-used" not in proc.stderr, describe(proc))
+        check("Q-2: and the planted files are left exactly as planted (nothing in the temp folder is read, written or "
+              "removed)", planted.is_file() and planted_ticket.is_file(), "planted files changed")
+        mine = sid()
+        af.write_marker(af.session_parent(sb.home), mine)
+        ok = run_hook(w.guard, sb, project, "Read", read_cs(project), mine)
+        check("Q-2 [control]: the same marker under the Per-user session parent opens the gate (silent allow)",
+              silent_allow(ok), describe(ok))
+        before = sorted(p.name for p in sb.tmp.iterdir())
+        session = sid()
+        run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, session,
+                 event="PostToolUse")
+        run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "next"})
+        after = sorted(p.name for p in sb.tmp.iterdir())
+        check("Q-2: no hook creates or removes anything in the system temp folder (guard, tracker, reset)",
+              before == after, "before %s / after %s" % (before, after))
+        check("Q-2 [control]: the hooks did keep this session's state under the Per-user session parent",
+              pfolder(sb, session).is_dir(), "no folder at %s" % pfolder(sb, session))
+
+
+# ---- criterion 3: the pruner touches only the caller's own per-user parent ------------------------------------------
+def run_parent_pruner(w: World) -> None:
+    with af.Sandbox("cgq3-") as sb:
+        project = project_of(sb, "prune3")
+        parent = af.session_parent(sb.home)
+        foreign_tmp = old_session(sb.tmp, "tmp-old")  # a leftover folder of someone else in the shared temp folder
+        own_old = old_session(parent, "own-old")  # control: this user's own old folder
+        link_target = old_session(sb.tmp, "link-target")  # old known files, in the temp folder
+        link = parent / (af.CODEGRAPH_SESSION_PREFIX + "linked")
+        linked = af.make_dir_link(link, link_target)
+        session = sid()
+        done = run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "one"})
+        check("Q-3: the reset hook exits 0 on a first prompt", done.returncode == 0, describe(done))
+        check("Q-3 [control]: it prunes this user's own old known-file folder in the Per-user session parent",
+              not own_old.exists(), "own old folder still exists")
+        check("Q-3: an old known-file folder in the shared TEMP folder is left alone (the temp folder is never listed)",
+              foreign_tmp.is_dir() and all((foreign_tmp / n).exists() for n in KNOWN),
+              "temp folder entry changed: %s" % sorted(p.name for p in foreign_tmp.iterdir()) if foreign_tmp.exists() else "gone")
+        if linked:
+            check("Q-3: a folder LINK inside the parent pointing into the temp folder is kept", af.is_link(link),
+                  "the link was removed")
+            check("Q-3: and the link's target is untouched (every known file still there)",
+                  link_target.is_dir() and all((link_target / n).exists() for n in KNOWN),
+                  "target holds: %s" % (sorted(p.name for p in link_target.iterdir()) if link_target.is_dir() else "<gone>"))
+            try:
+                os.rmdir(str(link))
+            except OSError:
+                pass
+        else:
+            skip("Q-3: a folder link in the parent", "the OS refused to create a folder link")
+        # the unit seam: prune_session_folders(<parent>) lists the parent only
+        mod = load_reset_module(sb, w)
+        prune = getattr(mod, "prune_session_folders", None)
+        if prune is None:
+            check("Q-3: the reset hook defines prune_session_folders", False, "not defined")
+        else:
+            temp_only = old_session(sb.tmp, "temp-only")
+            prune(str(parent), before_remove=lambda p: None)
+            check("Q-3: prune_session_folders(<parent>) never reaches a sibling folder in the temp folder",
+                  temp_only.is_dir(), "temp folder entry removed")
+        # a foreign-owner folder is kept: only root can plant one on POSIX
+        if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() != 0:
+            skip("Q-3: a foreign-owned folder in the parent is kept", "needs root on POSIX to chown a fixture folder")
+        else:
+            foreign = old_session(parent, "foreign-owner")
+            for entry in [foreign] + list(foreign.iterdir()):
+                os.chown(str(entry), 12345, 12345)
+            run_hook(w.reset, sb, project, "", {}, sid(), event="UserPromptSubmit", payload_extra={"prompt": "two"})
+            check("Q-3: a folder owned by another user is kept", foreign.is_dir(), "foreign-owned folder was removed")
+
+
+# ---- criterion 4: the Foreign marker opens the gate and is logged once ----------------------------------------------
+def run_foreign_marker(w: World) -> None:
+    with af.Sandbox("cgq4-") as sb:
+        parent = af.session_parent(sb.home)
+
+        def other_session(session: str) -> None:
+            marker = af.write_marker(parent, session)
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            data["session"] = "s" + "0" * 32
+            marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+        def unreadable(session: str) -> None:
+            folder = af.session_folder(parent, session)
+            folder.mkdir()
+            (folder / "turn.json").write_text("{not json\n", encoding="utf-8")
+
+        cases = [("an unstamped (0.15.2 shape) marker", "missing-stamp", lambda s: af.write_marker(parent, s, stamped=False)),
+                 ("a marker stamped for another session", "other-session", other_session),
+                 ("an unreadable marker", "unreadable", unreadable)]
+        for number, (label, cause, setup) in enumerate(cases):
+            project = project_of(sb, "fm-%d" % number)
+            make_logs(project)
+            session = sid()
+            setup(session)
+            first = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+            second = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+            check(f"Q-4 [{label}]: a Foreign marker still opens the gate on both calls", allowed(first) and allowed(second)
+                  and not blocked(first) and not blocked(second), describe(first) + " / " + describe(second))
+            records = events(project, "foreign-marker")
+            check(f"Q-4 [{label}]: exactly ONE foreign-marker record after two calls", len(records) == 1,
+                  "records: %r" % records)
+            check(f"Q-4 [{label}]: and the record names the cause {cause}", bool(records) and cause in json.dumps(records[0]),
+                  "records: %r" % records)
+        project = project_of(sb, "fm-own")
+        make_logs(project)
+        session = sid()
+        af.write_marker(parent, session)
+        own = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        check("Q-4 [control]: a stamped OWN marker opens the gate silently", silent_allow(own), describe(own))
+        check("Q-4 [control]: and logs no foreign-marker record", events(project, "foreign-marker") == [],
+              repr(events(project, "foreign-marker")))
+
+
+# ---- the Parent base rule: a pure table over both OS branches, and parity of the three hooks -------------------------
+def rule_rows() -> list:
+    """(label, os_name, env, want_problem, want_base, realpath_map). want_base is checked only when want_problem is None."""
+    srv = "\\\\srv\\s\\x"
+    return [
+        ("nt: LOCALAPPDATA unset", "nt", {}, "unset", None, {}),
+        ("nt: LOCALAPPDATA empty", "nt", {"LOCALAPPDATA": ""}, "unset", None, {}),
+        ("nt: LOCALAPPDATA relative", "nt", {"LOCALAPPDATA": "rel\\dir"}, "not-absolute", None, {}),
+        ("nt: an absolute local folder", "nt", {"LOCALAPPDATA": "C:\\Users\\u\\AppData\\Local"}, None,
+         "C:\\Users\\u\\AppData\\Local", {}),
+        ("nt: \\\\host\\share is remote", "nt", {"LOCALAPPDATA": "\\\\host-271.invalid\\share"}, "remote", None, {}),
+        ("nt: \\\\?\\UNC\\host\\share is remote", "nt", {"LOCALAPPDATA": "\\\\?\\UNC\\host-271.invalid\\share"}, "remote",
+         None, {}),
+        ("nt: \\\\?\\C:\\x is local", "nt", {"LOCALAPPDATA": "\\\\?\\C:\\x"}, None, "\\\\?\\C:\\x", {}),
+        ("nt: \\\\?\\Volume{0}\\x (empty host) is remote", "nt", {"LOCALAPPDATA": "\\\\?\\Volume{0}\\x"}, "remote", None, {}),
+        ("nt: a mapped drive whose realpath is \\\\srv\\s is remote", "nt", {"LOCALAPPDATA": "Z:\\x"}, "remote", None,
+         {"Z:\\x": srv}),
+        # review fix round S-M1: a device path whose '..' climbs into a UNC path, and a mapped drive in device form, are remote
+        ("nt: \\\\.\\C:\\..\\UNC\\h\\s is remote (Win32 collapses the '..')", "nt",
+         {"LOCALAPPDATA": "\\\\.\\C:\\..\\UNC\\host-271.invalid\\s"}, "remote", None, {}),
+        ("nt: //./C:/../UNC/h/s is remote", "nt", {"LOCALAPPDATA": "//./C:/../UNC/host-271.invalid/s"}, "remote", None, {}),
+        ("nt: \\\\.\\C:\\..\\..\\UNC\\h\\s is remote", "nt",
+         {"LOCALAPPDATA": "\\\\.\\C:\\..\\..\\UNC\\host-271.invalid\\s"}, "remote", None, {}),
+        ("nt: \\\\?\\C:\\..\\UNC\\h\\s is remote", "nt",
+         {"LOCALAPPDATA": "\\\\?\\C:\\..\\UNC\\host-271.invalid\\s"}, "remote", None, {}),
+        ("nt: a device path with '..' that stays local is still refused (fail closed)", "nt",
+         {"LOCALAPPDATA": "\\\\?\\C:\\x\\..\\y"}, "remote", None, {}),
+        ("nt: \\\\?\\Z:\\ on a mapped drive is remote", "nt", {"LOCALAPPDATA": "\\\\?\\Z:\\"}, "remote", None,
+         {"drive:Z": "\\\\srv\\s"}),
+        ("nt: \\\\.\\Z:\\ on a mapped drive is remote", "nt", {"LOCALAPPDATA": "\\\\.\\Z:\\"}, "remote", None,
+         {"drive:Z": "\\\\srv\\s"}),
+        ("nt: \\\\?\\Z:\\x on a mapped drive is remote", "nt", {"LOCALAPPDATA": "\\\\?\\Z:\\x"}, "remote", None,
+         {"drive:Z": "\\\\srv\\s"}),
+        ("nt [control]: \\\\?\\C:\\x stays local while Z: is mapped", "nt", {"LOCALAPPDATA": "\\\\?\\C:\\x"}, None,
+         "\\\\?\\C:\\x", {"drive:Z": "\\\\srv\\s"}),
+        ("nt [control]: \\\\.\\C:\\x stays local while Z: is mapped", "nt", {"LOCALAPPDATA": "\\\\.\\C:\\x"}, None,
+         "\\\\.\\C:\\x", {"drive:Z": "\\\\srv\\s"}),
+        # review pass 2 (round 3) M1: the canonical form is judged, never raw[4:] offsets. A doubled separator after the
+        # device prefix, and the NT object-manager prefix, both reach the mapped drive / a UNC share in Win32
+        ("nt: \\\\.\\\\Z:\\x (doubled separator after \\\\.\\) on a mapped drive is remote", "nt",
+         {"LOCALAPPDATA": "\\\\.\\\\Z:\\x"}, "remote", None, {"drive:Z": "\\\\srv\\s"}),
+        ("nt: \\\\?\\\\Z:\\x (doubled separator after \\\\?\\) on a mapped drive is remote", "nt",
+         {"LOCALAPPDATA": "\\\\?\\\\Z:\\x"}, "remote", None, {"drive:Z": "\\\\srv\\s"}),
+        ("nt: //.//Z:/x on a mapped drive is remote", "nt", {"LOCALAPPDATA": "//.//Z:/x"}, "remote", None,
+         {"drive:Z": "\\\\srv\\s"}),
+        ("nt: \\\\.\\/Z:\\x (mixed separators) on a mapped drive is remote", "nt", {"LOCALAPPDATA": "\\\\.\\/Z:\\x"},
+         "remote", None, {"drive:Z": "\\\\srv\\s"}),
+        ("nt: \\??\\Z:\\x (NT prefix) on a mapped drive is remote", "nt", {"LOCALAPPDATA": "\\??\\Z:\\x"}, "remote", None,
+         {"drive:Z": "\\\\srv\\s"}),
+        ("nt: \\??\\C:\\Windows (NT prefix, even on a fixed drive) is remote", "nt", {"LOCALAPPDATA": "\\??\\C:\\Windows"},
+         "remote", None, {"drive:Z": "\\\\srv\\s"}),
+        ("nt: \\??\\UNC\\h\\s (NT prefix, UNC) is remote", "nt", {"LOCALAPPDATA": "\\??\\UNC\\host-271.invalid\\s"}, "remote",
+         None, {}),
+        ("nt [control]: C:\\x stays local while Z: is mapped", "nt", {"LOCALAPPDATA": "C:\\x"}, None, "C:\\x",
+         {"drive:Z": "\\\\srv\\s"}),
+        # review pass 3 (round 4) M1/L1: a rooted base with no drive letter resolves against the cwd's drive (which may be a
+        # mapped network drive), and a drive designator that is not an ASCII letter reaches realpath with no drive-table
+        # question: both are 'not-absolute' on every Python version, whatever the cwd's drive is
+        ("nt: \\x (rooted, no drive) is not-absolute", "nt", {"LOCALAPPDATA": "\\x"}, "not-absolute", None, {}),
+        ("nt: /x/y (rooted, no drive) is not-absolute", "nt", {"LOCALAPPDATA": "/x/y"}, "not-absolute", None, {}),
+        ("nt: \\AppData\\Local (rooted, no drive) is not-absolute", "nt", {"LOCALAPPDATA": "\\AppData\\Local"},
+         "not-absolute", None, {"drive:Z": "\\\\srv\\s"}),
+        ("nt: 1:\\x (the drive designator is a digit) is not-absolute", "nt", {"LOCALAPPDATA": "1:\\x"}, "not-absolute", None, {}),
+        ("nt: ' :\\x' (the drive designator is a space) is not-absolute", "nt", {"LOCALAPPDATA": " :\\x"}, "not-absolute",
+         None, {}),
+        # review pass 3 (round 4) L2: leading separators that are not exactly the \\?\ or \\.\ device prefix are remote
+        ("nt: \\\\\\?\\Z:\\x (three separators before the ?) is remote", "nt", {"LOCALAPPDATA": "\\\\\\?\\Z:\\x"}, "remote",
+         None, {}),
+        ("nt: \\\\\\.\\Z:\\x (three separators before the .) is remote", "nt", {"LOCALAPPDATA": "\\\\\\.\\Z:\\x"}, "remote",
+         None, {}),
+        ("nt: \\\\?z:\\x (a UNC server named ?z:) is remote", "nt", {"LOCALAPPDATA": "\\\\?z:\\x"}, "remote", None, {}),
+        ("nt: //?z:/x (a UNC server named ?z:) is remote", "nt", {"LOCALAPPDATA": "//?z:/x"}, "remote", None, {}),
+        ("nt: \\/\\?\\C:\\x (mixed separators, three before the ?) is remote", "nt", {"LOCALAPPDATA": "\\/\\?\\C:\\x"},
+         "remote", None, {}),
+        ("nt: ////?/C:/x (four separators before the ?) is remote", "nt", {"LOCALAPPDATA": "////?/C:/x"}, "remote", None, {}),
+        ("nt: LOCALAPPDATA is never skipped to HOME or XDG", "nt", {"XDG_CACHE_HOME": "/c", "HOME": "/h"}, "unset", None, {}),
+        ("posix: XDG_CACHE_HOME set", "posix", {"XDG_CACHE_HOME": "/x/cache", "HOME": "/h"}, None, "/x/cache", {}),
+        ("posix: XDG_CACHE_HOME empty falls to HOME/.cache", "posix", {"XDG_CACHE_HOME": "", "HOME": "/h"}, None,
+         "/h/.cache", {}),
+        ("posix: XDG_CACHE_HOME unset falls to HOME/.cache", "posix", {"HOME": "/h"}, None, "/h/.cache", {}),
+        ("posix: XDG_CACHE_HOME relative is not-absolute (never skipped to HOME)", "posix",
+         {"XDG_CACHE_HOME": "rel/cache", "HOME": "/h"}, "not-absolute", None, {}),
+        ("posix: both unset", "posix", {}, "unset", None, {}),
+        ("posix: both empty", "posix", {"XDG_CACHE_HOME": "", "HOME": ""}, "unset", None, {}),
+    ]
+
+
+PROBLEM_NAMES = ("unset", "not-absolute", "remote", "cannot-create", "link", "not-a-folder", "foreign-owner",
+                 "open-mode", "unwritable", "check-failed")
+
+#: Review fix round C-W2: the shared verdict code every hook carries inline; the three copies must stay textually identical.
+SHARED_VERDICT_FUNCTIONS = ("session_parent_base", "_base_shown", "_create_parent", "resolve_session_parent",
+                            "session_folder_problem", "_remote_host", "_own_spellings")
+
+
+#: Review pass 2 (round 3): the helper that decides "link" for the Parent and the Session folder, and the module constants the
+#: shared verdict code reads. ``_is_link_stat`` is compared without its docstring (the three docstrings differ in wording).
+SHARED_NODOC_FUNCTIONS = ("_is_link_stat",)
+SHARED_CONSTANTS = ("_LOCAL_DEVICE_HOST_RE", "PARENT_NAME", "_REPARSE_POINT", "PARENT_PROBLEMS")
+
+
+def function_source(path: Path, name: str) -> str | None:
+    """The source text of the top-level function ``name`` in ``path`` (decorators and docstring included), else None."""
+    import ast
+    text = Path(path).read_text(encoding="utf-8")
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(text, node)
+    return None
+
+
+def function_source_nodoc(path: Path, name: str) -> str | None:
+    """Like function_source, but the docstring is dropped: the code alone is compared."""
+    import ast
+    text = Path(path).read_text(encoding="utf-8")
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            body = list(node.body)
+            if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant)                     and isinstance(body[0].value.value, str):
+                body = body[1:]
+            node.body = body or [ast.Pass()]
+            node.decorator_list = list(node.decorator_list)
+            return ast.unparse(node)
+    return None
+
+
+def constant_source(path: Path, name: str) -> str | None:
+    """The source text of the top-level assignment of ``name`` in ``path``, else None."""
+    import ast
+    text = Path(path).read_text(encoding="utf-8")
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.get_source_segment(text, node)
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name:
+            return ast.get_source_segment(text, node)
+    return None
+
+
+def parity_differences(paths: list) -> list:
+    """The names of the shared verdict functions, helpers and constants whose source differs between ``paths`` (or is missing)."""
+    out = [name for name in SHARED_VERDICT_FUNCTIONS if len({function_source(p, name) for p in paths}) != 1
+           or function_source(paths[0], name) is None]
+    out += [name for name in SHARED_NODOC_FUNCTIONS if len({function_source_nodoc(p, name) for p in paths}) != 1
+            or function_source_nodoc(paths[0], name) is None]
+    out += [name for name in SHARED_CONSTANTS if len({constant_source(p, name) for p in paths}) != 1
+            or constant_source(paths[0], name) is None]
+    return out
+
+
+def run_verdict_function_parity(w: World) -> None:
+    paths = [w.guard, w.tracker, w.reset]
+    differ = parity_differences(paths)
+    check("Q-parity: resolve_session_parent, _create_parent, session_folder_problem, _base_shown, session_parent_base, "
+          "_remote_host and _own_spellings are textually identical in the guard, the tracker and the reset hook",
+          differ == [], "differ or missing: %s" % differ)
+    check("Q-parity [round 3]: _is_link_stat (code, docstring excluded) and the constants _LOCAL_DEVICE_HOST_RE, PARENT_NAME, "
+          "_REPARSE_POINT and PARENT_PROBLEMS (round 4) are identical in the three hooks",
+          not [n for n in differ if n in SHARED_NODOC_FUNCTIONS + SHARED_CONSTANTS],
+          "differ or missing: %s" % differ)
+    # the row must BITE: a throwaway copy of the tracker with one check edited out is reported, then deleted with its sandbox
+    with af.Sandbox("cgqpar-") as sb:
+        mutations = {"resolve_session_parent": ('"open-mode"', '"open-modes"'),
+                     "session_folder_problem": ('"session-foreign-owner"', '"session-foreign"'),
+                     "_create_parent": ('"cannot-create"', '"cannot-created"'),
+                     "_is_link_stat": ("& _REPARSE_POINT", "& 0"),
+                     "_LOCAL_DEVICE_HOST_RE": ('r"\?[a-z]:"', 'r"\?[a-y]:"'),
+                     "PARENT_NAME": ('"auto-improve-codegraph"', '"auto-improve-codegraphs"'),
+                     "_REPARSE_POINT": ("0x400", "0x401"),
+                     "PARENT_PROBLEMS": ('"open-mode"', '"open-modes"')}
+        for fn_name, (old, new) in mutations.items():
+            text = w.tracker.read_text(encoding="utf-8")
+            body = function_source(w.tracker, fn_name) or constant_source(w.tracker, fn_name) or ""
+            if not body or old not in body:
+                check(f"Q-parity [mutation proof {fn_name}]: the mutation anchor exists in the tracker's copy", False,
+                      "anchor %r not found in %s" % (old, fn_name))
+                continue
+            copy = sb.root / ("mut-" + fn_name + ".py")
+            copy.write_text(text.replace(body, body.replace(old, new, 1), 1), encoding="utf-8")
+            found = parity_differences([w.guard, copy, w.reset])
+            check(f"Q-parity [mutation proof]: editing {fn_name} in one copy makes the parity row report it",
+                  fn_name in found, "reported: %s" % found)
+
+
+def run_parent_rule_table(w: World) -> None:
+    hooks = [("guard", w.guard), ("tracker", w.tracker), ("reset", w.reset)]
+    answers: dict = {}
+    decoy = {"LOCALAPPDATA": "C:\\decoy-from-os-environ", "XDG_CACHE_HOME": "/decoy-from-os-environ",
+             "HOME": "/decoy-home-from-os-environ"}
+    for name, path in hooks:
+        mod = load_module(path, "codegraph_rule_" + name)
+        fn = getattr(mod, "session_parent_base", None)
+        if fn is None:
+            check(f"Q-rule [{name}]: defines session_parent_base(env, os_name) (the pure Parent base rule)", False,
+                  "%s has no session_parent_base" % path.name)
+            continue
+        for label, os_name, env, want_problem, want_base, realmap in rule_rows():
+            def fake_realpath(p, *a, _map=realmap, **k):
+                # review fix round S-M1: ``drive:Z`` in the map means "drive Z: is a mapped network drive": any spelling of a
+                # path on it (X:\..., \\?\X:\..., \\.\X:\...) resolves to the share (the CPython realpath behaviour assumed)
+                text = os.fspath(p)
+                if text in _map:
+                    return _map[text]
+                drive = re.match(r"^(?:[\\/]{2}[?.][\\/])?([A-Za-z]):", text)
+                if drive and ("drive:" + drive.group(1).upper()) in _map:
+                    return _map["drive:" + drive.group(1).upper()] + text[drive.end():].replace("/", "\\").rstrip("\\")
+                return text
+
+            def fake_drive_type(root, _map=realmap):
+                # the other seam an implementation may use to learn a drive is remote: kernel32.GetDriveTypeW (4 = DRIVE_REMOTE)
+                drive = re.match(r"^(?:[\\/]{2}[?.][\\/])?([A-Za-z]):", str(root))
+                return 4 if drive and ("drive:" + drive.group(1).upper()) in _map else 3
+            windll = types.SimpleNamespace(kernel32=types.SimpleNamespace(GetDriveTypeW=fake_drive_type))
+            try:
+                with mock.patch.dict(os.environ, decoy), mock.patch("os.path.realpath", fake_realpath), \
+                        mock.patch("ctypes.windll", windll, create=True):
+                    got = tuple(fn(dict(env), os_name))
+            except Exception as exc:  # noqa: BLE001
+                got = ("raised %r" % (exc,), None)
+            answers.setdefault(label, {})[name] = got
+            ok = len(got) == 2 and got[1] == want_problem and (want_problem is not None or got[0] == want_base)
+            check(f"Q-rule [{name}] {label}: problem {want_problem!r}" + (f", base {want_base!r}" if want_problem is None else ""),
+                  ok, "got %r" % (got,))
+    for label, per_hook in answers.items():
+        if len(per_hook) == 3:
+            check(f"Q-parity: the three hooks answer alike on [{label}]",
+                  len({repr(v) for v in per_hook.values()}) == 1, repr(per_hook))
+    for name, path in hooks:
+        text = path.read_text(encoding="utf-8")
+        missing = [p for p in PROBLEM_NAMES if ('"%s"' % p) not in text and ("'%s'" % p) not in text]
+        check(f"Q-parity [{name}]: the hook knows the whole Parent problem set", not missing, "missing: %s" % missing)
+        import ast
+        calls_temp = [node.lineno for node in ast.walk(ast.parse(text))
+                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "gettempdir"]
+        check(f"Q-parity [{name}]: the hook no longer CALLS gettempdir() (a comment may still name it)",
+              not calls_temp, "gettempdir() is called in %s at line(s) %s" % (path.name, calls_temp))
+
+
+# ---- criterion 9: every Parent problem fails closed, on disk ----------------------------------------------------------
+def run_unusable_parent(w: World) -> None:
+    nt = os.name == "nt"
+
+    def make_base(sb: af.Sandbox) -> Path:
+        base = sb.home / "AppData" / "Local" if nt else sb.home / ".cache"
+        if not base.is_dir():
+            os.mkdir(str(base), 0o700)
+            os.chmod(str(base), 0o700)
+        return base
+
+    def file_parent(sb):
+        (make_base(sb) / "auto-improve-codegraph").write_text("x\n", encoding="utf-8")
+        return {}, str(make_base(sb)), None
+
+    def link_parent(sb):
+        target = sb.root / "parent-link-target"
+        target.mkdir()
+        if not af.make_dir_link(make_base(sb) / "auto-improve-codegraph", target):
+            return None
+        return {}, str(make_base(sb)), target
+
+    def open_mode(sb):
+        parent = make_base(sb) / "auto-improve-codegraph"
+        os.mkdir(str(parent), 0o755)
+        os.chmod(str(parent), 0o755)
+        return {}, str(make_base(sb)), None
+
+    def cannot_create(sb):
+        missing = sb.home / "missing-a" / "missing-b" / ("Local" if nt else ".cache")
+        return {("LOCALAPPDATA" if nt else "XDG_CACHE_HOME"): str(missing)}, str(missing), None
+
+    def unset(sb):
+        return ({"LOCALAPPDATA": ""} if nt else {"XDG_CACHE_HOME": "", "HOME": ""}), "", None
+
+    def relative(sb):
+        return {("LOCALAPPDATA" if nt else "XDG_CACHE_HOME"): "relative-271"}, "relative-271", None
+
+    def remote(sb):
+        return {"LOCALAPPDATA": "\\\\remote-host-271.invalid\\share"}, "remote-host-271.invalid", None
+
+    scenarios = [("the parent is a plain file", "not-a-folder", file_parent, "", False),
+                 ("the parent is a link", "link", link_parent, "remove the link", False),
+                 ("the parent is open to other users (mode 0755)", "open-mode", open_mode, "chmod 700", True),
+                 ("the base folder is missing", "cannot-create", cannot_create, "", False),
+                 ("the base variable is unset or empty", "unset", unset, "LOCALAPPDATA" if nt else "XDG_CACHE_HOME", False),
+                 ("the base variable is relative", "not-absolute", relative, "", False),
+                 ("the base is a network path (Windows)", "remote", remote, "", None)]
+    for label, problem, build, fix, posix_only in scenarios:
+        if posix_only is True and nt:
+            skip(f"Q-9 [{label}]", "POSIX only (mode bits)")
+            continue
+        if posix_only is None and not nt:
+            skip(f"Q-9 [{label}]", "Windows only (the Remote rule)")
+            continue
+        with af.Sandbox("cgq9-") as sb:
+            built = build(sb)
+            if built is None:
+                skip(f"Q-9 [{label}]", "the OS refused to create a folder link")
+                continue
+            extra, shown, link_target = built
+            project = project_of(sb, "u9")
+            make_logs(project)
+            first = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), extra_env=extra)
+            second = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), extra_env=extra)
+            text = first.stderr
+            check(f"Q-9 [{label}]: the guard BLOCKS a source Read (fails closed) and names the problem {problem}",
+                  blocked(first) and names_problem(text, project, problem), describe(first))
+            check(f"Q-9 [{label}]: the message names the path or variable concerned", (not shown) or shown in text, text)
+            check(f"Q-9 [{label}]: and the fix", (not fix) or fix.lower() in text.lower(), text)
+            check(f"Q-9 [{label}]: and the uninstall skill, with a new session", "/auto-improve-codegraph-uninstall" in text
+                  and "new session" in text.lower(), text)
+            check(f"Q-9 [{label}]: it offers NO retry, advises no shell route (no 'cat ', no 'through the shell')",
+                  not any(p in text for p in UNUSABLE_BANNER_FORBIDDEN) and re.search(r"\b(cat|sed)\s", text) is None, text)
+            blocks = parent_problem_events(project, "session-state-unusable")
+            check(f"Q-9 [{label}]: one block record per blocked call (two calls, two records)", len(blocks) == 2,
+                  "records: %r" % blocks)
+            check(f"Q-9 [{label}]: and each record's problem field is exactly {problem}",
+                  unusable_records(project) == [problem, problem], "problem fields: %r" % unusable_records(project))
+            check(f"Q-9 [{label}]: the second identical-shape call is still blocked (no ticket was ever written)",
+                  blocked(second) and "allowed (" not in second.stderr, describe(second))
+            check(f"Q-9 [{label}]: nothing was created in the fixture temp folder", sorted(sb.tmp.iterdir()) == [],
+                  "temp holds: %s" % [p.name for p in sb.tmp.iterdir()])
+            if link_target is not None:
+                check(f"Q-9 [{label}]: and nothing was written through the link", not any(link_target.iterdir()),
+                      "target holds: %s" % [p.name for p in link_target.iterdir()])
+            # steps 4-6 still apply: a subagent and a project without an index are let through, and no log record is written
+            sub = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), extra_env=extra,
+                           payload_extra={"agent_id": "a-271", "agent_type": "general-purpose"})
+            noidx = project_of(sb, "u9-noidx", index=False)
+            make_logs(noidx)
+            free = run_hook(w.guard, sb, noidx, "Read", read_cs(noidx), sid(), extra_env=extra)
+            check(f"Q-9 [{label}]: a subagent payload is still let through (fail-open:subagent) and writes no log record",
+                  allowed(sub, "fail-open:subagent") and events(project, "fail-open") == [], describe(sub))
+            if clean_above("Q-9 no-index", noidx):
+                check(f"Q-9 [{label}]: a project with no index is still let through (fail-open:no-index), with no log record",
+                      allowed(free, "fail-open:no-index") and events(noidx, "fail-open") == [], describe(free))
+            # the tracker writes no marker and says so; the reset hook prunes nothing and still removes the legacy sentinel
+            tracked = run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, sid(),
+                               extra_env=extra, event="PostToolUse")
+            check(f"Q-9 [{label}]: the tracker exits 0, writes no marker and prints that the gate stays shut",
+                  tracked.returncode == 0 and "the gate stays shut" in tracked.stderr and problem in tracked.stderr
+                  and list(sb.root.rglob("turn.json")) == [], describe(tracked))
+            legacy = project / ".claude" / ".codegraph-used-this-turn"
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.write_text("legacy\n", encoding="utf-8")
+            bait = old_session(link_target, "bait") if link_target is not None else None
+            reset = run_hook(w.reset, sb, project, "", {}, sid(), extra_env=extra, event="UserPromptSubmit",
+                             payload_extra={"prompt": "next"})
+            check(f"Q-9 [{label}]: the reset hook exits 0, prints the same line, and removes the legacy sentinel",
+                  reset.returncode == 0 and "the gate stays shut" in reset.stderr and not legacy.exists(), describe(reset))
+            if bait is not None:
+                check(f"Q-9 [{label}]: and prunes nothing through the unusable parent", bait.is_dir()
+                      and all((bait / n).exists() for n in KNOWN), "the folder behind the link was touched")
+    # control: a usable parent keeps today's source-target block and its retry
+    with af.Sandbox("cgq9c-") as sb:
+        project = project_of(sb, "u9c")
+        session = sid()
+        first = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        retry = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        check("Q-9 [control]: with a usable parent the same call blocks as source-target and the retry is allowed",
+              blocked(first) and "session-state-unusable" not in first.stderr and allowed(retry, "retry-escape-used"),
+              describe(first) + " / " + describe(retry))
+
+
+# ---- criterion 9b (merge order): an unusable Session state still lets a NON-source call through, silently -------------
+# Merged step order: session check -> marker -> targets -> subagent/index/server -> ticket. The verdict runs BEFORE the
+# targets, so the silent allow of a README read, a read with no target and a `**/*.md` glob depends on step 1 skipping the
+# marker read and step 2 still running after an unusable verdict. A "fail fast" edit (block on an unusable state before
+# classifying) would break it; these rows pin it. `a.py` blocks as the control in the same fixture.
+def run_unusable_nonsource(w: World) -> None:
+    nt = os.name == "nt"
+    variable = "LOCALAPPDATA" if nt else "XDG_CACHE_HOME"
+
+    def relative_base(sb, session):
+        return {variable: "relative-271"}, "not-absolute", None
+
+    def session_link(sb, session):
+        target = sb.root / "nonsource-link-target"
+        target.mkdir()
+        af.session_parent(sb.home)  # a usable Per-user session parent
+        if not af.make_dir_link(pfolder(sb, session), target):
+            return None
+        return {}, "session-link", target
+
+    for label, build in (("LOCALAPPDATA/XDG_CACHE_HOME relative", relative_base), ("the Session folder is a link", session_link)):
+        with af.Sandbox("cgq9n-") as sb:
+            session = sid()
+            built = build(sb, session)
+            if built is None:
+                skip(f"Q-9n [{label}]", "the OS refused to create a folder link")
+                continue
+            extra, problem, link_target = built
+            project = project_of(sb, "u9n")
+            make_logs(project)
+            calls_ = (("a README Read", "Read", {"file_path": str(project / "README.md")}),
+                      ("a Read with no target", "Read", {}),
+                      ("a **/*.md Glob", "Glob", {"pattern": "**/*.md"}))
+            for what, tool, tool_input in calls_:
+                proc = run_hook(w.guard, sb, project, tool, tool_input, session, extra_env=extra)
+                check(f"Q-9n [{label}]: {what} exits 0 with EMPTY stderr", proc.returncode == 0 and proc.stderr == "", describe(proc))
+            check(f"Q-9n [{label}]: and none of the three wrote a block record", events(project, "block") == [],
+                  repr(events(project, "block")))
+            control = run_hook(w.guard, sb, project, "Read", {"file_path": str(project / "a.py")}, session, extra_env=extra)
+            check(f"Q-9n [{label}] [control]: a.py in the same fixture BLOCKS as session-state-unusable ({problem})",
+                  blocked(control) and names_problem(control.stderr, project, problem), describe(control))
+            if link_target is not None:
+                check(f"Q-9n [{label}]: and nothing was written through the link", not any(link_target.iterdir()),
+                      "target holds: %s" % [p.name for p in link_target.iterdir()])
+    # in-process: decide() allows a non-source target with the Session folder a link, and writes nothing through it
+    with af.Sandbox("cgq9d-") as sb:
+        session = sid()
+        target = sb.root / "decide-link-target"
+        target.mkdir()
+        af.session_parent(sb.home)
+        project = project_of(sb, "u9d")
+        make_logs(project)
+        if not af.make_dir_link(pfolder(sb, session), target):
+            skip("Q-9n decide: non-source-target with a link Session folder", "the OS refused to create a folder link")
+        else:
+            guard_mod = load_module(w.guard, "codegraph_first_guard_nonsource_decide")
+            saved_cwd = os.getcwd()
+            try:
+                with mock.patch.dict(os.environ, af.isolated_env(sb.home, sb.tmp, project), clear=True), \
+                        mock.patch.object(tempfile, "tempdir", str(sb.tmp)):
+                    os.chdir(str(project))
+                    got = guard_mod.decide("Read", {"file_path": str(project / "n.md")}, {"session_id": session, "cwd": str(project)})
+            except Exception as exc:  # noqa: BLE001
+                got = ("raised", repr(exc))
+            finally:
+                os.chdir(saved_cwd)
+            check("Q-9n decide: a .md Read with the Session folder a link is ('allow', 'non-source-target')",
+                  tuple(got) == ("allow", "non-source-target"), repr(got))
+            check("Q-9n decide: and the link target is unchanged (empty)", list(target.iterdir()) == [],
+                  "target holds: %s" % [p.name for p in target.iterdir()])
+
+
+# ---- check-failed: an exception while computing the verdict is a block, never the I-4 allow ---------------------------
+def run_check_failed(w: World) -> None:
+    with af.Sandbox("cgq9f-") as sb:
+        project = project_of(sb, "cf")
+        make_logs(project)
+        parent = af.session_parent(sb.home)
+        old_in_parent = old_session(parent, "cf-old")
+        env = af.isolated_env(sb.home, sb.tmp, project)
+        guard_mod = load_module(w.guard, "codegraph_first_guard_checkfailed")
+        code, err = run_inproc(guard_mod, guard_payload(project, sid()), env, lstat_for=parent)
+        check("Q-9f: os.lstat raising ValueError for the parent path only: the guard BLOCKS (exit 2), not the I-4 allow",
+              code == 2 and "BLOCKED" in err and "internal error" not in err and "repeat this exact call" not in err,
+              "exit=%s stderr=%r" % (code, err[-500:]))
+        check("Q-9f: the message names the exception type (ValueError) and the problem check-failed (message or log record)",
+              "ValueError" in err and names_problem(err, project, "check-failed"), err[-500:])
+        check("Q-9f: and the block is logged with reason session-state-unusable",
+              parent_problem_events(project, "session-state-unusable") != [], repr(events(project, "block")))
+        tracker_mod = load_module(w.tracker, "codegraph_tracker_checkfailed")
+        code, err = run_inproc(tracker_mod, {"session_id": sid(), "cwd": str(project), "tool_name":
+                               "mcp__codegraph__codegraph_explore", "tool_input": {"query": "q"}}, env, lstat_for=parent)
+        check("Q-9f: the tracker writes no marker (exit 0) and prints that the gate stays shut",
+              code == 0 and "the gate stays shut" in err and list(parent.rglob("turn.json")) == [old_in_parent / "turn.json"], "exit=%s %r" % (code, err))
+        legacy = project / ".claude" / ".codegraph-used-this-turn"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("legacy\n", encoding="utf-8")
+        reset_mod = load_module(w.reset, "codegraph_reset_checkfailed")
+        code, err = run_inproc(reset_mod, {"session_id": sid(), "cwd": str(project), "prompt": "next"}, env, lstat_for=parent)
+        check("Q-9f: the reset hook deletes and prunes nothing under the parent (exit 0), and removes the legacy sentinel",
+              code == 0 and old_in_parent.is_dir() and not legacy.exists(), "exit=%s old exists=%s legacy=%s %r"
+              % (code, old_in_parent.is_dir(), legacy.exists(), err))
+        # control: the same wrapper with no index still lets the read through (step 4 runs), writing no log record
+        noidx = project_of(sb, "cf-noidx", index=False)
+        make_logs(noidx)
+        env2 = af.isolated_env(sb.home, sb.tmp, noidx)
+        code, err = run_inproc(load_module(w.guard, "codegraph_first_guard_checkfailed2"), guard_payload(noidx, sid()),
+                               env2, lstat_for=parent)
+        check("Q-9f [control]: the same wrapper with no index allows (fail-open:no-index) and writes no log record",
+              code == 0 and "fail-open:no-index" in err and events(noidx, "fail-open") == [] and events(noidx, "block") == [],
+              "exit=%s stderr=%r records=%r" % (code, err[-300:], events(noidx)))
+        check("Q-9f [isolation]: no in-process run wrote to the real errors.jsonl (its size is unchanged)",
+              INPROC_LEAKS == [], repr(INPROC_LEAKS))
+
+
+# ---- announce: a no-index allow with an unusable parent writes nothing through it -------------------------------------
+def run_announce_unusable(w: World) -> None:
+    with af.Sandbox("cgq9a-") as sb:
+        base = sb.home / "AppData" / "Local" if os.name == "nt" else sb.home / ".cache"
+        if os.name != "nt":
+            os.mkdir(str(base), 0o700)
+            os.chmod(str(base), 0o700)
+        target = sb.root / "announce-target"
+        target.mkdir()
+        if not af.make_dir_link(base / "auto-improve-codegraph", target):
+            skip("Q-announce: the parent is a link", "the OS refused to create a folder link")
+        else:
+            noidx = project_of(sb, "an", index=False)
+            make_logs(noidx)
+            if clean_above("Q-announce", noidx):
+                proc = run_hook(w.guard, sb, noidx, "Read", read_cs(noidx), sid())
+                check("Q-announce: a no-index allow still prints its line (fail-open:no-index)",
+                      allowed(proc, "fail-open:no-index"), describe(proc))
+                check("Q-announce: and creates nothing inside or through the unusable parent (no logged-* flag)",
+                      list(target.iterdir()) == [], "target holds: %s" % [p.name for p in target.iterdir()])
+                check("Q-announce: and writes no log record (no state exists to rate-limit it)",
+                      events(noidx, "fail-open") == [], repr(events(noidx, "fail-open")))
+        with af.Sandbox("cgq9b-") as sb2:
+            noidx = project_of(sb2, "an-ctl", index=False)
+            make_logs(noidx)
+            if clean_above("Q-announce control", noidx):
+                run_hook(w.guard, sb2, noidx, "Read", read_cs(noidx), sid())
+                check("Q-announce [control]: with a usable parent the same allow writes its one log record",
+                      len(events(noidx, "fail-open")) == 1, repr(events(noidx, "fail-open")))
+
+
+# ---- retry-ticket-unwritten and the link swap ------------------------------------------------------------------------
+def run_ticket_unwritten(w: World) -> None:
+    with af.Sandbox("cgq8-") as sb:
+        project = project_of(sb, "tk")
+        make_logs(project)
+        guard_mod = load_module(w.guard, "codegraph_first_guard_ticket")
+        session = sid()
+        folder = pfolder(sb, session, True)
+        folder.mkdir()
+        ticket = folder / ("ticket-" + guard_mod.call_fingerprint("Read", read_cs(project)))
+        ticket.mkdir()
+        proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        text = proc.stderr
+        check("Q-8: a ticket that cannot be written BLOCKS with retry-ticket-unwritten", blocked(proc), describe(proc))
+        check("Q-8: the message names the Session folder", af.CODEGRAPH_SESSION_PREFIX + session in text, text)
+        check("Q-8: it says the usual cause is a passing lock (an antivirus or indexer) or a full disk",
+              ("antivirus" in text.lower() or "indexer" in text.lower()) and "disk" in text.lower(), text)
+        check("Q-8: its retry line says the guard 'tries again to record the retry'",
+              "tries again to record the retry" in text, text)
+        check("Q-8: and it does not say 'it will be allowed and logged'", "will be allowed and logged" not in text, text)
+        check("Q-8: it names LOCALAPPDATA, chmod and links nowhere", not any(n in text for n in ("LOCALAPPDATA", "chmod"))
+              and re.search(r"\blink\b", text, re.IGNORECASE) is None, text)
+        check("Q-8: it names a CodeGraph tool call (mcp__codegraph__*) and the uninstall skill as the other ways out",
+              "mcp__codegraph__*" in text and "/auto-improve-codegraph-uninstall" in text, text)
+        check("Q-8: the block is logged with reason retry-ticket-unwritten",
+              parent_problem_events(project, "retry-ticket-unwritten") != [], repr(events(project, "block")))
+        os.rmdir(str(ticket))  # the write works again
+        again = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        check("Q-8: once the write works again, the repeat blocks as source-target (with its usual retry line)",
+              blocked(again) and "repeat this exact call once; it will be allowed and logged" in again.stderr
+              and "retry-ticket-unwritten" not in again.stderr, describe(again))
+        retry = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+        check("Q-8: and the identical call after it is allowed (retry-escape-used)", allowed(retry, "retry-escape-used"),
+              describe(retry))
+
+        # link swap: the Session folder becomes a link between step 2 and step 8
+        target = sb.root / "swap-target"
+        target.mkdir()
+        project2 = project_of(sb, "tk-swap")
+        make_logs(project2)
+        session2 = sid()
+        folder2 = pfolder(sb, session2)
+        swapped: list = []
+        guard2 = load_module(w.guard, "codegraph_first_guard_swap")
+        real_write = guard2._atomic_write
+
+        def swap_then_fail(final, data):
+            if os.path.basename(final).startswith("ticket-") and not swapped:
+                shutil.rmtree(str(folder2), ignore_errors=True)
+                swapped.append(af.make_dir_link(folder2, target))
+                return False
+            return real_write(final, data)
+
+        env = af.isolated_env(sb.home, sb.tmp, project2)
+        with mock.patch.object(guard2, "_atomic_write", swap_then_fail):
+            code, err = run_inproc(guard2, guard_payload(project2, session2), env)
+        if not swapped or not swapped[0]:
+            skip("Q-8 link swap", "the ticket write was never attempted, or the OS refused to create a folder link")
+        else:
+            check("Q-8 link swap: the folder replaced by a link when the write fails: BLOCK session-state-unusable, "
+                  "problem session-link (not retry-ticket-unwritten)",
+                  code == 2 and names_problem(err, project2, "session-link") and "retry-ticket-unwritten" not in err
+                  and parent_problem_events(project2, "session-state-unusable") != [], "exit=%s %r" % (code, err[-500:]))
+            check("Q-8 link swap: and nothing was written through the link", not any(target.iterdir()),
+                  "target holds: %s" % [p.name for p in target.iterdir()])
+            check("Q-8 link swap [isolation]: no in-process run wrote to the real errors.jsonl (its size is unchanged)",
+                  INPROC_LEAKS == [], repr(INPROC_LEAKS))
+            try:
+                os.rmdir(str(folder2))
+            except OSError:
+                pass
+
+
+# ---- the banner chooses its retry line by reason ---------------------------------------------------------------------
+def run_banner_by_reason(w: World) -> None:
+    with af.Sandbox("cgqb-") as sb:
+        project = project_of(sb, "bn")
+        src = project / "src"
+        for label, tool, tool_input in (("source-target (Read .cs)", "Read", read_cs(project)),
+                                        ("ambiguous-target (Glob **/*)", "Glob", {"pattern": "**/*", "path": str(src)})):
+            proc = run_hook(w.guard, sb, project, tool, tool_input, sid())
+            check(f"Q-banner [{label}]: keeps today's retry lines 'repeat this exact call once; it will be allowed and logged'",
+                  blocked(proc) and "repeat this exact call once; it will be allowed and logged" in proc.stderr, describe(proc))
+            check(f"Q-banner [{label}]: and the uninstall lines", "/auto-improve-codegraph-uninstall" in proc.stderr
+                  and "new session" in proc.stderr.lower(), describe(proc))
+
+
+# ---- the Hop proof: TREE_HOP_REFUSAL, or the 0.15.2 helper's shape -----------------------------------------------------
+def helper_text_at(commit: str) -> tuple:
+    try:
+        probe = subprocess.run(["git", "-C", str(af.PROJECT_ROOT), "cat-file", "-e", commit + "^{commit}"],
+                               capture_output=True, timeout=60)
+        if probe.returncode != 0:
+            return None, "commit %s is not available (shallow clone?)" % commit
+        proc = subprocess.run(["git", "-C", str(af.PROJECT_ROOT), "show", "%s:%s" % (commit, BASE_HELPER_PATH)],
+                              capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, repr(exc)
+    if proc.returncode != 0:
+        return None, proc.stderr.decode("utf-8", "replace").strip()[:200]
+    return proc.stdout.decode("utf-8"), ""
+
+
+def run_hop_proof(w: World) -> None:
+    pp = load_module(af.HOOKS_DIR / "_project_paths.py", "project_paths_hop_proof")
+    check("Q-hop: _project_paths.py declares TREE_HOP_REFUSAL = True", getattr(pp, "TREE_HOP_REFUSAL", None) is True,
+          "TREE_HOP_REFUSAL is %r" % (getattr(pp, "TREE_HOP_REFUSAL", "missing"),))
+    import inspect
+    source = inspect.getsource(pp._git_file_kind).lower() if hasattr(pp, "_git_file_kind") else ""
+    check("Q-hop: _git_file_kind carries the probe-order comment above the commondir hop (realpath only after the text "
+          "checks, isdir last)", "probe order" in source and "realpath" in source and "isdir" in source,
+          "no 'probe order' comment naming realpath and isdir in _git_file_kind")
+    bridge_now = load_module(SCRIPTS_DIR / "_claude_paths.py", "claude_paths_hop_proof")
+    check("Q-hop: the bridge beside the current helper exports TREE_HOP_REFUSAL True and no WORKTREE_OWN_ROOT_NATIVE",
+          getattr(bridge_now, "TREE_HOP_REFUSAL", None) is True and not hasattr(bridge_now, "WORKTREE_OWN_ROOT_NATIVE"),
+          "TREE_HOP_REFUSAL=%r, WORKTREE_OWN_ROOT_NATIVE present=%s"
+          % (getattr(bridge_now, "TREE_HOP_REFUSAL", "missing"), hasattr(bridge_now, "WORKTREE_OWN_ROOT_NATIVE")))
+    guard_now = load_module(w.guard, "codegraph_first_guard_hop_now")
+    check("Q-hop [current helper]: the guard binds tree_kind and main_checkout_root",
+          getattr(guard_now, "_pp_tree_kind", None) is not None and getattr(guard_now, "_pp_main_checkout_root", None) is not None,
+          "tree_kind %r, main_checkout_root %r" % (getattr(guard_now, "_pp_tree_kind", None),
+                                                 getattr(guard_now, "_pp_main_checkout_root", None)))
+    fi = load_installer()
+    rows = [("0.15.2 helper (e4f392c)", "e4f392c", True), ("older helper (643b667)", "643b667", False)]
+    for label, commit, bound in rows:
+        text, why = helper_text_at(commit)
+        if text is None:
+            skip(f"Q-hop [{label}]", "%s: %s" % (commit, why))
+            print("        " + why)
+            continue
+        with af.Sandbox("cgqh-") as sb:
+            folder = sb.root / "helper" / "hooks"
+            folder.mkdir(parents=True)
+            (folder / "_project_paths.py").write_text(text, encoding="utf-8")
+            shutil.copyfile(af.HOOKS_DIR / "_error_log.py", folder / "_error_log.py")
+            shutil.copyfile(w.guard, folder / HOOK_FILE)
+            scripts = sb.root / "helper" / "scripts"
+            scripts.mkdir()
+            shutil.copyfile(SCRIPTS_DIR / "_claude_paths.py", scripts / "_claude_paths.py")
+            with helper_folder_first(folder):
+                old_guard = load_module(folder / HOOK_FILE, "codegraph_guard_hop_" + commit)
+                try:
+                    bridge = load_module(scripts / "_claude_paths.py", "claude_paths_hop_" + commit)
+                except Exception as exc:  # noqa: BLE001
+                    bridge = None
+                    check(f"Q-hop [{label}]: the bridge imports beside that helper", False, repr(exc))
+            is_bound = getattr(old_guard, "_pp_tree_kind", None) is not None \
+                and getattr(old_guard, "_pp_main_checkout_root", None) is not None
+            check(f"Q-hop [{label}]: the guard {'binds' if bound else 'does not bind'} tree_kind and main_checkout_root",
+                  is_bound is bound, "bound=%s" % is_bound)
+            info = af.make_linked_worktree(sb.root / "lw", layout="inside", gitdir_form="absolute")
+            af.plant_index(info["main"])
+            af.plant_server(info["main"])
+            af.plant_server(info["worktree"])
+            cwd = info["worktree"] / "src" / "deep"
+            proc = run_hook(folder / HOOK_FILE, sb, info["worktree"], "Read", read_cs(info["worktree"]), sid(), cwd=cwd)
+            if bound:
+                check(f"Q-hop [{label}]: in a linked worktree with no index of its own the guard gives index-other-tree",
+                      allowed(proc, "fail-open:index-other-tree"), describe(proc))
+            else:
+                check(f"Q-hop [{label}]: the same worktree keeps the gate (BLOCKED, the helper cannot be trusted)",
+                      blocked(proc), describe(proc))
+            if bridge is not None:
+                check(f"Q-hop [{label}]: the bridge's TREE_HOP_REFUSAL is {bound}",
+                      getattr(bridge, "TREE_HOP_REFUSAL", None) is bound and not hasattr(bridge, "WORKTREE_OWN_ROOT_NATIVE"),
+                      "TREE_HOP_REFUSAL=%r" % (getattr(bridge, "TREE_HOP_REFUSAL", "missing"),))
+                with mock.patch.object(fi, "_launcher_api", lambda: bridge):
+                    notes = fi._codegraph_index_notes(info["worktree"])
+                if bound:
+                    check(f"Q-hop [{label}]: the installer decides the tree (no undecidable note)",
+                          notes != [fi.UNDECIDABLE_TREE_NOTE], "notes %r" % (notes,))
+                else:
+                    check(f"Q-hop [{label}]: the installer says the tree is undecidable (one plain note)",
+                          notes == [fi.UNDECIDABLE_TREE_NOTE], "notes %r" % (notes,))
+
+
+# --------------------------------------------------------------------------------------------------------------
+REVIEW_BANNER_BOTH = "`source-target` or `ambiguous-target`"
+
+
+def folded(text: str) -> str:
+    return re.sub(r"\s+", " ", text)
+
+
+# ---- review fix round S-M1 (recorded row): what a REAL mapped drive resolves to --------------------------------------------
+def run_recorded_mapped_drive(w: World) -> None:
+    """Records (does not assert) what os.path.realpath answers for a real mapped network drive on this machine. Skips with a
+    printed reason when the OS is not Windows or no drive of type DRIVE_REMOTE exists. It touches no network host by itself:
+    GetDriveTypeW reads the local drive table, and realpath of a drive root runs in a thread with a 10 second limit."""
+    if os.name != "nt":
+        skip("S-M1 [recorded]: realpath of a mapped network drive", "not Windows: there are no mapped drives")
+        return
+    import ctypes
+    import threading
+    remote = []
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        try:
+            if ctypes.windll.kernel32.GetDriveTypeW(letter + ":\\") == 4:
+                remote.append(letter)
+        except Exception:  # noqa: BLE001
+            break
+    if not remote:
+        skip("S-M1 [recorded]: realpath of a mapped network drive", "no drive of type DRIVE_REMOTE on this machine (net use is empty)")
+        return
+    for letter in remote:
+        answer: list = []
+        worker = threading.Thread(target=lambda: answer.append(os.path.realpath(letter + ":\\")), daemon=True)
+        worker.start()
+        worker.join(10)
+        print("        recorded: os.path.realpath(%r) -> %r" % (letter + ":\\", answer[0] if answer else "<no answer in 10 s>"))
+        check("S-M1 [recorded]: a mapped drive %s: was found and its realpath recorded (not asserted)" % letter, True)
+
+
+# ---- review pass 2 (round 3): the no-I/O verdicts come BEFORE any realpath --------------------------------------------------
+_DRIVE_RE = re.compile(r"^(?:[\\/]{2}[?.][\\/])?([A-Za-z]):")
+
+
+def call_base_with_seams(fn, raw: str, drive_types: dict, realpath_raises_on) -> tuple:
+    """session_parent_base(env, "nt") with BOTH I/O seams faked and recorded. ``drive_types`` maps a drive letter to its
+    GetDriveTypeW answer (default 3, fixed). ``realpath_raises_on(text)`` says when the fake realpath must RAISE (a slow or
+    network call): the text is recorded first, so a swallowed exception is still seen. Seams: ``os.path.realpath`` and
+    ``ctypes.windll.kernel32.GetDriveTypeW``. Returns (answer, realpath calls, drive calls)."""
+    rp_calls: list = []
+    dr_calls: list = []
+
+    def fake_realpath(p, *a, **k):
+        text = os.fspath(p)
+        rp_calls.append(text)
+        if realpath_raises_on(text):
+            raise AssertionError("realpath was called on %r: that is the slow / network call this row forbids" % text)
+        return text
+
+    def fake_drive_type(root):
+        dr_calls.append(str(root))
+        match = _DRIVE_RE.match(str(root))
+        return drive_types.get(match.group(1).upper(), 3) if match else 3
+    windll = types.SimpleNamespace(kernel32=types.SimpleNamespace(GetDriveTypeW=fake_drive_type))
+    try:
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": "C:\\decoy-from-os-environ"}), \
+                mock.patch("os.path.realpath", fake_realpath), mock.patch("ctypes.windll", windll, create=True):
+            got = tuple(fn({"LOCALAPPDATA": raw}, "nt"))
+    except Exception as exc:  # noqa: BLE001
+        got = ("raised %r" % (exc,), None)
+    return got, rp_calls, dr_calls
+
+
+def run_remote_before_realpath(w: World) -> None:
+    """M1 (security pass 2) and F1 (code review pass 2): a base that the local tables or the text already prove remote is
+    refused WITHOUT a realpath call (a disconnected mapped drive costs 21 s per call, a \\??\\UNC base opens an SMB session)."""
+    answers: dict = {}
+    z_text = lambda text: bool(re.match(r"^(?:[\\/]{2}[?.][\\/]+)?Z:", text, re.I)) or "??" in text  # noqa: E731
+    any_text = lambda text: True  # noqa: E731
+    for name, path in (("guard", w.guard), ("tracker", w.tracker), ("reset", w.reset)):
+        fn = getattr(load_module(path, "codegraph_pre_" + name), "session_parent_base", None)
+        if fn is None:
+            check(f"Q-pre [{name}]: defines session_parent_base", False, "missing")
+            continue
+        # -- the NT prefix: refused from the text alone, realpath never called (it would open \\h\s before the verdict) --
+        for raw in ("\\??\\UNC\\host-271.invalid\\s", "\\??\\unc\\host-271.invalid\\s", "\\??\\Z:\\x", "\\??\\C:\\Windows"):
+            got, rp, dr = call_base_with_seams(fn, raw, {"Z": 4}, any_text)
+            answers.setdefault("nt-prefix " + raw, {})[name] = (got, rp)
+            check(f"Q-pre [{name}] {raw}: judged remote", got == (None, "remote"), "got %r" % (got,))
+            check(f"Q-pre [{name}] {raw}: and realpath is NEVER called on it", rp == [], "realpath calls: %r" % rp)
+        # -- the drive table first: a remote / unknown / no-root drive is refused with realpath never called --
+        for raw in ("Z:\\x", "\\\\?\\Z:\\x", "\\\\.\\Z:\\x", "z:\\x"):
+            for kind, kind_name in ((4, "DRIVE_REMOTE"), (0, "DRIVE_UNKNOWN"), (1, "DRIVE_NO_ROOT_DIR")):
+                got, rp, dr = call_base_with_seams(fn, raw, {"Z": kind}, z_text)
+                answers.setdefault("drive %s %s" % (raw, kind), {})[name] = (got, rp)
+                check(f"Q-pre [{name}] {raw} with GetDriveTypeW={kind} ({kind_name}): judged remote",
+                      got == (None, "remote"), "got %r" % (got,))
+                check(f"Q-pre [{name}] {raw} with GetDriveTypeW={kind} ({kind_name}): and realpath is NEVER called (no slow "
+                      "call before the verdict)", rp == [], "realpath calls: %r" % rp)
+        # -- doubled separator after the device prefix on a REMOTE drive: also no realpath --
+        for raw in ("\\\\.\\\\Z:\\x", "\\\\?\\\\Z:\\x", "//.//Z:/x", "\\\\.\\/Z:\\x"):
+            got, rp, dr = call_base_with_seams(fn, raw, {"Z": 4}, z_text)
+            check(f"Q-pre [{name}] {raw} with GetDriveTypeW=4: judged remote and realpath never called",
+                  got == (None, "remote") and rp == [], "got %r, realpath calls %r" % (got, rp))
+        # -- controls: a local drive proceeds (realpath is allowed to run) --
+        for kind, kind_name in ((3, "DRIVE_FIXED"), (2, "DRIVE_REMOVABLE"), (6, "DRIVE_RAMDISK")):
+            for raw in ("Z:\\x", "\\\\?\\Z:\\x", "\\\\.\\Z:\\x"):
+                got, rp, dr = call_base_with_seams(fn, raw, {"Z": kind}, lambda text: False)
+                check(f"Q-pre [{name}] [control] {raw} with GetDriveTypeW={kind} ({kind_name}): proceeds, local",
+                      got == (raw, None), "got %r" % (got,))
+        for raw in ("C:\\x", "\\\\?\\C:\\x", "\\\\.\\C:\\x"):
+            got, rp, dr = call_base_with_seams(fn, raw, {"C": 3, "Z": 4}, lambda text: False)
+            check(f"Q-pre [{name}] [control] {raw} on a fixed C: while Z: is remote: stays local (realpath allowed)",
+                  got == (raw, None), "got %r" % (got,))
+
+        # -- review pass 3 (round 4) M1/L1: a rooted base without a drive, or a non-letter drive designator, is judged from
+        # the text: not-absolute, and realpath (which would resolve it against the cwd's drive) is never called --
+        for raw in ("\\x", "/x/y", "\\AppData\\Local", "/AppData/Local", "1:\\x", " :\\x", ".:\\x"):
+            got, rp, dr = call_base_with_seams(fn, raw, {"Z": 4}, any_text)
+            answers.setdefault("no-drive " + raw, {})[name] = (got, rp)
+            check(f"Q-pre [{name}] {raw!r}: judged not-absolute", got == (None, "not-absolute"), "got %r" % (got,))
+            check(f"Q-pre [{name}] {raw!r}: and realpath is NEVER called on it (it would resolve against the cwd's drive)",
+                  rp == [], "realpath calls: %r" % rp)
+        # -- review pass 3 (round 4) L2: '//' or '\\' text that is not exactly the \\?\ or \\.\ device prefix is remote --
+        for raw in ("\\\\\\?\\Z:\\x", "\\\\\\.\\Z:\\x", "\\\\?z:\\x", "//?z:/x", "\\/\\?\\C:\\x", "////?/C:/x", "\\\\\\\\?\\C:\\x"):
+            got, rp, dr = call_base_with_seams(fn, raw, {"Z": 3}, any_text)
+            answers.setdefault("leading-sep " + raw, {})[name] = (got, rp)
+            check(f"Q-pre [{name}] {raw!r}: judged remote", got == (None, "remote"), "got %r" % (got,))
+            check(f"Q-pre [{name}] {raw!r}: and realpath is NEVER called on it", rp == [], "realpath calls: %r" % rp)
+        for raw in ("\\\\?\\C:\\x", "\\\\.\\C:\\x", "//?/C:/x", "//./C:/x"):
+            got, rp, dr = call_base_with_seams(fn, raw, {"C": 3, "Z": 4}, lambda text: False)
+            check(f"Q-pre [{name}] [control] {raw!r}: exactly the device prefix on C: stays local",
+                  got == (raw, None), "got %r" % (got,))
+        # -- review pass 3 (round 4) L4: only DRIVE_REMOVABLE (2), DRIVE_FIXED (3) and DRIVE_RAMDISK (6) proceed --
+        for kind, kind_name in ((5, "DRIVE_CDROM"), (7, "undefined 7"), (99, "undefined 99"), (-1, "negative")):
+            for raw in ("Z:\\x", "\\\\?\\Z:\\x"):
+                got, rp, dr = call_base_with_seams(fn, raw, {"Z": kind}, z_text)
+                answers.setdefault("drive-allowlist %s %s" % (raw, kind), {})[name] = (got, rp)
+                check(f"Q-pre [{name}] {raw} with GetDriveTypeW={kind} ({kind_name}): judged remote (allow-list 2, 3, 6)",
+                      got == (None, "remote"), "got %r" % (got,))
+                check(f"Q-pre [{name}] {raw} with GetDriveTypeW={kind} ({kind_name}): and realpath is NEVER called",
+                      rp == [], "realpath calls: %r" % rp)
+
+        # -- an undecidable drive table is refused as ``check-failed`` (a true diagnosis), never as ``remote``, never allowed --
+        def broken(root):
+            raise OSError("no kernel32 271-marker")
+        windll_broken = types.SimpleNamespace(kernel32=types.SimpleNamespace(GetDriveTypeW=broken))
+        for how, patches in (("GetDriveTypeW raises", {"ctypes.windll": windll_broken}), ("ctypes cannot be imported", None)):
+            try:
+                if patches is not None:
+                    with mock.patch("os.path.realpath", lambda p, *a, **k: os.fspath(p)), \
+                            mock.patch("ctypes.windll", windll_broken, create=True):
+                        got = tuple(fn({"LOCALAPPDATA": "Z:\\x"}, "nt"))
+                else:
+                    with mock.patch("os.path.realpath", lambda p, *a, **k: os.fspath(p)), \
+                            mock.patch.dict(sys.modules, {"ctypes": None}):
+                        got = tuple(fn({"LOCALAPPDATA": "Z:\\x"}, "nt"))
+            except Exception as exc:  # noqa: BLE001
+                got = ("raised %r" % (exc,), None)
+            answers.setdefault("undecidable " + how, {})[name] = (got, [])
+            check(f"Q-pre [{name}]: {how} gives check-failed (undecidable is refused, and not called a network path)",
+                  len(got) in (2, 3) and got[0] is None and got[1] == "check-failed",
+                  "got %r (a 2-tuple, or a 3-tuple whose third item is the exception text)" % (got,))
+        # the exception text reaches resolve_session_parent's detail (the banner and the log carry it)
+        resolver = getattr(load_module(path, "codegraph_pre_resolve_" + name), "resolve_session_parent", None)
+        if os.name != "nt" or resolver is None:
+            skip(f"Q-pre [{name}]: check-failed detail from a failing GetDriveTypeW", "needs Windows os.name and resolve_session_parent")
+        else:
+            try:
+                with mock.patch.dict(os.environ, {"LOCALAPPDATA": "Z:\\x"}), \
+                        mock.patch("os.path.realpath", lambda p, *a, **k: os.fspath(p)), \
+                        mock.patch("ctypes.windll", windll_broken, create=True):
+                    resolved = tuple(resolver())
+            except Exception as exc:  # noqa: BLE001
+                resolved = ("raised %r" % (exc,), None, "")
+            check(f"Q-pre [{name}]: resolve_session_parent reports check-failed with the exception text as its detail",
+                  len(resolved) == 3 and resolved[1] == "check-failed" and "no kernel32 271-marker" in str(resolved[2]),
+                  "got %r" % (resolved,))
+    for label, per_hook in answers.items():
+        if len(per_hook) == 3:
+            check(f"Q-pre parity: the three hooks answer alike on [{label}]",
+                  len({repr(v) for v in per_hook.values()}) == 1, repr(per_hook))
+
+
+# ---- review pass 2 (round 3): block() builds its message inside its try; a non-string tool_input field cannot allow ---------
+def run_block_non_string_fields(w: World) -> None:
+    with af.Sandbox("cgqns-") as sb:
+        project = project_of(sb, "nonstr")
+        make_logs(project)
+        src = project / "src"
+        ctrl = run_hook(w.guard, sb, project, "Read", {"file_path": str(src / "Thing.cs")}, sid())
+        check("S-L1 [control]: an ordinary Read of source blocks (exit 2)", blocked(ctrl), describe(ctrl))
+        rows = (
+            ("a Read with a numeric file_path and a string path", "Read", {"file_path": 1, "path": str(src / "Thing.cs")}),
+            ("a Read with a list file_path and a string path", "Read", {"file_path": ["x"], "path": str(src / "Thing.cs")}),
+            ("a Read with a numeric filePath and a string path", "Read", {"filePath": 7, "path": str(src / "Thing.cs")}),
+            ("a Grep with a numeric pattern", "Grep", {"pattern": 5, "path": str(src), "glob": "*.cs"}),
+            ("a Grep with a list pattern", "Grep", {"pattern": ["a"], "path": str(src), "glob": "*.cs"}),
+            ("a Glob with a numeric pattern and a source path", "Glob", {"pattern": 5, "path": str(src / "Thing.cs")}),
+        )
+        for index, (label, tool, tool_input) in enumerate(rows):
+            proj = project_of(sb, "nonstr-%d" % index)
+            make_logs(proj)
+            proc = run_hook(w.guard, sb, proj, tool, tool_input, sid())
+            check(f"S-L1 [{label}]: the guard still BLOCKS (exit 2), never the catch-all allow",
+                  blocked(proc) and "internal error" not in proc.stderr, describe(proc))
+            check(f"S-L1 [{label}]: and the block is logged", len(events(proj, "block")) == 1, repr(events(proj, "block")))
+        # the same verdict with string values only (the message builder is the only difference)
+        for index, (label, tool, tool_input) in enumerate(rows):
+            if tool == "Read":
+                strings = {"file_path": str(src / "Thing.cs")}
+            elif tool == "Grep":
+                strings = {"pattern": "plain", "path": str(src), "glob": "*.cs"}
+            else:
+                strings = {"pattern": "**/*.cs", "path": str(src / "Thing.cs")}
+            proj = project_of(sb, "nonstr-ok-%d" % index)
+            make_logs(proj)
+            proc = run_hook(w.guard, sb, proj, tool, strings, sid())
+            check(f"S-L1 [control, {tool} with string values only]: blocks, so the verdict is not what the non-string field "
+                  "changed", blocked(proc), describe(proc))
+
+
+# ---- review fix round S-M2: a lone surrogate in the banner text must not turn the block into an allow ----------------------
+def run_block_survives_surrogates(w: World) -> None:
+    with af.Sandbox("cgqsur-") as sb:
+        project = project_of(sb, "sur")
+        make_logs(project)
+        src = project / "src"
+        ctrl = run_hook(w.guard, sb, project, "Grep", {"pattern": "plain", "path": str(src), "glob": "*.cs"}, sid())
+        check("S-M2 [control]: an ordinary Grep pattern blocks as source-target (exit 2)", blocked(ctrl), describe(ctrl))
+        for label, tool, tool_input in (
+                ("a Grep pattern holding a lone surrogate", "Grep", {"pattern": "a\ud800b", "path": str(src), "glob": "*.cs"}),
+                ("a Glob pattern holding a lone surrogate", "Glob", {"pattern": "**/\udc80*.cs", "path": str(src)}),
+                ("a Read file name holding a lone surrogate", "Read", {"file_path": str(src / "Th\ud800ing.cs")})):
+            proj = project_of(sb, "sur-" + tool)
+            make_logs(proj)
+            proc = run_hook(w.guard, sb, proj, tool, tool_input, sid())
+            check(f"S-M2 [{label}]: the guard still BLOCKS (exit 2), never the catch-all allow",
+                  blocked(proc) and "internal error" not in proc.stderr, describe(proc))
+            check(f"S-M2 [{label}]: and the block is still logged", len(events(proj, "block")) == 1, repr(events(proj, "block")))
+        # the environment route: LOCALAPPDATA / XDG_CACHE_HOME holding a lone surrogate -> session-state-unusable, exit 2
+        missing = sb.home / "missing-a" / "missing-b" / ("Local" if os.name == "nt" else ".cache")
+        variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_CACHE_HOME"
+        proj = project_of(sb, "sur-env")
+        make_logs(proj)
+        try:
+            proc = run_hook(w.guard, sb, proj, "Read", read_cs(proj), sid(), extra_env={variable: str(missing) + "\udc80"})
+        except (ValueError, UnicodeError, OSError) as exc:
+            skip("S-M2 [%s holding a lone surrogate]" % variable, "this OS cannot pass such an environment value: %r" % (exc,))
+        else:
+            check(f"S-M2 [{variable} holding a lone surrogate]: the guard BLOCKS (exit 2) with session-state-unusable, not the "
+                  "catch-all allow", blocked(proc) and "internal error" not in proc.stderr
+                  and len(unusable_records(proj)) == 1, describe(proc) + " / " + repr(events(proj, "block")))
+        # the same shape without a surrogate is the control for the environment route
+        proc = run_hook(w.guard, sb, proj, "Read", read_cs(proj), sid(), extra_env={variable: str(missing)})
+        check(f"S-M2 [control]: {variable} at the same missing folder, no surrogate, blocks with (cannot-create)",
+              blocked(proc) and "(cannot-create)" in proc.stderr, describe(proc))
+
+
+# ---- review fix round T-H1 / T-H2: the owner, mode, writable and session-level verdicts, on every OS -----------------------
+def run_verdict_matrix(w: World) -> None:
+    import stat as stat_module
+    uid = 4242
+    own_dir_mode = stat_module.S_IFDIR | 0o700
+    open_dir_mode = stat_module.S_IFDIR | 0o755
+    # (label, parent override, session override, parent unwritable, session unwritable, expected token)
+    rows = [("parent owned by another user", {"st_uid": uid + 1, "st_mode": own_dir_mode}, None, False, False, "foreign-owner"),
+            ("parent open to other users (mode 0755)", {"st_uid": uid, "st_mode": open_dir_mode}, None, False, False, "open-mode"),
+            ("parent not writable", {"st_uid": uid, "st_mode": own_dir_mode}, None, True, False, "unwritable"),
+            ("Session folder owned by another user", {"st_uid": uid, "st_mode": own_dir_mode},
+             {"st_uid": uid + 1, "st_mode": own_dir_mode}, False, False, "session-foreign-owner"),
+            ("Session folder not writable", {"st_uid": uid, "st_mode": own_dir_mode},
+             {"st_uid": uid, "st_mode": own_dir_mode}, False, True, "session-unwritable"),
+            (None, {"st_uid": uid, "st_mode": own_dir_mode}, {"st_uid": uid, "st_mode": own_dir_mode}, False, False, None)]
+    guard_mod = load_module(w.guard, "codegraph_first_guard_matrix")
+    for label, parent_patch, session_patch, parent_denied, session_denied, token in rows:
+        with af.Sandbox("cgqmx-") as sb:
+            project = project_of(sb, "mx")
+            make_logs(project)
+            parent = af.session_parent(sb.home)
+            session = sid()
+            folder = pfolder(sb, session)
+            os.mkdir(str(folder), 0o700)
+            over = {parent: parent_patch}
+            if session_patch is not None:
+                over[folder] = session_patch
+            denied = tuple(p for p, flag in ((parent, parent_denied), (folder, session_denied)) if flag)
+            env = af.isolated_env(sb.home, sb.tmp, project)
+            code, err = run_inproc(guard_mod, guard_payload(project, session), env, stat_over=over, no_access=denied, fake_uid=uid)
+            if token is None:
+                check("T-H1 [control]: with a faked uid and every owner, mode and access fact fine, the guard blocks as "
+                      "source-target (no session-state-unusable)", code == 2 and "BLOCKED" in err
+                      and "session-state-unusable" not in err and unusable_records(project) == [], "exit=%s %r" % (code, err[-400:]))
+                continue
+            check(f"T-H1 [{label}]: the guard BLOCKS fail-closed (exit 2) with (%s) in the message and a retry-free banner" % token,
+                  code == 2 and "BLOCKED" in err and ("(%s)" % token) in err and "repeat this exact call" not in err,
+                  "exit=%s %r" % (code, err[-500:]))
+            check(f"T-H1 [{label}]: and the log record's problem field is exactly {token}",
+                  unusable_records(project) == [token], repr(events(project, "block")))
+            tracker_mod = load_module(w.tracker, "codegraph_tracker_matrix")
+            code, err = run_inproc(tracker_mod, {"session_id": session, "cwd": str(project), "tool_name":
+                                   "mcp__codegraph__codegraph_explore", "tool_input": {"query": "q"}}, env, stat_over=over,
+                                   no_access=denied, fake_uid=uid)
+            check(f"T-H1 [{label}]: the tracker writes no marker (exit 0) and prints that the gate stays shut",
+                  code == 0 and "the gate stays shut" in err and not (folder / "turn.json").exists(), "exit=%s %r" % (code, err))
+    # T-H2: the Session folder alone fails to be checked -> session-check-failed, distinct from the parent-level check-failed
+    with af.Sandbox("cgqsf-") as sb:
+        project = project_of(sb, "sf")
+        make_logs(project)
+        af.session_parent(sb.home)
+        session = sid()
+        env = af.isolated_env(sb.home, sb.tmp, project)
+        code, err = run_inproc(load_module(w.guard, "codegraph_first_guard_sessionfailed"), guard_payload(project, session), env,
+                               lstat_for=pfolder(sb, session))
+        check("T-H2: os.lstat raising ValueError for the SESSION folder only: the guard BLOCKS (exit 2), not the I-4 allow",
+              code == 2 and "BLOCKED" in err and "internal error" not in err, "exit=%s %r" % (code, err[-500:]))
+        check("T-H2: the message says (session-check-failed) and names ValueError, and never the parent-level (check-failed)",
+              "(session-check-failed)" in err and "ValueError" in err and "(check-failed)" not in err, err[-500:])
+        check("T-H2: and the record's problem field is exactly session-check-failed",
+              unusable_records(project) == ["session-check-failed"], repr(events(project, "block")))
+        check("T-H2: and no marker or ticket was written", not (pfolder(sb, session)).exists(), "folder exists")
+        noidx = project_of(sb, "sf-noidx", index=False)
+        make_logs(noidx)
+        env2 = af.isolated_env(sb.home, sb.tmp, noidx)
+        code, err = run_inproc(load_module(w.guard, "codegraph_first_guard_sessionfailed2"), guard_payload(noidx, session), env2,
+                               lstat_for=pfolder(sb, session))
+        check("T-H2 [control]: the same fence with no index still allows (fail-open:no-index)",
+              code == 0 and "fail-open:no-index" in err, "exit=%s %r" % (code, err[-300:]))
+        check("T-H2 [isolation]: no in-process run wrote to the real errors.jsonl", INPROC_LEAKS == [], repr(INPROC_LEAKS))
+
+
+# ---- review fix round T-M1: the cannot-create boundary ---------------------------------------------------------------------
+def run_base_boundaries(w: World) -> None:
+    import stat as stat_module
+    if os.name == "nt":
+        with af.Sandbox("cgqbb-") as sb:
+            (sb.home / "AppData").mkdir(exist_ok=True)
+            base = sb.home / "AppData" / "LocalMissing"  # its own parent exists; the base itself does not
+            project = project_of(sb, "bb")
+            make_logs(project)
+            proc = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), extra_env={"LOCALAPPDATA": str(base)})
+            check("T-M1: Windows, a base that is missing while ITS parent exists is never created: the guard blocks "
+                  "(cannot-create)", blocked(proc) and names_problem(proc.stderr, project, "cannot-create"), describe(proc))
+            check("T-M1: and the base folder is still absent afterwards", not base.exists(), "the base was created: %s" % base)
+        skip("T-M1: POSIX creates the base exactly one level, mode 0700", "Windows: the base is never created")
+        return
+    skip("T-M1: Windows never creates a missing base", "POSIX: the base is created one level")
+    with af.Sandbox("cgqbb-") as sb:
+        base = sb.home / "onelevel-cache"
+        project = project_of(sb, "bb")
+        make_logs(project)
+        proc = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), extra_env={"XDG_CACHE_HOME": str(base)})
+        check("T-M1: POSIX, a base missing while its parent exists is created (one level) and the state is usable",
+              base.is_dir() and blocked(proc) and "session-state-unusable" not in proc.stderr, describe(proc))
+        check("T-M1: and the base and the Per-user session parent are mode 0700",
+              stat_module.S_IMODE(base.stat().st_mode) == 0o700
+              and stat_module.S_IMODE((base / "auto-improve-codegraph").stat().st_mode) == 0o700, "modes differ")
+
+
+# ---- review fix round T-L1: the Foreign marker's stderr line, and the flag only after the record ---------------------------
+def run_foreign_marker_order(w: World) -> None:
+    with af.Sandbox("cgqfo-") as sb:
+        parent = af.session_parent(sb.home)
+        guard_mod = load_module(w.guard, "codegraph_first_guard_foreign_order")
+        line = "the gate opened from a turn marker this session's tracker did not write"
+        for label, returns, flag_expected in (("the record is written", True, True), ("the record could not be written", False, False)):
+            project = project_of(sb, "fo-%s" % returns)
+            make_logs(project)
+            session = sid()
+            af.write_marker(parent, session, stamped=False)
+            flag = af.session_folder(parent, session) / "logged-foreign-marker"
+            seen: list = []
+
+            def spy(**kwargs):
+                seen.append((kwargs.get("event"), flag.exists()))
+                return returns
+            env = af.isolated_env(sb.home, sb.tmp, project)
+            with mock.patch.object(guard_mod, "log_event", spy):
+                code, err = run_inproc(guard_mod, guard_payload(project, session), env)
+            check(f"T-L1 [{label}]: the gate opens (exit 0) and ONE stderr line says the marker was not written by this "
+                  "session's tracker, naming the cause", code == 0 and err.count(line) == 1 and "(missing-stamp)" in err,
+                  "exit=%s %r" % (code, err))
+            check(f"T-L1 [{label}]: the foreign-marker record is written while the flag does NOT exist yet",
+                  seen == [("foreign-marker", False)], repr(seen))
+            check(f"T-L1 [{label}]: and the flag exists afterwards only when the record did not fail", flag.exists() is flag_expected,
+                  "flag exists=%s" % flag.exists())
+            if flag_expected:
+                with mock.patch.object(guard_mod, "log_event", spy):
+                    code, err = run_inproc(guard_mod, guard_payload(project, session), env)
+                check("T-L1: the second call prints no foreign-marker line and writes no second record",
+                      code == 0 and line not in err and len(seen) == 1, "exit=%s %r seen=%r" % (code, err, seen))
+        check("T-L1 [isolation]: no in-process run wrote to the real errors.jsonl", INPROC_LEAKS == [], repr(INPROC_LEAKS))
+
+
+# ---- review fix round C-W1: the repeat after retry-ticket-unwritten may be ambiguous-target --------------------------------
+def run_ambiguous_after_unwritten(w: World) -> None:
+    with af.Sandbox("cgqaw-") as sb:
+        project = project_of(sb, "aw")
+        make_logs(project)
+        guard_mod = load_module(w.guard, "codegraph_first_guard_ambiguous")
+        session = sid()
+        folder = pfolder(sb, session, True)
+        folder.mkdir()
+        # a Grep on a folder with no glob: the class is 'unknown' (a pattern-only Grep has no target at all and is allowed)
+        tool_input = {"pattern": "Thing", "path": str(project / "src")}
+        ticket = folder / ("ticket-" + guard_mod.call_fingerprint("Grep", tool_input))
+        ticket.mkdir()
+        first = run_hook(w.guard, sb, project, "Grep", tool_input, session)
+        check("C-W1: an unknown-class Grep (a folder, no glob) whose ticket cannot be written blocks as retry-ticket-unwritten",
+              blocked(first) and parent_problem_events(project, "retry-ticket-unwritten") != [], describe(first))
+        check("C-W1: and its banner says the repeat blocks as `source-target` or `ambiguous-target`",
+              REVIEW_BANNER_BOTH in folded(first.stderr), first.stderr[-700:])
+        os.rmdir(str(ticket))
+        again = run_hook(w.guard, sb, project, "Grep", tool_input, session)
+        reasons = [(rec.get("details") or {}).get("reason") for rec in events(project, "block")]
+        check("C-W1 [control]: once the write works again the repeat of the unknown-class Grep blocks as ambiguous-target, "
+              "not source-target", blocked(again) and reasons[-1:] == ["ambiguous-target"], "reasons %r / %s" % (reasons, describe(again)))
+        # and the same banner for a source Read, with its own session
+        project2 = project_of(sb, "aw2")
+        make_logs(project2)
+        session2 = sid()
+        folder2 = pfolder(sb, session2)
+        folder2.mkdir()
+        (folder2 / ("ticket-" + guard_mod.call_fingerprint("Read", read_cs(project2)))).mkdir()
+        proc = run_hook(w.guard, sb, project2, "Read", read_cs(project2), session2)
+        check("C-W1: the same two-reason sentence is in the banner for a source Read", blocked(proc)
+              and REVIEW_BANNER_BOTH in folded(proc.stderr), proc.stderr[-700:])
+
+
+# ---- review fix round S-L6: the bridge never binds worktree_own_root to None ----------------------------------------------
+def run_bridge_without_own_root(w: World) -> None:
+    helper_text = (af.HOOKS_DIR / "_project_paths.py").read_text(encoding="utf-8")
+    for label, tail in (("the helper declares TREE_HOP_REFUSAL and has no worktree_own_root at all",
+                         "\nTREE_HOP_REFUSAL = True\ndel worktree_own_root\n"),
+                        ("the helper declares TREE_HOP_REFUSAL and worktree_own_root is not callable",
+                         "\nTREE_HOP_REFUSAL = True\nworktree_own_root = None\n")):
+        with af.Sandbox("cgqbr-") as sb:
+            folder = sb.root / "helper" / "hooks"
+            folder.mkdir(parents=True)
+            (folder / "_project_paths.py").write_text(helper_text + tail, encoding="utf-8")
+            shutil.copyfile(af.HOOKS_DIR / "_error_log.py", folder / "_error_log.py")
+            scripts = sb.root / "helper" / "scripts"
+            scripts.mkdir()
+            shutil.copyfile(SCRIPTS_DIR / "_claude_paths.py", scripts / "_claude_paths.py")
+            bridge = None
+            with helper_folder_first(folder):
+                try:
+                    bridge = load_module(scripts / "_claude_paths.py", "claude_paths_no_own_root_%d" % len(label))
+                except Exception as exc:  # noqa: BLE001
+                    check(f"S-L6 [{label}]: the bridge imports beside that helper", False, repr(exc))
+            if bridge is not None:
+                check(f"S-L6 [{label}]: the bridge's worktree_own_root is callable (its inline copy), never None",
+                      callable(getattr(bridge, "worktree_own_root", None)),
+                      "worktree_own_root is %r" % (getattr(bridge, "worktree_own_root", "missing"),))
+
+
+# ---- review fix round T-L3: the real-folder snapshot catches a created parent or a non-prefixed entry ----------------------
+def run_real_parent_snapshot_selfcheck(w: World) -> None:
+    snapshot = getattr(af, "real_parent_snapshot", None)
+    if snapshot is None:
+        check("T-L3: the fixture offers real_parent_snapshot()", False, "not defined")
+        return
+    with af.Sandbox("cgql3-") as sb:
+        fake_parent = sb.root / "never-created" / "auto-improve-codegraph"
+        with mock.patch.object(af, "REAL_PARENT", fake_parent):
+            absent = snapshot()
+            fake_parent.mkdir(parents=True)
+            created = snapshot()
+            (fake_parent / ".tmp-abc").write_text("x", encoding="utf-8")
+            extra = snapshot()
+        check("T-L3: the snapshot tells an absent parent from a newly created (empty) one", absent != created, "%r / %r" % (absent, created))
+        check("T-L3: and sees a non-prefixed entry (.tmp-*) appear in an existing parent", created != extra, "%r / %r" % (created, extra))
+
 # Issue #295 (contract 2026-11-07-295-codegraph-gate-dropped-mcp): the command-line route, the two-route banner, the
 # connection probe and notice, the cli-fallback record, AC7/AC8, the bench's --reset-budget mode.
 #
@@ -2339,13 +3789,13 @@ def mcp_errored(w: World, sb: af.Sandbox, project: Path, session: str) -> subpro
 
 def marker_of(sb: af.Sandbox, session: str):
     try:
-        return json.loads((af.session_folder(sb.tmp, session) / "turn.json").read_text(encoding="utf-8"))
+        return json.loads((pfolder(sb, session) / "turn.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
 
 def flag_exists(sb: af.Sandbox, session: str, name: str) -> bool:
-    return (af.session_folder(sb.tmp, session) / name).exists()
+    return (pfolder(sb, session) / name).exists()
 
 
 def tracker_events(project: Path, event: str | None = None) -> list[dict]:
@@ -2557,8 +4007,8 @@ def run_cli_fallback_record(w: World) -> None:
         check("R5-7: KEY: mcp-seen is a known name of the reset hook's pruner",
               reset.KNOWN_FILE_RE.fullmatch("mcp-seen") is not None)
         check("R5-7: logged-cli-fallback is a known name", reset.KNOWN_FILE_RE.fullmatch("logged-cli-fallback") is not None)
-        folder = old_session(sb.tmp, "r5-old", files=names)
-        removed = reset.prune_session_folders(sb.tmp)
+        folder = old_session(af.session_parent(sb.home), "r5-old", files=names)
+        removed = reset.prune_session_folders(af.session_parent(sb.home))
         check("R5-7: an old session folder holding mcp-seen and logged-cli-fallback is pruned whole",
               af.CODEGRAPH_SESSION_PREFIX + "r5-old" in removed and not folder.exists(), "removed %r; left %s" % (
                   removed, sorted(os.listdir(folder)) if folder.exists() else []))
@@ -2939,11 +4389,11 @@ def run_notice_main_rows(w: World) -> None:
         project = project_of(sb, "nm")
         me = os.getpid()
         chain, host_pid = host_chain(me, 4)
-        folder_of = lambda session: af.session_folder(sb.tmp, session)  # noqa: E731
+        folder_of = lambda session: pfolder(sb, session)  # noqa: E731
         ticket = "ticket-" + "c" * 64
 
         def seed(session):
-            af.write_marker(sb.tmp, session)
+            af.write_marker(af.session_parent(sb.home), session)
             (folder_of(session) / ticket).write_text("{}\n", encoding="utf-8")
 
         body = lambda session: {"session_id": session, "cwd": str(project), "prompt": "go"}  # noqa: E731
@@ -3118,7 +4568,7 @@ def run_review_followups(w: World) -> None:
         for label, fire in (("cli", lambda s: bash_ok(w, sb, project, s, "codegraph explore Thing")),
                             ("mcp", lambda s: mcp_ok(w, sb, project, s))):
             session = sid()
-            folder = af.session_folder(sb.tmp, session)
+            folder = pfolder(sb, session, create=True)
             folder.mkdir(parents=True)
             (folder / "turn.json").mkdir()  # os.replace onto an existing directory raises OSError
             before = len(tracker_events(project, "cli-fallback"))
@@ -3226,6 +4676,8 @@ def guarded(name: str, fn, *args) -> None:
 
 def run() -> None:
     real_temp_before = af.real_temp_codegraph_entries()
+    real_parent_before = af.real_parent_codegraph_entries()
+    real_snapshot_before = af.real_parent_snapshot()
     try:
         world = World()
     except af.AddonFixtureError as exc:
@@ -3248,6 +4700,28 @@ def run() -> None:
         guarded("X-8", run_prune_once, world)
         guarded("S", run_state, world)
         guarded("L", run_link_writes, world)
+        guarded("Q-plant", run_planted_state, world)
+        guarded("Q-prune", run_parent_pruner, world)
+        guarded("Q-foreign", run_foreign_marker, world)
+        guarded("Q-rule", run_parent_rule_table, world)
+        guarded("Q-unusable", run_unusable_parent, world)
+        guarded("Q-nonsource", run_unusable_nonsource, world)
+        guarded("Q-checkfailed", run_check_failed, world)
+        guarded("Q-announce", run_announce_unusable, world)
+        guarded("Q-ticket", run_ticket_unwritten, world)
+        guarded("Q-banner", run_banner_by_reason, world)
+        guarded("Q-hop", run_hop_proof, world)
+        guarded("R2-parity", run_verdict_function_parity, world)
+        guarded("R2-mapped", run_recorded_mapped_drive, world)
+        guarded("R2-surrogate", run_block_survives_surrogates, world)
+        guarded("R3-pre-realpath", run_remote_before_realpath, world)
+        guarded("R3-nonstring", run_block_non_string_fields, world)
+        guarded("R2-matrix", run_verdict_matrix, world)
+        guarded("R2-boundary", run_base_boundaries, world)
+        guarded("R2-foreign", run_foreign_marker_order, world)
+        guarded("R2-ambiguous", run_ambiguous_after_unwritten, world)
+        guarded("R2-bridge", run_bridge_without_own_root, world)
+        guarded("R2-snapshot", run_real_parent_snapshot_selfcheck, world)
         guarded("CLI", run_cli_route, world)
         guarded("RT", run_marker_routes, world)
         guarded("R5", run_cli_fallback_record, world)
@@ -3268,6 +4742,13 @@ def run() -> None:
         leaked = sorted(af.real_temp_codegraph_entries() - real_temp_before)
         check("isolation: the REAL temp folder (%s) gained no auto-improve-codegraph-* entry during this run" % af.REAL_TEMP,
               not leaked, "new entries: %s" % leaked)
+        leaked_parent = sorted(af.real_parent_codegraph_entries() - real_parent_before)
+        check("isolation: the REAL per-user session parent (%s) gained no auto-improve-codegraph-* entry during this run"
+              % af.REAL_PARENT, not leaked_parent, "new entries: %s" % leaked_parent)
+        after_snapshot = af.real_parent_snapshot()
+        check("isolation: the REAL per-user session parent itself was not newly created and gained no entry of any name "
+              "(a .tmp-* or a non-prefixed entry counts)", after_snapshot == real_snapshot_before,
+              "before %r / after %r" % (real_snapshot_before, after_snapshot))
 
 
 if __name__ == "__main__":

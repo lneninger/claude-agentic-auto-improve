@@ -18,11 +18,15 @@ WHAT IS PINNED
     reads the PROJECT's architecture-guard.rules.json first (it names the project's reference document);
   * the CodeGraph trio (issue #259): with a Project index (.codegraph/codegraph.db) and a configured server the
     codegraph-first-guard.py blocks a source Read with no marker; codegraph-turn-tracker.py writes the SESSION-keyed
-    marker (turn.json in <system temp>/auto-improve-codegraph-<session_id>/) after any CodeGraph tool call (and
+    marker (turn.json in <Per-user session parent>/auto-improve-codegraph-<session_id>/: the folder
+    auto-improve-codegraph under %LOCALAPPDATA% on Windows, under $XDG_CACHE_HOME or ~/.cache on POSIX; never the
+    system temp folder) after any CodeGraph tool call (and
     ignores any other tool); the guard then allows the Read; codegraph-turn-reset.py removes the marker so the
     guard blocks again. The guard fails open, with a logged reason, when there is no index, no server, a disabled
     server or a subagent; the identical retry of a blocked call is allowed once; the manifest grants the wildcard
-    only and lists released hashes;
+    only and lists released hashes; (issue #271) a folder planted in the shared temp folder opens no gate, an
+    unusable session parent blocks with session-state-unusable, and a run leaves nothing in the real parent or the
+    real temp folder;
   * bash-gate.py blocks a redirect into an uncovered source file, allows a covered one and a trivial one,
     and (Revision 4, D) with ``_shell_write_targets.py`` deleted from the project it exits 2 naming that
     file; the strict-shell-gate manifest names ``_shell_write_targets.py`` as a helper;
@@ -56,10 +60,28 @@ import _addon_fixture as af  # noqa: E402
 
 FALLBACK_TEXT = "fallback mode"
 
+_LEAK_BEFORE: dict = {}
+
+
+def setUpModule() -> None:
+    # Isolation (contract FM 1, JOURNAL 2026-10-05): snapshot the REAL Per-user session parent and the REAL temp folder.
+    _LEAK_BEFORE["temp"] = af.real_temp_codegraph_entries()
+    _LEAK_BEFORE["parent"] = af.real_parent_codegraph_entries()
+
+
+def tearDownModule() -> None:
+    leaked_temp = sorted(af.real_temp_codegraph_entries() - _LEAK_BEFORE.get("temp", set()))
+    leaked_parent = sorted(af.real_parent_codegraph_entries() - _LEAK_BEFORE.get("parent", set()))
+    if leaked_temp or leaked_parent:
+        raise AssertionError("isolation: a run added auto-improve-codegraph-* entries to the REAL temp folder %s: %s; "
+                             "to the REAL Per-user session parent %s: %s"
+                             % (af.REAL_TEMP, leaked_temp, af.REAL_PARENT, leaked_parent))
+
 
 def clean_env(project: Path, home: Path, extra: dict | None = None) -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_") and not k.startswith("GIT_")}
     env.update({"CLAUDE_PROJECT_DIR": str(project), "HOME": str(home), "USERPROFILE": str(home),
+                "LOCALAPPDATA": str(Path(home) / "AppData" / "Local"), "XDG_CACHE_HOME": str(Path(home) / ".cache"),
                 "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
     if extra:
         env.update(extra)
@@ -90,8 +112,10 @@ class AddonCase(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(tempfile.mkdtemp(prefix="addon-home-"))
         self.addCleanup(__import__("shutil").rmtree, self.home, True)
-        # A temp folder per test: the CodeGraph hooks keep their Session folder in the system temp folder, so a
-        # row never reads or writes the developer's real one.
+        # A temp folder per test (TMP/TEMP point at it) and a fixture LOCALAPPDATA / XDG_CACHE_HOME under the fixture
+        # home: the CodeGraph hooks keep their Session folders under the Per-user session parent (never the temp
+        # folder), so a row never reads or writes the developer's real one. The Windows base must exist.
+        (self.home / "AppData" / "Local").mkdir(parents=True, exist_ok=True)
         self.tmp = Path(tempfile.mkdtemp(prefix="addon-tmp-"))
         self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
         self.project = af.new_project("addon-run-")
@@ -292,8 +316,31 @@ class CodegraphAddonTests(AddonCase):
         self.sid = "s" + uuid.uuid4().hex
 
     def marker(self, session: str | None = None) -> Path:
-        """The Turn marker: turn.json in the session's folder under the (fixture) system temp folder."""
-        return af.session_folder(self.tmp, session or self.sid) / "turn.json"
+        """The Turn marker: turn.json in the session's folder under the (fixture) Per-user session parent."""
+        return af.session_folder(self.parent(), session or self.sid) / "turn.json"
+
+    def parent(self) -> Path:
+        """The fixture's Per-user session parent, NOT created here (the hooks create it)."""
+        return af.session_parent(self.home, create=False)
+
+    def planted_in_tmp(self) -> list:
+        """Every auto-improve-codegraph-* entry in the fixture TEMP folder (a hook run must add none)."""
+        return sorted(p.name for p in self.tmp.iterdir() if p.name.startswith(af.CODEGRAPH_SESSION_PREFIX))
+
+    def log_records(self, event: str) -> list:
+        path = self.project / ".claude" / "logs" / "errors.jsonl"
+        out = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("hook") == "codegraph-first-guard" and rec.get("event") == event:
+                    out.append(rec)
+        except OSError:
+            pass
+        return out
 
     def legacy_sentinel(self) -> Path:
         return self.project / ".claude" / ".codegraph-used-this-turn"
@@ -324,7 +371,9 @@ class CodegraphAddonTests(AddonCase):
         tracked = self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "Thing"}))
         self.assertEqual(tracked.rc, 0, msg=tracked.describe())
         self.assertTrue(self.marker().is_file(), msg="the tracker must write turn.json in the session's folder under "
-                                                     "the system temp folder: " + str(self.marker()))
+                                                     "the Per-user session parent: " + str(self.marker()))
+        self.assertEqual(self.planted_in_tmp(), [],
+                         msg="and nothing under the system temp folder: " + repr(self.planted_in_tmp()))
         self.assertFalse(self.legacy_sentinel().exists(), msg="and no longer writes <cwd>/.claude/.codegraph-used-this-turn")
         allowed = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(allowed.rc, 0, msg="after the tracker ran the same Read is allowed: " + allowed.describe())
@@ -363,8 +412,11 @@ class CodegraphAddonTests(AddonCase):
                 marker = self.marker(session)
                 self.assertTrue(marker.is_file(), msg="any mcp__codegraph__ tool opens the turn: " + str(marker))
                 data = json.loads(marker.read_text(encoding="utf-8"))
-                self.assertEqual(sorted(data), ["pid", "route", "summary", "tool", "ts"], msg="the marker shape (issue #295 adds route): " + repr(data))
+                self.assertEqual(sorted(data), ["pid", "route", "session", "summary", "tool", "ts", "writer"],
+                                 msg="the marker shape (stamped by #271, route added by #295): " + repr(data))
                 self.assertEqual(data["tool"], tool)
+                self.assertEqual(data["writer"], "codegraph-turn-tracker", msg="the stamp names the writer")
+                self.assertEqual(data["session"], session, msg="and the Session key")
 
     def test_the_tracker_ignores_a_tool_that_is_not_a_codegraph_tool(self):
         run = self.run_hook(self.TRACKER, self.payload("Bash", {"command": "ls"}))
@@ -446,13 +498,78 @@ class CodegraphAddonTests(AddonCase):
 
     def test_the_next_prompt_clears_a_retry_ticket(self):
         self.assertEqual(self.run_hook(self.GUARD, self.read_payload()).rc, 2, msg="control: blocked, ticket issued")
-        tickets = list(af.session_folder(self.tmp, self.sid).glob("ticket-*"))
+        tickets = list(af.session_folder(self.parent(), self.sid).glob("ticket-*"))
         self.assertEqual(len(tickets), 1, msg="the block must issue ticket-<fingerprint> in the Session folder: %s" % tickets)
         self.run_hook(self.RESET, self.payload("", {}, prompt="next"))
-        self.assertEqual(list(af.session_folder(self.tmp, self.sid).glob("ticket-*")), [],
+        self.assertEqual(list(af.session_folder(self.parent(), self.sid).glob("ticket-*")), [],
                          msg="the reset hook deletes this session's tickets")
         again = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(again.rc, 2, msg="after the reset the identical call has no ticket: " + again.describe())
+
+    # --- issue #271: per-user session parent, fail closed, foreign marker ------------------------------------------
+    def test_a_session_folder_planted_in_the_shared_temp_folder_opens_no_gate(self):
+        # criterion 2: the victim's first source Read, with a marker planted where the hooks used to keep it.
+        victim = "s" + uuid.uuid4().hex
+        af.write_marker(self.tmp, victim)  # the OLD location: the (shared) temp folder
+        run = self.run_hook(self.GUARD, self.read_payload(session_id=victim))
+        self.assertEqual(run.rc, 2, msg="a marker planted under the system temp folder must not open the gate: "
+                                        + run.describe())
+        self.assertIn("[codegraph-first-guard] BLOCKED", run.err, msg=run.describe())
+        # control: the same marker under the Per-user session parent opens it
+        mine = "s" + uuid.uuid4().hex
+        af.write_marker(af.session_parent(self.home), mine)
+        ok = self.run_hook(self.GUARD, self.read_payload(session_id=mine))
+        self.assertEqual(ok.rc, 0, msg="control: the same marker under the Per-user session parent allows: " + ok.describe())
+
+    def test_the_hooks_write_nothing_under_the_system_temp_folder(self):
+        self.run_hook(self.GUARD, self.read_payload())
+        self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "q"}))
+        self.run_hook(self.RESET, self.payload("", {}, prompt="next"))
+        self.assertEqual(self.planted_in_tmp(), [],
+                         msg="no hook creates, reads or prunes a Session folder in the system temp folder")
+        self.assertTrue(self.parent().is_dir() and any(self.parent().glob("auto-improve-codegraph-*")),
+                        msg="control: the hooks did keep state, under the Per-user session parent " + str(self.parent()))
+
+    def test_an_unusable_session_parent_blocks_with_session_state_unusable_and_the_tracker_writes_no_marker(self):
+        # the parent path is a plain FILE: not a folder. Fails closed, says why; no retry offered.
+        base = self.home / "AppData" / "Local" if os.name == "nt" else self.home / ".cache"
+        base.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(str(base), 0o700)
+        (base / "auto-improve-codegraph").write_text("not a folder\n", encoding="utf-8")
+        run = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(run.rc, 2, msg="an unusable parent fails closed: " + run.describe())
+        self.assertIn("[codegraph-first-guard] BLOCKED", run.err, msg=run.describe())
+        self.assertTrue("not-a-folder" in run.err or "not a folder" in run.err.lower(),
+                        msg="and names the problem (not-a-folder, in plain words): " + run.describe())
+        self.assertNotIn("repeat this exact call once", run.err,
+                         msg="a session-state-unusable block offers no retry: " + run.describe())
+        self.assertIn("/auto-improve-codegraph-uninstall", run.err, msg="but names the uninstall way out: " + run.describe())
+        tracked = self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "q"}))
+        self.assertEqual(tracked.rc, 0, msg=tracked.describe())
+        self.assertIn("the gate stays shut", tracked.err, msg="the tracker says the gate stays shut: " + tracked.describe())
+        self.assertTrue((base / "auto-improve-codegraph").is_file(), msg="and wrote nothing through the unusable parent")
+        # control: with the file removed (a usable parent) the same Read blocks as source-target, with its retry line
+        (base / "auto-improve-codegraph").unlink()
+        first = self.run_hook(self.GUARD, self.read_payload())
+        self.assertIn("repeat this exact call once", first.err,
+                      msg="control: a usable parent keeps today's source-target banner: " + first.describe())
+
+    def test_a_foreign_marker_opens_the_gate_and_is_logged_once(self):
+        (self.project / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
+        af.write_marker(af.session_parent(self.home), self.sid, stamped=False)
+        for _ in range(2):
+            run = self.run_hook(self.GUARD, self.read_payload())
+            self.assertEqual(run.rc, 0, msg="a Foreign marker still opens the gate: " + run.describe())
+        self.assertEqual(len(self.log_records("foreign-marker")), 1,
+                         msg="logged once per session: " + repr(self.log_records("foreign-marker")))
+
+    def test_an_own_stamped_marker_logs_no_foreign_marker_record(self):
+        (self.project / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
+        af.write_marker(af.session_parent(self.home), self.sid)
+        run = self.run_hook(self.GUARD, self.read_payload())
+        self.assertEqual(run.rc, 0, msg="control: an own marker opens the gate: " + run.describe())
+        self.assertEqual(self.log_records("foreign-marker"), [], msg="and logs no foreign-marker record")
 
     # --- the manifest (acceptance criteria 7 and the upgrade path) --------------------------------------------------
     def test_the_manifest_grants_the_wildcard_only(self):

@@ -17,6 +17,9 @@ Two more items joined this stub in Revision 9:
 - **The counting rule for "6 generic data files"** in the `.claude/hooks/` tree line. The folder holds six `.json` files, but `hooks.json` has its own tree line, which leaves five. Decide the rule, then correct the number and pin it with the other tree counts.
 - **The manifest descriptions** (t18 I1). The descriptions in `plugin.json`, `.claude-plugin/plugin.json`, `.cursor-plugin/plugin.json` and `.claude-plugin/marketplace.json` say "28 skills" (and 14 agents), while the tree has 33 skills and 15 agents. The landing does not correct them: `raise_manifests` rewrites only the `"version"` fields. The parent's Open Question 33 recommends one pull request to `master` after the landing, which corrects the descriptions from the tree's counts and takes a patch raise.
 
+One more item joined this stub from the t20 re-review (its I2):
+- **The `test_pr_merged.py` case count in two skill files.** `skills/pr-merged/SKILL.md` (lines 115 and 121) and `skills/advance/SKILL.md` (lines 100 and 101) say 760 cases, while the suite and `README.md` say 761. Neither file was in the Files to touch of blocks 17 or 19, so neither block could correct it. Decide whether the skill text should carry a count at all, or point at the suite, then correct both files together.
+
 ## Why it was deferred
 
 The pin is a new check with design choices of its own (which tree lines it reads, how a helper module is told from a workflow script, and whether every pull request that adds a test must also edit the README), and it fixes nothing the t18 review blocked on.

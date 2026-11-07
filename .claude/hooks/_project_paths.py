@@ -558,6 +558,12 @@ _NO_TARGET_BASH = ("/dev/null", "/dev/stdout", "/dev/stderr")
 _ENV_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)|%(\w+)%")
 
 
+#: Capability declaration (issue #271): this file carries the hop refusal (``_hop_allowed`` and the checks that run
+#: before a hostile ``gitdir:`` / ``commondir`` host is probed). A consumer asks "does this helper refuse the hop?"
+#: with the Hop proof: ``getattr(helper, "TREE_HOP_REFUSAL", False) is True``, or the 0.15.2 helper's shape
+#: (``_hop_allowed`` and ``worktree_own_root`` both callable). It names a capability, not a release.
+TREE_HOP_REFUSAL = True
+
 _GITDIR_READ_CAP = 4096
 _GITDIR_MARKERS = ("/.git/worktrees/", "/.git/modules/")
 
@@ -636,6 +642,14 @@ def _git_file_kind(gitfile: str, folder: str) -> tuple[str, str | None]:
         commondir = os.path.join(target, "commondir")
         if not os.path.isfile(commondir):
             return "main-checkout", os.path.realpath(folder)
+        # Probe order of the commondir hop (issue #271). No later step may move before a check, because steps 4 and 6
+        # touch the host a hostile ``commondir`` text names:
+        #   1. read the ``commondir`` text (the file itself sits in a gitdir already judged local or same-host);
+        #   2. judge the raw relative text;
+        #   3. judge the normalised join;
+        #   4. only then ``realpath``, which touches the disk;
+        #   5. judge the ``realpath`` form;
+        #   6. ``isdir`` last.
         relative = _read_gitdir_line(commondir)
         # The commondir hop is judged against the folder it hops from (and the tree), and the joined text is normalised BEFORE the
         # check: the string that is checked is the string that is opened.

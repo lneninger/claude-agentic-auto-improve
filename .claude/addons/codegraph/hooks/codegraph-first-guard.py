@@ -3,8 +3,10 @@
 codegraph-first-guard.py -- PreToolUse hook for the CodeGraph-First Protocol.
 
 Asks the agent to start an investigation with a CodeGraph tool: it blocks Read / Grep / Glob on source-code paths
-until one has been called in the current investigation turn. It is a NUDGE, never a wall: it fails open whenever
-CodeGraph is provably unavailable, and the identical retry of a call it just blocked is allowed once.
+until one has been called in the current investigation turn. It lets reads through whenever CodeGraph is provably
+unavailable, and the identical retry of a call it just blocked is allowed once. When its own session folder cannot be
+used it blocks instead (session-state-unusable), says why and how to fix it, and offers no retry: planted or broken
+state must never open the gate.
 
 The "turn" is bounded by UserPromptSubmit and keyed to the SESSION, not to a directory:
     UserPromptSubmit -> codegraph-turn-reset.py deletes the session's marker and retry tickets
@@ -18,27 +20,34 @@ Hook contract (Claude Code):
     exit 2: block (stderr shown to Claude)
     other:  error (hook fails open -- logs to stderr, allows the call)
 
-Session folder (shared by the three hooks):
-    <system temp folder>/auto-improve-codegraph-<session key>/
-        turn.json            the Turn marker {ts, tool, summary, pid, route}
+Session folder (shared by the three hooks), under the Per-user session parent (issue #271): the folder
+auto-improve-codegraph in %LOCALAPPDATA% on Windows, in $XDG_CACHE_HOME (else ~/.cache) on POSIX, mode 0700. The
+system temp folder is never read, written or pruned:
+    <Per-user session parent>/auto-improve-codegraph-<session key>/
+        turn.json            the Turn marker {ts, tool, summary, pid, route, writer, session}
         mcp-seen             set by the tracker after a successful mcp__codegraph__* call (sticky for the session)
         ticket-<64 hex>      a Retry escape ticket, issued at a block, consumed by the identical retry
         availability.json    the cached server and index verdicts
-        logged-<reason>      at most one log record per session per fail-open reason
+        logged-<reason>      at most one log record per session per fail-open reason (and for a Foreign marker)
 
         transcript-cursor.json   the shadow's Transcript cursor (issue #261); transcript-cursor.<pid>.tmp is its temp file
 
-Decision order (concept contracts 2026-11-05-codegraph-guard-fail-open and 2026-11-05-codegraph-hooks-redesign, G-1):
-    0. the Session folder is unusable            -> allow (fail-open:state-unwritable; it logs on every call,
-                                                    because there is no writable state to rate-limit it)
-    2. the Turn marker exists                    -> allow (checked BEFORE the paths are classified: steps 1 and 2 are
-                                                    both silent allows, so only the internal reason differs)
-    1. no target / only non-source targets       -> allow
-    3. the payload carries a non-empty agent_id  -> allow (fail-open:subagent)
-    4. no Project index / index of another tree  -> allow (fail-open:no-index / fail-open:index-other-tree)
-    5. the server is not configured / disabled   -> allow (fail-open:server-not-configured / server-disabled)
+Decision order (concept contracts 2026-11-05-codegraph-guard-fail-open, 2026-11-05-codegraph-hooks-redesign (G-1) and
+2026-11-06-session-folder-owner-and-tool-named):
+    0. resolve the Session state                 -> unusable: the Stateless session (it reads and writes nothing)
+    1. the Turn marker exists                    -> allow (checked BEFORE the paths are classified: the next step is also
+                                                    a silent allow, so only the internal reason differs; a Foreign
+                                                    marker is logged once per session)
+    2. no target / only non-source targets       -> allow
+    3-5. the proof steps, each an allow (their stderr line prints on every call, and nothing is logged, while the
+         Session state is unusable):
+         the payload carries a non-empty agent_id  (fail-open:subagent)
+         no Project index / index of another tree  (fail-open:no-index / fail-open:index-other-tree)
+         the server is not configured / disabled   (fail-open:server-not-configured / server-disabled)
     6. a ticket matches the call's fingerprint   -> delete it, allow (retry-escape-used)
-    7. otherwise write the ticket and block.
+    7. otherwise write the ticket and block; the Session state unusable blocks here (session-state-unusable) without a
+       ticket; when the write fails, resolve the Session state again: unusable -> session-state-unusable, still usable
+       -> retry-ticket-unwritten. It never allows.
 
 main() runs the decision in three parts (G-2): the Live plan (a pure function: it reads, it writes nothing), the SHADOW
 SECTION (the same planner with the Transcript turn state in place of the Turn marker; it logs one Shadow record to
@@ -52,11 +61,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
+import posixpath
 import re
 import stat
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -73,9 +83,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 #:                                    EXACTLY like ``_pp`` being None, the fallback-mode banner text included.
 #:   _pp_worktree_own_root            issue #259: bound the same way; a helper from an earlier release lacks it, the inline walk is used.
 #:   _pp_tree_kind, _pp_main_checkout_root
-#:                                    bound ONLY from a helper that carries the hop refusal (``_hop_allowed``): an older helper
-#:                                    probes the host a hostile ``gitdir:`` line names before any caller-side check could run,
-#:                                    so with one of those ``index-other-tree`` cannot fire and the old functions are never called.
+#:                                    bound ONLY on the Hop proof (issue #271): the helper declares ``TREE_HOP_REFUSAL = True``, or
+#:                                    it has the 0.15.2 shape (``_hop_allowed`` and ``worktree_own_root`` both callable). An older
+#:                                    helper probes the host a hostile ``gitdir:`` line names before any caller-side check could
+#:                                    run, so with one of those ``index-other-tree`` cannot fire and the old functions are never
+#:                                    called. The same expression gates the bridge (``_claude_paths.TREE_HOP_REFUSAL``) and the installer.
 _PP_NAMES = frozenset({
     "_pp", "_pp_checkout_equivalent_path", "_pp_worktree_own_root", "_pp_has_hop_refusal", "_pp_tree_kind",
     "_pp_main_checkout_root"})
@@ -133,7 +145,9 @@ def _load_project_paths() -> None:
     pp = scope["_pp"]
     scope.setdefault("_pp_checkout_equivalent_path", getattr(pp, "checkout_equivalent_path", None) if pp is not None else None)
     scope.setdefault("_pp_worktree_own_root", getattr(pp, "worktree_own_root", None) if pp is not None else None)
-    scope.setdefault("_pp_has_hop_refusal", pp is not None and callable(getattr(pp, "_hop_allowed", None)))
+    scope.setdefault("_pp_has_hop_refusal", pp is not None and (
+        getattr(pp, "TREE_HOP_REFUSAL", False) is True
+        or (callable(getattr(pp, "_hop_allowed", None)) and callable(getattr(pp, "worktree_own_root", None)))))
     scope.setdefault("_pp_tree_kind", getattr(pp, "tree_kind", None) if scope["_pp_has_hop_refusal"] else None)
     scope.setdefault("_pp_main_checkout_root",
                      getattr(pp, "main_checkout_root", None) if scope["_pp_has_hop_refusal"] else None)
@@ -278,6 +292,8 @@ TICKET_PREFIX = "ticket-"
 LOGGED_PREFIX = "logged-"
 LEGACY_SENTINEL_NAME = ".codegraph-used-this-turn"
 SERVER_NAME = "codegraph"
+MARKER_WRITER = "codegraph-turn-tracker"
+FOREIGN_MARKER_FLAG = LOGGED_PREFIX + "foreign-marker"
 _SESSION_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?")  # never ends in "." (Windows strips it)
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
@@ -292,8 +308,6 @@ NOTICES = {
     "fail-open:server-not-configured": "the CodeGraph MCP server is not configured for this project.",
     "fail-open:server-disabled": "the CodeGraph MCP server is disabled for this project.",
     "fail-open:subagent": "this is a subagent session, which may have no CodeGraph tool attached.",
-    "fail-open:state-unwritable": (
-        "the guard's session folder in the system temp folder cannot be used, so it cannot record a retry."),
     "retry-escape-used": (
         "the identical call was blocked just before; it is allowed once and logged as a retry-escape."),
 }
@@ -301,7 +315,14 @@ NOTICES = {
 
 def log(msg: str) -> None:
     """Log to stderr so Claude sees the diagnostic line."""
-    print(f"[codegraph-first-guard] {msg}", file=sys.stderr)
+    try:
+        sys.stderr.reconfigure(errors="backslashreplace")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        print(f"[codegraph-first-guard] {msg}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - a diagnostic line must never change the verdict
+        pass
 
 
 def _is_link_stat(st: os.stat_result) -> bool:
@@ -323,6 +344,176 @@ def _norm_path(path: str) -> str:
 def _payload_cwd(payload: dict) -> str:
     value = payload.get("cwd")
     return value if isinstance(value, str) and value else os.getcwd()
+
+
+# ---------------------------------------------------------------------------
+# Per-user session parent (issue #271). The tracker and the reset hook carry the same block inline (a parity test pins
+# the three copies): an add-on copies a helper only when the project lacks it, so an old helper must not be a dependency.
+# ---------------------------------------------------------------------------
+PARENT_NAME = "auto-improve-codegraph"
+#: The closed set of Parent problems. The Session folder inside a usable parent adds ``session-<link / not-a-folder /
+#: foreign-owner / unwritable / check-failed>``.
+PARENT_PROBLEMS = ("unset", "not-absolute", "remote", "cannot-create", "link", "not-a-folder", "foreign-owner",
+                   "open-mode", "unwritable", "check-failed")
+_LOCAL_DEVICE_HOST_RE = re.compile(r"\?[a-z]:")
+
+
+def session_parent_base(env, os_name: str) -> tuple:
+    """The Parent base rule, a pure function of the environment mapping and the OS name: ``(base, problem)``. It reads
+    ONLY ``env`` (no expanduser, no pwd, no os.environ). Windows: ``LOCALAPPDATA``. POSIX: ``XDG_CACHE_HOME``, and when
+    that is unset or empty ``HOME`` + ``/.cache`` (the XDG default); both unset or empty gives ``unset``. A set but
+    relative value gives ``not-absolute`` and is never skipped to the next name. On Windows a base that is a network
+    path (any spelling ``_own_spellings`` gives has a host that is not the local-drive form) gives ``remote``; the
+    empty host of a device path counts as remote. Exactly one of the two is None."""
+    if os_name == "nt":
+        path_module, raw = ntpath, env.get("LOCALAPPDATA") or ""
+    else:
+        path_module, raw = posixpath, env.get("XDG_CACHE_HOME") or ""
+        if not raw:
+            home = env.get("HOME") or ""
+            raw = posixpath.join(home, ".cache") if home else ""
+    if not raw:
+        return None, "unset"
+    if os_name == "nt" and raw.replace("\\", "/")[:4] == "/??/":
+        return None, "remote"  # the NT object-manager prefix reaches any device or share: refused from the text, no I/O
+    if os_name == "nt" and raw.replace("\\", "/")[:2] == "//" and raw.replace("\\", "/")[:4] not in ("//?/", "//./"):
+        return None, "remote"  # '//' or '\\' that is not exactly the device prefix: a UNC host (or a spelling of one)
+    if not path_module.isabs(raw):
+        return None, "not-absolute"
+    if os_name == "nt" and not ntpath.splitdrive(raw)[0]:
+        return None, "not-absolute"  # rooted with no drive: Win32 would resolve it against the cwd's drive
+    if os_name == "nt":
+        slashed = raw.replace("\\", "/")
+        device = slashed[:4] in ("//?/", "//./")
+        if device and ".." in slashed.split("/"):
+            return None, "remote"  # Win32 collapses the '..' before it opens the path: the text judged is not the path opened
+        canon, stripped = raw, raw
+        if device:
+            rest = slashed[4:].lstrip("/").replace("/", "\\")  # doubled separators after the prefix collapse in Win32
+            canon = "\\\\" + slashed[2] + "\\" + rest
+            stripped = rest if rest[1:2] == ":" else ("\\\\" + rest[4:] if rest[:4].upper() == "UNC\\" else canon)
+        letter = (stripped if stripped[1:2] == ":" else "")[:1]
+        if letter and not (letter.isascii() and letter.isalpha()):
+            return None, "not-absolute"  # a drive designator that is not an ASCII letter (1:, ' ':, .:)
+        if letter:
+            # a drive letter in any spelling: the drive table (no network I/O) is asked BEFORE any realpath
+            try:
+                import ctypes
+                drive_type = ctypes.windll.kernel32.GetDriveTypeW(letter + ":\\")
+            except Exception as exc:  # noqa: BLE001 - undecidable is refused (a true diagnosis), never allowed
+                return None, "check-failed", "%s: %s" % (type(exc).__name__, exc)
+            if drive_type not in (2, 3, 6):  # removable, fixed, ram disk; every other answer (remote, cd-rom, unknown) is refused
+                return None, "remote"
+        texts = [raw, canon]
+        full_name = getattr(ntpath, "_getfullpathname", None)  # no I/O: the same collapse Win32 does
+        if full_name is not None:
+            try:
+                texts.append(full_name(stripped))
+            except (OSError, ValueError):
+                return None, "remote"
+        for text in texts:
+            for spelling in _own_spellings(text):
+                host = _remote_host(spelling)
+                if host is not None and not _LOCAL_DEVICE_HOST_RE.fullmatch(host):
+                    return None, "remote"
+    return raw, None
+
+
+def _base_shown(env, os_name: str) -> str:
+    """The setting a base problem is about, for a message: its value, else the variable's name."""
+    if os_name == "nt":
+        return env.get("LOCALAPPDATA") or "LOCALAPPDATA"
+    return env.get("XDG_CACHE_HOME") or env.get("HOME") or "XDG_CACHE_HOME or HOME"
+
+
+def _create_parent(base: str, parent: str) -> str | None:
+    """Create the Per-user session parent with mode 0700: one ``mkdir``, never ``makedirs``. Windows: the base must
+    exist and is never created. POSIX: a missing base is created (one level, 0700) only when its own parent exists; a
+    deeper missing chain is ``cannot-create``. Returns None or the problem."""
+    try:
+        os.mkdir(parent, 0o700)
+        return None
+    except FileExistsError:
+        return None
+    except FileNotFoundError:
+        if os.name == "nt":
+            return "cannot-create"  # the base is never created on Windows
+    except OSError:
+        return "cannot-create"
+    try:
+        os.mkdir(base, 0o700)  # POSIX only: one level; its own parent must exist
+    except FileExistsError:
+        pass
+    except OSError:
+        return "cannot-create"
+    try:
+        os.mkdir(parent, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return "cannot-create"
+    return None
+
+
+def resolve_session_parent() -> tuple:
+    """The Per-user session parent of THIS call, from the environment at call time (never at import, so an in-process
+    test can redirect it): ``(parent, problem, detail)``. ``problem`` is None when the parent is usable. ``parent`` is
+    its path, or for a base problem the setting that failed. ``detail`` is the exception text of ``check-failed``.
+    The parent gets every check (not a link, a folder, the user's own and closed to others on POSIX, writable); the
+    base only the existence, text and remote rules, because a base that is a junction is legitimate (a moved
+    AppData). Never raises: any exception while computing the verdict is ``check-failed`` (file facts come from
+    ``os.lstat``)."""
+    parent = ""
+    try:
+        verdict = session_parent_base(os.environ, os.name)  # (base, problem) or (None, "check-failed", exception text)
+        base, problem = verdict[0], verdict[1]
+        if problem:
+            return _base_shown(os.environ, os.name), problem, (verdict[2] if len(verdict) > 2 else "")
+        parent = os.path.join(base, PARENT_NAME)
+        try:
+            st = os.lstat(parent)
+        except FileNotFoundError:
+            problem = _create_parent(base, parent)
+            if problem:
+                return parent, problem, ""
+            st = os.lstat(parent)
+        if _is_link_stat(st):
+            return parent, "link", ""
+        if not stat.S_ISDIR(st.st_mode):
+            return parent, "not-a-folder", ""
+        if hasattr(os, "getuid"):
+            if st.st_uid != os.getuid():
+                return parent, "foreign-owner", ""
+            if st.st_mode & 0o077:
+                return parent, "open-mode", ""
+        if not os.access(parent, os.W_OK):
+            return parent, "unwritable", ""
+        return parent, None, ""
+    except Exception as exc:  # noqa: BLE001 - a hostile folder must reach check-failed, never the catch-all that allows
+        return parent, "check-failed", "%s: %s" % (type(exc).__name__, exc)
+
+
+def session_folder_problem(folder: str) -> tuple:
+    """``(problem, detail)`` of a Session folder inside a usable parent; ``(None, "")`` when usable. An absent folder is
+    usable (it is created on the first write)."""
+    try:
+        st = os.lstat(folder)
+    except FileNotFoundError:
+        return None, ""
+    except Exception as exc:  # noqa: BLE001
+        return "session-check-failed", "%s: %s" % (type(exc).__name__, exc)
+    try:
+        if _is_link_stat(st):
+            return "session-link", ""
+        if not stat.S_ISDIR(st.st_mode):
+            return "session-not-a-folder", ""
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            return "session-foreign-owner", ""
+        if not os.access(folder, os.W_OK):
+            return "session-unwritable", ""
+    except Exception as exc:  # noqa: BLE001
+        return "session-check-failed", "%s: %s" % (type(exc).__name__, exc)
+    return None, ""
 
 
 def session_key(payload: dict) -> str:
@@ -358,45 +549,50 @@ def _atomic_write(final: str, data: str) -> bool:
 
 
 class Session:
-    """The Session folder of one payload and the small state kept in it."""
+    """The Session folder of one payload and the small state kept in it.
+
+    ``resolve()`` computes the Session state verdict (the Per-user session parent, then the Session folder). While
+    ``problem`` is set the object is the Stateless session: every read answers "absent" and every write answers
+    False WITHOUT any filesystem call, so nothing is created inside or through an unusable folder. A Session that
+    has not been resolved yet is stateless too."""
 
     def __init__(self, payload: dict) -> None:
         self.payload = payload
         self.key = session_key(payload)
-        self.folder = os.path.join(tempfile.gettempdir(), SESSION_PREFIX + self.key)
+        self.parent = ""
+        self.folder = ""
+        self.problem: str | None = "check-failed"
+        self.detail = "the session state was not resolved"
 
-    def folder_usable(self) -> bool:
-        """False when the folder is a link, not a folder, owned by another POSIX user, or not writable.
-        An absent folder is usable (it is created on the first write)."""
-        try:
-            st = os.lstat(self.folder)
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        if _is_link_stat(st) or not stat.S_ISDIR(st.st_mode):
-            return False
-        if hasattr(os, "getuid") and st.st_uid != os.getuid():
-            return False
-        return os.access(self.folder, os.W_OK)
+    def resolve(self) -> None:
+        """Resolve the Session state verdict again, from the environment of this call."""
+        self.parent, self.problem, self.detail = resolve_session_parent()
+        self.folder = ""
+        if self.problem is None:
+            self.folder = os.path.join(self.parent, SESSION_PREFIX + self.key)
+            self.problem, self.detail = session_folder_problem(self.folder)
 
     def ensure_folder(self) -> bool:
         """Create the folder when absent and re-check it. False when it cannot be used."""
+        if self.problem is not None:
+            return False
         try:
             os.mkdir(self.folder, 0o700)
         except FileExistsError:
             pass
-        except OSError:
+        except Exception:  # noqa: BLE001
             return False
-        return self.folder_usable()
+        return session_folder_problem(self.folder)[0] is None
 
     def path(self, name: str) -> str:
         return os.path.join(self.folder, name)
 
     def has_plain_file(self, name: str) -> bool:
+        if self.problem is not None:
+            return False
         try:
             st = os.lstat(self.path(name))
-        except OSError:
+        except (OSError, ValueError):
             return False
         return stat.S_ISREG(st.st_mode) and not _is_link_stat(st)
 
@@ -902,9 +1098,9 @@ class Plan:
         self.reason = ""
         self.fingerprint = ""
         self.step0_ok = True
-        self.turn_marker: bool | None = None  # None until step 2 read it
+        self.turn_marker: bool | None = None  # None until step 1 read it
         self.target_class = "not-computed"
-        self.availability: tuple[str, str] | None = None  # (server verdict, index verdict) once step 4 computed them
+        self.availability: tuple[str, str] | None = None  # (server verdict, index verdict) once step 3 computed them
         self.availability_write: str | None = None  # availability.json body to write at apply
         self.ticket_op: tuple | None = None  # ("delete", name) or ("write", name, body)
 
@@ -920,7 +1116,7 @@ def _class_of(all_classes: list[str]) -> str:
 
 
 def _plan(tool_name: str, tool_input: dict, payload: dict | None, gate: str | None, base: "Plan | None") -> Plan:
-    """The decision as a pure function (it reads, it writes nothing). Order 0, 2, 1, 3-7 (G-1).
+    """The decision as a pure function (it reads, it writes nothing but the Session folder's lazy creation). Order 0-7 (G-1).
 
     ``gate`` is None for the Live plan (step 2 reads the Turn marker). For the Shadow decision it is the Transcript
     turn state, and ``base`` is the Live plan whose step-0 and availability verdicts are reused, never recomputed (S-1);
@@ -930,24 +1126,30 @@ def _plan(tool_name: str, tool_input: dict, payload: dict | None, gate: str | No
     session = base.session if shadow else Session(payload)
     plan = Plan(session)
 
-    # 0. an unusable Session folder: a guard that cannot record an escape must not block.
-    plan.step0_ok = base.step0_ok if shadow else session.folder_usable()
-    if not plan.step0_ok:
-        return plan.done("allow", "fail-open:state-unwritable")
+    # 0. the Session state verdict (the Per-user session parent, then the Session folder). Unusable: the Stateless
+    #    session reads and writes nothing, the proof steps still run, and the call is blocked at step 7 (fail closed:
+    #    planted or broken state must never open the gate). The folder resolution is the plan's one lazy creation
+    #    (idempotent, identical with or without the shadow); the Shadow decision reuses the Live plan's verdict.
+    if shadow:
+        plan.step0_ok = base.step0_ok
+    else:
+        session.resolve()
+        plan.step0_ok = session.problem is None
 
-    # 2. the Turn marker of this session (the Transcript turn state in the Shadow decision; unknown counts as open).
-    #    Checked before the paths are classified: both steps allow with no effect and no output.
+    # 1. the Turn marker of this session (the Transcript turn state in the Shadow decision; unknown counts as open;
+    #    never read from an unusable folder). Checked before the paths are classified: both steps allow with no effect
+    #    and no output.
     if shadow:
         if gate == "open":
             return plan.done("allow", "transcript-open")
         if gate.startswith("unknown"):
             return plan.done("allow", "transcript-unknown")
     else:
-        plan.turn_marker = session.has_plain_file(MARKER_NAME)
+        plan.turn_marker = session.has_plain_file(MARKER_NAME) if plan.step0_ok else None  # not read from an unusable folder
         if plan.turn_marker:
             return plan.done("allow", "turn-marker-present")
 
-    # 1. no target, or only non-source targets.
+    # 2. no target, or only non-source targets.
     paths, patterns = extract_targets(tool_name, tool_input)
     if not paths and not patterns:
         plan.target_class = "allowed"
@@ -987,10 +1189,13 @@ def _plan(tool_name: str, tool_input: dict, payload: dict | None, gate: str | No
             plan.ticket_op = ("delete", ticket)
         return plan.done("allow", "retry-escape-used")
 
-    # 7. issue the ticket (at apply) and block.
-    if not shadow:
+    # 7. issue the ticket (at apply) and block. Never an allow: an unusable Session state blocks without a ticket, and
+    #    a ticket write that fails at apply resolves the verdict again (apply_state).
+    if plan.step0_ok and not shadow:
         body = json.dumps({"ts": int(time.time()), "tool": tool_name, "fingerprint": plan.fingerprint}) + "\n"
         plan.ticket_op = ("write", ticket, body)
+    if not plan.step0_ok:
+        return plan.done("block", "session-state-unusable")
     if any(c == "source" for c in all_classes):
         return plan.done("block", "source-target")
     # Only "unknown" left (Grep regex, generic Glob like `**/*`): ambiguous code investigation is gated too.
@@ -1005,8 +1210,9 @@ def plan_live(tool_name: str, tool_input: dict, payload: dict | None = None) -> 
 def apply_state(plan: Plan) -> tuple[str, str]:
     """The Live plan's STATE effects (G-2 step 3): the availability.json write, the ticket delete or write. Returns the final
     (decision, reason). A ticket already gone (an identical parallel call consumed it after the plan) keeps the planned
-    allow; apply never re-decides. A ticket that cannot be written turns the planned block into
-    fail-open:state-unwritable, as before the split. Output, notice flags and log records are main()'s effects."""
+    allow; apply never re-decides. A ticket that cannot be written resolves the Session state again (the
+    folder may have changed since the plan, for example it became a link): unusable -> block session-state-unusable,
+    still usable -> block retry-ticket-unwritten. It never allows. Output, notice flags and log records are main()'s effects."""
     session = plan.session
     if plan.availability_write is not None:
         session.write(AVAILABILITY_NAME, plan.availability_write)
@@ -1018,7 +1224,10 @@ def apply_state(plan: Plan) -> tuple[str, str]:
             pass  # someone else consumed it: the planned allow stands
     elif op is not None and op[0] == "write":
         if not session.write(op[1], op[2]):
-            return "allow", "fail-open:state-unwritable"
+            session.resolve()
+            if session.problem is not None:
+                return "block", "session-state-unusable"
+            return "block", "retry-ticket-unwritten"
     return plan.decision, plan.reason
 
 
@@ -1038,7 +1247,66 @@ def decide(tool_name: str, tool_input: dict, payload: dict | None = None) -> tup
 REASON_TEXT = {
     "source-target": "source-code target without a CodeGraph call this turn",
     "ambiguous-target": "ambiguous codebase investigation without a CodeGraph call this turn",
+    "session-state-unusable": "the guard's per-user session folder cannot be used (session-state-unusable)",
+    "retry-ticket-unwritten": "the retry of this call could not be recorded (retry-ticket-unwritten)",
 }
+
+#: Problem token -> the problem in plain words. ``{where}`` is the parent or the Session folder; a Parent base problem
+#: names the setting instead.
+PROBLEM_WORDS = {
+    "unset": "the setting is empty or missing",
+    "not-absolute": "the setting is not an absolute path",
+    "remote": "the setting points at a network share, not at this computer",
+    "cannot-create": "the folder cannot be created",
+    "link": "the folder is a link",
+    "not-a-folder": "the path is a file, not a folder",
+    "foreign-owner": "the folder belongs to another user",
+    "open-mode": "the folder is open to other users",
+    "unwritable": "the folder is not writable",
+    "check-failed": "the folder could not be checked",
+    "session-link": "the session folder is a link",
+    "session-not-a-folder": "the session folder path is a file, not a folder",
+    "session-foreign-owner": "the session folder belongs to another user",
+    "session-unwritable": "the session folder is not writable",
+    "session-check-failed": "the session folder could not be checked",
+}
+
+
+def problem_fix(problem: str, where: str) -> str:
+    """What the user does about ``problem`` (I-7): the fix that matches the problem, never a shell route to the source."""
+    setting = "LOCALAPPDATA" if os.name == "nt" else "XDG_CACHE_HOME (or HOME)"
+    if problem in ("unset", "not-absolute", "remote"):
+        return f"set {setting} to an absolute, local folder you own, then start a new session."
+    if problem == "cannot-create":
+        return f"make sure the folder {os.path.dirname(where)} exists and you can write in it, then start a new session."
+    if problem in ("link", "session-link"):
+        return f"remove the link at {where}, then start a new session."
+    if problem in ("not-a-folder", "session-not-a-folder"):
+        return f"remove the file at {where} (it is not a folder), then start a new session."
+    if problem in ("foreign-owner", "session-foreign-owner"):
+        return f"remove {where} (it belongs to another user) or point {setting} at a folder you own, then start a new session."
+    if problem == "open-mode":
+        return f"run `chmod 700 {where}`, then start a new session."
+    if problem in ("unwritable", "session-unwritable"):
+        return f"make {where} writable for your user, then start a new session."
+    return "fix the cause named above, then start a new session."
+
+
+def unusable_lines(session: Session) -> list:
+    """The body of a ``session-state-unusable`` banner (I-7): the path, the problem in plain words with its token, the
+    fix, and the uninstall way out. It offers no retry and names no individual tool."""
+    where = session.folder if session.problem.startswith("session-") else session.parent
+    words = PROBLEM_WORDS.get(session.problem, "the folder cannot be used")
+    detail = f": {session.detail}" if session.detail else ""
+    return [
+        f"Problem:  {where} -- {words} ({session.problem}){detail}",
+        f"Fix:      {problem_fix(session.problem, where)}",
+        "",
+        "Until this is fixed the guard cannot record a CodeGraph call, so a CodeGraph call does not open the gate and",
+        "a repeat of this call is blocked the same way: this block offers no retry.",
+        "To remove the guard instead, run",
+        "/auto-improve-codegraph-uninstall and start a new session.",
+    ]
 
 
 COPYABLE_TERM_MAX = 80
@@ -1055,13 +1323,12 @@ def neutral_term(text: str) -> str:
 
 def _term_of(tool_name: str, tool_input: dict) -> str:
     """The name or pattern the suggestion is about, before neutralising."""
+    def text_of(key: str) -> str:
+        value = tool_input.get(key) if isinstance(tool_input, dict) else None
+        return value if isinstance(value, str) else ""  # only a string can be named in the message
+
     if tool_name == "Read":
-        path = (
-            tool_input.get("file_path")
-            or tool_input.get("filePath")
-            or tool_input.get("path")
-            or ""
-        )
+        path = text_of("file_path") or text_of("filePath") or text_of("path")
         name = Path(path).stem if path else "Symbol"
         # Strip common C# suffixes for a cleaner search term.
         for suf in ("Service", "Controller", "Repository", "Configuration", "Entity"):
@@ -1069,8 +1336,7 @@ def _term_of(tool_name: str, tool_input: dict) -> str:
                 name = name[: -len(suf)] or name
                 break
         return name
-    pattern = tool_input.get("pattern", "") if tool_name in ("Grep", "Glob") else ""
-    return pattern if isinstance(pattern, str) else ""
+    return text_of("pattern") if tool_name in ("Grep", "Glob") else ""
 
 
 def cg_suggestion(tool_name: str, tool_input: dict) -> str:
@@ -1105,74 +1371,124 @@ def copyable_command(tool_name: str, tool_input: dict) -> str:
     return f'codegraph explore "{neutral_term(_term_of(tool_name, tool_input))}"'
 
 
-def block(reason: str, tool_name: str, tool_input: dict) -> None:
-    """Emit block message and exit 2."""
-    bar = "=" * 62
-    suggestion = cg_suggestion(tool_name, tool_input)
-    message = [
-        "",
-        bar,
-        "[codegraph-first-guard] BLOCKED -- CodeGraph-First Protocol",
-        bar,
-        f"Tool:     {tool_name}",
-        f"Reason:   {REASON_TEXT.get(reason, reason)}",
-        "",
-    ]
-    if _late("_pp_checkout_equivalent_path") is None:
-        message.append(
-            f"NOTE: _project_paths.py could not be imported (looked for "
-            f"{_PROJECT_PATHS_EXPECTED_PATH}). Fallback mode is in effect: "
-            "worktree source gets no bypass until this helper is restored."
-        )
-        message.append("")
-    message.extend([
-        "CodeGraph is the primary investigation tool. Every codebase",
-        "question starts with a CodeGraph call -- only after that does",
-        "the gate open for Read / Grep / Glob in the same turn.",
-        "",
-        suggestion,
-        "",
-        "Two routes open the gate for the rest of this turn: a mcp__codegraph__*",
-        "tool, or a CodeGraph command in the Bash tool. When the MCP tools are gone",
-        "(the connection dropped), run this one command on its own, no pipe or `&&`:",
-        "",
-        f"    {copyable_command(tool_name, tool_input)}",
-        "",
-        "Also accepted, one at a time: query, context, node, callers, callees, impact, files.",
-        "In a worktree the command line reads the main checkout's index, unless one was",
-        "built in that worktree.",
-        "",
-        "If no mcp__codegraph__* tool is available to you in this session,",
-        "repeat this exact call once; it will be allowed and logged.",
-        "To remove the guard instead, run",
-        "/auto-improve-codegraph-uninstall and start a new session.",
-        "",
-        "If the index is stale, run `codegraph sync` or `codegraph init -i`.",
-        "/auto-improve-codegraph-install installs the add-on.",
-        bar,
-        "",
-    ])
+def block(reason: str, tool_name: str, tool_input: dict, session: Session | None = None) -> None:
+    """Emit block message and exit 2. The retry lines are chosen by reason (I-7c): ``source-target`` and
+    ``ambiguous-target`` keep the two-line retry escape, ``session-state-unusable`` has none, and
+    ``retry-ticket-unwritten`` says the guard tries again to record the retry. The uninstall lines stay for every reason."""
+    def build() -> tuple:
+        bar = "=" * 62
+        suggestion = cg_suggestion(tool_name, tool_input)
+        details: dict = {"tool": tool_name, "reason": reason}
+        message = [
+            "",
+            bar,
+            "[codegraph-first-guard] BLOCKED -- CodeGraph-First Protocol",
+            bar,
+            f"Tool:     {tool_name}",
+            f"Reason:   {REASON_TEXT.get(reason, reason)}",
+            "",
+        ]
+        if _late("_pp_checkout_equivalent_path") is None:
+            message.append(
+                f"NOTE: _project_paths.py could not be imported (looked for "
+                f"{_PROJECT_PATHS_EXPECTED_PATH}). Fallback mode is in effect: "
+                "worktree source gets no bypass until this helper is restored."
+            )
+            message.append("")
+        if reason == "session-state-unusable" and session is not None and session.problem is not None:
+            details.update({"problem": session.problem, "parent": session.parent})
+            message.extend(unusable_lines(session))
+        else:
+            if reason == "retry-ticket-unwritten" and session is not None:
+                details["folder"] = session.folder
+                message.extend([
+                    f"The guard could not record the retry of this call in its session folder {session.folder}.",
+                    "The usual cause is a passing lock (an antivirus or an indexer scanning the folder) or a full disk.",
+                    "",
+                ])
+            message.extend([
+                "CodeGraph is the primary investigation tool. Every codebase",
+                "question starts with a CodeGraph call -- only after that does",
+                "the gate open for Read / Grep / Glob in the same turn.",
+                "",
+                suggestion,
+                "",
+                "Two routes open the gate for the rest of this turn: a mcp__codegraph__*",
+                "tool, or a CodeGraph command in the Bash tool. When the MCP tools are gone",
+                "(the connection dropped), run this one command on its own, no pipe or `&&`:",
+                "",
+                f"    {copyable_command(tool_name, tool_input)}",
+                "",
+                "Also accepted, one at a time: query, context, node, callers, callees, impact, files.",
+                "In a worktree the command line reads the main checkout's index, unless one was",
+                "built in that worktree.",
+                "",
+            ])
+            if reason == "retry-ticket-unwritten":
+                message.extend([
+                    "Repeat this exact call: the guard tries again to record the retry. When that works the block says",
+                    "`source-target` or `ambiguous-target`, and the identical call after it is allowed.",
+                    "Or ask CodeGraph with a mcp__codegraph__* tool, which opens the gate, or remove the guard:",
+                    "run /auto-improve-codegraph-uninstall and start a new session.",
+                ])
+            else:
+                message.extend([
+                    "If no mcp__codegraph__* tool is available to you in this session,",
+                    "repeat this exact call once; it will be allowed and logged.",
+                    "To remove the guard instead, run",
+                    "/auto-improve-codegraph-uninstall and start a new session.",
+                ])
+            message.extend([
+                "",
+                "If the index is stale, run `codegraph sync` or `codegraph init -i`.",
+                "/auto-improve-codegraph-install installs the add-on.",
+            ])
+        message.extend([bar, ""])
+        return message, details
+
     try:
-        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    print("\n".join(message), file=sys.stderr)
-    _late("log_event")(
-        hook="codegraph-first-guard",
-        event="block",
-        file=None,
-        details={"tool": tool_name, "reason": reason},
-    )
-    sys.exit(2)
+        try:
+            message, details = build()
+        except Exception:  # noqa: BLE001 - a field of an odd type must still reach the exit-2 block below
+            message = ["[codegraph-first-guard] BLOCKED -- CodeGraph-First Protocol", "Call a mcp__codegraph__* tool first."]
+            details = {"tool": str(tool_name), "reason": str(reason)}
+        try:
+            # backslashreplace: a lone surrogate in the text must print as an escape, never raise and end the hook in the allow
+            sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            print("\n".join(message), file=sys.stderr)
+        except Exception:  # noqa: BLE001 - the verdict is the exit code, not the text
+            pass
+        try:
+            # the log line is written as UTF-8: a lone surrogate (from an environment value) would drop the whole record
+            safe = {k: (v.encode("utf-8", "backslashreplace").decode("utf-8") if isinstance(v, str) else v)
+                    for k, v in details.items()}
+            _late("log_event")(
+                hook="codegraph-first-guard",
+                event="block",
+                file=None,
+                details=safe,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        sys.exit(2)
 
 
 def announce(reason: str, tool_name: str, session: Session, fingerprint: str) -> None:
-    """The stderr line of a fail-open or a retry, and its log record (fail-open: once per session per reason)."""
+    """The stderr line of a fail-open or a retry, and its log record (fail-open: once per session per reason).
+
+    While the Session state is unusable (the Stateless session) the line prints on every call and NOTHING is logged: no
+    state exists to rate-limit a record, and no flag is created inside or through the unusable folder."""
     try:
-        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    except Exception:
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
         pass
     log(f"allowed ({reason}): {NOTICES.get(reason, '')}")
+    if session.problem is not None:
+        return
     log_event = _late("log_event")
     if reason == "retry-escape-used":
         log_event(hook="codegraph-first-guard", event="retry-escape", file=None, session_id=session.key,
@@ -1180,11 +1496,6 @@ def announce(reason: str, tool_name: str, session: Session, fingerprint: str) ->
         return
     short = reason.split(":", 1)[1]
     flag = LOGGED_PREFIX + short
-    if reason == "fail-open:state-unwritable":
-        # No writable state exists to rate-limit it: this reason logs on every call.
-        log_event(hook="codegraph-first-guard", event="fail-open", file=None, session_id=session.key,
-                  details={"reason": short, "tool": tool_name})
-        return
     if session.has_plain_file(flag):
         return
     written = log_event(hook="codegraph-first-guard", event="fail-open", file=None, session_id=session.key,
@@ -1193,6 +1504,37 @@ def announce(reason: str, tool_name: str, session: Session, fingerprint: str) ->
     # leaves no flag, so the next call logs the reason. A helper that returns nothing is taken as written.
     if written is not False:
         session.create_once(flag)
+
+
+def marker_cause(session: Session) -> str | None:
+    """None when the Turn marker is this session's own (``writer`` and ``session`` match); else the cause of a Foreign
+    marker: ``unreadable`` (not JSON, not an object), ``missing-stamp`` (no tracker stamp, the 0.15.2 shape) or
+    ``other-session`` (stamped for another session)."""
+    marker_file = session.path(MARKER_NAME)  # a READ of the marker (the AC8 scan looks for writes)
+    try:
+        with open(marker_file, "r", encoding="utf-8") as fh:
+            data = json.loads(fh.read(65536))
+    except (OSError, ValueError):
+        return "unreadable"
+    if not isinstance(data, dict):
+        return "unreadable"
+    if data.get("writer") != MARKER_WRITER or not isinstance(data.get("session"), str):
+        return "missing-stamp"
+    return None if data["session"] == session.key else "other-session"
+
+
+def note_foreign_marker(session: Session, tool_name: str) -> None:
+    """The gate opened from a marker this session's tracker did not write: one stderr line and one log record per
+    session. It still opens (the marker sits in a parent the checks proved the user's own); the stamp only detects it.
+    The flag is created only after the record did not fail."""
+    cause = marker_cause(session)
+    if cause is None or session.has_plain_file(FOREIGN_MARKER_FLAG):
+        return
+    log(f"the gate opened from a turn marker this session's tracker did not write ({cause}).")
+    written = _late("log_event")(hook="codegraph-first-guard", event="foreign-marker", file=None, session_id=session.key,
+                        details={"cause": cause, "tool": tool_name, "session": session.key})
+    if written is not False:
+        session.create_once(FOREIGN_MARKER_FLAG)
 
 
 # ---------------------------------------------------------------------------
@@ -1570,11 +1912,16 @@ def main() -> None:
     decision, reason = apply_state(plan)
     session, fingerprint = plan.session, plan.fingerprint
     if decision == "allow":
-        if reason.startswith("fail-open:") or reason == "retry-escape-used":
+        if reason == "turn-marker-present":
+            try:
+                note_foreign_marker(session, tool_name)
+            except Exception:  # noqa: BLE001 - a notice must never change the verdict
+                pass
+        elif reason.startswith("fail-open:") or reason == "retry-escape-used":
             announce(reason, tool_name, session, fingerprint)
         sys.exit(0)
 
-    block(reason, tool_name, tool_input)
+    block(reason, tool_name, tool_input, session)
 
 
 if __name__ == "__main__":

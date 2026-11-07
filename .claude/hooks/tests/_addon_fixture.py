@@ -361,6 +361,7 @@ class Sandbox:
         self.tmp = self.root / "tmp"
         self.home.mkdir()
         self.tmp.mkdir()
+        (self.home / "AppData" / "Local").mkdir(parents=True)
 
     def __enter__(self) -> "Sandbox":
         return self
@@ -414,6 +415,63 @@ def make_dir_link(link: Path, target: Path) -> bool:
 REAL_TEMP = tempfile.gettempdir()
 
 
+def parent_base(env, os_name: str):
+    """The Parent base rule of contract 2026-11-06-session-folder-owner-and-tool-named, as a pure function of the
+    environment mapping and the OS name: ``(base path or None, problem or None)``. It reads ONLY ``env``. Windows:
+    ``LOCALAPPDATA``. POSIX: ``XDG_CACHE_HOME``, and when that is unset or empty ``HOME`` + ``/.cache``; both unset
+    or empty gives ``unset``. A set but relative value gives ``not-absolute`` (never skipped to the next name)."""
+    import ntpath
+    import posixpath
+    if os_name == "nt":
+        raw, isabs = env.get("LOCALAPPDATA") or "", ntpath.isabs
+    else:
+        isabs = posixpath.isabs
+        raw = env.get("XDG_CACHE_HOME") or ""
+        if not raw:
+            home = env.get("HOME") or ""
+            if not home:
+                return None, "unset"
+            if not isabs(home):
+                return None, "not-absolute"
+            return posixpath.join(home, ".cache"), None
+    if not raw:
+        return None, "unset"
+    if not isabs(raw):
+        return None, "not-absolute"
+    return raw, None
+
+
+def session_parent(home: Path, create: bool = True) -> Path:
+    """The Per-user session parent the CodeGraph hooks use for a run whose fixture home is ``home``:
+    ``<base>/auto-improve-codegraph``, the base computed by the pure rule from the SAME variables ``isolated_env``
+    sets (``LOCALAPPDATA`` = ``<home>/AppData/Local``, ``XDG_CACHE_HOME`` = ``<home>/.cache``). Created on demand
+    with ``os.mkdir(p, 0o700)`` then ``os.chmod(p, 0o700)``, never ``mkdir(parents=True)`` (a umask mode would make
+    every POSIX row fail closed with ``open-mode``)."""
+    home = Path(home)
+    env = {"LOCALAPPDATA": str(home / "AppData" / "Local"), "XDG_CACHE_HOME": str(home / ".cache"), "HOME": str(home)}
+    base, problem = parent_base(env, os.name)
+    if base is None:
+        raise AddonFixtureError("session_parent: the Parent base rule gave %r for %r" % (problem, env))
+    parent = Path(base) / "auto-improve-codegraph"
+    if create:
+        for folder in (Path(base), parent):
+            if not folder.is_dir():
+                os.mkdir(str(folder), 0o700)
+                os.chmod(str(folder), 0o700)
+    return parent
+
+
+def real_parent() -> Path | None:
+    """The REAL Per-user session parent of the developer running the suite, by the pure rule over the ORIGINAL
+    environment; None when the rule gives none."""
+    base, _problem = parent_base(os.environ, os.name)
+    return (Path(base) / "auto-improve-codegraph") if base else None
+
+
+#: The REAL Per-user session parent, computed once at import from the original ``os.environ`` (before any suite patches it).
+REAL_PARENT = real_parent()
+
+
 def real_temp_codegraph_entries() -> set:
     """The names of the ``auto-improve-codegraph-*`` entries in the real temp folder (the leak check of the suites that
     run the CodeGraph hooks: a run must add none)."""
@@ -421,6 +479,27 @@ def real_temp_codegraph_entries() -> set:
         return {n for n in os.listdir(REAL_TEMP) if n.startswith(CODEGRAPH_SESSION_PREFIX)}
     except OSError:
         return set()
+
+
+def real_parent_codegraph_entries() -> set:
+    """The names of the ``auto-improve-codegraph-*`` entries in the REAL Per-user session parent (a run must add none)."""
+    try:
+        return {n for n in os.listdir(str(REAL_PARENT)) if n.startswith(CODEGRAPH_SESSION_PREFIX)} if REAL_PARENT else set()
+    except OSError:
+        return set()
+
+
+def real_parent_snapshot():
+    """Review fix round T-L3: a snapshot of the REAL Per-user session parent that notices more than a new
+    ``auto-improve-codegraph-*`` name: ``None`` when the parent folder does not exist, else the frozenset of EVERY entry name
+    in it (a ``.tmp-*`` file or any non-prefixed entry counts). Comparing two snapshots also catches the parent being
+    created by a run (None -> a set)."""
+    if REAL_PARENT is None:
+        return None
+    try:
+        return frozenset(os.listdir(str(REAL_PARENT)))
+    except OSError:
+        return None
 
 
 def can_make_file_symlink(folder: Path) -> bool:
@@ -530,31 +609,40 @@ def make_linked_worktree(base: Path, name: str = "wt1", layout: str = "inside",
     return {"main": main, "worktree": worktree, "admin": admin, "gitdir_text": text}
 
 
-def session_folder(temp: Path, session_id: str) -> Path:
-    """The Session folder the three hooks share for ``session_id`` under the (fixture) temp folder."""
-    return Path(temp) / (CODEGRAPH_SESSION_PREFIX + session_id)
+def session_folder(parent: Path, session_id: str) -> Path:
+    """The Session folder the three hooks share for ``session_id`` under the Per-user session parent ``parent``
+    (``af.session_parent(<fixture home>)``), never under the system temp folder."""
+    return Path(parent) / (CODEGRAPH_SESSION_PREFIX + session_id)
 
 
-def write_marker(temp: Path, session_id: str, tool: str = "mcp__codegraph__" + "codegraph_explore") -> Path:
-    """Write the Turn marker exactly as the tracker does: ``turn.json`` = {ts, tool, summary, pid}."""
-    folder = session_folder(temp, session_id)
+def write_marker(parent: Path, session_id: str, tool: str = "mcp__codegraph__" + "codegraph_explore",
+                 stamped: bool = True) -> Path:
+    """Write the Turn marker as the tracker does: ``turn.json`` in the Session folder under ``parent``. ``stamped``
+    (the default) writes {ts, tool, summary, pid, writer: "codegraph-turn-tracker", session: session_id}, an OWN
+    marker; ``stamped=False`` writes the 0.15.2 shape {ts, tool, summary, pid}, a Foreign marker."""
+    folder = session_folder(parent, session_id)
     folder.mkdir(parents=True, exist_ok=True)
     marker = folder / "turn.json"
-    marker.write_text(json.dumps({"ts": 1, "tool": tool, "summary": "fixture", "pid": 1}) + "\n", encoding="utf-8")
+    body = {"ts": 1, "tool": tool, "summary": "fixture", "pid": 1}
+    if stamped:
+        body.update({"writer": "codegraph-turn-tracker", "session": session_id})
+    marker.write_text(json.dumps(body) + "\n", encoding="utf-8")
     return marker
 
 
-def remove_marker(temp: Path, session_id: str) -> None:
-    marker = session_folder(temp, session_id) / "turn.json"
+def remove_marker(parent: Path, session_id: str) -> None:
+    marker = session_folder(parent, session_id) / "turn.json"
     if marker.exists():
         marker.unlink()
 
 
 def isolated_env(home: Path, tmp: Path, project: Path | None = None, extra: dict | None = None) -> dict:
-    """The environment of a codegraph row: HOME, USERPROFILE and CLAUDE_CONFIG_DIR at the fixture home, TMP and TEMP
-    at the fixture temp folder, every CLAUDE_* and GIT_* variable of the developer removed."""
+    """The environment of a codegraph row: HOME, USERPROFILE and CLAUDE_CONFIG_DIR at the fixture home, LOCALAPPDATA at
+    ``<home>/AppData/Local`` and XDG_CACHE_HOME at ``<home>/.cache`` (so the Per-user session parent is inside the
+    fixture), TMP and TEMP at the fixture temp folder, every CLAUDE_* and GIT_* variable of the developer removed."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_") and not k.startswith("GIT_")}
     env.update({"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_CONFIG_DIR": str(home),
+                "LOCALAPPDATA": str(Path(home) / "AppData" / "Local"), "XDG_CACHE_HOME": str(Path(home) / ".cache"),
                 "TMP": str(tmp), "TEMP": str(tmp), "TMPDIR": str(tmp),
                 "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
     if project is not None:
