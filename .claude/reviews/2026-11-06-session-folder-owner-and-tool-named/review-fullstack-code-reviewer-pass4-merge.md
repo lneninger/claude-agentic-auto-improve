@@ -325,7 +325,7 @@ Run on the merged working tree. The hook suites ran one at a time, in the foregr
 | `test_codegraph_session_parent_docs`, `test_plugin_text_scans`, `test_installed_plugin_root` | 65 tests OK |
 | `test_codegraph_shadow_report` | 31 tests OK |
 | `test_auto_improve_finish_install` (`-k odegraph -k Hop -k ool_named -k orktreeOwnRoot`) | 73 tests OK |
-| `unittest discover -s .claude/scripts/tests` (background) | still running when this report was written (this suite takes well over 10 minutes). The targeted subsets above cover every file the merge touched under `.claude/scripts/tests`. |
+| `unittest discover -s .claude/scripts/tests` (background, 76 min) | Ran 2656: 3 failures, 4 errors, 4 skipped. None of them comes from this PR, but I did not run master's discover to compare. (1) `test_plugin_manifests` fails to import because `test_land_contract_identity`'s git guard, loaded earlier in the same process, refuses its import-time `git rev-parse HEAD`. That call (`read_merge_base_state(ROOT)`) is already on master at `bc398b5:1354`, and the file passes alone (192/192). (2) `test_script_path_resolution`, `test_ship_skill_sync` and `test_sql_patterns_skill_sync` are script-style modules that call `sys.exit(0)` when imported. (3) `test_land_contract` (finds `gh-pr-merge` in `skills/ship/SKILL.md`) and two `test_land_contract_verification` real-config rows fail. This PR touches neither those test files, `skills/ship` nor `.claude/work-item-conventions.json`. They belong in a separate issue, not in this merge. |
 | `check_version_bump.py` | reads the committed HEAD (0.15.3) before the merge commit. Run it again after committing. |
 
 ---
