@@ -1,0 +1,48 @@
+status: completed
+commit: ccd006fa602298bc19186e12b86a3a3bc063a5dc
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/321
+merged_at: '2026-11-08T20:11:45Z'
+verified: github
+sub_issue_closed: closed
+hand_resolved:
+  files:
+  - .claude-plugin/marketplace.json
+  - .claude-plugin/plugin.json
+  - .claude/addons/codegraph/addon.json
+  - .claude/addons/codegraph/hooks/codegraph-first-guard.py
+  - .claude/addons/codegraph/hooks/codegraph-turn-reset.py
+  - .claude/addons/codegraph/hooks/codegraph-turn-tracker.py
+  - .claude/hooks/hooks.json
+  - .claude/hooks/tests/_addon_fixture.py
+  - .claude/hooks/tests/bench_codegraph_guard.py
+  - .claude/hooks/tests/test_addons.py
+  - .claude/hooks/tests/test_codegraph_first_guard.py
+  - .claude/hooks/tests/test_codegraph_shadow.py
+  - .claude/references/codegraph-decision-table.md
+  - .claude/registries/JOURNAL.md
+  - .claude/registries/MECHANISMS.md
+  - .claude/registries/VOCABULARY.md
+  - .claude/scripts/auto_improve_finish_install.py
+  - .claude/scripts/tests/test_auto_improve_finish_install.py
+  - .claude/scripts/tests/test_plugin_manifests.py
+  - .claude/scripts/tests/test_plugin_text_scans.py
+  - .cursor-plugin/plugin.json
+  - README.md
+  - plugin.json
+  - skills/auto-improve-codegraph-install/SKILL.md
+  - skills/auto-improve-codegraph-uninstall/SKILL.md
+  - .claude/concepts/2026-11-07-295-codegraph-gate-dropped-mcp.md
+  - .claude/scripts/tests/test_skill_script_lookup.py
+  - skills/verify-before-done/SKILL.md
+  merge_commits: 11
+  commits_inspected: 24
+  commits_unread: 0
+base_ref: fix/235-domain-split-registries
+base_is_default: false
