@@ -259,17 +259,16 @@ If `VAL` comes back empty, say the lint could not run (the plugin's script was n
 - **0:** the step passes. `advisory:` lines in the output (a dead path reference, a legacy entry, a project that is not yet on registry layout 2) are reported as written, and they do **not** make the verdict NOT-READY.
 - **2:** the lint could not run; show its message and report Step 5.6 as `NOT RUN`.
 
-## Step 5.8: The codegraph add-on's settings check
+## Step 5.8: The codegraph add-on's settings and hook freshness check
 
 Run this step only when `.claude/settings.json` has a row for `codegraph-first-guard.py` (the project installed the `codegraph` add-on). Otherwise skip it.
 
-The check is `auto_improve_finish_install.py addon --name codegraph --project . --check --json`. It only reads. It finds the script the same way the install skill does (the project copy, then `CLAUDE_PLUGIN_ROOT`, then what Claude Code recorded for the plugin, then the newest cache folder):
+The check is `auto_improve_finish_install.py addon --name codegraph --project . --check --json`. It only reads. It finds the script through the plugin install only (`CLAUDE_PLUGIN_ROOT`, then what Claude Code recorded for the plugin, then the newest cache folder); a copy under the project's `.claude/scripts/` is never used, because a stale vendored installer could neither see nor repair a stale hook:
 
 ```bash
-FI=
+FIP=
 S=.claude/scripts/auto_improve_finish_install.py
-if [ -f "$S" ]; then FI=$S
-elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then FI=$CLAUDE_PLUGIN_ROOT/$S
+if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then FIP=$CLAUDE_PLUGIN_ROOT/$S
 else
   # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
   CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -280,18 +279,20 @@ else
     [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
   done)
   NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
-  FI=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+  FIP=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
     [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
   done)
 fi
-py -3 "$FI" addon --name codegraph --project . --check --json   # macOS and Linux: python3
+py -3 "$FIP" addon --name codegraph --project . --check --json   # macOS and Linux: python3
 ```
 
-**If `FI` is empty, say so and report "could not check" for this step. Never report READY on it.** Then read the exit code:
+**If `FIP` is empty, say so and report "could not check" for this step. Never report READY on it.** A project that holds the add-on but has no plugin install can never reach READY on this step. Then read the exit code:
 
-- `0`: the settings allow `mcp__codegraph__*` and name no single tool. The step passes.
-- `1`: findings. `codegraph-wildcard-missing` (no settings layer allows the wildcard) or `codegraph-tool-named` (a layer's `permissions.allow` names one CodeGraph tool; the answer names the entry and the file). **NOT READY.** Tell the user to run `/auto-improve-codegraph-install` or to replace the entry with `mcp__codegraph__*` by hand.
-- `2`: it could not check (a settings layer is unreadable or malformed). **NOT READY.** Say which file the answer names.
+- `0`: the settings allow `mcp__codegraph__*` and name no single tool, and the answer says `"freshness": "checked"` with no finding. The step passes. **A result with no `freshness` field is from an older installer: report "could not check" (a `freshness` that is missing reads as could not check), NOT READY.** (`"freshness": "not-applicable"` is for another add-on and does not apply to codegraph.)
+- `1`: findings. **NOT READY.** `codegraph-wildcard-missing` (no settings layer allows the wildcard) or `codegraph-tool-named` (a layer's `permissions.allow` names one CodeGraph tool; the answer names the entry and the file): run `/auto-improve-codegraph-install` or replace the entry with `mcp__codegraph__*` by hand. The freshness findings: `addon-hook-outdated` (the project's hook is a released copy older than the plugin's; the answer names both versions), `addon-hook-missing` and `addon-row-missing` (a hook file or a settings row the manifest lists is absent): re-run `/auto-improve-codegraph-install`. `addon-row-outdated` (a row is registered but its `if` differs from the manifest's): run `/auto-improve-codegraph-uninstall`, then `/auto-improve-codegraph-install`, because an install never rewrites a row.
+- `2`: it could not check (a settings layer is unreadable or malformed, or no separate plugin root was found). **NOT READY.** Say which file the answer names.
+
+`addon-hook-unrecognised` is a note, not a finding: the project's hook is neither the plugin's copy nor a released copy (an edited copy, or one from a newer plugin than the one that ran). It never changes the exit code and never makes this step NOT READY; mention it in one sentence.
 
 ## Step 6: HANDOFF completeness check
 

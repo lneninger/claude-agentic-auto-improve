@@ -16,6 +16,9 @@ shape) are counted, never fatal. ``malformed`` includes ``torn`` (a line that st
 
 Pairing a block with its retry (Q5): the next later record with the same ``session``, ``fp`` and ``prompt_key`` whose live
 decision is the retry escape. One retry record pairs with one block. A ``prompt_key`` of ``none`` only matches ``none``.
+A shadow-more-closed row is also grouped by the record's ``marker_route`` (``mcp`` or ``cli``; ``none`` when the record has
+none, as an older record does); a ``cli`` group is a turn the command-line route opened, which the transcript rule does not
+see yet, so the text report labels it "explained (command-line route)".
 Percentiles are nearest-rank: the value at rank ceil(q * n) of the sorted values.
 """
 
@@ -33,6 +36,7 @@ from typing import Iterable
 LOG_RELATIVE = Path(".claude") / "logs" / "codegraph-shadow.jsonl"
 OUTCOMES = ("agree", "shadow-more-open", "shadow-more-closed")
 RETRY_REASON = "retry-escape-used"
+ROUTES = ("mcp", "cli")
 NON_TRANSCRIPT_STATES = ("unknown:subagent", "unknown:no-transcript")  # no transcript was read: not the transcript path
 
 
@@ -112,7 +116,9 @@ def build_report(lines: Iterable[bytes]) -> dict:
         live_reasons[side][_text(r.get("live_reason"))] += 1
         shadow_reasons[side][_text(r.get("shadow_reason"))] += 1
         if r["outcome"] == "shadow-more-closed":
-            more_closed[(_text(r.get("live_reason")), _text(r.get("transcript_turn")))] += 1
+            route = r.get("marker_route")
+            more_closed[(_text(r.get("live_reason")), _text(r.get("transcript_turn")),
+                         route if route in ROUTES else "none")] += 1
         skipped_here = r.get("skipped_long_line")
         if isinstance(skipped_here, int) and not isinstance(skipped_here, bool) and skipped_here > 0:
             skipped += skipped_here
@@ -156,8 +162,8 @@ def build_report(lines: Iterable[bytes]) -> dict:
         "records": len(records),
         "sessions": len(sessions),
         "outcomes": outcomes,
-        "more_closed": [{"live_reason": lr, "transcript_turn": tt, "count": n}
-                        for (lr, tt), n in sorted(more_closed.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "more_closed": [{"live_reason": lr, "transcript_turn": tt, "marker_route": mr, "count": n}
+                        for (lr, tt, mr), n in sorted(more_closed.items(), key=lambda kv: (-kv[1], kv[0]))],
         "live_reasons": {side: dict(c.most_common()) for side, c in live_reasons.items()},
         "shadow_reasons": {side: dict(c.most_common()) for side, c in shadow_reasons.items()},
         "blocks": blocks,
@@ -191,8 +197,10 @@ def render_text(report: dict) -> str:
         out.append("no records in the log")
     out.append(f"records: {report['records']}   sessions: {report['sessions']}")
     out.append("outcomes: " + "   ".join(f"{name}: {report['outcomes'][name]}" for name in OUTCOMES))
-    out.append("shadow-more-closed by (live_reason, transcript_turn):")
-    out.extend([f"  {row['live_reason']} / {row['transcript_turn']}: {row['count']}" for row in report["more_closed"]] or ["  none"])
+    out.append("shadow-more-closed by (live_reason, transcript_turn, marker_route):")
+    out.extend([f"  {row['live_reason']} / {row['transcript_turn']} / {row.get('marker_route', 'none')}: {row['count']}"
+                + (" -- explained (command-line route)" if row.get("marker_route") == "cli" else "")
+                for row in report["more_closed"]] or ["  none"])
     for title, key in (("live reasons", "live_reasons"), ("shadow reasons", "shadow_reasons")):
         for side in ("main", "agent"):
             pairs = ", ".join(f"{reason}: {n}" for reason, n in report[key][side].items()) or "none"
