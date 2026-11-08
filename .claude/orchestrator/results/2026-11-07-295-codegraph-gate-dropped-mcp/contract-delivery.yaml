@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/316
+number: 316
+head_ref: feature/295-codegraph-gate-dropped-mcp
+base_ref: master
+base_is_default: true
+commit: 2c79ddd9ef129fe2b050b8057686080dd0e8eb60
+merged_at: '2026-11-08T04:40:21Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-08T04:45:31.926752+00:00'
+blocks_recorded:
+- t1-command-line-route-connection-notice-and-hook-freshness-check
+blocks_already_recorded: []

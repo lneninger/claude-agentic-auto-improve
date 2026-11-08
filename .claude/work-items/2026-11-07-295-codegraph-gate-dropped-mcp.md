@@ -59,3 +59,6 @@ M — several coordinated hook changes plus an installer and verification check;
 
 ## Routing
 non-trivial → /design-first (the issue states: contract first, then /tdd-first; trading-safety review not needed). This is hook work, not a safety-critical root.
+
+## Run log
+- 2026-11-08: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/316); contract 2026-11-07-295-codegraph-gate-dropped-mcp flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #295: none
