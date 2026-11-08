@@ -10,7 +10,8 @@ state must never open the gate.
 
 The "turn" is bounded by UserPromptSubmit and keyed to the SESSION, not to a directory:
     UserPromptSubmit -> codegraph-turn-reset.py deletes the session's marker and retry tickets
-    PostToolUse on mcp__codegraph__* -> codegraph-turn-tracker.py writes the marker
+    PostToolUse on mcp__codegraph__*, or on a Bash call of a Counted `codegraph` command -> codegraph-turn-tracker.py
+        writes the marker (route mcp or cli)
     PreToolUse on Read|Grep|Glob -> this hook checks for the marker
 
 Hook contract (Claude Code):
@@ -23,7 +24,8 @@ Session folder (shared by the three hooks), under the Per-user session parent (i
 auto-improve-codegraph in %LOCALAPPDATA% on Windows, in $XDG_CACHE_HOME (else ~/.cache) on POSIX, mode 0700. The
 system temp folder is never read, written or pruned:
     <Per-user session parent>/auto-improve-codegraph-<session key>/
-        turn.json            the Turn marker {ts, tool, summary, pid, writer, session}
+        turn.json            the Turn marker {ts, tool, summary, pid, route, writer, session}
+        mcp-seen             set by the tracker after a successful mcp__codegraph__* call (sticky for the session)
         ticket-<64 hex>      a Retry escape ticket, issued at a block, consumed by the identical retry
         availability.json    the cached server and index verdicts
         logged-<reason>      at most one log record per session per fail-open reason (and for a Foreign marker)
@@ -822,8 +824,8 @@ def _config_home() -> str:
     return env if env else os.path.join(os.path.expanduser("~"), ".claude")
 
 
-def _server_state_at(project: str) -> str:
-    """``configured``, ``not-configured`` or ``disabled`` for the CodeGraph server as seen from ``project``."""
+def _server_entries_at(project: str) -> tuple[list, list]:
+    """(the CodeGraph server entries found for ``project``, the settings layers read), in precedence order."""
     project_path = Path(project)
     home = _config_home()
     user_files = sorted({os.path.join(os.path.expanduser("~"), ".claude.json"), os.path.join(home, ".claude.json")})
@@ -851,6 +853,12 @@ def _server_state_at(project: str) -> str:
                 layers.append(entry)
                 if SERVER_NAME in _servers_in(entry):
                     found.append(_servers_in(entry)[SERVER_NAME])
+    return found, layers
+
+
+def _server_state_at(project: str) -> str:
+    """``configured``, ``not-configured`` or ``disabled`` for the CodeGraph server as seen from ``project``."""
+    found, layers = _server_entries_at(project)
     if not any(_starts_a_server(entry) for entry in found):
         return "not-configured"
     if any(_lists_server(data, "disabledMcpjsonServers") for data in layers):
@@ -872,6 +880,26 @@ def server_verdict(cwd: str) -> str:
     if "disabled" in states:
         return "disabled"
     return "not-configured"
+
+
+def server_starts_process(path: str) -> bool:
+    """True when the selected CodeGraph server entry of the first Server project path that ``server_verdict`` judges
+    ``configured`` has a non-empty ``command`` (a ``url``-only server starts no process for the session)."""
+    base = _project_dir_env() or path
+    paths = [base]
+    candidate = _main_candidate(base)
+    if candidate and _norm_path(candidate) != _norm_path(base):
+        paths.append(candidate)
+    for p in paths:
+        if _server_state_at(p) != "configured":
+            continue
+        found, _layers = _server_entries_at(p)
+        for entry in found:
+            if _starts_a_server(entry):
+                command = entry.get("command")
+                return isinstance(command, str) and bool(command.strip())
+        return False
+    return False
 
 
 def availability_plan(session: Session, cwd: str) -> tuple[str, str, str | None]:
@@ -1281,8 +1309,20 @@ def unusable_lines(session: Session) -> list:
     ]
 
 
-def cg_suggestion(tool_name: str, tool_input: dict) -> str:
-    """Return a tailored suggestion. It names no individual tool: it says `mcp__codegraph__*`."""
+COPYABLE_TERM_MAX = 80
+_TERM_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_. -]+")
+
+
+def neutral_term(text: str) -> str:
+    """The Copyable command's term: keep ``[A-Za-z0-9_.-]`` and spaces, fold every other run to one space, strip leading
+    ``-`` and ``.`` (so it never reads as an option), trim to 80, fall back to ``Symbol``."""
+    folded = _TERM_UNSAFE_RE.sub(" ", text if isinstance(text, str) else "")
+    folded = folded.lstrip("-. ")[:COPYABLE_TERM_MAX].strip()
+    return folded or "Symbol"
+
+
+def _term_of(tool_name: str, tool_input: dict) -> str:
+    """The name or pattern the suggestion is about, before neutralising."""
     def text_of(key: str) -> str:
         value = tool_input.get(key) if isinstance(tool_input, dict) else None
         return value if isinstance(value, str) else ""  # only a string can be named in the message
@@ -1295,29 +1335,40 @@ def cg_suggestion(tool_name: str, tool_input: dict) -> str:
             if name.endswith(suf) and name != suf:
                 name = name[: -len(suf)] or name
                 break
+        return name
+    return text_of("pattern") if tool_name in ("Grep", "Glob") else ""
+
+
+def cg_suggestion(tool_name: str, tool_input: dict) -> str:
+    """Return a tailored suggestion. It names no individual tool: it says `mcp__codegraph__*`."""
+    term = neutral_term(_term_of(tool_name, tool_input))
+    if tool_name == "Read":
         return (
             f"Before reading source files, ask CodeGraph with a mcp__codegraph__* tool\n"
-            f"your session offers: a question about \"{name}\" (where it is defined, who calls it,\n"
+            f"your session offers: a question about \"{term}\" (where it is defined, who calls it,\n"
             f"what it depends on) usually replaces opening the file."
         )
 
     if tool_name == "Grep":
-        pattern = text_of("pattern")
         return (
             f"Before grepping source code, ask CodeGraph with a mcp__codegraph__* tool\n"
-            f"your session offers: a question about \"{pattern[:80]}\" returns symbol hits with\n"
+            f"your session offers: a question about \"{term}\" returns symbol hits with\n"
             f"file and line, and usually replaces Grep entirely."
         )
 
     if tool_name == "Glob":
-        pattern = text_of("pattern")
         return (
             f"Before globbing for source files, ask CodeGraph with a mcp__codegraph__* tool\n"
-            f"your session offers: a question about \"{pattern[:80]}\" lists the indexed files.\n"
+            f"your session offers: a question about \"{term}\" lists the indexed files.\n"
             f"Glob is appropriate only for non-indexed files (markdown, config)."
         )
 
     return "Call a mcp__codegraph__* tool first."
+
+
+def copyable_command(tool_name: str, tool_input: dict) -> str:
+    """The command-line equivalent the banner offers: ``codegraph explore "<term>"``."""
+    return f'codegraph explore "{neutral_term(_term_of(tool_name, tool_input))}"'
 
 
 def block(reason: str, tool_name: str, tool_input: dict, session: Session | None = None) -> None:
@@ -1361,6 +1412,16 @@ def block(reason: str, tool_name: str, tool_input: dict, session: Session | None
                 "the gate open for Read / Grep / Glob in the same turn.",
                 "",
                 suggestion,
+                "",
+                "Two routes open the gate for the rest of this turn: a mcp__codegraph__*",
+                "tool, or a CodeGraph command in the Bash tool. When the MCP tools are gone",
+                "(the connection dropped), run this one command on its own, no pipe or `&&`:",
+                "",
+                f"    {copyable_command(tool_name, tool_input)}",
+                "",
+                "Also accepted, one at a time: query, context, node, callers, callees, impact, files.",
+                "In a worktree the command line reads the main checkout's index, unless one was",
+                "built in that worktree.",
                 "",
             ])
             if reason == "retry-ticket-unwritten":
@@ -1449,8 +1510,9 @@ def marker_cause(session: Session) -> str | None:
     """None when the Turn marker is this session's own (``writer`` and ``session`` match); else the cause of a Foreign
     marker: ``unreadable`` (not JSON, not an object), ``missing-stamp`` (no tracker stamp, the 0.15.2 shape) or
     ``other-session`` (stamped for another session)."""
+    marker_file = session.path(MARKER_NAME)  # a READ of the marker (the AC8 scan looks for writes)
     try:
-        with open(session.path(MARKER_NAME), "r", encoding="utf-8") as fh:
+        with open(marker_file, "r", encoding="utf-8") as fh:
             data = json.loads(fh.read(65536))
     except (OSError, ValueError):
         return "unreadable"
@@ -1775,6 +1837,12 @@ def _outcome(live: str, shadow: str) -> str:
     return "shadow-more-open" if shadow == "allow" else "shadow-more-closed"
 
 
+def _marker_route(session: Session) -> str:
+    """``cli`` when the Turn marker says the command-line route opened the turn, else ``mcp`` (also for a marker with no
+    route, written by an older tracker)."""
+    return "cli" if session.read_json(MARKER_NAME).get("route") == "cli" else "mcp"
+
+
 def shadow_section(tool_name: str, tool_input: dict, payload: dict, live: Plan) -> None:
     """The shadow (G-2 step 2): read the transcript, recompute the decision with the Transcript turn state in place of the
     Turn marker, persist the cursor, append one Shadow record. Reads and writes nothing else. main() swallows whatever this
@@ -1801,6 +1869,7 @@ def shadow_section(tool_name: str, tool_input: dict, payload: dict, live: Plan) 
         "live_decision": live.decision,
         "live_reason": live.reason,
         "turn_marker": live.turn_marker,
+        "marker_route": _marker_route(session) if live.turn_marker else None,
         "transcript_turn": result["state"],
         "session_seen": bool(result["session_seen"]),
         "shadow_decision": shadow.decision,

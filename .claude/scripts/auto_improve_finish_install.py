@@ -69,7 +69,12 @@ nothing; the removal keeps the entry and lists it under ``kept``). An install is
 (exit 2) when a settings layer's ``permissions.allow`` names an individual CodeGraph tool. ``released_sha256`` maps
 each ACTIVE hook to the folded hashes of its released copies, so ``addon-remove`` deletes an unedited old copy. The
 read-only ``addon --check`` judges the three settings layers: exit 0 clean, 1 with findings
-(``codegraph-wildcard-missing``, ``codegraph-tool-named``), 2 when a layer could not be read. The preview also carries
+(``codegraph-wildcard-missing``, ``codegraph-tool-named``), 2 when a layer could not be read. For an add-on whose manifest
+carries ``released_sha256`` it also judges hook freshness (issue #295; the JSON carries ``freshness``: ``checked`` or
+``not-applicable``): ``addon-hook-outdated`` (the project's copy is a released copy older than the plugin's, both versions
+named from ``released_versions``), ``addon-hook-missing``, ``addon-row-missing`` and ``addon-row-outdated`` (a row whose
+``if`` differs from the manifest's) are findings; ``addon-hook-unrecognised`` (a copy that is neither listed nor the
+plugin's) is a note and never changes the exit code. The preview also carries
 an index-ownership note for the codegraph add-on: a Project index is ``.codegraph/codegraph.db``; no index, or an index
 that belongs to the main checkout, means the guard lets reads through.
 
@@ -238,7 +243,7 @@ ADDON_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 #: A prerequisite MCP server name in an add-on manifest (also checked for a double underscore, which splits a grant).
 _SERVER_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9-])?")
 ADDON_HELPER_ROOTS = (".claude/hooks/", ".claude/scripts/")
-ADDON_ROW_KEYS = ("async", "statusMessage")
+ADDON_ROW_KEYS = ("async", "statusMessage", "if")
 #: Where an add-on's documents land in the project: ``<ADDON_DOCUMENTS_REL>/<add-on name>/<file>``.
 ADDON_DOCUMENTS_REL = ".claude/references"
 #: The only profile slot an add-on install writes (I-6): it appends its own document paths to it.
@@ -1084,7 +1089,7 @@ def _existing_registrations(project: Path, home: Path
             parsed = _hook_key(hook)
             if parsed:
                 found.append({"layer": layer, "event": event, "matcher": matcher, "file": parsed[0],
-                              "extras": _compare_extras(parsed[1]), "folder": parsed[2]})
+                              "extras": _compare_extras(parsed[1]), "folder": parsed[2], "if": hook.get("if")})
     return found, disabled, None
 
 
@@ -1924,8 +1929,10 @@ def _read_addon_manifest(folder: Path) -> Tuple[Optional[Result], Dict[str, Any]
     if not (isinstance(rows, list) and all(
             isinstance(r, dict) and r.get("hook") in hooks and isinstance(r.get("event"), str) and r["event"]
             and isinstance(r.get("args", []), list) and all(isinstance(a, str) for a in r.get("args", []))
-            and isinstance(r.get("matcher", ""), str) for r in rows)):
-        return _addon_manifest_problem(path, "registrations must be rows naming an event and one of the hooks"), {}
+            and isinstance(r.get("matcher", ""), str)
+            and ("if" not in r or (isinstance(r["if"], str) and r["if"].strip())) for r in rows)):
+        return _addon_manifest_problem(path, "registrations must be rows naming an event and one of the hooks; a row's "
+                                             "if, when present, must be a non-empty string"), {}
     if not all(any(r["hook"] == h for r in rows) for h in hooks):  # I-2: every hook has a row
         return _addon_manifest_problem(path, "every hook needs at least one registration row"), {}
     if not (isinstance(prerequisites, list) and all(
@@ -1973,6 +1980,15 @@ def _read_addon_manifest(folder: Path) -> Tuple[Optional[Result], Dict[str, Any]
                 for hook, hashes in released.items())):
             return _addon_manifest_problem(path, "released_sha256, when present, must map each of the add-on's hooks "
                                                  "to a non-empty list of lowercase hex SHA-256 values"), {}
+    if "released_versions" in data:
+        labels = data["released_versions"]
+        if not (isinstance(labels, dict) and all(
+                isinstance(hook, str) and hook in hooks and isinstance(per_hook, dict)
+                and all(isinstance(h, str) and _SHA256_HEX.match(h) and isinstance(label, str) and label.strip()
+                        for h, label in per_hook.items())
+                for hook, per_hook in labels.items())):
+            return _addon_manifest_problem(path, "released_versions, when present, must map each of the add-on's hooks "
+                                                 "to {lowercase hex SHA-256: release version label}"), {}
     return None, data
 
 
@@ -2453,6 +2469,75 @@ def _tool_named_refusal(findings: List[Dict[str, str]], name: str, grants: Seque
         % (listed, "` / `".join(grants), name), findings[0]["file"])
 
 
+#: The plugin manifests in the order ``check_version_bump.MANIFESTS`` reads them: the first with a version is the plugin's.
+_PLUGIN_VERSION_MANIFESTS = ("plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json",
+                             ".claude-plugin/marketplace.json")
+
+
+def _plugin_version(root: Path) -> str:
+    """The plugin version from the first manifest of ``root`` that has one, else ``unknown``."""
+    for rel in _PLUGIN_VERSION_MANIFESTS:
+        data = _load_json_lenient(root / rel)
+        if not isinstance(data, dict):
+            continue
+        if isinstance(data.get("version"), str) and data["version"]:
+            return data["version"]
+        for entry in data.get("plugins") if isinstance(data.get("plugins"), list) else []:
+            if isinstance(entry, dict) and isinstance(entry.get("version"), str) and entry["version"]:
+                return entry["version"]
+    return "unknown"
+
+
+def _hook_freshness(project: Path, folder: Path, manifest: Dict[str, Any], plugin_version: str
+                    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """(findings, notes) about the add-on's hook copies in the project: missing, an older release, or neither the plugin's
+    copy nor a released one (a note). Reads only."""
+    findings: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    released = manifest.get("released_sha256", {})
+    labels = manifest.get("released_versions", {})
+    install = manifest.get("install_skill") or "the add-on's install skill"
+    for hook in manifest["hooks"]:
+        rel = ".claude/hooks/" + hook
+        have = _folded_sha256(project / ".claude" / "hooks" / hook)
+        if have is None:
+            findings.append({"code": "addon-hook-missing", "file": hook, "plugin-version": plugin_version,
+                             "route": "re-run /%s" % install})
+            continue
+        if have == _folded_sha256(folder / "hooks" / hook):
+            continue
+        if have in released.get(hook, []):
+            findings.append({"code": "addon-hook-outdated", "file": hook,
+                             "project-version": labels.get(hook, {}).get(have, "unknown"),
+                             "plugin-version": plugin_version, "route": "re-run /%s" % install})
+        else:
+            notes.append("addon-hook-unrecognised: %s is neither the plugin's copy (version %s, the one that ran) nor a "
+                         "released copy: an edited copy, or one from a newer plugin; it is left as it is" % (rel, plugin_version))
+    return findings, notes
+
+
+def _row_freshness(project: Path, home: Path, manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[Result]]:
+    """(findings, refusal): each manifest row no settings layer registers (matched on event, file and arguments, as the install
+    does, not on the matcher), and each registered row whose ``if`` differs from the manifest's."""
+    existing, _disabled, problem = _existing_registrations(project, home)
+    if problem:
+        return [], problem
+    findings: List[Dict[str, Any]] = []
+    install, uninstall = manifest.get("install_skill") or "the add-on's install skill", manifest.get("uninstall_skill")
+    for row in manifest["registrations"]:
+        args = list(row.get("args", []))
+        key = (row["event"], row["hook"], _compare_extras(tuple(args)))
+        same = [e for e in existing if (e["event"], e["file"], e["extras"]) == key]
+        base = {"event": row["event"], "matcher": row.get("matcher") or None, "hook": row["hook"], "args": args}
+        if not same:
+            findings.append(dict(base, code="addon-row-missing", route="re-run /%s" % install))
+        elif row.get("if") and not any(e.get("if") == row["if"] for e in same):
+            findings.append(dict(base, code="addon-row-outdated", key="if", want=row["if"], have=same[0].get("if"),
+                                 route=("run /%s, then /%s (an install never rewrites a row)" % (uninstall, install))
+                                 if uninstall else "remove the add-on, then re-run /%s" % install))
+    return findings, None
+
+
 def check_addon(
     project: Path,
     name: str,
@@ -2462,8 +2547,8 @@ def check_addon(
 ) -> Dict[str, Any]:
     """Read-only ``addon --check``: do the settings layers allow the add-on's permission entry and name no single tool?
 
-    Returns ``{"status": "checked", "ok": bool, "findings": [...]}`` (exit 0 clean, 1 with findings), or a refusal
-    (exit 2) when an add-on or a settings layer could not be read. Writes nothing."""
+    Returns ``{"status": "checked", "ok": bool, "findings": [...], "freshness": "checked" | "not-applicable"}`` (exit 0 clean,
+    1 with findings), or a refusal (exit 2) when an add-on or a settings layer could not be read. Writes nothing."""
     project = Path(project)
     problem, found = _resolve_addon(project, name, claude_home, plugin_root, provider, "install")
     if problem:
@@ -2477,10 +2562,45 @@ def check_addon(
     if grants and not any(entry in accepted for _l, _p, data in layers for entry in _layer_allow_entries(data)):
         findings.append({"code": "codegraph-wildcard-missing", "layer": "project",
                          "file": str(project / ".claude" / "settings.json"), "entry": grants[0]})
-    return {"status": "checked", "add-on": name, "ok": not findings, "findings": findings,
-            "layers": [str(path) for _layer, path, _data in layers],
-            "message": ("the settings allow %s and name no single tool" % " / ".join(grants)) if not findings else
-            "; ".join("%s: %s (%s)" % (f["code"], _entry_shown(f["entry"]), f["file"]) for f in findings)}
+    manifest = found["manifest"]
+    notes: List[str] = []
+    freshness = "not-applicable"
+    plugin_version = ""
+    if "released_sha256" in manifest:
+        freshness = "checked"
+        plugin_version = _plugin_version(found["root"])
+        hook_findings, notes = _hook_freshness(project, found["folder"], manifest, plugin_version)
+        row_findings, problem = _row_freshness(project, found["home"], manifest)
+        if problem:
+            return problem
+        findings = findings + hook_findings + row_findings
+    result = {"status": "checked", "add-on": name, "ok": not findings, "findings": findings, "freshness": freshness,
+              "layers": [str(path) for _layer, path, _data in layers],
+              "message": ("the settings allow %s and name no single tool" % " / ".join(grants)) if not findings else
+              "; ".join(_finding_line(f) for f in findings)}
+    if freshness == "checked":
+        result["plugin-version"] = plugin_version
+        result["notes"] = notes
+    return result
+
+
+def _finding_line(finding: Dict[str, Any]) -> str:
+    """One finding as text: the settings findings as before, a freshness finding with the versions or the row it names."""
+    code = finding.get("code")
+    if "entry" in finding:
+        return "%s: %s (%s)" % (code, _entry_shown(str(finding["entry"])), finding.get("file"))
+    if code == "addon-hook-outdated":
+        detail = "%s is from %s, the plugin is %s" % (finding.get("file"), finding.get("project-version"),
+                                                       finding.get("plugin-version"))
+    elif code == "addon-row-outdated":
+        detail = "the %s row for %s has %s %r, the manifest wants %r" % (
+            finding.get("event"), finding.get("hook"), finding.get("key"), finding.get("have"), finding.get("want"))
+    elif code == "addon-row-missing":
+        detail = "no settings layer registers the %s row for %s %s" % (
+            finding.get("event"), finding.get("hook"), " ".join(finding.get("args") or []))
+    else:
+        detail = str(finding.get("file"))
+    return "%s: %s; %s" % (code, detail.strip(), finding.get("route", ""))
 
 
 def _has_project_index(folder: str) -> bool:
@@ -3580,8 +3700,9 @@ def _render_text(result: Result) -> str:
         return "REFUSED %s: %s\n  path: %s" % (result["code"], result["message"], result["path"])
     out = ["status: %s" % result.get("status")]
     for finding in result.get("findings", []):
-        out.append("  finding %s: %s (%s)" % (finding.get("code"), _entry_shown(str(finding.get("entry"))),
-                                                    finding.get("file")))
+        out.append("  finding " + _finding_line(finding))
+    if result.get("freshness"):
+        out.append("freshness: %s" % result["freshness"])
     allow = result.get("permissions-allow")
     if allow:
         out.append("permissions.allow: add %s; already listed %s" % (", ".join(allow["add"]) or "none",

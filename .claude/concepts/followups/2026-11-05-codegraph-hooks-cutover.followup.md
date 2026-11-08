@@ -38,6 +38,7 @@ Run `codegraph_shadow_report.py` on the projects that ran the shadow, attach its
   - Idea 4 (nudge before blocking): owner of the decision; evidence is blocks followed by a retry.
   - Hot-path order for the transcript check (transcript before or after classification): set by the parent's block 3 bench.
   - The `if` narrowing of the guard's registration row (an "other option" in the parent).
+  - Teach the transcript rule the command-line route (issue #295): the Transcript turn state counts only `mcp__codegraph__` tool uses, so a turn opened by a Counted `codegraph` command in Bash reads `shadow-more-closed` with `marker_route: cli`; the report labels those "explained (command-line route)", and the cut-over decides whether the transcript rule must count the Bash call.
 - **Journal entries to re-read when promoting:**
   - 2026-10-17 — Loosening a guard rule must be checked against the guard's own test fixtures
   - 2026-10-22 — Describe a broken install by the rows each install age really has

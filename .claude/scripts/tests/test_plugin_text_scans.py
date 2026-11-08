@@ -603,5 +603,63 @@ class TestOnlyTheWildcardNamesCodeGraphTools(unittest.TestCase):
         self.assertGreater(len(granting), 0, "at least one agent must grant the wildcard (the scan is not vacuous)")
 
 
+# Issue #295 (concept contract 2026-11-07-295-codegraph-gate-dropped-mcp): the texts that tell an agent about the hook
+# freshness check, the command-line route and the profile re-record. Each scan reads a real section and asserts it found it.
+def _section(text: str, start: str, stop: str) -> str:
+    begin = text.find(start)
+    if begin < 0:
+        return ""
+    end = text.find(stop, begin + len(start))
+    return text[begin:end if end > 0 else len(text)]
+
+
+class TestCodegraphFreshnessTexts(unittest.TestCase):
+    VBD = SKILLS / "verify-before-done" / "SKILL.md"
+    INSTALL = SKILLS / "auto-improve-codegraph-install" / "SKILL.md"
+    UNINSTALL = SKILLS / "auto-improve-codegraph-uninstall" / "SKILL.md"
+
+    def step_58(self) -> str:
+        return _section(self.VBD.read_text(encoding="utf-8"), "## Step 5.8", "## Step 6")
+
+    def test_step_5_8_is_found(self):
+        self.assertTrue(self.step_58().strip(), "the scan must read Step 5.8 of /verify-before-done (it found nothing)")
+
+    def test_step_5_8_names_the_four_finding_codes_the_note_and_the_freshness_rule(self):
+        text = self.step_58()
+        for code in ("addon-hook-outdated", "addon-hook-missing", "addon-row-missing", "addon-row-outdated", "addon-hook-unrecognised"):
+            self.assertIn(code, text, "Step 5.8 must name the finding %s" % code)
+        self.assertIn("freshness", text, "Step 5.8 must name the freshness field")
+        self.assertRegex(text, r"(?is)freshness.{0,300}could not check|could not check.{0,300}freshness",
+                         "a result without `freshness` reads 'could not check' and is NOT READY (an older installer)")
+        line = next((ln for ln in text.splitlines() if "addon-hook-unrecognised" in ln), "")
+        self.assertRegex(line, r"(?i)\bnote\b", "the unrecognised-copy code is described as a note (it never makes the step NOT READY)")
+
+    def test_step_5_8_finds_the_installer_through_the_plugin_only(self):
+        text = self.step_58()
+        self.assertIn("FIP", text, "Step 5.8 looks the installer up into FIP (plugin-only)")
+        self.assertIsNone(re.search(r'\[ -f "\$S" \]\s*;\s*then\s+FI[P]?=\$S', text), "and never takes the project's own copy")
+
+    def test_the_install_skill_tells_the_profile_re_record_the_age_row_and_the_first_prompt_notice(self):
+        text = self.INSTALL.read_text(encoding="utf-8")
+        self.assertIn("record-registrations", text, "a project with a Hook registration profile re-records it after the install")
+        self.assertIn("0.16.1", text, "the upgrade-age row for 0.16.1 (one new row to add)")
+        self.assertRegex(text, r"(?i)first prompt", "the install skill states the possible false notice on the first prompt")
+        self.assertRegex(text, r"codegraph explore", "and shows the command-line route")
+
+    def test_the_uninstall_skill_finds_the_installer_through_the_plugin_only(self):
+        text = self.UNINSTALL.read_text(encoding="utf-8")
+        self.assertIn("FIP", text)
+
+    def test_the_readme_records_the_change_and_the_profile_note(self):
+        text = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Changed in 0.16.5", text)
+        section = _section(text, "Changed in 0.16.5", "**Changed in 0.")
+        self.assertIn("record-registrations", section, "the note for a project with a Hook registration profile")
+
+    def test_the_decision_table_teaches_the_command_line_route(self):
+        text = (PLUGIN_ROOT / ".claude" / "references" / "codegraph-decision-table.md").read_text(encoding="utf-8")
+        self.assertIn("codegraph explore", text, "the decision table names the bare command-line form")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

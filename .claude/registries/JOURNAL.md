@@ -473,6 +473,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a fix or merge block's pre-check compares origin/<default> against a stop list of shared, often-edited files such as README.md
 - **Tags:** pre-check, stop-list, moving-base, merge-tree, amendment
 
+### 2026-11-07 — A failed tool call is a different hook event, and a row's `if` matches each sub-command
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-07-295-codegraph-gate-dropped-mcp.md
+- **Lesson:** Do not design a hook's "did the call succeed" rule around fields of `tool_response`. Claude Code fires `PostToolUseFailure` (no `tool_response`, an `error` text) for a non-zero Bash exit and for an errored MCP call, so a hook registered on `PostToolUse` only sees successes and the success signal is the event name. An MCP `tool_response` is a list of content blocks, not an object. A row's `if: "Bash(<word> *)"` is not a starts-with test: it matches each sub-command of a compound line and strips leading `VAR=value`, so `cd x && <word> y` reaches the hook and the hook must narrow by itself. The contract's `mcp-error` route, its "tool_response an object" rule and its "exactly what `if` admits" definition were all wrong; live trial L1/L2/L7 caught them.
+- **Apply when:** a contract defines a success, failure or trigger condition for a hook from the payload shape or from an `if` pattern without a live trial having recorded the real payloads and the real `if` matches
+- **Tags:** hook-event, posttoolusefailure, if-pattern, success-signal, live-trial
+
 ---
 
 <!-- empty on day 1 — populated as lessons are discovered -->
@@ -525,6 +532,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Lesson:** Keeping the old reader's tests as acceptance tests proves only the forms those fixtures hold. Read both readers side by side, list each form they read differently (fences, prose sections, legacy headings, continuation, field repeats), and pin each with a fixture row.
 - **Apply when:** a contract replaces a reader's body with an adapter over another reader and keeps the old names.
 - **Tags:** adapter, shared-reader, behaviour-difference, fixtures
+
+### 2026-11-07 — A clean landing check goes stale when the default branch moves; re-run it immediately before launching
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** a merge-tree check proves a clean merge for the two commits it named, nothing more. Here the t14 review's check passed against origin/master a241f5c, and one registry-mirroring commit later (aa3f715) the same command conflicted in MECHANISMS.md and VOCABULARY.md, because new entries landed beside lines the parent branch had rewritten. Record the default branch's commit with every clean result, re-run the check as the last step before launching the landing, and treat a registry-only conflict as a small merge block, not a redesign.
+- **Apply when:** a contract delivered through a parent branch waits between its last review and its landing while the default branch keeps merging.
+- **Tags:** parent-branch, landing, merge-tree, stale-check, registries
+
+### 2026-11-07 — A merge block's pull request must paste each required output, not tick a line that says it passed
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** When a contract block says "paste the output in the pull request" (Base-line checks, side-by-side comparisons, older-test greps), the description must carry the raw output per item; a ticked summary turns a verified check into an asserted one, and the reviewer must redo every check. Likewise, when the implementer finds that the contract mis-predicts the code (an exit code, a grep that cannot pass), the next block or an amendment must fix the text, not only the pull request note.
+- **Apply when:** a contract block lists evidence to paste in a pull request, or a pull request records "the contract's wording does not match the code".
+- **Tags:** evidence, pull-request, merge-block, contract-text, review
 
 ## Project tier
 

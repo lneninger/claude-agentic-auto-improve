@@ -296,6 +296,11 @@ import subprocess  # noqa: E402
 #: Manifest keys the contract adds.
 KEY_PERMISSIONS_ALLOW = "permissions_allow"
 KEY_RELEASED = "released_sha256"
+#: Issue #295: ``released_versions`` maps ``{<hook>: {<folded sha256>: <earliest release label>}}``; every hash listed in
+#: ``released_sha256`` has a label and no label names a hash that is not listed.
+KEY_RELEASED_VERSIONS = "released_versions"
+#: Issue #295: the optional ``if`` of a registration row (a non-empty string when present).
+ROW_IF = "if"
 #: What the codegraph add-on must grant: the wildcard only, never a per-tool name.
 CODEGRAPH_WILDCARD = "mcp__codegraph__*"
 CODEGRAPH_SESSION_PREFIX = "auto-improve-codegraph-"
@@ -328,6 +333,23 @@ def released_hashes(add_on: str) -> dict:
     if not ok:
         raise AddonFixtureError("manifest of %r has a %r that is not {hook: [64-hex, ...]}" % (add_on, KEY_RELEASED))
     return dict(value)
+
+
+def released_versions(add_on: str) -> dict:
+    """The manifest's ``released_versions`` map ``{<hook>: {<sha256 hex>: <release label>}}``; absent or malformed FAILS."""
+    data = manifest(add_on, KNOWN_HOOKS.get(add_on))
+    if KEY_RELEASED_VERSIONS not in data:
+        raise AddonFixtureError("manifest of %r has no %r key" % (add_on, KEY_RELEASED_VERSIONS))
+    value = data[KEY_RELEASED_VERSIONS]
+    ok = isinstance(value, dict) and value and all(
+        isinstance(k, str) and isinstance(v, dict) and v and all(
+            isinstance(h, str) and len(h) == 64 and isinstance(label, str) and label.count(".") == 2
+            for h, label in v.items())
+        for k, v in value.items())
+    if not ok:
+        raise AddonFixtureError("manifest of %r has a %r that is not {hook: {64-hex: 'x.y.z'}}"
+                                % (add_on, KEY_RELEASED_VERSIONS))
+    return {k: dict(v) for k, v in value.items()}
 
 
 class Sandbox:
