@@ -303,6 +303,40 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.16.5 (the `codegraph` gate survives a dropped MCP connection, issue #295):** when Claude Code drops the
+CodeGraph MCP connection in the middle of a session (seen after `/clear`), the index and the server entry are still
+there, so the guard kept blocking and nothing said why. Five changes, all in the `codegraph` add-on:
+
+- **A command-line route.** A Bash call of `codegraph query|explore|context|node|callers|callees|impact|files ...` that
+  succeeds opens the turn like an `mcp__codegraph__*` call. It must be one plain command (an optional trailing `2>&1`;
+  no pipe, `&&`, `cd`, variable prefix or path form), and a failed call opens nothing. The tracker handles it: a new
+  fourth row, `PostToolUse` on `Bash` with `if: "Bash(codegraph *)"` and the argument `cli`. The marker gains a `route`
+  (`mcp` or `cli`), and the Shadow record a `marker_route`, so the cut-over report can tell a command-line turn from an MCP
+  one.
+- **A two-route block message.** The banner names the MCP route, a copyable `codegraph explore "<term>"`, and says that
+  in a worktree the command line reads the main checkout's index unless one was built there.
+- **A connection notice.** At each prompt the reset hook says so when the server is configured and the index exists but no
+  `codegraph serve --mcp` process belongs to this session. It is silent on a healthy session, for a subagent, and when it
+  cannot tell; it never blocks; on the first prompt of a session it can be wrong while the server is still starting.
+  A project instruction or a skill's gate that forbids shell commands wins over it.
+- **One audit record.** The first successful command-line call of a session with no successful MCP call logs a
+  `cli-fallback` record (`reason: mcp-unavailable`) in `errors.jsonl`.
+- **A hook freshness check.** `addon --check` (and `/verify-before-done` Step 5.8) names an add-on hook that is an older
+  release than the plugin's (both versions), a manifest row no settings layer has, and a row that lacks its `if`. The
+  manifest gains `released_versions` (a release label per released hash) and the row key `if`. The two codegraph add-on
+  skills and Step 5.8 now find the installer through the plugin only (`FIP`), because a stale vendored installer could
+  neither see nor repair a stale hook.
+
+There is still no kill switch: no variable or setting turns the gate, the route or the notice off.
+
+**Upgrading.** Re-run `/auto-improve-codegraph-install`: the preview adds exactly one row (the Bash row) and replaces the
+unedited older hook files. **A project with a Hook registration profile** (recorded with `record-registrations`) must
+re-record it afterwards (`py -3 .claude/scripts/auto_improve_finish_install.py record-registrations --project .`, then
+`--apply --expect-sha256 <plan hash>`), because the profile counts rows and there is now a fourth. A Bash row that an
+older installer wrote without its `if` is reported as `addon-row-outdated`: run `/auto-improve-codegraph-uninstall`, then
+the install again. After upgrading, `/verify-before-done` Step 5.8 reports NOT READY for a project still on 0.16.4 or earlier until the
+codegraph add-on install is re-run (intended: its Bash row and hook copies are missing).
+
 **Changed in 0.16.3 (the `codegraph` session folder moves to a per-user parent and fails closed, issue #271):**
 
 - **The move.** The `codegraph` add-on's hooks keep every session folder under the Per-user session parent: `%LOCALAPPDATA%\auto-improve-codegraph\`
@@ -1038,7 +1072,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 408 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 421 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 

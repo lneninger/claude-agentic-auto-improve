@@ -28,6 +28,7 @@ call only in a project that installed it. The routing below still says which too
 | "Is the index alive / fresh?" | the index status (or run `codegraph status`) | Main session |
 | "Explain the area around `X`" (broad) | a focused context for the area | **Explore subagent only** |
 | "Map a feature from scratch" | a broad exploration | **Explore subagent only** |
+| "The `mcp__codegraph__*` tools are gone but the `codegraph` program works" | run a Counted command in the Bash tool, on its own: `codegraph explore "SymbolName"` (also `query`, `context`, `node`, `callers`, `callees`, `impact`, `files`); it opens the gate for the turn like an MCP call. No pipe, `&&`, `cd`, variable prefix or path form; a failed call opens nothing. In a worktree it reads the main checkout's index unless one was built there. A project instruction or a skill's gate that forbids shell commands wins | Main session |
 | "Read a markdown / config file" | nothing (`Read`, no CodeGraph call needed) | Main session |
 | "Read a file CodeGraph just pointed to" | nothing (`Read`) | Main session |
 
@@ -110,9 +111,9 @@ parent is `%LOCALAPPDATA%\auto-improve-codegraph\` on Windows and `$XDG_CACHE_HO
 
 | Hook | Event | Effect |
 |---|---|---|
-| `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the session's `turn.json` marker is missing, the target is a source path and CodeGraph is available. The message says to ask CodeGraph through a `mcp__codegraph__*` tool. |
-| `codegraph-turn-tracker.py` | PostToolUse on `mcp__codegraph__*` | Writes the session's `turn.json` marker, whatever the tool is called. |
-| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the marker and the retry tickets, so every new user turn opens a fresh investigation budget. It also prunes old session folders in that parent, once per session. |
+| `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the session's `turn.json` marker is missing, the target is a source path and CodeGraph is available. The message names both routes: a `mcp__codegraph__*` tool, or a copyable `codegraph explore "<term>"` in the Bash tool. |
+| `codegraph-turn-tracker.py` | PostToolUse on `mcp__codegraph__*`; and PostToolUse on `Bash` with `if: "Bash(codegraph *)"` (argument `cli`) | Writes the session's `turn.json` marker (route `mcp`, or `cli` for a successful Counted command such as `codegraph explore "Name"` run on its own), whatever the MCP tool is called. A failed call writes nothing. |
+| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the marker and the retry tickets, so every new user turn opens a fresh investigation budget. It also prunes old session folders in that parent, once per session, and prints the connection notice when the server is configured but no `codegraph serve --mcp` process belongs to this session. |
 
 The marker belongs to the session, not to a directory, so `cd` or `EnterWorktree` does not close the
 gate again.
@@ -148,8 +149,10 @@ uninstall keeps the log. The data decides a later cut-over; nothing about the li
 older copy (its line-ending-folded hash is in the add-on's `released_sha256`) is previewed as `update`,
 backed up as `<hook>.bak-<UTC stamp>` and replaced, inside the same plan hash. An edited copy is
 refused as `addon-file-differs`, naming the file and the route (uninstall, which keeps it, then
-install). The rows are the same three in every add-on release (the permission entry joined them in
-0.15.2), so the upgrade replaces files, not rows. It takes effect in a new session.
+install). The rows are the same three from 0.9.9 to 0.16.4 (the permission entry joined them in
+0.15.2); 0.16.5 adds a fourth, the tracker's Bash row, which the re-run adds as its one `to-add`. It takes effect in a new
+session. `addon --name codegraph --check` also names a hook that is an older release than the plugin's, a missing row, and
+a Bash row without its `if`.
 
 **Ways out.** Run `/auto-improve-codegraph-uninstall` and start a new session. To stop the block for
 good, that uninstall skill removes the three hooks' rows from the project's `settings.json`; only when

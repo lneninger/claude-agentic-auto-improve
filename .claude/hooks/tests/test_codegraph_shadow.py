@@ -1067,11 +1067,58 @@ def run_pruner(w: World) -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------
+# SH-M: issue #295 (contract 2026-11-07-295-codegraph-gate-dropped-mcp, Extension Points "Shadow (Q5)"): the Shadow
+# record gains marker_route: mcp / cli / null. A marker with no route (an older tracker) reads as mcp.
+# --------------------------------------------------------------------------------------------------------------
+def run_marker_route(w: World) -> None:
+    t = w.sb.root / "trm"
+    t.mkdir(exist_ok=True)
+    closed = t / "closed.jsonl"
+    write_lines(closed, [filler_line(), human_line(1)])
+    cases = [("route cli", {"route": "cli"}, "cli"), ("route mcp", {"route": "mcp"}, "mcp"),
+             ("no route key (an older tracker)", {}, "mcp")]
+    for label, extra, want in cases:
+        project = w.project()
+        s = sid()
+        folder = w.folder(s)
+        (folder / "turn.json").write_text(json.dumps(dict({"ts": 1, "tool": "x", "summary": "y", "pid": 1}, **extra)) + "\n",
+                                          encoding="utf-8")
+        proc = w.run(project, s, closed)
+        rec = last_record(project)
+        check("SH-M1 marker with %s: the record carries marker_route %r" % (label, want),
+              proc.returncode == 0 and "marker_route" in rec and rec.get("marker_route") == want and rec.get("turn_marker") is True,
+              "%s %s" % (rec, describe(proc)))
+    project = w.project()
+    s = sid()
+    proc = w.run(project, s, closed)
+    rec = last_record(project)
+    check("SH-M2 no marker: the live gate blocks (exit 2) and marker_route is present and null", proc.returncode == 2 and "marker_route" in rec and rec["marker_route"] is None,
+          "%s %s" % (rec, describe(proc)))
+    project = w.project()
+    s = sid()
+    af.write_marker(af.session_parent(w.sb.home), s)
+    w.run(project, s, closed)
+    rec = last_record(project)
+    check("SH-M3 the fixture marker (no route key) reads as mcp", rec.get("marker_route") == "mcp", repr(rec))
+    # SH-M4: real text goes into the marker (tool, summary) and the payload (prompt); none of it may reach the record
+    project = w.project()
+    s = sid()
+    folder = w.folder(s)
+    (folder / "turn.json").write_text(json.dumps({"ts": 1, "tool": "codegraph SECRETCMD-987", "summary": "SECRET-SUMMARY-654 rm -rf",
+                                                  "pid": 1, "route": "cli"}) + "\n", encoding="utf-8")
+    proc = w.run(project, s, closed, extra_payload={"prompt": "SECRET-PROMPT-321"})
+    rec = last_record(project)
+    text = json.dumps(rec)
+    check("SH-M4 the record names no marker tool, marker summary or prompt text, and still carries marker_route cli",
+          proc.returncode == 0 and rec.get("marker_route") == "cli" and "SECRET" not in text, repr(rec))
+
+
+# --------------------------------------------------------------------------------------------------------------
 def main() -> int:
     w = World()
     try:
         for fn in (run_states, run_cursor, run_limits, run_inproc_states, run_classifier, run_log, run_two_writers, run_g2, run_g1,
-                   run_pruner):
+                   run_pruner, run_marker_route):
             try:
                 fn(w)
             except Exception:  # noqa: BLE001

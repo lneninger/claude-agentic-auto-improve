@@ -5,6 +5,10 @@ bench_codegraph_guard.py -- cost per call of the CodeGraph guard, old design aga
 
     py -3 .claude/hooks/tests/bench_codegraph_guard.py [--runs 30] [--old-ref origin/master] [--sizes 1,10,50]
                                                        [--json out.json] [--keep]
+    py -3 .claude/hooks/tests/bench_codegraph_guard.py --reset-budget [--runs 30]
+
+``--reset-budget`` (issue #295) measures the reset hook's Connection notice against its time budget instead; see
+``reset_budget``. It never builds the #259 ``Workspace`` and must be run from a Claude Code session.
 
 Not a test (no ``test_`` prefix): it measures, it asserts nothing about speed. It runs every case ``--runs`` times, each run a
 fresh ``python <hook>`` process fed the hook payload on stdin, timed from the parent (interpreter start included, as the host
@@ -62,6 +66,11 @@ HELPER_RELS = (".claude/hooks/_error_log.py", ".claude/hooks/_project_paths.py")
 SESSION_PREFIX = "auto-improve-codegraph-"
 MB = 1024 * 1024
 SMALL_TRANSCRIPT_BYTES = 64 * 1024
+#: The baseline of ``--reset-budget``: the 0.16.1 release, pinned (never origin/master or HEAD, which move).
+RESET_BASELINE_REF = "db61fd7"
+T1_MARGIN_MS = 150.0   # T1: subprocess p50 of the reset hook <= the baseline's p50 + this
+T2_P95_MS = 150.0      # T2: in-process notice-section p95 <= this
+T2_RUNS = 20
 CALLS_PER_TURN = (5, 10, 20, 50)  # the Q2 "median calls per turn" is unknown until the real sample; shown for these
 
 
@@ -138,6 +147,27 @@ class Case:
     stderr_sample: str = ""
 
 
+def make_project(project: Path, with_claude: bool) -> None:
+    """A throwaway project with a Project index and a configured CodeGraph server."""
+    (project / "src").mkdir(parents=True, exist_ok=True)
+    (project / "src" / "app.py").write_text("print('x')\n", encoding="utf-8")
+    (project / "README.md").write_text("# bench\n", encoding="utf-8")
+    (project / ".codegraph").mkdir(exist_ok=True)
+    (project / ".codegraph" / "codegraph.db").write_bytes(b"SQLite format 3\x00")
+    (project / ".mcp.json").write_text(json.dumps({"mcpServers": {"codegraph": {"command": "codegraph", "args": ["serve", "--mcp"]}}}),
+                                       encoding="utf-8")
+    if with_claude:
+        (project / ".claude").mkdir(exist_ok=True)
+
+
+def isolated_env(tmp: Path, home: Path, project: Path) -> dict:
+    """The environment of a child process: private temp folder, home and config dir, this project."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update({"CLAUDE_PROJECT_DIR": str(project), "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+                "TMP": str(tmp), "TEMP": str(tmp), "TMPDIR": str(tmp), "USERPROFILE": str(home), "HOME": str(home)})
+    return env
+
+
 class Workspace:
     def __init__(self, root: Path, old_ref: str, sizes: list[int]) -> None:
         self.root = root
@@ -162,15 +192,7 @@ class Workspace:
     # -- fixtures ------------------------------------------------------------------------------------------------
     @staticmethod
     def _make_project(project: Path, with_claude: bool) -> None:
-        (project / "src").mkdir(parents=True, exist_ok=True)
-        (project / "src" / "app.py").write_text("print('x')\n", encoding="utf-8")
-        (project / "README.md").write_text("# bench\n", encoding="utf-8")
-        (project / ".codegraph").mkdir(exist_ok=True)
-        (project / ".codegraph" / "codegraph.db").write_bytes(b"SQLite format 3\x00")
-        (project / ".mcp.json").write_text(json.dumps({"mcpServers": {"codegraph": {"command": "codegraph", "args": ["serve", "--mcp"]}}}),
-                                           encoding="utf-8")
-        if with_claude:
-            (project / ".claude").mkdir(exist_ok=True)
+        make_project(project, with_claude)
 
     def _install(self, target: Path, from_ref: str | None) -> Path:
         target.mkdir(parents=True, exist_ok=True)
@@ -488,14 +510,139 @@ def render_markdown(result: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def reset_budget(runs: int) -> int:
+    """The Connection notice's time budget (contract 2026-11-07-295, "Notice time budget").
+
+    Baseline: the reset hook at ``RESET_BASELINE_REF`` (read with ``git show``). New side: this working tree's three hooks.
+    Completion check: the notice section is run in process, with natural Host detection, on the fixture and the new-side
+    copy; unless its outcome is ``shown`` or ``silent:probe-present`` the run would not measure the probe (a missing guard, an
+    untrusted Host or a spent budget all end silent and fast) and it fails. T1: subprocess p50 of the new reset hook <= the
+    baseline's p50 + 150 ms. T2: in-process p95 of 20 runs <= 150 ms, every run with that outcome. Exit 1 on an incomplete run,
+    a breach, or when the baseline commit is absent. It must run from a Claude Code session (the Host is that session)."""
+    ref = RESET_BASELINE_REF
+    have = subprocess.run(["git", "cat-file", "-e", f"{ref}^{{commit}}"], cwd=REPO_ROOT, capture_output=True)
+    if have.returncode != 0:
+        print(f"--reset-budget: the baseline commit {ref} is absent from this checkout: fetch the full history "
+              "(this mode fails, it never skips and never uses HEAD or origin/master)", file=sys.stderr)
+        return 1
+    root = Path(os.path.realpath(tempfile.mkdtemp(prefix="cg-reset-bench-")))
+    try:
+        tmp, home, project = root / "tmp", root / "home", root / "project"
+        for folder in (tmp, home / ".claude"):
+            folder.mkdir(parents=True, exist_ok=True)
+        make_project(project, True)
+        old_dir, new_dir = root / "old_hooks", root / "new_hooks"
+        for target, from_ref in ((old_dir, ref), (new_dir, None)):
+            target.mkdir(parents=True, exist_ok=True)
+            rels = (RESET_REL,) + HELPER_RELS if from_ref else (GUARD_REL, RESET_REL, TRACKER_REL) + HELPER_RELS
+            for rel in rels:
+                if from_ref is None:
+                    data = (REPO_ROOT / rel).read_bytes()
+                else:
+                    shown = subprocess.run(["git", "show", f"{from_ref}:{rel}"], cwd=REPO_ROOT, capture_output=True)
+                    if shown.returncode != 0:
+                        print(f"--reset-budget: cannot read {rel} at {from_ref}: fetch the full history", file=sys.stderr)
+                        return 1
+                    data = shown.stdout
+                (target / Path(rel).name).write_bytes(data)
+
+        def payload(session: str) -> dict:
+            return {"session_id": session, "cwd": str(project), "hook_event_name": "UserPromptSubmit", "prompt": "hello",
+                    "prompt_id": "bench-prompt"}
+
+        # -- completion check and T2: the new-side notice section in process, the real probe -----------------------------
+        from contextlib import redirect_stdout
+        from importlib import util
+        import io
+        saved = (tempfile.tempdir, os.getcwd(), dict(os.environ), sys.dont_write_bytecode)
+        outcomes: list[str] = []
+        times: list[float] = []
+        try:
+            tempfile.tempdir = str(tmp)
+            os.environ.clear()
+            os.environ.update(isolated_env(tmp, home, project))
+            os.chdir(str(project))
+            sys.dont_write_bytecode = True
+            spec = util.spec_from_file_location("cg_bench_reset", str(new_dir / Path(RESET_REL).name))
+            reset = util.module_from_spec(spec)
+            sys.modules[spec.name] = reset
+            spec.loader.exec_module(reset)
+            for number in range(max(T2_RUNS, 1) + 1):  # run 0 is the completion check, then T2_RUNS timed runs
+                out = io.StringIO()
+                start = time.perf_counter()
+                with redirect_stdout(out):
+                    outcome = reset.notice_section(payload(f"bench-reset-{number}"))
+                elapsed = (time.perf_counter() - start) * 1000.0
+                outcomes.append(outcome)
+                if number:
+                    times.append(elapsed)
+        finally:
+            tempfile.tempdir = saved[0]
+            os.chdir(saved[1])
+            os.environ.clear()
+            os.environ.update(saved[2])
+            sys.dont_write_bytecode = saved[3]
+            sys.modules.pop("cg_bench_reset", None)
+        ok_outcomes = ("shown", "silent:probe-present")
+        if outcomes[0] not in ok_outcomes:
+            print(f"--reset-budget: the notice section ended {outcomes[0]!r} on the fixture: this run would not measure the "
+                  "probe (run it from a Claude Code session, with the sibling guard beside the reset hook)", file=sys.stderr)
+            return 1
+        bad = [o for o in outcomes[1:] if o not in ok_outcomes]
+        if bad:
+            print(f"--reset-budget: {len(bad)} of {T2_RUNS} timed runs ended {sorted(set(bad))}: this run would not measure the "
+                  "probe", file=sys.stderr)
+            return 1
+        t2_p95 = percentile(times, 0.95)
+
+        # -- T1: the whole hook as a process, baseline against new -----------------------------------------------------
+        def one(hooks: Path, session: str) -> tuple[float, int]:
+            start = time.perf_counter()
+            proc = subprocess.run([sys.executable, str(hooks / Path(RESET_REL).name)], input=json.dumps(payload(session)).encode("utf-8"),
+                                  capture_output=True, env=isolated_env(tmp, home, project), cwd=str(project))
+            return (time.perf_counter() - start) * 1000.0, proc.returncode
+
+        for hooks in (old_dir, new_dir):
+            one(hooks, "bench-reset-prime")  # untimed: bytecode of the hook, the Session folder, the pruner's first run
+        old_times: list[float] = []
+        new_times: list[float] = []
+        exits: list[int] = []
+        for round_no in range(runs):
+            for design, hooks, bucket in (("old", old_dir, old_times), ("new", new_dir, new_times)):
+                elapsed, code = one(hooks, f"bench-reset-{design}")
+                bucket.append(elapsed)
+                exits.append(code)
+        old_p50, new_p50 = percentile(old_times, 0.5), percentile(new_times, 0.5)
+        problems: list[str] = []
+        if any(code != 0 for code in exits) or not old_times:
+            problems.append("a reset hook run exited non-zero")
+        if old_p50 is None or new_p50 is None or new_p50 > old_p50 + T1_MARGIN_MS:
+            problems.append(f"T1: new p50 {_f(new_p50)} ms > baseline p50 {_f(old_p50)} ms + {T1_MARGIN_MS:.0f} ms")
+        if t2_p95 is None or t2_p95 > T2_P95_MS:
+            problems.append(f"T2: in-process notice p95 {_f(t2_p95)} ms > {T2_P95_MS:.0f} ms")
+        print(f"reset budget: baseline {ref}; completion outcome {outcomes[0]}; T1 baseline p50 {_f(old_p50)} ms, new p50 "
+              f"{_f(new_p50)} ms (limit baseline + {T1_MARGIN_MS:.0f}); T2 p95 {_f(t2_p95)} ms (limit {T2_P95_MS:.0f}) over "
+              f"{len(times)} runs, outcomes {dict(Counter(outcomes[1:]))}")
+        for problem in problems:
+            print(f"--reset-budget: {problem}", file=sys.stderr)
+        return 1 if problems else 0
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--reset-budget", action="store_true",
+                        help="measure the reset hook's Connection notice against its budget (T1, T2) and exit; run it from a Claude "
+                             "Code session")
     parser.add_argument("--runs", type=int, default=30, help="fresh-process runs per case (default 30)")
     parser.add_argument("--old-ref", default="origin/master", help="git ref holding the #259 guard (default origin/master)")
     parser.add_argument("--sizes", default="1,10,50", help="transcript sizes in MB (default 1,10,50)")
     parser.add_argument("--json", dest="json_path", help="also write the raw result as JSON to this path")
     parser.add_argument("--keep", action="store_true", help="keep the temp folder (printed) after the run")
     args = parser.parse_args(argv)
+    if args.reset_budget:
+        return reset_budget(args.runs)
     sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
 
     root = Path(os.path.realpath(tempfile.mkdtemp(prefix="cg-bench-")))
