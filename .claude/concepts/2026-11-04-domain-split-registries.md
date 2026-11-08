@@ -7,7 +7,8 @@
 **Work Item Brief:** .claude/work-items/2026-11-04-235-domain-split-registries.md
 **Tracking issue:** pending (opened by `/design-first` Step 3.4)
 **Budget:** 18,000 tokens (XL contract). Superseded text and every critique round live in `.claude/contract-history/2026-11-04-domain-split-registries.round-{1,2,3}.md`.
-**Amendment:** 7 (2026-11-07). The t14 review passed with findings and a clean landing check against `origin/master` `a241f5c`; `origin/master` then moved to `aa3f715` (and since to `50bfc2a`, one records file), and the landing merge conflicts again in `MECHANISMS.md` and `VOCABULARY.md`. This amendment adds block 15 (a second, small merge of the default branch, written like block 12, which also appends the two Q25 journal lessons) and block 16 (its review, superseding t14), plus one Open Question line set, one Failure Modes clause, one Uncertain Assumptions line and one Lessons line. Blocks 1–14 are unchanged except block 12's two t14 N2 sentences, corrected where they stand. See "Amendment 7 record".
+**Amendment:** 8 (2026-11-08). Block 15's own stop rule fired: origin/master moved to 67a4a14 and the merge now also conflicts in skills/verify-before-done/SKILL.md (one heading hunk). This amendment adds that path to block 15 with per-file rule (6') (keep both sides, as block 12 does for the two skills), a fast-forward first step, and the matching checks in block 16, plus Q26 and one Uncertain Assumptions line. No rule changed. See "Amendment 8 record".
+**Amendment 7** (2026-11-07). The t14 review passed with findings and a clean landing check against `origin/master` `a241f5c`; `origin/master` then moved to `aa3f715` (and since to `50bfc2a`, one records file), and the landing merge conflicts again in `MECHANISMS.md` and `VOCABULARY.md`. This amendment adds block 15 (a second, small merge of the default branch, written like block 12, which also appends the two Q25 journal lessons) and block 16 (its review, superseding t14), plus one Open Question line set, one Failure Modes clause, one Uncertain Assumptions line and one Lessons line. Blocks 1–14 are unchanged except block 12's two t14 N2 sentences, corrected where they stand. See "Amendment 7 record".
 **Previous amendments:** 6 (2026-11-07: block 12 re-run after it stopped `has-issues`; "Amendment 6 record"), 5 (2026-11-07: blocks 12–14 after the landing halted; "Amendment 5 record") and 4 (2026-11-06: blocks 10–11 after the t9 review; "Amendment 4 record"). The owner re-approved each. Amendment 3 (2026-11-04) was approved. Blocks 1–14 and their completion records are unchanged.
 
 > **Protocol:** filled in by `data-architect`. Implementers refuse to run unless `Status: approved`. `concept-gate.py` reads `Files to touch`. Lifecycle, budget rule and management commands: `.claude/templates/concept-contract.md`.
@@ -206,6 +207,7 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - *Amendment 5.* `VERIFIED via check_version_bump.py:163-174`: in parent mode the allowed versions are the base's and the one at `merge-base(origin/<default>, HEAD)`. After the merge, that merge base is the merged default-branch commit, so a head that carries the default branch's version passes. `VERIFIED via the default branch's MECHANISMS.md:93,106`: the default branch holds two entries titled "CodeGraph (amendment)" (dated 2026-10-30 and 2026-11-05), which form one key (Q22). `VERIFIED via memory_boundary.py:60,500`: the adapter binds `DOMAINS` and falls back to its own default list, so a domain file outside that list is never read. `VERIFIED by the amendment-5 critic via concept_changed_check.py and concept-gate.py:201-222` (critic NIT; not re-read by the architect): the Changed-file check judges every changed file (turn end) and staged file (`--staged`, from `/git-commit` and `/verify-before-done`) against Files to touch, but every code path the default branch changed lies under `.claude/` or has a doc or config extension, which the gate allows, so the t12 merge passes it. The t12 diff holds every file the default branch changed; if that check, or any loop or CI gate, still rejects a file, block 12 stops and reports instead of narrowing the merge. `VERIFIED via a default-branch-derived tree (VOCABULARY.md:79,86,91,94)`: the default branch's copies of the three entries block 1 folded are byte-equal to the text block 1 kept, so rule (4) deletes them with nothing to carry over.
 - *Amendment 6.* `VERIFIED by the caller's shell (2026-11-07)`: neither `e4f392c` nor `643b667` defines `registry_files` or `registry_files_in` in `.claude/hooks/_project_paths.py`; `e4f392c` defines `worktree_own_root`, `643b667` does not. `VERIFIED via the Q-hop rows (test_codegraph_first_guard.py:3214-3236)`: the default branch's bridge imports beside both helpers, so every bare name it reads (the resolver names and the five launcher names, checked at import by `_claude_paths.py:74-87`) exists in both. `VERIFIED via the t12 _claude_paths.py:97-101`: the parent branch added three bare reads to the bridge: `registry_files`, `registry_files_in` and `checkout_equivalent_path`. `ASSUMED`: both helpers define `checkout_equivalent_path` (the hooks have bound it with `getattr` since before both pins, `concept-gate.py:96-105`, and amendment 3 read it in the parent's base tree). Check: PowerShell `git show 643b667:.claude/hooks/_project_paths.py | Select-String "def checkout_equivalent_path"`, and the same for `e4f392c`; block 12's frozen-helper row and the two Q-hop rows fail at import if it is false.
 - *Amendment 7.* `VERIFIED via refs and reflogs (no shell)`: `origin/master` moved `a241f5c` → `aa3f715` → `50bfc2a` after t14's clean check; `origin/fix/235-domain-split-registries` is `5df3f3a`; `c5bf9d4` (first parent `a241f5c`) carries the registry additions block 15's rules (3') and (4') place. `VERIFIED via a working-tree search on the parent tip`: `def _atomic_write` is defined in `_preview_apply.py:30`, `land_contract.py:578` and `memory_boundary.py:720`, and `pr_merged.py:3964` defines `_atomic_write_bytes`, which a whole-word search leaves out. `ASSUMED` (caller's report, not run by the architect): the merge-tree against the tip exits 1 on exactly `MECHANISMS.md` and `VOCABULARY.md`; `aa3f715` holds `c5bf9d4`'s tree; the only change from `aa3f715` to `50bfc2a` is the records file `t14-review.yaml` (PR #317). Check: block 15's Run-first merge-tree line stops on any other conflicting path; its deleted-names check measures the changed `.py` files over the whole range instead of assuming them.
+- *Amendment 8.* VERIFIED by the caller's shell (2026-11-08): origin/master is 67a4a14, and git merge-tree --write-tree --name-only origin/master <parent tip> exits 1 on exactly MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md (one heading hunk). ASSUMED: no further path conflicts by the time block 15 runs. Check: block 15's Run-first merge-tree line (and its Resume re-run) stops on any other conflicting path, and block 16's last check is live.
 
 ## Failure Modes & Mitigations
 
@@ -247,6 +249,8 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
   → Owner answered 2026-11-07: accepted the recommendation. N1 and N3 stay out of blocks 15 and 16.
 - [x] **Q25 (amendment 7) The two proposed journal lessons** (t14's Disposition lesson and this amendment's, both quoted in full in the "Amendment 7 record") — **Recommendation:** block 15 appends both itself, with `registry_append.py --project . --registry journal --universal`, in one commit of its own on its task branch, after its merge commit and before its Run list. They enter the parent branch only through block 15's pull request (no direct push to the parent branch), the landing's single minor raise covers them, as it covers blocks 10 and 13's appends, and block 16's last check names a parent commit that already contains them. Block 15 therefore always touches `JOURNAL.md`; its rule (5') additionally moves any default-branch entry git places below the pointer.
   → Owner answered 2026-11-07: fold into block 15 (the recommendation above).
+- [x] **Q26 (amendment 8) Master keeps moving: should the conflict set be open-ended?** — **Recommendation:** no, keep the closed list. Block 15 resolves only the paths in its Files to touch, and any other conflicting path still stops it with AMENDMENT. Each new conflicting path is another small amendment like this one, because an open-ended list would let the implementer resolve files nobody reviewed.
+  → Accepted by the owner's instruction to continue (2026-11-08).
 
 ---
 
@@ -337,6 +341,10 @@ Verified against git refs, reflogs and trees (positive evidence):
 
 - That `aa3f715` holds `c5bf9d4`'s tree, the merge-tree exit codes, and `git diff --stat` / `--name-only` over `88f4d32..aa3f715`. The critic had no shell, so these rest on the caller's measurement and on block 15's Run-first line.
 
+### Amendment 8 note
+
+No separate critic run: amendment 8 is a mechanical extension of block 12's both-sides rule for the two skills to one more measured path (skills/verify-before-done/SKILL.md), measured by the caller with git merge-tree, and it changes no rule, shape or mechanism.
+
 ## Lessons referenced
 
 - **2026-10-04 — A root locator can return the consumer itself under vendoring** — heeded by `separate_plugin_root`, the Plugin root resolution VO and the vendored fixtures.
@@ -423,6 +431,14 @@ Verified against git refs, reflogs and trees (positive evidence):
   - **Tags:** evidence, pull-request, merge-block, contract-text, review
   ```
 - **Critique resolution (owner, 2026-11-07):** the BLOCKER (Q25, folded into block 15), all 3 WARNs and all 4 NITs accepted and fixed in the body; Q23 and Q24 accepted as recommended. See the "→ Addressed by" lines under `### Amendment 7 critique`.
+
+## Amendment 8 record (2026-11-08)
+
+- **Measured by the caller (shell, 2026-11-08):** origin/master is 67a4a14 (it was 50bfc2a at amendment 7). Master PRs #316 and #318 (issue 295) changed skills/verify-before-done/SKILL.md and the two codegraph install skills, README.md, the codegraph hooks and their tests, auto_improve_finish_install.py and codegraph_shadow_report.py, and test_plugin_manifests.py, test_plugin_text_scans.py and test_skill_script_lookup.py. The merge-tree against the parent tip (eed6527 or later) exits 1 on three paths: MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md. Everything else auto-merges and arrives from origin/master through git.
+- **Why block 15 stopped:** its Run-first line expected exactly the two registry paths, and it stops with AMENDMENT on any other conflicting path. The implementer stopped without merging, which is the intended behaviour.
+- **The skill hunk:** master (d860663) renamed "## Step 5.8: The codegraph add-on's settings check" to "## Step 5.8: The codegraph add-on's settings and hook freshness check". The parent (b0ace82, kept by the block-12 merge 8558879) inserted the whole "## Step 5.6: Registry structure lint" section just before that heading. The resolution keeps both sides (rule (6')): the parent's Step 5.6 section verbatim, then master's renamed heading. This is block 12's "both skills keep both sides" rule applied to one more path.
+- **Unchanged:** the stop rule (any conflicting path outside Files to touch stops with AMENDMENT; an ambiguous hunk stops too and is never guessed), the version rule, Data Shapes, mechanisms, vocabulary and blocks 1-14. Block 15 gains one path, rule (6'), a fast-forward first step and wider checks. Block 16 gains the matching checks. Q26 keeps the conflict set closed.
+- **Process note:** the architect drafted these edits without write access to this worktree, and the main session applied them after re-checking every anchor against the file. The contract-critic was not run (see the Amendment 8 note).
 
 ---
 
@@ -1515,48 +1531,58 @@ PRIOR_FINDINGS:
 **Files to touch:**
 - `.claude/registries/MECHANISMS.md`
 - `.claude/registries/VOCABULARY.md`
+- `skills/verify-before-done/SKILL.md`
 - `.claude/registries/JOURNAL.md`
 
 **Pre-written TASK block:**
 ```
-TASK: Merge origin/master (aa3f715 or later) into the parent branch fix/235-domain-split-registries through this
-  sub-task's task branch, resolve the conflicts in MECHANISMS.md and VOCABULARY.md by the per-file rules below,
-  append the two journal lessons quoted in the "Amendment 7 record" (Q25), and leave every suite green, so that the
-  landing's merge of the default branch is clean.
-CONTEXT: concept contract amendment 7 ("Amendment 7 record", Q23-Q25); block 12 (the first merge, its rules (0), (3),
-  (4), (5) and (9), which this block narrows); the t14 review
+TASK: Merge origin/master (67a4a14 or later) into the parent branch fix/235-domain-split-registries through this
+  sub-task's task branch, resolve the conflicts in MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md
+  by the per-file rules below, append the two journal lessons quoted in the "Amendment 7 record" (Q25), and leave
+  every suite green, so that the landing's merge of the default branch is clean.
+CONTEXT: concept contract amendments 7 and 8 ("Amendment 7 record", Q23-Q25; "Amendment 8 record", Q26); block 12 (the
+  first merge, its rules (0), (3), (4), (5) and (9) and its "both skills keep both sides" rule, which this block
+  narrows); the t14 review
   .claude/reviews/2026-11-04-domain-split-registries/t14-review-fullstack-code-reviewer.md (its last check, W1, N2).
 FILES: as listed. Every other file the merge changes (the four version manifests, the work-item brief, anything else
   the default branch changed) arrives from origin/master through git, not by an edit.
 CONSTRAINTS:
+  - First step, before anything else, on the task branch: git fetch origin ; git merge --ff-only
+    origin/fix/235-domain-split-registries. The branch was cut before amendment 8, so this brings in the amended
+    contract. It is a fast-forward, not a merge commit; if it is not a fast-forward, stop and report. The contract
+    you follow is the amended one (amendment 8) as it stands after this step.
   - Run first, on the task branch task/2026-11-04-domain-split-registries/t15-... (the loop cuts it from
     origin/fix/235-domain-split-registries): git fetch origin ; git merge-base HEAD origin/master (expected 88f4d32;
     call it <base>; 9a1b452a or 28f0b18 means an earlier merge was lost: stop) ; git log --oneline <base>..origin/master
     ; git diff --stat <base> origin/master ; git merge-tree --write-tree --name-only origin/master HEAD (expected exit
-    1, conflicting paths exactly .claude/registries/MECHANISMS.md and .claude/registries/VOCABULARY.md). Only the
+    1, conflicting paths exactly .claude/registries/MECHANISMS.md, .claude/registries/VOCABULARY.md and
+    skills/verify-before-done/SKILL.md). Only the
     merge-base line and the merge-tree line can stop the run: a different merge base stops it, and any other
     conflicting path stops the sub-task with AMENDMENT; never resolve a path outside Files to touch. The git log and
     git diff --stat outputs are informational: paste them raw in the pull request. A normal run shows the commits
-    a88a2f8, a241f5c and aa3f715 (or later) and a stat over docs, records, registries and manifests, but whatever
+    a88a2f8, a241f5c, aa3f715 and 67a4a14 (or later) and a stat over docs, records, registries, manifests, skills,
+    hooks, scripts and tests, but whatever
     they show, the deleted-names check below is what judges the changed .py files.
   - Deleted-names check (textual conflicts hide semantic ones). The amendment record assumes nothing about which
-    .py files the default branch changed over <base>..origin/master (a88a2f8, a241f5c, aa3f715 and later); this
+    .py files the default branch changed over <base>..origin/master (a88a2f8, a241f5c, aa3f715, 67a4a14 and later); this
     check measures it. (1) List them: git diff --name-only <base> origin/master -- '*.py', and paste the list (or
     "none"). (2) For each listed file, git grep -n -w in origin/master's copy (git grep -n -w -e <name> ...
     origin/master -- <file>) for the names this contract removed: tier_split, DOMAINS, DEFAULT_DOMAINS,
     parse_entries, _journal_entries, _SOURCE_VALUE, and grd.read / grd.entries / grd.OUT. (3) One stop rule: a hit
     stops the sub-task with AMENDMENT, naming the file, line and name; a listed file with no hit is recorded in the
     pull request as "<file>: no hit" and the check continues.
-  - Route: git merge --no-ff origin/master on the task branch. Put only the conflict resolutions in the merge commit
-    (two parents: the parent-branch tip and the origin/master commit), so git show --remerge-diff <merge> shows them
+  - Route: git merge --no-ff origin/master on the task branch. Put only the conflict resolutions (the three paths) in
+    the merge commit (two parents: the parent-branch tip and the origin/master commit), so git show --remerge-diff <merge> shows them
     alone; a rule (5') move, if needed, is one separate commit after it. Open the pull request into
     fix/235-domain-split-registries. Its description's first line says: "Owner: merge this pull request with Create a
     merge commit, never Squash and merge or Rebase and merge." Never rebase, amend or force-push; never push to the
     parent branch directly.
   - Resume: if origin/master moves again before the pull request merges, run git merge --no-ff origin/master on the
     same branch (a second ordinary merge commit), with its own <base> (git merge-base HEAD origin/master before it)
-    and "parent tip" = HEAD just before it, the same rules, and the full Run list again. A conflict outside Files to
-    touch stops with AMENDMENT.
+    and "parent tip" = HEAD just before it, the same rules, and the full Run list again. The expected conflicting
+    paths stay the three in Files to touch other than JOURNAL.md (MECHANISMS.md, VOCABULARY.md,
+    skills/verify-before-done/SKILL.md), each resolved by its rule below; a conflict on any other path stops with
+    AMENDMENT.
   - Read both sides first: for each conflicting path, git show origin/master:<path>, git show
     origin/fix/235-domain-split-registries:<path>, git diff <base> origin/master -- <path> and git diff <base>
     origin/fix/235-domain-split-registries -- <path>. In the pull request, paste what each side added since <base>.
@@ -1578,6 +1604,12 @@ CONSTRAINTS:
         sits above the "## Project tier" pointer; move any that git placed below it to the end of the Universal tier,
         in its own commit, listed in the pull request. If the merge does not change JOURNAL.md, this rule moves
         nothing. (JOURNAL.md is touched in every case by the journal appends below.)
+    (6') skills/verify-before-done/SKILL.md (amendment 8; block 12's "both skills keep both sides" rule): keep the
+        parent's whole "## Step 5.6: Registry structure lint" section verbatim, followed by master's renamed heading
+        "## Step 5.8: The codegraph add-on's settings and hook freshness check" in place of the old "## Step 5.8: The
+        codegraph add-on's settings check". Nothing else in the file changes. Every other change master made to the
+        file auto-merges and arrives through git. Paste both sides of the hunk (master's and the parent's) and the
+        resolved text in the pull request. A second hunk, or a hunk this rule does not describe, stops with AMENDMENT.
   - Journal appends (Q25, owner 2026-11-07): after the merge commit and any rule (5') commit, and before the Run
     list, append both lessons quoted in the "Amendment 7 record" (this amendment's "A clean landing check goes stale
     when the default branch moves; re-run it immediately before launching" and t14's "A merge block's pull request
@@ -1589,16 +1621,21 @@ CONSTRAINTS:
     line number is lower than the pointer's). These appends are in this pull request, so the parent commit that
     block 16's last check names already contains them. If origin/master moves after the append commit (Resume), the
     new merge commit comes after it; re-run this check on the new head, and never append a second time.
-  - Base-line check (block 12's, narrowed): for each resolved path, for each side B in {origin/master, the parent tip}
+  - Base-line check (block 12's, narrowed): for each resolved path (MECHANISMS.md, VOCABULARY.md and
+    skills/verify-before-done/SKILL.md), for each side B in {origin/master, the parent tip}
     and the other side A, take the non-blank base lines B removed (the "-" lines of git diff --unified=0 <base> <B> --
     <path>); each must occur in the merged file no more often than in B's version plus the copies A added beyond the
-    base (multiset counts). Lost-lines check, the reverse: every line either side added since <base> occurs in the
+    base (multiset counts). Lost-lines check, the reverse, on the same three paths: every line either side added since <base> occurs in the
     merged file. Write both as a throwaway script outside the repository (for example under $env:TEMP), run them per
     merge commit with its own <base> and parent tip, and paste the raw output: zero surviving and zero lost lines, or
     each one named with its reason.
   - Head proof: for each merge commit of origin/master this block made, git rev-list --parents -n 1 <merge> prints
     three hashes (name both parents); git merge-tree --write-tree --name-only origin/master HEAD exits 0 and lists
-    no conflicting path.
+    no conflicting path. In the merged skill: git grep -c -F "## Step 5.6: Registry structure lint" HEAD --
+    skills/verify-before-done/SKILL.md prints 1; git grep -c -F "## Step 5.8: The codegraph add-on's settings and
+    hook freshness check" HEAD -- skills/verify-before-done/SKILL.md prints 1; git grep -c -x -F "## Step 5.8: The
+    codegraph add-on's settings check" HEAD -- skills/verify-before-done/SKILL.md prints nothing (the old heading is
+    absent; -x matches whole lines). Paste the three results.
   - Version: edit no version file. git diff <merged origin/master commit> HEAD -- plugin.json .claude-plugin
     .cursor-plugin is empty, so the parent's version equals origin/master's at the merged commit (0.16.4 at amendment
     time; print it). py -3 .claude/scripts/check_version_bump.py --base origin/fix/235-domain-split-registries
@@ -1612,7 +1649,11 @@ CONSTRAINTS:
   - Run, every one exit 0 unless said: the 14 suites of block 12's Run list, py -3
     .claude/scripts/tests/test_registry_entries.py, py -3 .claude/scripts/tests/test_memory_boundary.py, every test
     file in .claude/hooks/tests (the landing's step), and every test file listed by git diff --name-only
-    <base>..origin/master -- .claude/scripts/tests .claude/hooks/tests (paste the list, or "none"). py -3
+    <base>..origin/master -- .claude/scripts/tests .claude/hooks/tests (paste the list, or "none"). That list
+    includes the tests master changed (test_plugin_manifests.py, test_plugin_text_scans.py,
+    test_skill_script_lookup.py and the codegraph hook tests). py -3 .claude/scripts/tests/test_plugin_text_scans.py
+    and py -3 .claude/scripts/tests/test_skill_script_lookup.py, both changed on both sides, are run explicitly and
+    must exit 0. py -3
     .claude/scripts/tests/test_plugin_manifests.py exits non-zero with exactly one failing row, the amendment-6
     exception, now printed with the new merge base's version ("tree differs from the merge base (<version>)"); any
     other red row is a real failure. Repeat block 12's "Expected red, owner-accepted" paragraph in the pull request.
@@ -1631,10 +1672,11 @@ CONSTRAINTS:
   - If the Changed-file check, a loop gate or a CI gate rejects a file because the merge's changed files exceed this
     list, stop and report; do not narrow the merge.
   - Expected report: after this pull request merges, pr_merged reports the merge commit's hand-resolved files
-    (MECHANISMS.md and VOCABULARY.md; JOURNAL.md only if rule (5') moved an entry; the append commit is an ordinary
-    commit, not a resolution). Say so in the pull request.
+    (MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md; JOURNAL.md only if rule (5') moved an
+    entry; the append commit is an ordinary commit, not a resolution). Say so in the pull request.
   - Expected outputs, besides the Run list: the two registry_append.py file:line lines; the two "1" counts and the
-    two line numbers above the pointer from the journal appends check; the single-definitions five lines.
+    two line numbers above the pointer from the journal appends check; the single-definitions five lines; the three
+    skill heading counts from the Head proof; both sides of the skill hunk.
   - No other registry append, and no push to the parent branch directly: the two Q25 lessons enter only through
     this pull request.
 PRIOR_FINDINGS:
@@ -1652,29 +1694,35 @@ PRIOR_FINDINGS:
 **Pre-written TASK block:**
 ```
 TASK: Review sub-task 15 (the second merge of the default branch), and write a review artefact that supersedes t14.
-CONTEXT: concept contract at .claude/concepts/2026-11-04-domain-split-registries.md (amendment 7; "Amendment 7
-  record"); superseded report .claude/reviews/2026-11-04-domain-split-registries/t14-review-fullstack-code-reviewer.md.
+CONTEXT: concept contract at .claude/concepts/2026-11-04-domain-split-registries.md (amendments 7 and 8; "Amendment 7
+  record", "Amendment 8 record"); superseded report
+  .claude/reviews/2026-11-04-domain-split-registries/t14-review-fullstack-code-reviewer.md.
 FILES: .claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md
 CONSTRAINTS:
   - Header names "Supersedes: .claude/reviews/2026-11-04-domain-split-registries/t14-review-fullstack-code-reviewer.md".
     The Gate Output t16-review-fullstack-code-reviewer.gate.json sets
     "supersedes": ["t14-review-fullstack-code-reviewer.md"] and lists every Review checklist item verbatim.
-  - Commit range: <the parent tip t15 was cut from (5df3f3a at amendment time)>..<merge commit of sub-task 15's pull
+  - Commit range: <the parent tip t15 was cut from, after its fast-forward first step (the commit that holds
+    amendment 8)>..<merge commit of sub-task 15's pull
     request>. List the first-parent merges inside it. Read each t15 merge of origin/master with git show
     --remerge-diff <merge>, not the full diff against the parent branch.
   - Check, one line each:
-    each t15 merge commit has two parents, one of them an origin/master commit (aa3f715 or later), and t15's pull
+    each t15 merge commit has two parents, one of them an origin/master commit (67a4a14 or later), and t15's pull
     request was merged with a merge commit (git merge-base origin/master origin/fix/235-domain-split-registries prints
     the merged origin/master commit, not 88f4d32);
-    the remerge-diff shows only MECHANISMS.md and VOCABULARY.md resolved (JOURNAL.md only through a separate rule
+    the remerge-diff shows only MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md resolved
+    (JOURNAL.md only through a separate rule
     (5') commit and the separate journal-append commit, both listed in the pull request);
+    the skill keeps both sides (rule (6')): at the parent tip "## Step 5.6: Registry structure lint" occurs once,
+    "## Step 5.8: The codegraph add-on's settings and hook freshness check" occurs once, and the old heading
+    "## Step 5.8: The codegraph add-on's settings check" (whole line) is absent; nothing else in the hunk changed;
     journal appends (Q25): both lessons quoted in the "Amendment 7 record" ("A clean landing check goes stale when
     the default branch moves; re-run it immediately before launching" and "A merge block's pull request must paste
     each required output, not tick a line that says it passed") are in JOURNAL.md at the parent tip, each with its
     heading and fields equal to the quoted text, each exactly once (git grep -c -F "<title>" prints 1), each above "## Project tier", added
     by a non-merge commit inside the range (never by a direct push to the parent branch, never inside a merge
     commit);
-    Base-line check: re-run it yourself on MECHANISMS.md and VOCABULARY.md with each merge's own base and parent tip:
+    Base-line check: re-run it yourself on MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md with each merge's own base and parent tip:
     zero surviving base lines; the Q22 fold and both rule-(9) folds are intact and no top-level copy is restored;
     both sides' entries kept: every entry and Correction line the default branch added since the base is byte-equal
     to origin/master's copy, sits above "## Project tier", and each Correction line sits under the entry it
@@ -1688,7 +1736,8 @@ CONSTRAINTS:
     every t14 "Met" item still holds.
   - Re-run every suite in the t14 Evidence table, plus every test file the default branch changed since 88f4d32
     (git diff --name-only 88f4d32..<merged origin/master commit> -- .claude/scripts/tests .claude/hooks/tests; record
-    the list, or "none"), and the live commands --check, --check-structure (with and without --strict), the digest
+    the list, or "none"), with test_plugin_text_scans.py and test_skill_script_lookup.py run explicitly (exit 0),
+    and the live commands --check, --check-structure (with and without --strict), the digest
     generator, plugin_doctor --project . (--json too) and check_version_bump.py in parent mode. Run the
     single-definitions grep in block 15's whole-word form (git grep -n -w ...), not t14's row: exactly the five lines
     block 15 lists.

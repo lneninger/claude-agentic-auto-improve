@@ -100,8 +100,8 @@ sub_tasks:
     base: fix/235-domain-split-registries
     brief: .claude/work-items/2026-11-07-306-t14-review.md
   t15-merge-the-default-branch-into-the-parent-branch-again:
-    status: pending
-    branch: null
+    status: awaiting-merge
+    branch: task/2026-11-04-domain-split-registries/t15-merge-the-default-branch-into-the-parent-branch-again
     pull_request: null
     issue: 319
     base: fix/235-domain-split-registries
