@@ -533,6 +533,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract replaces a reader's body with an adapter over another reader and keeps the old names.
 - **Tags:** adapter, shared-reader, behaviour-difference, fixtures
 
+### 2026-11-07 — A clean landing check goes stale when the default branch moves; re-run it immediately before launching
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** a merge-tree check proves a clean merge for the two commits it named, nothing more. Here the t14 review's check passed against origin/master a241f5c, and one registry-mirroring commit later (aa3f715) the same command conflicted in MECHANISMS.md and VOCABULARY.md, because new entries landed beside lines the parent branch had rewritten. Record the default branch's commit with every clean result, re-run the check as the last step before launching the landing, and treat a registry-only conflict as a small merge block, not a redesign.
+- **Apply when:** a contract delivered through a parent branch waits between its last review and its landing while the default branch keeps merging.
+- **Tags:** parent-branch, landing, merge-tree, stale-check, registries
+
+### 2026-11-07 — A merge block's pull request must paste each required output, not tick a line that says it passed
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** When a contract block says "paste the output in the pull request" (Base-line checks, side-by-side comparisons, older-test greps), the description must carry the raw output per item; a ticked summary turns a verified check into an asserted one, and the reviewer must redo every check. Likewise, when the implementer finds that the contract mis-predicts the code (an exit code, a grep that cannot pass), the next block or an amendment must fix the text, not only the pull request note.
+- **Apply when:** a contract block lists evidence to paste in a pull request, or a pull request records "the contract's wording does not match the code".
+- **Tags:** evidence, pull-request, merge-block, contract-text, review
+
 ## Project tier
 
 This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.
