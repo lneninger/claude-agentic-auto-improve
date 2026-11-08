@@ -149,8 +149,8 @@ uninstall keeps the log. The data decides a later cut-over; nothing about the li
 older copy (its line-ending-folded hash is in the add-on's `released_sha256`) is previewed as `update`,
 backed up as `<hook>.bak-<UTC stamp>` and replaced, inside the same plan hash. An edited copy is
 refused as `addon-file-differs`, naming the file and the route (uninstall, which keeps it, then
-install). The rows are the same three from 0.9.9 to 0.16.3 (the permission entry joined them in
-0.15.2); 0.16.4 adds a fourth, the tracker's Bash row, which the re-run adds as its one `to-add`. It takes effect in a new
+install). The rows are the same three from 0.9.9 to 0.16.4 (the permission entry joined them in
+0.15.2); 0.16.5 adds a fourth, the tracker's Bash row, which the re-run adds as its one `to-add`. It takes effect in a new
 session. `addon --name codegraph --check` also names a hook that is an older release than the plugin's, a missing row, and
 a Bash row without its `if`.
 

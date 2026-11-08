@@ -496,8 +496,8 @@ class TestCodegraphFreshnessTexts(unittest.TestCase):
 
     def test_the_readme_records_the_change_and_the_profile_note(self):
         text = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("Changed in 0.16.4", text)
-        section = _section(text, "Changed in 0.16.4", "**Changed in 0.")
+        self.assertIn("Changed in 0.16.5", text)
+        section = _section(text, "Changed in 0.16.5", "**Changed in 0.")
         self.assertIn("record-registrations", section, "the note for a project with a Hook registration profile")
 
     def test_the_decision_table_teaches_the_command_line_route(self):

@@ -7115,7 +7115,7 @@ class TestCodegraphUpgradeInPlace(CodegraphHarness):
 # .claude-plugin/plugin.json, so the "first manifest" rule is also pinned.
 # ======================================================================================================================
 REAL_REPO = Path(__file__).resolve().parents[3]
-FRESH_PLUGIN_VERSION = "0.16.4"
+FRESH_PLUGIN_VERSION = "0.16.5"
 BASELINE_REF = "db61fd7"  # the 0.16.1 release; a missing commit FAILS, never skips, and never falls back to HEAD
 BASELINE_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "codegraph-db61fd7"
 BASH_IF = "Bash(codegraph *)"

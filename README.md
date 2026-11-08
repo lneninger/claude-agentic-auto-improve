@@ -303,7 +303,7 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
-**Changed in 0.16.4 (the `codegraph` gate survives a dropped MCP connection, issue #295):** when Claude Code drops the
+**Changed in 0.16.5 (the `codegraph` gate survives a dropped MCP connection, issue #295):** when Claude Code drops the
 CodeGraph MCP connection in the middle of a session (seen after `/clear`), the index and the server entry are still
 there, so the guard kept blocking and nothing said why. Five changes, all in the `codegraph` add-on:
 
@@ -334,7 +334,7 @@ unedited older hook files. **A project with a Hook registration profile** (recor
 re-record it afterwards (`py -3 .claude/scripts/auto_improve_finish_install.py record-registrations --project .`, then
 `--apply --expect-sha256 <plan hash>`), because the profile counts rows and there is now a fourth. A Bash row that an
 older installer wrote without its `if` is reported as `addon-row-outdated`: run `/auto-improve-codegraph-uninstall`, then
-the install again. After upgrading, `/verify-before-done` Step 5.8 reports NOT READY for a project still on 0.16.3 or earlier until the
+the install again. After upgrading, `/verify-before-done` Step 5.8 reports NOT READY for a project still on 0.16.4 or earlier until the
 codegraph add-on install is re-run (intended: its Bash row and hook copies are missing).
 
 **Changed in 0.16.3 (the `codegraph` session folder moves to a per-user parent and fails closed, issue #271):**

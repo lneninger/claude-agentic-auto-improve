@@ -175,8 +175,8 @@ What an install of each age holds, so the preview is read correctly:
 - **0.9.9 to 0.15.1:** three rows (`PreToolUse` on `Read|Grep|Glob`, `UserPromptSubmit`, `PostToolUse` on `mcp__codegraph__.*`), the older hook files, and no `mcp__codegraph__*` entry in `permissions.allow`. The earliest of these releases declared a kill switch (`CLAUDE_SKIP_CG`); none exists now. The re-run shows those three rows as `already-present`, the hook files as `update`, the permission entry under `permissions-allow.add`, and the Bash row (`cli`) under `to-add`.
 - **0.15.2 (the fail-open guard):** the same three rows and the permission entry. The re-run updates all three hook files and adds exactly one row, the tracker's Bash row (`PostToolUse` on `Bash`, argument `cli`, `if: "Bash(codegraph *)"`): the guard and the reset hook changed, and the tracker now stamps the turn marker. The session folders that release kept in the system temp folder are no longer read; a new session starts with the per-user session folder.
 - **0.16.0 to 0.16.2 (the shadow measurement):** the same three rows and the permission entry (0.16.1 is in this range). The hashes of the 0.16.2 copies are listed too, so the re-run updates all three hook files (guard, reset hook and tracker) and adds exactly one row, the Bash row.
-- **0.16.3 (the per-user session folder):** the same three rows. The re-run updates all three hook files and adds exactly one row, the Bash row.
-- **Current (0.16.4):** four rows; every file `present`; the re-run writes nothing.
+- **0.16.3 and 0.16.4 (the per-user session folder; 0.16.4 changed no codegraph hook):** the same three rows. The re-run updates all three hook files and adds exactly one row, the Bash row.
+- **Current (0.16.5):** four rows; every file `present`; the re-run writes nothing.
 
 A row is never rewritten by an upgrade; only files are replaced and a missing row is added. A Bash row that an older installer wrote without its `if` is reported by `addon --check` as `addon-row-outdated`: run `/auto-improve-codegraph-uninstall`, then this skill again.
 
