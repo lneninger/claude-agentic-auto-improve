@@ -7,7 +7,8 @@
 **Work Item Brief:** .claude/work-items/2026-11-04-235-domain-split-registries.md
 **Tracking issue:** pending (opened by `/design-first` Step 3.4)
 **Budget:** 18,000 tokens (XL contract). Superseded text and every critique round live in `.claude/contract-history/2026-11-04-domain-split-registries.round-{1,2,3}.md`.
-**Amendment:** 8 (2026-11-08). Block 15's own stop rule fired: origin/master moved to 67a4a14 and the merge now also conflicts in skills/verify-before-done/SKILL.md (one heading hunk). This amendment adds that path to block 15 with per-file rule (6') (keep both sides, as block 12 does for the two skills), a fast-forward first step, and the matching checks in block 16, plus Q26 and one Uncertain Assumptions line. No rule changed. See "Amendment 8 record".
+**Amendment:** 9 (2026-11-08). Block 15's retry merged cleanly at 6fdaf25 but its own live checks stopped it: master's issue-295 entries reuse three titles the registries already hold (MECHANISMS.md "CodeGraph (amendment)" and "Add-on layout (amendment)", VOCABULARY.md "Investigation Turn (amendment)"), so the structure lint exits 1 with three R2 findings; and master's frozen released-hook fixture adds a sixth line to the single-definitions search. This amendment adds rule (7') to block 15 (fold each later-dated duplicate verbatim as a Correction line under the earlier entry, exactly as Q22 did), leaves the fixtures folder out of the definitions search, records test_gate_cost.py as an environmental red, and adds the matching block 16 checks, Q27 and one Uncertain Assumptions line. No rule changed. See "Amendment 9 record".
+**Amendment 8** (2026-11-08). Block 15's own stop rule fired: origin/master moved to 67a4a14 and the merge now also conflicts in skills/verify-before-done/SKILL.md (one heading hunk). This amendment adds that path to block 15 with per-file rule (6') (keep both sides, as block 12 does for the two skills), a fast-forward first step, and the matching checks in block 16, plus Q26 and one Uncertain Assumptions line. No rule changed. See "Amendment 8 record".
 **Amendment 7** (2026-11-07). The t14 review passed with findings and a clean landing check against `origin/master` `a241f5c`; `origin/master` then moved to `aa3f715` (and since to `50bfc2a`, one records file), and the landing merge conflicts again in `MECHANISMS.md` and `VOCABULARY.md`. This amendment adds block 15 (a second, small merge of the default branch, written like block 12, which also appends the two Q25 journal lessons) and block 16 (its review, superseding t14), plus one Open Question line set, one Failure Modes clause, one Uncertain Assumptions line and one Lessons line. Blocks 1–14 are unchanged except block 12's two t14 N2 sentences, corrected where they stand. See "Amendment 7 record".
 **Previous amendments:** 6 (2026-11-07: block 12 re-run after it stopped `has-issues`; "Amendment 6 record"), 5 (2026-11-07: blocks 12–14 after the landing halted; "Amendment 5 record") and 4 (2026-11-06: blocks 10–11 after the t9 review; "Amendment 4 record"). The owner re-approved each. Amendment 3 (2026-11-04) was approved. Blocks 1–14 and their completion records are unchanged.
 
@@ -208,6 +209,7 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - *Amendment 6.* `VERIFIED by the caller's shell (2026-11-07)`: neither `e4f392c` nor `643b667` defines `registry_files` or `registry_files_in` in `.claude/hooks/_project_paths.py`; `e4f392c` defines `worktree_own_root`, `643b667` does not. `VERIFIED via the Q-hop rows (test_codegraph_first_guard.py:3214-3236)`: the default branch's bridge imports beside both helpers, so every bare name it reads (the resolver names and the five launcher names, checked at import by `_claude_paths.py:74-87`) exists in both. `VERIFIED via the t12 _claude_paths.py:97-101`: the parent branch added three bare reads to the bridge: `registry_files`, `registry_files_in` and `checkout_equivalent_path`. `ASSUMED`: both helpers define `checkout_equivalent_path` (the hooks have bound it with `getattr` since before both pins, `concept-gate.py:96-105`, and amendment 3 read it in the parent's base tree). Check: PowerShell `git show 643b667:.claude/hooks/_project_paths.py | Select-String "def checkout_equivalent_path"`, and the same for `e4f392c`; block 12's frozen-helper row and the two Q-hop rows fail at import if it is false.
 - *Amendment 7.* `VERIFIED via refs and reflogs (no shell)`: `origin/master` moved `a241f5c` → `aa3f715` → `50bfc2a` after t14's clean check; `origin/fix/235-domain-split-registries` is `5df3f3a`; `c5bf9d4` (first parent `a241f5c`) carries the registry additions block 15's rules (3') and (4') place. `VERIFIED via a working-tree search on the parent tip`: `def _atomic_write` is defined in `_preview_apply.py:30`, `land_contract.py:578` and `memory_boundary.py:720`, and `pr_merged.py:3964` defines `_atomic_write_bytes`, which a whole-word search leaves out. `ASSUMED` (caller's report, not run by the architect): the merge-tree against the tip exits 1 on exactly `MECHANISMS.md` and `VOCABULARY.md`; `aa3f715` holds `c5bf9d4`'s tree; the only change from `aa3f715` to `50bfc2a` is the records file `t14-review.yaml` (PR #317). Check: block 15's Run-first merge-tree line stops on any other conflicting path; its deleted-names check measures the changed `.py` files over the whole range instead of assuming them.
 - *Amendment 8.* VERIFIED by the caller's shell (2026-11-08): origin/master is 67a4a14, and git merge-tree --write-tree --name-only origin/master <parent tip> exits 1 on exactly MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md (one heading hunk). ASSUMED: no further path conflicts by the time block 15 runs. Check: block 15's Run-first merge-tree line (and its Resume re-run) stops on any other conflicting path, and block 16's last check is live.
+- *Amendment 9.* VERIFIED by the caller's shell (2026-11-08): at the t15 retry's merge commit 6fdaf25, validate_registries.py --check-structure exits 1 with exactly three R2 findings (MECHANISMS.md lines 101/124 "codegraph (amendment)", lines 123/125 "add-on layout (amendment)", VOCABULARY.md lines 142/153 "investigation turn (amendment)"), each later entry a single line dated 2026-11-07, issue #295; `git grep -n -w` over .claude/scripts prints six lines, the sixth being the frozen fixture codegraph-db61fd7/codegraph-first-guard.py:335; test_gate_cost.py (hooks tests, from master's 58d476d) is red because the concepts folder holds fewer than 100 contracts, and it reads no merged file. ASSUMED: the fold leaves no other lint finding. Check: rule (7')'s commit is followed by a lint run whose output must hold only R4, digest: and at most one R3-skip line, and block 15 stops with AMENDMENT otherwise.
 
 ## Failure Modes & Mitigations
 
@@ -251,6 +253,7 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
   → Owner answered 2026-11-07: fold into block 15 (the recommendation above).
 - [x] **Q26 (amendment 8) Master keeps moving: should the conflict set be open-ended?** — **Recommendation:** no, keep the closed list. Block 15 resolves only the paths in its Files to touch, and any other conflicting path still stops it with AMENDMENT. Each new conflicting path is another small amendment like this one, because an open-ended list would let the implementer resolve files nobody reviewed.
   → Accepted by the owner's instruction to continue (2026-11-08).
+- [ ] **Q27 (amendment 9) Three duplicate titles from master's issue-295 entries: fold or retitle?** — **Recommendation:** fold, exactly as Q22 did for the earlier pair: the later-dated entry becomes the last indented Correction line under the earlier entry, text verbatim, nothing renamed (rule (7')). A retitle would invent titles the default branch does not have and would split one decision across two keys; a fold keeps every word and one key per decision, and the lint's own R2 message offers it. → Applied provisionally by the session under the owner's standing instruction to continue (2026-11-08); the owner was not asked this question. It is reversible in the t15 pull request: the fold is one commit of its own. The owner confirms or redirects at that review.
 
 ---
 
@@ -344,6 +347,10 @@ Verified against git refs, reflogs and trees (positive evidence):
 ### Amendment 8 note
 
 No separate critic run: amendment 8 is a mechanical extension of block 12's both-sides rule for the two skills to one more measured path (skills/verify-before-done/SKILL.md), measured by the caller with git merge-tree, and it changes no rule, shape or mechanism.
+
+### Amendment 9 note
+
+No separate critic run: amendment 9 applies two existing decisions to measured facts (Q22's fold of a duplicate-title entry as a Correction line, three more pairs; block 12's closed list of definition sites, one more copy outside it) and adds an environmental-red note for one master test. Q27 is open for the owner (applied provisionally); the fold is one separate commit in the t15 pull request, so it is reversible.
 
 ## Lessons referenced
 
@@ -439,6 +446,14 @@ No separate critic run: amendment 8 is a mechanical extension of block 12's both
 - **The skill hunk:** master (d860663) renamed "## Step 5.8: The codegraph add-on's settings check" to "## Step 5.8: The codegraph add-on's settings and hook freshness check". The parent (b0ace82, kept by the block-12 merge 8558879) inserted the whole "## Step 5.6: Registry structure lint" section just before that heading. The resolution keeps both sides (rule (6')): the parent's Step 5.6 section verbatim, then master's renamed heading. This is block 12's "both skills keep both sides" rule applied to one more path.
 - **Unchanged:** the stop rule (any conflicting path outside Files to touch stops with AMENDMENT; an ambiguous hunk stops too and is never guessed), the version rule, Data Shapes, mechanisms, vocabulary and blocks 1-14. Block 15 gains one path, rule (6'), a fast-forward first step and wider checks. Block 16 gains the matching checks. Q26 keeps the conflict set closed.
 - **Process note:** the architect drafted these edits without write access to this worktree, and the main session applied them after re-checking every anchor against the file. The contract-critic was not run (see the Amendment 8 note).
+
+## Amendment 9 record (2026-11-08)
+
+- **Measured by the caller (shell, 2026-11-08):** the t15 retry fast-forwarded to 82bfe5e, then merged origin/master (67a4a14) as 6fdaf25 (parents 82bfe5e and 67a4a14) and appended the two Q25 lessons as a74a52b (JOURNAL.md:536 and :543, above the pointer at 550). Its Run list then stopped on: (1) the structure lint, exit 1 with three R2 duplicate-title findings (listed in the Uncertain Assumptions line), which also turn test_registry_layout.py's ThisRepositoryTests row and generate_registry_digest.py red; (2) the single-definitions search printing a sixth line from the frozen fixture codegraph-db61fd7/codegraph-first-guard.py:335. The caller reproduced both. Nothing was pushed and the pull request was not opened.
+- **Why the merge cannot keep master's entries as they are:** the layout-2 lint forbids two entries with one title (R2). Master reused titles the parent already folded once (Q22), so keeping master's entries verbatim, as rule (3') says, and passing the lint contradict each other for these three. Rule (7') settles it with the precedent already set: fold, do not retitle.
+- **test_gate_cost.py:** a master test (58d476d) that deliberately refuses to run on fewer than 100 contracts; this repository holds fewer, and the test reads no merged file. It is recorded as an environmental red with a named single failing check, so a real regression in it is still caught.
+- **Unchanged:** the stop rule, the closed list of paths (Q26), the version rule, Data Shapes, mechanisms, vocabulary and blocks 1-14. Block 15 gains rule (7'), the fixtures exclusion and the test_gate_cost note; block 16 gains the matching checks. Q27 stays open for the owner.
+- **Process note:** the caller (main session) wrote this amendment directly after reproducing both stops; the architect and critic were not run (see the Amendment 9 note).
 
 ---
 
@@ -1610,8 +1625,23 @@ CONSTRAINTS:
         codegraph add-on's settings check". Nothing else in the file changes. Every other change master made to the
         file auto-merges and arrives through git. Paste both sides of the hunk (master's and the parent's) and the
         resolved text in the pull request. A second hunk, or a hunk this rule does not describe, stops with AMENDMENT.
-  - Journal appends (Q25, owner 2026-11-07): after the merge commit and any rule (5') commit, and before the Run
-    list, append both lessons quoted in the "Amendment 7 record" (this amendment's "A clean landing check goes stale
+    (7') Duplicate titles after the merge (amendment 9; I-7 exceptions, like Q22 and rule (9); one commit of its own
+        after the merge commit, before or after the journal-append commit (at the t15 retry the appends already
+        existed, so the fold follows them; never rebase to reorder), the lines quoted in the pull request). The
+        structure lint (validate_registries.py --check-structure) reports R2 when two entries share a title. For each
+        R2 pair the lint reports, the later-dated entry is folded as the last indented line of the earlier-dated
+        entry, exactly "  - **Correction (<date>, issue #<n>):** " followed by the text after the entry's " — "
+        separator, verbatim, and the later entry's own heading line is removed. At amendment time the pairs are:
+        MECHANISMS.md "CodeGraph (amendment)" (2026-11-07, issue #295, folded under the 2026-10-30 entry, after its
+        existing 2026-11-05 Correction line), MECHANISMS.md "Add-on layout (amendment)" (2026-11-07, issue #295,
+        folded under the 2026-11-05 entry), and VOCABULARY.md "Investigation Turn (amendment)" (2026-11-07, issue
+        #295, folded under the 2026-11-05 entry). Rename nothing and retitle nothing. Read each entry with git show
+        origin/master:<path> first; an entry that has more than one line or carries a Contract line, a pair the lint
+        reports that is not one of these three, or any lint finding other than R2 and the lines the Run list allows (R4,
+        digest: and at most one R3-skip advisory) stops the sub-task with AMENDMENT. After the commit the lint prints no R2 line. Quote each folded heading line in the
+        pull request: they are the only lines the Lost-lines check may report.
+  - Journal appends (Q25, owner 2026-11-07): after the merge commit and any rule (5') commit, and
+    before the Run list, append both lessons quoted in the "Amendment 7 record" (this amendment's "A clean landing check goes stale
     when the default branch moves; re-run it immediately before launching" and t14's "A merge block's pull request
     must paste each required output, not tick a line that says it passed"), verbatim, one call each:
     py -3 .claude/scripts/registry_append.py --project . --registry journal --universal with the lesson as its entry
@@ -1626,7 +1656,8 @@ CONSTRAINTS:
     and the other side A, take the non-blank base lines B removed (the "-" lines of git diff --unified=0 <base> <B> --
     <path>); each must occur in the merged file no more often than in B's version plus the copies A added beyond the
     base (multiset counts). Lost-lines check, the reverse, on the same three paths: every line either side added since <base> occurs in the
-    merged file. Write both as a throwaway script outside the repository (for example under $env:TEMP), run them per
+    merged file, except the heading lines rule (7') folds, which are quoted in the pull request (their text after
+    the separator still occurs, as the Correction line). Write both as a throwaway script outside the repository (for example under $env:TEMP), run them per
     merge commit with its own <base> and parent tip, and paste the raw output: zero surviving and zero lost lines, or
     each one named with its reason.
   - Head proof: for each merge commit of origin/master this block made, git rev-list --parents -n 1 <merge> prints
@@ -1657,15 +1688,23 @@ CONSTRAINTS:
     .claude/scripts/tests/test_plugin_manifests.py exits non-zero with exactly one failing row, the amendment-6
     exception, now printed with the new merge base's version ("tree differs from the merge base (<version>)"); any
     other red row is a real failure. Repeat block 12's "Expected red, owner-accepted" paragraph in the pull request.
+    One more red is environmental, not a finding (amendment 9): .claude/hooks/tests/test_gate_cost.py (master's, from
+    58d476d) refuses to run on a concepts folder of fewer than 100 contracts, and this repository holds fewer; it
+    reads no merged file. Run it and paste its output: the one failing check must be "the measured concepts folder
+    is production size (at least 100 contracts ...)". Any other failing line is a real failure. (No gate runs it.)
     Live: py -3 .claude/scripts/registry_migrate.py --check --project . (exit 0, current); py -3
     .claude/scripts/validate_registries.py --check-structure --project . (exit 0; only R4, digest: and at most one
     "advisory: R3 universal-candidate skipped" line; any R1, R2, R3, R5, A1 line -> stop and report AMENDMENT, never
     suppressed); py -3 .claude/scripts/plugin_doctor.py --project . ; py -3 .claude/scripts/generate_registry_digest.py
     (exit 0; delete the gitignored output afterwards); single definitions: git grep -n -w -e "def _atomic_write" -e
-    "def _plan_digest" -e "def _separate_plugin_root" -- .claude/scripts prints exactly five lines:
+    "def _plan_digest" -e "def _separate_plugin_root" -- .claude/scripts ':(exclude).claude/scripts/tests/fixtures'
+    prints exactly five lines:
     _preview_apply.py (def _plan_digest, def _atomic_write), _plugin_root.py (def _separate_plugin_root),
     land_contract.py (def _atomic_write) and memory_boundary.py (def _atomic_write), the last two the default
-    branch's own (amendment 7, t14 N2). -w (whole word) keeps pr_merged.py's def _atomic_write_bytes out. Any other
+    branch's own (amendment 7, t14 N2). -w (whole word) keeps pr_merged.py's def _atomic_write_bytes out. The
+    exclude pathspec (amendment 9) keeps out the default branch's frozen released-hook fixture
+    .claude/scripts/tests/fixtures/codegraph-db61fd7/codegraph-first-guard.py:335 (def _atomic_write), a verbatim copy
+    of a released hook that master added in d860663, not a definition site of this contract. Any other
     line stops the sub-task with AMENDMENT, naming the file.
   - Evidence (t14 W1): paste every output this TASK names, raw, in the pull request description or one pull request
     comment. A ticked line that says a check passed is not evidence.
@@ -1676,7 +1715,8 @@ CONSTRAINTS:
     entry; the append commit is an ordinary commit, not a resolution). Say so in the pull request.
   - Expected outputs, besides the Run list: the two registry_append.py file:line lines; the two "1" counts and the
     two line numbers above the pointer from the journal appends check; the single-definitions five lines; the three
-    skill heading counts from the Head proof; both sides of the skill hunk.
+    skill heading counts from the Head proof; both sides of the skill hunk; the three folded heading lines and the
+    lint output with no R2 line (rule (7')); test_gate_cost.py's output.
   - No other registry append, and no push to the parent branch directly: the two Q25 lessons enter only through
     this pull request.
 PRIOR_FINDINGS:
@@ -1712,10 +1752,18 @@ CONSTRAINTS:
     the merged origin/master commit, not 88f4d32);
     the remerge-diff shows only MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md resolved
     (JOURNAL.md only through a separate rule
-    (5') commit and the separate journal-append commit, both listed in the pull request);
+    (5') commit and the separate journal-append commit; MECHANISMS.md and VOCABULARY.md are also changed by the one
+    separate rule (7') fold commit, which is not a resolution; all listed in the pull request);
     the skill keeps both sides (rule (6')): at the parent tip "## Step 5.6: Registry structure lint" occurs once,
     "## Step 5.8: The codegraph add-on's settings and hook freshness check" occurs once, and the old heading
     "## Step 5.8: The codegraph add-on's settings check" (whole line) is absent; nothing else in the hunk changed;
+    duplicate titles (rule (7'), amendment 9): the structure lint prints no R2 line; in MECHANISMS.md the 2026-10-30
+    "CodeGraph (amendment)" entry ends with the 2026-11-05 Correction line and then the 2026-11-07 (issue #295)
+    Correction line, and the 2026-11-05 "Add-on layout (amendment)" entry ends with a 2026-11-07 (issue #295)
+    Correction line; in VOCABULARY.md the 2026-11-05 "Investigation Turn (amendment)" entry ends with a 2026-11-07
+    (issue #295) Correction line; each Correction text is byte-equal to the text after the separator in
+    origin/master's copy, and no top-level entry with those three titles and the 2026-11-07 date remains;
+    test_gate_cost.py is red only on its production-size check (environmental, not a finding);
     journal appends (Q25): both lessons quoted in the "Amendment 7 record" ("A clean landing check goes stale when
     the default branch moves; re-run it immediately before launching" and "A merge block's pull request must paste
     each required output, not tick a line that says it passed") are in JOURNAL.md at the parent tip, each with its
