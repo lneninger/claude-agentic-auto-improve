@@ -1498,10 +1498,11 @@ the rows you expect. Follow these steps in your project.
    changes a registration on purpose, run the two commands again in that same pull request. To
    exempt a row on purpose, add an exclusion with a reason to the file by hand. A re-record keeps it.
 
-2. **Vendor five files.** List these files in your `.claude/.sync-config.json`, so the sync tool
+2. **Vendor seven files.** List these files in your `.claude/.sync-config.json`, so the sync tool
    copies them into your `.claude/scripts/` folder: `check_hook_registrations.py`,
-   `auto_improve_finish_install.py`, `pr_merged.py`, `plugin_doctor.py` and
-   `check_version_bump.py`. The checker imports the other four. With only the checker present it
+   `auto_improve_finish_install.py`, `pr_merged.py`, `plugin_doctor.py`,
+   `check_version_bump.py`, `_preview_apply.py` and `_plugin_root.py`. The checker imports the
+   other six. With only the checker present it
    exits 2 with `checker-dependency-missing` and names the files. Vendoring is the only supported
    way, because the landing step must name the checker at a path inside your repository.
 
