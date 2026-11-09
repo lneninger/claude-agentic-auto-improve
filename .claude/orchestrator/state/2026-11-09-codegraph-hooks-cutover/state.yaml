@@ -1,0 +1,17 @@
+contract: 2026-11-09-codegraph-hooks-cutover
+started_at: '2026-11-09T17:08:47.754935+00:00'
+sub_tasks:
+  t1-cut-over:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 325
+    base: feature/262-codegraph-hooks-cutover
+    brief: .claude/work-items/2026-11-09-325-t1-cut-over.md
+  t2-fail-open-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 326
+    base: feature/262-codegraph-hooks-cutover
+    brief: .claude/work-items/2026-11-09-326-t2-fail-open-review.md

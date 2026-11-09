@@ -3,7 +3,8 @@
 **Parent contract:** `.claude/concepts/2026-11-05-codegraph-hooks-redesign.md`
 **Derived from:** Non-Goals of the parent (the cut-over is deliberately a later step, acceptance criterion 2 of issue #261), not an Adjacent Areas row
 **Date:** 2026-11-05
-**Status:** stub
+**Status:** superseded
+**Superseded by:** `.claude/concepts/2026-11-09-codegraph-hooks-cutover.md` (the cut-over); the deferred policy decisions moved to `.claude/concepts/followups/2026-11-09-codegraph-turn-policy-decisions.followup.md`
 **Estimated scope:** medium
 **Issue:** #262
 
