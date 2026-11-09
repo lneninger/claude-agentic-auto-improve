@@ -547,6 +547,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract block lists evidence to paste in a pull request, or a pull request records "the contract's wording does not match the code".
 - **Tags:** evidence, pull-request, merge-block, contract-text, review
 
+### 2026-11-09 — A change that adds a module-level import to a vendored script must update the vendored-file list in the same change
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** Sub-task 2 of issue #235 moved helpers into `_preview_apply.py` and `_plugin_root.py` and made `auto_improve_finish_install.py` import them at module level, but the Hook registration check's `VENDORED_FILES`, its test's own copy of that list and README step 2 still named five files, so a vendored five-file copy exited 2. No block ran `test_check_hook_registrations.py`, and no CI workflow runs it, so the landing's P8 step was the first to fail (run 20261109T154140Z-97de67). When a change adds or moves a module-level import in a script that a checker vendors, update that checker's vendored-file list, its docs and its registry entry in the same change, and put that checker's suite and the landing's verification steps in the block's Run list.
+- **Apply when:** a block adds or moves a module-level import in a script named in a vendored-file list (a `VENDORED_FILES` constant, a README copy list or a sync configuration).
+- **Tags:** vendoring, imports, landing, verification, test-coverage
+
 ## Project tier
 
 This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.
