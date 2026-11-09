@@ -7,7 +7,8 @@
 **Work Item Brief:** .claude/work-items/2026-11-04-235-domain-split-registries.md
 **Tracking issue:** pending (opened by `/design-first` Step 3.4)
 **Budget:** 18,000 tokens (XL contract). Superseded text and every critique round live in `.claude/contract-history/2026-11-04-domain-split-registries.round-{1,2,3}.md`.
-**Amendment:** 9 (2026-11-08). Block 15's retry merged cleanly at 6fdaf25 but its own live checks stopped it: master's issue-295 entries reuse three titles the registries already hold (MECHANISMS.md "CodeGraph (amendment)" and "Add-on layout (amendment)", VOCABULARY.md "Investigation Turn (amendment)"), so the structure lint exits 1 with three R2 findings; and master's frozen released-hook fixture adds a sixth line to the single-definitions search. This amendment adds rule (7') to block 15 (fold each later-dated duplicate verbatim as a Correction line under the earlier entry, exactly as Q22 did), leaves the fixtures folder out of the definitions search, records test_gate_cost.py as an environmental red, and adds the matching block 16 checks, Q27 and one Uncertain Assumptions line. No rule changed. See "Amendment 9 record".
+**Amendment:** 10 (2026-11-09). The landing run 20261109T154140Z-97de67 halted at gate P8 (verification-not-ready): its hook-registration-tests step failed 3 of 72 tests, because sub-task 2 made auto_improve_finish_install.py hard-import _preview_apply and _plugin_root while the Hook registration check's vendored set (VENDORED_FILES, and the test's own FIVE_FILES copy) still names five files. This amendment adds block 17 (add the two files to VENDORED_FILES, make the tests read that one list, fix README step 2 and add one Correction line to the mechanism entry) and block 18 (its review, which runs the landing's four verification steps verbatim), plus Q28, Q29, one Uncertain Assumptions line, one Failure Modes clause, two Adjacent Areas rows and one Lessons line. No rule, shape or mechanism changed. Critique fold (owner, 2026-11-09: "Apply all recommendations"): the greps are scoped so their expectations hold, block 17 also appends the Q28 journal lesson, and block 18 also runs the four steps on a throwaway landing merge. Q28 and Q29 are answered; Q27 stays open. See "Amendment 10 record".
+**Amendment 9** (2026-11-08). Block 15's retry merged cleanly at 6fdaf25 but its own live checks stopped it: master's issue-295 entries reuse three titles the registries already hold (MECHANISMS.md "CodeGraph (amendment)" and "Add-on layout (amendment)", VOCABULARY.md "Investigation Turn (amendment)"), so the structure lint exits 1 with three R2 findings; and master's frozen released-hook fixture adds a sixth line to the single-definitions search. This amendment adds rule (7') to block 15 (fold each later-dated duplicate verbatim as a Correction line under the earlier entry, exactly as Q22 did), leaves the fixtures folder out of the definitions search, records test_gate_cost.py as an environmental red, and adds the matching block 16 checks, Q27 and one Uncertain Assumptions line. No rule changed. See "Amendment 9 record".
 **Amendment 8** (2026-11-08). Block 15's own stop rule fired: origin/master moved to 67a4a14 and the merge now also conflicts in skills/verify-before-done/SKILL.md (one heading hunk). This amendment adds that path to block 15 with per-file rule (6') (keep both sides, as block 12 does for the two skills), a fast-forward first step, and the matching checks in block 16, plus Q26 and one Uncertain Assumptions line. No rule changed. See "Amendment 8 record".
 **Amendment 7** (2026-11-07). The t14 review passed with findings and a clean landing check against `origin/master` `a241f5c`; `origin/master` then moved to `aa3f715` (and since to `50bfc2a`, one records file), and the landing merge conflicts again in `MECHANISMS.md` and `VOCABULARY.md`. This amendment adds block 15 (a second, small merge of the default branch, written like block 12, which also appends the two Q25 journal lessons) and block 16 (its review, superseding t14), plus one Open Question line set, one Failure Modes clause, one Uncertain Assumptions line and one Lessons line. Blocks 1–14 are unchanged except block 12's two t14 N2 sentences, corrected where they stand. See "Amendment 7 record".
 **Previous amendments:** 6 (2026-11-07: block 12 re-run after it stopped `has-issues`; "Amendment 6 record"), 5 (2026-11-07: blocks 12–14 after the landing halted; "Amendment 5 record") and 4 (2026-11-06: blocks 10–11 after the t9 review; "Amendment 4 record"). The owner re-approved each. Amendment 3 (2026-11-04) was approved. Blocks 1–14 and their completion records are unchanged.
@@ -171,6 +172,8 @@ The architect has no shell and did not run the scanner; `.claude/area-mapping.js
 | Area | Decision | Implication / Reason | Handle |
 |------|----------|----------------------|--------|
 | sync-tool (other repository) | follow-up handle | `tools/sync-plugin.ps1` must halt on `pending`/`stale-sync`, refuse cross-layout publishing, record the applied layout only on `current`, add the new modules to its `files` arrays, and handle the plugin-owned-token loop. Not in this repository. | `.claude/concepts/followups/2026-11-04-sync-tool-registry-layout-gate.followup.md` |
+| hook registration check, vendored copies in consuming projects (amendment 10) | follow-up handle | A consumer that vendors the checker lists its files in its own `.claude/.sync-config.json` (README step 2). After block 17 that list is seven files, not five. Block 17 fixes the README instruction. The sync tool's own `files` arrays are already covered by the existing stub's "add the new modules" item. | `.claude/concepts/followups/2026-11-04-sync-tool-registry-layout-gate.followup.md` |
+| t16 notes N1 and N2 (amendment 10) | not applicable | N1: the `git grep -c -x -F` line in blocks 15 and 16 cannot run (git has no `-x` switch, exit 129). N2: pull request #321 summarised three outputs. Both blocks are complete and are not rewritten. t16's Disposition (`t16-review-fullstack-code-reviewer.md:220-222`) asks for no change in this contract. JOURNAL 2026-11-07 "A merge block's pull request must paste each required output" already covers N2's class. Blocks 17 and 18 add no `-x` command, and each literal command they add is run once and its exit code recorded. | — |
 | version-rule (amendment 6) | follow-up handle | The default branch's INV-O1 row in `test_plugin_manifests.py` contradicts the Parent Branch Delivery Rule for every parent-branch sub-task, not only t12 to t14. This contract accepts its own red row; the rule conflict needs its own contract. | `.claude/concepts/followups/2026-11-07-inv-o1-parent-branch-conflict.followup.md` |
 
 ## UI Implications
@@ -192,7 +195,7 @@ Not applicable. Reason: no REST endpoint or SignalR event is added or changed.
 
 ## Confidence
 
-Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plugin_root` and its helpers `:284-377`, `_atomic_write` `:380-394`, `checkout_equivalent_path` `_project_paths.py:486`, and the `.gitignore` entry for `.claude/cache/`). Medium on multi-file rollback on Windows and on M/V header bullets parsing (Uncertain Assumptions). Full rationale: round-3 history, Part C. Amendment 4 re-read `accuracy_update.py:40-78,404-438` (the old `_ENTRY_HEADER` and its body cut), `critic-verdict-tracker.py:66-72` and `contract-status-watcher.py:68` (fail-soft imports of `accuracy_update`), and `test_registry_layout.py:737-749` (the this-repository pin). Medium on whether the first post-upgrade re-seed lands before a client's next hand-written `post-*` entry (Accepted guard limit). Amendment 5 re-read both copies of `journal-post-approval-tracker.py` (the parent's thin wrapper; the default branch's caller of `generate_registry_digest.journal_entries`), the default branch's `generate_registry_digest.py:55-184` (`entry_blocks`, `journal_entries`, `_source_value`), `memory_boundary.py:28-61,499-568` (its `_bind` of those names and its fixed-`DOMAINS` file list), `test_registry_entries.py`, `accuracy_update.py:404-446,525-610`, `_registry_layout.py:440-481` (`registry_files_in`) and `check_version_bump.py:62-182` (parent mode). The default branch's copies were read from a checkout of a branch cut from it, not from `origin/master` itself, so block 12 re-reads each one with `git show origin/master:<path>`. Medium on the size of the default branch's other changes (153 commits; only the conflicting files and the reader overlap were read). The critique fold (2026-11-07) re-read `_registry_layout.parse_text`, `_field_map`, `_make_entry` and `fence_mask` (`:153-437`), and, in the default-branch-derived tree `20261107-docs-journal-moving-base-stop-list`, `generate_registry_digest.py:55-184`, `memory_boundary.py:51-61,499-568`, `VOCABULARY.md:79-94` and `JOURNAL.md:411-416`; the adapter differences in block 12 come from that reading. Medium-Low on the merge method holding, because only an instruction to the owner controls it (block 13's Run-first line catches a failure, it does not prevent one), and on the default branch staying conflict-free until the landing. Amendment 6 read the t12 branch's `MECHANISMS.md:119-120`, `VOCABULARY.md:140-146`, `_claude_paths.py:61-117,200-209` and the call sites of `registry_files` / `registry_files_in` (`accuracy_update.py:559`, the tracker's `is_journal`, `memory_boundary.py:500-505`, `validate_registries.py:62`), the Q-hop rows of `test_codegraph_first_guard.py:3195-3240` and `test_plugin_manifests.py:1331-1395`. High on the two folds and the version row. The critique fold (2026-11-07) re-read, in the t12 tree, `_claude_paths.py:55-117,200-216`, the Q-hop rows `test_codegraph_first_guard.py:3178-3264` (with the `643b667` precedent at `:2145-2166`), `test_plugin_manifests.py:1331-1397`, `accuracy_update.py:486-583` and `journal-post-approval-tracker.py:40-114`. Medium-High on the bridge now: the closed set rests on the caller's verified fact (neither helper defines `registry_files` / `registry_files_in`), on the default branch's bridge passing the Q-hop rows beside both helpers, and on one ASSUMED fact (`checkout_equivalent_path` is in both helpers), which the frozen-helper and Q-hop rows prove at import. Amendment 7: the Medium-Low risk named above, the default branch staying conflict-free until the landing, has now happened once (`origin/master` `a241f5c` → `aa3f715` → `50bfc2a` after t14's clean check), so it is no longer a hypothetical; it stays Medium-Low, because blocks 15 and 16 and the operator's re-run immediately before launching catch it, but only those live checks control it (Q23). High on block 15's per-file rules (both sides' additions read in `c5bf9d4` and the parent tree); Medium on the ASSUMED merge-tree result, which block 15 measures first.
+Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plugin_root` and its helpers `:284-377`, `_atomic_write` `:380-394`, `checkout_equivalent_path` `_project_paths.py:486`, and the `.gitignore` entry for `.claude/cache/`). Medium on multi-file rollback on Windows and on M/V header bullets parsing (Uncertain Assumptions). Full rationale: round-3 history, Part C. Amendment 4 re-read `accuracy_update.py:40-78,404-438` (the old `_ENTRY_HEADER` and its body cut), `critic-verdict-tracker.py:66-72` and `contract-status-watcher.py:68` (fail-soft imports of `accuracy_update`), and `test_registry_layout.py:737-749` (the this-repository pin). Medium on whether the first post-upgrade re-seed lands before a client's next hand-written `post-*` entry (Accepted guard limit). Amendment 5 re-read both copies of `journal-post-approval-tracker.py` (the parent's thin wrapper; the default branch's caller of `generate_registry_digest.journal_entries`), the default branch's `generate_registry_digest.py:55-184` (`entry_blocks`, `journal_entries`, `_source_value`), `memory_boundary.py:28-61,499-568` (its `_bind` of those names and its fixed-`DOMAINS` file list), `test_registry_entries.py`, `accuracy_update.py:404-446,525-610`, `_registry_layout.py:440-481` (`registry_files_in`) and `check_version_bump.py:62-182` (parent mode). The default branch's copies were read from a checkout of a branch cut from it, not from `origin/master` itself, so block 12 re-reads each one with `git show origin/master:<path>`. Medium on the size of the default branch's other changes (153 commits; only the conflicting files and the reader overlap were read). The critique fold (2026-11-07) re-read `_registry_layout.parse_text`, `_field_map`, `_make_entry` and `fence_mask` (`:153-437`), and, in the default-branch-derived tree `20261107-docs-journal-moving-base-stop-list`, `generate_registry_digest.py:55-184`, `memory_boundary.py:51-61,499-568`, `VOCABULARY.md:79-94` and `JOURNAL.md:411-416`; the adapter differences in block 12 come from that reading. Medium-Low on the merge method holding, because only an instruction to the owner controls it (block 13's Run-first line catches a failure, it does not prevent one), and on the default branch staying conflict-free until the landing. Amendment 6 read the t12 branch's `MECHANISMS.md:119-120`, `VOCABULARY.md:140-146`, `_claude_paths.py:61-117,200-209` and the call sites of `registry_files` / `registry_files_in` (`accuracy_update.py:559`, the tracker's `is_journal`, `memory_boundary.py:500-505`, `validate_registries.py:62`), the Q-hop rows of `test_codegraph_first_guard.py:3195-3240` and `test_plugin_manifests.py:1331-1395`. High on the two folds and the version row. The critique fold (2026-11-07) re-read, in the t12 tree, `_claude_paths.py:55-117,200-216`, the Q-hop rows `test_codegraph_first_guard.py:3178-3264` (with the `643b667` precedent at `:2145-2166`), `test_plugin_manifests.py:1331-1397`, `accuracy_update.py:486-583` and `journal-post-approval-tracker.py:40-114`. Medium-High on the bridge now: the closed set rests on the caller's verified fact (neither helper defines `registry_files` / `registry_files_in`), on the default branch's bridge passing the Q-hop rows beside both helpers, and on one ASSUMED fact (`checkout_equivalent_path` is in both helpers), which the frozen-helper and Q-hop rows prove at import. Amendment 7: the Medium-Low risk named above, the default branch staying conflict-free until the landing, has now happened once (`origin/master` `a241f5c` → `aa3f715` → `50bfc2a` after t14's clean check), so it is no longer a hypothetical; it stays Medium-Low, because blocks 15 and 16 and the operator's re-run immediately before launching catch it, but only those live checks control it (Q23). High on block 15's per-file rules (both sides' additions read in `c5bf9d4` and the parent tree); Medium on the ASSUMED merge-tree result, which block 15 measures first. Amendment 10: High on the root cause and the seven-file closure, which the architect and the critic read in source. Medium on two ASSUMED facts that no shell has checked: origin/master lacks the defect, and seven files are enough at run time. Block 17's GREEN run, block 18's origin/master checks and its run of the four steps on a throwaway landing merge measure all three.
 
 ## Alternatives Considered & Why Rejected
 
@@ -210,6 +213,7 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - *Amendment 7.* `VERIFIED via refs and reflogs (no shell)`: `origin/master` moved `a241f5c` → `aa3f715` → `50bfc2a` after t14's clean check; `origin/fix/235-domain-split-registries` is `5df3f3a`; `c5bf9d4` (first parent `a241f5c`) carries the registry additions block 15's rules (3') and (4') place. `VERIFIED via a working-tree search on the parent tip`: `def _atomic_write` is defined in `_preview_apply.py:30`, `land_contract.py:578` and `memory_boundary.py:720`, and `pr_merged.py:3964` defines `_atomic_write_bytes`, which a whole-word search leaves out. `ASSUMED` (caller's report, not run by the architect): the merge-tree against the tip exits 1 on exactly `MECHANISMS.md` and `VOCABULARY.md`; `aa3f715` holds `c5bf9d4`'s tree; the only change from `aa3f715` to `50bfc2a` is the records file `t14-review.yaml` (PR #317). Check: block 15's Run-first merge-tree line stops on any other conflicting path; its deleted-names check measures the changed `.py` files over the whole range instead of assuming them.
 - *Amendment 8.* VERIFIED by the caller's shell (2026-11-08): origin/master is 67a4a14, and git merge-tree --write-tree --name-only origin/master <parent tip> exits 1 on exactly MECHANISMS.md, VOCABULARY.md and skills/verify-before-done/SKILL.md (one heading hunk). ASSUMED: no further path conflicts by the time block 15 runs. Check: block 15's Run-first merge-tree line (and its Resume re-run) stops on any other conflicting path, and block 16's last check is live.
 - *Amendment 9.* VERIFIED by the caller's shell (2026-11-08): at the t15 retry's merge commit 6fdaf25, validate_registries.py --check-structure exits 1 with exactly three R2 findings (MECHANISMS.md lines 101/124 "codegraph (amendment)", lines 123/125 "add-on layout (amendment)", VOCABULARY.md lines 142/153 "investigation turn (amendment)"), each later entry a single line dated 2026-11-07, issue #295; `git grep -n -w` over .claude/scripts prints six lines, the sixth being the frozen fixture codegraph-db61fd7/codegraph-first-guard.py:335; test_gate_cost.py (hooks tests, from master's 58d476d) is red because the concepts folder holds fewer than 100 contracts, and it reads no merged file. ASSUMED: the fold leaves no other lint finding. Check: rule (7')'s commit is followed by a lint run whose output must hold only R4, digest: and at most one R3-skip line, and block 15 stops with AMENDMENT otherwise.
+- *Amendment 10.* VERIFIED by reading the parent tree (architect, no shell): the module-level import closure of `check_hook_registrations.py` is exactly seven files (the "Amendment 10 record" gives each file:line). VERIFIED by reading the main checkout's working tree (branch `fix/614-landing-effective-review-verdicts`, cut from master), not `origin/master` itself: that tree has no `_preview_apply.py` or `_plugin_root.py`, and its finish-install imports only `pr_merged` and `plugin_doctor` (`:53-54`). So the defect is this contract's, not master's. ASSUMED: `origin/master` matches. ASSUMED: no module-level code in the seven files reaches a lazy import of `_claude_paths` or `_registry_layout` on the checker's path, so seven files suffice. Check: block 17's GREEN run of the three vendored-copy tests (they run a copy in a temp folder outside the repository), and block 18's `git cat-file -e origin/master:.claude/scripts/_preview_apply.py` line.
 
 ## Failure Modes & Mitigations
 
@@ -224,7 +228,7 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - **The migration half-writes** → stage all, back up outside the registries, replace, restore on failure (`write-failed`).
 - **The lint is red on unmigrated clients, legacy titles or historical paths** → advisory mode until `current`, R4 advisory, `archived-title-only`.
 - **Stale sync** (marker above `## Project:` sections) → `stale-sync`, `--check` exits 6, 0001 migrates.
-- **A copied-script client lacks the new modules** → import chain kept minimal (above); the README change note (sub-task 8) and the follow-up stub (item 7) list every new file to copy.
+- **A copied-script client lacks the new modules** → import chain kept minimal (above); the README change note (sub-task 8) and the follow-up stub (item 7) list every new file to copy. *Amendment 10:* one list was missed. The Hook registration check's `VENDORED_FILES` (`check_hook_registrations.py:37-43`) and its test's second literal `FIVE_FILES` (`test_check_hook_registrations.py:28-34`) kept five names, so a vendored five-file copy exits 2 and the landing's hook-registration-tests step failed. Block 2's Run list did not include that suite, and no later block or review ran it. The fix is block 17 (one list; the tests read it), and block 18 runs the landing's four verification steps verbatim.
 - **The reference client's 266 orphans keep verify-before-done NOT-READY** → by design (§4.3 step 5); one ready-to-run `--archive-title-only` line per orphan.
 - **The gate reads the plugin's own registries under a plugin install** → `--project` required; `project-undetermined`.
 - **Two shared registry readers meet in one merge** (amendment 5): this contract's `_registry_layout` and the default branch's `generate_registry_digest.entry_blocks` / `journal_entries` → one grammar survives (Q21). The default branch's names stay as adapters, so the memory adapter's fail-soft binding keeps working. Its file list goes through `registry_files_in`, and a layout-2 round-trip test pins it (JOURNAL 2026-11-01, merged writer).
@@ -254,6 +258,10 @@ Confidence: Medium-High. High on what exists (amendment 3 re-read `_separate_plu
 - [x] **Q26 (amendment 8) Master keeps moving: should the conflict set be open-ended?** — **Recommendation:** no, keep the closed list. Block 15 resolves only the paths in its Files to touch, and any other conflicting path still stops it with AMENDMENT. Each new conflicting path is another small amendment like this one, because an open-ended list would let the implementer resolve files nobody reviewed.
   → Accepted by the owner's instruction to continue (2026-11-08).
 - [ ] **Q27 (amendment 9) Three duplicate titles from master's issue-295 entries: fold or retitle?** — **Recommendation:** fold, exactly as Q22 did for the earlier pair: the later-dated entry becomes the last indented Correction line under the earlier entry, text verbatim, nothing renamed (rule (7')). A retitle would invent titles the default branch does not have and would split one decision across two keys; a fold keeps every word and one key per decision, and the lint's own R2 message offers it. → Applied provisionally by the session under the owner's standing instruction to continue (2026-11-08); the owner was not asked this question. It is reversible in the t15 pull request: the fold is one commit of its own. The owner confirms or redirects at that review.
+- [x] **Q28 (amendment 10) Add a guard so the vendored-file list cannot drift again?** — **Recommendation:** no new guard and no follow-up stub. The three vendored-copy tests are the guard: they run a copy of exactly `VENDORED_FILES` outside the repository, and they caught this defect. It reached the landing only because no block ran that suite; no CI workflow runs it (`.github/workflows/version-bump.yml` runs only `test_check_version_bump.py` and `test_repo_consistency.py`), so the landing's P8 step is its only gate. Block 17 removes the test's second copy of the set (`FIVE_FILES`): the tests that stage and name the files read `VENDORED_FILES`. One literal stays on purpose, block 17's seven-name pin (t3), which is meant to disagree with the code whenever the list changes, so that a change to the list is always a visible test edit. The drift left, `VENDORED_FILES` against finish-install's imports, is what the vendored-copy tests measure. A static import-closure test would only duplicate them. The process gap is a journal lesson. Block 17 appends it in a commit of its own, as Q20 and Q25 did, under the landing's single raise.
+  → Owner answered 2026-11-09: accepted the recommendation: no extra guard, no stub.
+- [x] **Q29 (amendment 10) Fix README step 2 and the mechanism entry in block 17, or code and tests only?** — **Recommendation:** include both. `README.md:1501-1506` tells a client to vendor five files, so a client who follows it gets `checker-dependency-missing`. `MECHANISMS.md:112` states the same wrong count. The README change is one paragraph. The registry change is one Correction line, written by `registry_append.py --correction-of` in a commit of its own, so the owner can drop that commit at the t17 pull request. The cost: `MECHANISMS.md` is the default branch's busiest conflict file. Block 18's live last check catches a returned conflict.
+  → Owner answered 2026-11-09: accepted. The README step 2 fix and the MECHANISMS.md Correction line go in block 17, the Correction line as its own commit.
 
 ---
 
@@ -352,6 +360,63 @@ No separate critic run: amendment 8 is a mechanical extension of block 12's both
 
 No separate critic run: amendment 9 applies two existing decisions to measured facts (Q22's fold of a duplicate-title entry as a Correction line, three more pairs; block 12's closed list of definition sites, one more copy outside it) and adds an environmental-red note for one master test. Q27 is open for the owner (applied provisionally); the fold is one separate commit in the t15 pull request, so it is reversible.
 
+### Amendment 10 critique
+
+**Critic:** contract-critic
+**Date:** 2026-11-09
+**Verdict:** blockers-found
+**Scope:** amendment 10 only: header line, the Uncertain Assumptions and Failure Modes lines, two Adjacent Areas rows, Q28 and Q29 (and Q27 carried forward), the Lessons line, the "Amendment 10 record", and blocks 17 and 18. The contract is `approved` and already has a Critique section. The caller asked for this subsection, as for amendments 4 to 7.
+
+#### Findings
+
+- **[BLOCKER] Two new grep checks state results the tree cannot give, because the contract itself holds both names**
+  - **What is wrong:** block 17's older-test search (4) runs `git grep -n -w -e VENDORED_FILES -e FIVE_FILES` with no pathspec and expects "only the checker and its test, and no FIVE_FILES". Block 18 checks that `git grep -n -w FIVE_FILES -- .claude` exits 1. This contract is a tracked file under `.claude/concepts/` and holds 21 whole-word hits for those names (amendment 10's own text and block 17's TASK block). So (4) prints this contract too, and block 18's line exits 0 after a correct t17, which gives a spurious finding. The amendment claims to avoid exactly this defect class. Its Adjacent Areas row says "each literal command they add is run once and its exit code recorded", and its Lessons line says it heeds the lesson that a contract which mis-predicts the code must be fixed in text. Running a command once records the wrong result. It does not correct the stated expectation.
+  - **Prior artifact ignored:** `JOURNAL.md:543` "2026-11-07 — A merge block's pull request must paste each required output, not tick a line that says it passed" (its second half: "a grep that cannot pass ... the next block or an amendment must fix the text"). Also the same defect class in the `### Amendment 7 critique` WARN "Block 15's single-definitions grep predicts output the tree does not give", and t16 N1 (the `-x` line).
+  - **Where in this contract:** `### 17` CONSTRAINTS, older-test search (4): "Expected: only the checker and its test, and no FIVE_FILES."; `### 18` CONSTRAINTS: "The tests read chk.VENDORED_FILES: git grep -n -w FIVE_FILES -- .claude exits 1."
+  - → Addressed by: both searches are scoped to `-- .claude/scripts README.md .claude/registries`, use `git grep -c -w` and run after all t17 commits. The expected output was checked against what those paths hold: `VENDORED_FILES` in the checker, its test and the MECHANISMS.md Correction line; `FIVE_FILES` in none, exit 1. Block 18 adds a "five files" count that expects only the original MECHANISMS.md entry, which the append leaves in place. Amendment 10 record, critique fold.
+- **[WARN] Block 18's "verbatim" re-run of the four landing steps does not run on the tree the landing judges**
+  - **What is wrong:** the landing runs each step "in its own landing checkout of the parent branch, after merging the default branch into it". P8 failed on merge commit `8230556`. Block 18 re-runs the steps on the parent tip and adds only a textual `git merge-tree` check. So a clean t18 proves the parent tip passes, not that P8 will pass on parent plus `origin/master`. The record names the commands as the landing's but never states this difference. The contract's own practice says textual conflicts hide semantic ones.
+  - **Prior artifact ignored:** `.claude/work-item-conventions.json:88` (`contractLanding.$comment`); `JOURNAL.md:536` "2026-11-07 — A clean landing check goes stale when the default branch moves"; `## Lessons referenced` Amendment 7 line ("textual conflicts hide semantic ones").
+  - **Where in this contract:** `### 18` CONSTRAINTS: "Re-run the landing's four verification steps, exactly as .claude/work-item-conventions.json contractLanding.verification.steps declares them". Also "Any non-zero step ... the verdict is "blocked", because the landing would halt at P8 again" (this implies the converse holds too).
+  - → Addressed by: block 18 also runs the four steps on a throwaway merge of origin/master into the parent tip. It uses a detached, flat worktree `.claude/worktrees/t18-landing-merge-scratch`, applies the landing's raise there as a local commit that is never pushed, and removes the worktree with `git worktree remove` afterwards. The parent-tip run stays. The record states the difference.
+- **[WARN] Q28 defers its journal lesson to an unnamed "later change", against this contract's own Q25 precedent**
+  - **What is wrong:** Q28 sends the process lesson to "a later change that already raises the version". Under the Parent Branch Delivery Rule, this contract's only raise is the landing. After the landing, no parent branch is left to batch into. So the lesson has no block, no follow-up stub and no owner. Q25 (amendment 7) and Q20 (amendment 4) put lessons that were already written into a sub-task, under the landing's single raise.
+  - **Prior artifact ignored:** `## Open Questions for User` Q25 and `## Amendment 7 record` "Journal lessons (Q25 ...)"; CLAUDE.md "Authors should batch registry appends ... with a change that already raises the version".
+  - **Where in this contract:** `## Open Questions for User` Q28: "Under CLAUDE.md's batching rule, it is appended by a later change that already raises the version."; `### 18`: "propose the Q28 journal lesson ... You do not append it."
+  - → Addressed by: block 17 appends the lesson (quoted in the Amendment 10 record) with `registry_append.py --registry journal --universal`, in a commit of its own. `JOURNAL.md` is added to its Files to touch, and the "later change" wording is removed from Q28 and block 18. Block 18 checks the entry. No version change in the sub-task.
+- **[NIT] The Version bullet calls README.md and the test file shipped.** `check_version_bump.py:32` (`EXEMPT_NAMES` holds `README.md`) and `:29` (`.claude/scripts/tests/` is exempt). Only `check_hook_registrations.py` and `MECHANISMS.md` are shipped. No outcome changes, because parent mode (`:166-174`) compares versions only and never reads the changed files. → Addressed by: the Version bullet in the Amendment 10 record names the exempt files and says that parent mode is unaffected.
+- **[NIT] Q28's "the checker and its tests can no longer disagree" is loose.** Block 17 (t3) adds a new seven-name literal (the pin), which can disagree by design. And no CI runs the suite: `.github/workflows/version-bump.yml:31-33` runs only `test_check_version_bump.py` and `test_repo_consistency.py`. The landing's P8 step is the only gate that runs it (`JOURNAL.md:406` "A 'fails the build' claim must name the workflow that runs the check"). → Addressed by: Q28 now names the pin as a deliberate literal, and says that no CI workflow runs the suite.
+- **[NIT] Blocks 17 and 18 copy the four step commands by hand.** `land_contract.py --verify-here` (`land_contract.py:2907-2909`; `skills/verify-before-done/SKILL.md:34`) already reads `contractLanding.verification.steps` itself. The copies match the conventions file today (`work-item-conventions.json:93-123`, checked), so this is drift risk only. → Addressed by: blocks 17 and 18 say the commands are read from `contractLanding.verification.steps`, and each copied line is compared with that file before it runs. `--verify-here` is named and rejected for this run: it reads the baseline from origin/master first, and with `.claude/test-baseline.json` absent it ends `no-baseline` at gate V1 without running a step (`land_contract.py:3124-3128`).
+- **[NIT] `## Confidence` has no amendment-10 sentence.** It stops at amendment 7, although amendment 10 states an ASSUMED closure fact. This is the same omission as amendments 8 and 9. → Addressed by: one amendment-10 sentence added to `## Confidence`.
+
+#### Verified against the source (no finding)
+
+- **Root cause.** `check_hook_registrations.py:37-43` (five names), `:49-52` (guarded module-level import), `:512-514` ("five" twice), `:14-15` docstring, `:32` "four dependencies". `auto_improve_finish_install.py:115-120` (`pr_merged`, `plugin_doctor`, `_preview_apply`, `_plugin_root`). The test's `FIVE_FILES` is at `:28-34`, used at `:712/:808/:830/:845`; the file holds 72 tests. `README.md:1501-1506` and `MECHANISMS.md:112` say five. `README.md:597-606` already lists both new files.
+- **The closure is exactly seven files, and nothing else is missing.**
+  - `pr_merged.py:44` imports `check_version_bump`; everything else in it is lazy (`flat_worktree`, `yaml`, `land_contract`, `cleanup_delivered`, `_claude_paths` at `:3275`).
+  - `plugin_doctor.py`, `_preview_apply.py`, `_plugin_root.py` (lazy `plugin_doctor` at `:87`) and `check_version_bump.py` import only the standard library at module level.
+  - The checker's own path reaches `_claude_paths` only through `_launcher_api` (`auto_improve_finish_install.py:139-142`), which catches `ImportError`.
+  - No `_registry_layout` or `_claude_paths` import at module level was added by this contract.
+- **Block 17's Files to touch is complete.** No shipped skill, agent or template lists the set (searched for "five files", "other four" and "Vendor all five"). The RED counts are right: 3 failures before the edits, 4 after (t1) to (t3) (the pin), and 73 tests at GREEN. `registry_append.py` supports `--from-file -`, `--correction-of`, `--source` and `correction-target-missing` (`:352-362`, `:384-393`), and writes only the target file.
+- **Commands match the source.** The four step commands match `work-item-conventions.json:93-123`. `land_contract.py` reads the list at `:987`, `:2713` and `:3104`. No `-x` is used.
+- **The version rule holds.** Parent mode tolerates a registry-only change at the unchanged version, because `evaluate_parent` checks versions only. This matches the Amendment 4 record precedent (block 10 touched `MECHANISMS.md`, covered by the landing's raise). No block lists a version file. The landing raise is minor + 1, patch 0.
+- **Q27, Q29 and Adjacent Areas.** Q27 is carried forward verbatim and stays undecided; block 18 says to name it and not decide it. Q29's recommendation is sound. The Adjacent Areas stub `2026-11-04-sync-tool-registry-layout-gate.followup.md` exists and its item 7 names both helpers.
+
+#### Applicable journal entries
+
+- **2026-11-06 — A sub-task that flips the state an earlier sub-task's test pins must re-run that suite** — heeded by blocks 17 and 18 running all four landing steps and the named suites.
+- **2026-11-07 — A merge block's pull request must paste each required output** — violated in its "fix the text" half, see the BLOCKER above. Its evidence half is heeded by block 17's Evidence constraint.
+- **2026-11-07 — A clean landing check goes stale when the default branch moves** — heeded by block 18's live last check, but only textually (see WARN 1).
+- **2026-10-04 — A root locator can return the consumer itself under vendoring** — heeded: the vendored-copy tests run in a temp folder (`test_check_hook_registrations.py:780-799`).
+- **2026-10-28 — Do not promote a mechanism the registry already describes as an extension seam** — heeded: `VENDORED_FILES` is extended. Nothing new is promoted.
+- **2026-11-02 — Name the tests a fix may change by the state they guard, after reading them** — heeded by (t2), and by "Leave every other "five" ... it counts Registration rules or test classes".
+- **2026-11-02 — After amending a contract, update every summary of the block graph** — heeded: the header names blocks 17 and 18, and neither the Handoff intro nor the brief carries a graph.
+
+#### What the critic did not check
+
+- `pr_merged.py --contract 2026-11-04-domain-split-registries --status --json` (`layout_defects`), the landing log and report in the main checkout, and `origin/master`'s tree and version. The critic had no shell, so these rest on the record and on block 18's own checks.
+- `.claude/.scout-cache/registry-digest.md` is absent (t16 removed the folder), so the registries were read directly. `JOURNAL/general.md` holds no entries.
+
 ## Lessons referenced
 
 - **2026-10-04 — A root locator can return the consumer itself under vendoring** — heeded by `separate_plugin_root`, the Plugin root resolution VO and the vendored fixtures.
@@ -372,6 +437,12 @@ No separate critic run: amendment 9 applies two existing decisions to measured f
 - **Amendment 5 critique fold (2026-11-07):** *2026-11-03 When resolving a conflict hunk by keeping both sides, drop the base lines the other side rewrote* (default branch, `JOURNAL.md:411`; it arrives with this merge and is not yet in the parent's journal) is heeded by block 12 rule (0) and its Base-line check. *2026-11-01 A shared reader reused by a stricter consumer must be re-checked …* and *2026-10-04 A VERIFIED parser claim must be tested …* are heeded by block 12's Adapter differences D1–D5 and J1–J5 and their fixture rows. *2026-10-22 An accepted critic WARN … must amend the contract body* is heeded by I-7, "Import chain", Failure Modes and rule (4) changing in the body, with no conditional left in blocks 12–14. *2026-11-03 A stop list checked against a moving default branch needs a rule for changes outside the edited lines* (default branch) is heeded by block 14's final live `git merge-tree` check. *2026-11-02 A revision that adds a path adds its failure modes* (default branch) is heeded by the merge-method and moving-branch Failure Modes citing a mechanism. *2026-11-02 Keep a review-fix block to the review's findings* (default branch) is heeded by block 13's TASK line naming the lesson batch as a second, stated purpose. *2026-10-30 A delivery rule must name every route into delivery* is heeded by the merge-method route being checked at block 12's head and at block 13's start.
 - **Amendment 6:** *2026-11-05 A bridge re-export that silently falls back to an inline copy must also say which one it gave* is heeded: the stand-in is no inline copy, and the `ImportError` it raises is the one signal callers read, so no new export is needed. *2026-11-05 An "older release" test fixture must be pinned to a fixed commit or a frozen copy, never to HEAD* is heeded in full by the frozen-helper, CLI and hook rows: they read the helper at the fixed commit `643b667`, check it with `git cat-file -e`, and SKIP with a printed reason when it is absent, as the Q-hop rows do. *2026-11-05 A hardening fix applied to a shared classifier must be checked against every consumer* and *2026-11-06 An exception sentence that names the outcome of a later call must list every outcome that call can have* are heeded by the closed name list, the per-name call-site rule, and the INV-O1 exception naming every gate and its outcome (critique fold). *2026-11-06 A sub-task that flips the state an earlier sub-task's test pins must re-run that suite* is heeded by naming the merge-base version row and its exit at the landing. *2026-10-22 An accepted critic WARN or answered Open Question must amend the contract body* is heeded by I-7 and Failure Modes changing in the body.
 - **Amendment 7:** *2026-11-03 A stop list checked against a moving default branch needs a rule for changes outside the edited lines* (default branch) and the amendment-5 lesson *A parent branch that shares files with a moving default branch must take the default branch in through a sub-task before its landing* (`JOURNAL.md`, 2026-11-07) are heeded by block 15 itself and by block 16's live last check. *2026-11-03 When resolving a conflict hunk by keeping both sides, drop the base lines the other side rewrote* is heeded by block 15 rule (0) with the new merge's own base (the folds of Q22 and rule (9) are not undone). The architect's merge-remedy practice (grep the default branch's changed code for callers of names the parent deleted; textual conflicts hide semantic ones) is heeded by block 15's deleted-names check. t14 W1 (paste outputs, never tick a line) is heeded by block 15's Evidence constraint and checked by block 16. *2026-11-02 Keep a review-fix block to the review's findings* is heeded by keeping t14's nits out of blocks 15–16 (Q24). Critique fold (2026-11-07): *2026-10-30 A delivery rule must name every route into delivery* is heeded by Q25's appends entering only through block 15's pull request, before block 16's last check; *2026-11-02 Edit a reversed sentence where it stands* is heeded by correcting block 12's t14 N2 sentences in place.
+- **Amendment 10:**
+  - *2026-11-06 A sub-task that flips the state an earlier sub-task's test pins must re-run that suite* was missed by block 2, which changed an importer of the vendored set without running `test_check_hook_registrations.py`. That miss is the root of the gap. Blocks 17 and 18 heed the lesson: each runs the landing's four verification steps verbatim.
+  - *2026-10-04 A root locator can return the consumer itself under vendoring* is heeded by keeping the vendored-copy tests' temp folder outside the repository.
+  - *2026-11-07 A merge block's pull request must paste each required output* covers its second half, "a contract that mis-predicts the code must be fixed in text". It is heeded by recording t16 N1 under Adjacent Areas and by running each literal command of blocks 17 and 18 once, with its exit code.
+  - *2026-11-07 A clean landing check goes stale when the default branch moves* is heeded by block 18's live last check.
+  - The architect's older-test practice (one search question per change) is heeded by block 17's older-test search.
 - Orthogonal to north-stars: none active.
 
 ## Amendment 4 record (2026-11-06)
@@ -454,6 +525,82 @@ No separate critic run: amendment 9 applies two existing decisions to measured f
 - **test_gate_cost.py:** a master test (58d476d) that deliberately refuses to run on fewer than 100 contracts; this repository holds fewer, and the test reads no merged file. It is recorded as an environmental red with a named single failing check, so a real regression in it is still caught.
 - **Unchanged:** the stop rule, the closed list of paths (Q26), the version rule, Data Shapes, mechanisms, vocabulary and blocks 1-14. Block 15 gains rule (7'), the fixtures exclusion and the test_gate_cost note; block 16 gains the matching checks. Q27 stays open for the owner.
 - **Process note:** the caller (main session) wrote this amendment directly after reproducing both stops; the architect and critic were not run (see the Amendment 9 note).
+
+## Amendment 10 record (2026-11-09)
+
+- **Trigger:** the landing run `20261109T154140Z-97de67` ended `verification-not-ready` at gate P8 (exit 9). Nothing merged into master. Its report is `.claude/state/landing/2026-11-04-domain-split-registries/report.json` in the main checkout, and the landing's merge commit was `8230556`.
+  - Three steps read `ok`: `version-bump`, `loop-script-tests` and `hook-tests`.
+  - The `hook-registration-tests` step (`py -3 .claude/scripts/tests/test_check_hook_registrations.py`) exited 1, with 3 of 72 tests failed:
+    - `test_a_vendored_copy_leaves_the_tree_byte_identical_with_dash_B`
+    - `test_a_vendored_copy_leaves_the_tree_byte_identical_without_dash_B`
+    - `test_the_vendored_copy_fails_the_same_way_as_the_repository_copy`
+  - Each failed with exit 2 where it expected 0 or 1, and printed: `COULD-NOT-CHECK checker-dependency-missing: cannot import the module '_preview_apply' that this check needs. Vendor all five files together into one folder: check_hook_registrations.py, auto_improve_finish_install.py, pr_merged.py, plugin_doctor.py, check_version_bump.py` followed by `Remedy: Copy the five files listed above next to check_hook_registrations.py, then rerun.`
+  - The landing's log is `.claude/logs/landing/2026-11-04-domain-split-registries/20261109T154140Z-97de67/hook-registration-tests/output.log`.
+  - The attribution was `undetermined`, because no file the failure names is in either diff.
+  - `.claude/test-baseline.json` is absent on origin/master, and the step is read by exit code, so re-recording a baseline cannot change the result. The fix must be in the code.
+- **Root cause, confirmed (the architect read the source; no shell):**
+  - `check_hook_registrations.py:49-52` imports `auto_improve_finish_install` at module level, inside the guarded try.
+  - `:37-43` define `VENDORED_FILES` with five names.
+  - `:512-514` hard-code "five" in the refusal message and in its remedy.
+  - `auto_improve_finish_install.py:115-120` import `pr_merged`, `plugin_doctor`, `_preview_apply` (`:117`) and `_plugin_root` (`:118-120`) at module level. Sub-task 2 added the last two (the "Import chain" says: "Finish-install hard-imports `_preview_apply` and `_plugin_root`").
+  - The rest of the closure:
+    - `pr_merged.py:44` imports `check_version_bump`; its other `_claude_paths` imports are lazy.
+    - `plugin_doctor.py:25-37` imports the standard library only; `_claude_paths` and `_registry_layout` are lazy (`:168`, `:208`, `:485`).
+    - `_preview_apply.py:12-18` imports the standard library only.
+    - `_plugin_root.py:15-21` imports the standard library only, and `plugin_doctor` lazily at `:87`.
+    - `check_version_bump.py:16-23` imports the standard library only.
+  - So the vendored set is seven files, and both new modules are needed. Only `_preview_apply` is named because `:117` fails first.
+  - The test keeps a second literal copy of the set, `FIVE_FILES` (`test_check_hook_registrations.py:28-34`). It is used at `:712`, `:808`, `:830` and `:845`, and the three failing tests stage it (`:830`, `:845`).
+- **Where else the set is listed:**
+  - `README.md:1501-1506`, step 2: "Vendor five files … The checker imports the other four".
+  - `MECHANISMS.md:112`, the "Hook registration check" entry: "A vendored copy needs five files".
+  - No other file this repository ships lists the set. A search for `check_hook_registrations` found only README.md, the two scripts, `test_auto_improve_finish_install.py`, `test_land_contract_verification.py`, `work-item-conventions.json` and MECHANISMS.md, and none of them lists it.
+  - The sync tool is not in this repository (Non-Goals). Consumers list vendored files in their own `.sync-config.json`.
+  - README's change note (`:601-609`) already lists the two new files for copied-script clients.
+- **Not a master defect (see Uncertain Assumptions):** master's finish-install does not import the two helpers, and they do not exist there.
+- **Why no gate caught it earlier:**
+  - Block 2's Run list (its TASK block's "Run" line) does not include `test_check_hook_registrations.py`.
+  - No later block or review ran it either. t16's Evidence table has no row for it.
+  - The landing is the first place the suite ran on this contract's tree.
+- **Reuse:** `VENDORED_FILES` in the Hook registration check (MECHANISMS.md:112) is the existing single list in code. Block 17 extends it, and the tests read it instead of their own copy. No new mechanism. The registry digest (`.claude/.scout-cache/registry-digest.md`) is absent, because t16 removed that folder, so the registries were read directly.
+- **Rejected alternative:** make finish-install import the two helpers lazily, so the vendored set stays at five. That contradicts the "Import chain" (hard imports), and block 2's tests pin that finish-install's names are the moved objects.
+- **Decision:** add blocks 17 (remedy) and 18 (review).
+- **Not changed:**
+  - Data Shapes, vocabulary and the "Import chain".
+  - The refusal code `checker-dependency-missing`, and exit codes 0, 1 and 2.
+  - The landing configuration, and the baseline (none is recorded).
+  - Blocks 1-16. Blocks 15 and 16 keep their `-x` text (t16 N1; Adjacent Areas).
+  - Q27, which stays open and undecided.
+  - The mechanism entry gains only one Correction line.
+- **Version:**
+  - No block edits a version file by hand.
+  - Block 17's shipped files are `check_hook_registrations.py`, `MECHANISMS.md` and `JOURNAL.md`. `README.md` (`check_version_bump.py:32`, `EXEMPT_NAMES`) and the test file (`:29`, `.claude/scripts/tests/` is exempt) are not shipped. Nothing changes in parent mode: it compares versions only (`:166-174`). As a sub-task pull request into the parent branch, block 17 keeps the base's version, and parent mode exits 0 with "keeps version …" (0.16.5 per t16).
+  - The landing raises the version once: minor + 1, patch 0, over origin/master's version at landing time. That version was 0.16.5 at amendment time, which gives 0.17.0. The architect could not read `origin/master:plugin.json`, so block 18 verifies the figure.
+- **Status:** stays `approved`, as for amendments 4 to 9. None of them flipped Status to draft; the owner re-approved each amendment. The main session presents blocks 17 and 18 and Q28 and Q29 to the owner before the loop dispatches them.
+- **Supersession:**
+  - t18 supersedes nothing: its Gate Output has `"supersedes": []`.
+  - t16 stays effective. Its verdict judged t15's merge, which block 17 does not touch, and its open W1 (Q27) must stay visible to the landing.
+  - t14 is already superseded by t16.
+- **Ordering:** block 17 depends on 16, which is `pass-with-findings` and so releases. Block 18 depends on 17.
+- **Critique fold (owner, 2026-11-09: "Apply all recommendations"):**
+  - **BLOCKER (wrong grep expectations).** Block 17's search (4) had no pathspec, and block 18 ran `git grep -n -w FIVE_FILES -- .claude`. Both matched this contract's own text under `.claude/concepts/`, so the stated results ("only the checker and its test"; "exits 1") could not hold after a correct t17.
+    - Fix: both are scoped to `-- .claude/scripts README.md .claude/registries`, use `-c -w` and run after every t17 commit.
+    - Expected after t17, `VENDORED_FILES`: the checker, its test and `.claude/registries/MECHANISMS.md` (the new Correction line names `VENDORED_FILES`).
+    - Expected after t17, `FIVE_FILES`: no hit, exit 1.
+    - "five files": MECHANISMS.md keeps its original "needs five files" text, because a Correction line is an append and I-7 keeps the entry verbatim. Block 18 therefore expects exactly that one line for `-E "needs five files|Vendor five files|all five files|the five files"`. The pattern is narrow on purpose: `MECHANISMS.md:51` "thirty-five files" and `test_cleanup_delivered.py:1881` "five files, three shown" are not about the vendored set.
+  - **WARN 1 (wrong tree).** P8 runs on the landing checkout after its merge of origin/master and its raise. Block 18 now also runs the four steps on a throwaway merge, done the same way in a detached scratch worktree that is never pushed and is removed afterwards. The parent-tip run stays.
+  - **WARN 2 (lesson with no owner).** Block 17 appends the lesson below in its own commit, through `registry_append.py --registry journal --universal`, as Q20 and Q25 did. It enters only through t17's pull request, under the landing's single raise; the sub-task changes no version.
+  - **NITs.** The Version bullet now names the exempt files. Q28's wording is corrected (the pin is a deliberate literal; no CI runs the suite). Blocks 17 and 18 read the step commands from `contractLanding.verification.steps` and say why `land_contract.py --verify-here` (`:2907-2909`, `launch_verify_here` `:3037`) is not used: with no baseline on origin/master it ends `no-baseline` at V1 and runs no step (`:3124-3128`). `## Confidence` has an amendment-10 sentence.
+  - The journal lesson block 17 appends, verbatim:
+
+  ```markdown
+  ### 2026-11-09 — A change that adds a module-level import to a vendored script must update the vendored-file list in the same change
+  - **Trigger:** post-impl divergence
+  - **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+  - **Lesson:** Sub-task 2 of issue #235 moved helpers into `_preview_apply.py` and `_plugin_root.py` and made `auto_improve_finish_install.py` import them at module level, but the Hook registration check's `VENDORED_FILES`, its test's own copy of that list and README step 2 still named five files, so a vendored five-file copy exited 2. No block ran `test_check_hook_registrations.py`, and no CI workflow runs it, so the landing's P8 step was the first to fail (run 20261109T154140Z-97de67). When a change adds or moves a module-level import in a script that a checker vendors, update that checker's vendored-file list, its docs and its registry entry in the same change, and put that checker's suite and the landing's verification steps in the block's Run list.
+  - **Apply when:** a block adds or moves a module-level import in a script named in a vendored-file list (a `VENDORED_FILES` constant, a README copy list or a sync configuration).
+  - **Tags:** vendoring, imports, landing, verification, test-coverage
+  ```
 
 ---
 
@@ -1804,6 +1951,282 @@ CONSTRAINTS:
     before launching it; a clean result is valid only for the origin/master commit it names.
   - Write the six-section artefact. The file does NOT exist yet; you create it. "## Evidence" lists every command with
     its exit code and is never empty.
+  - The header ends with exactly one of: "**Verdict:** pass", "**Verdict:** pass-with-findings",
+    "**Verdict:** blocked".
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-04-domain-split-registries.md
+  contract_status: approved
+```
+
+### 17. Complete the hook registration check's vendored file list (`python-ai-developer`)
+
+**Depends on:** 16
+
+**Files to touch:**
+- `.claude/scripts/check_hook_registrations.py`
+- `.claude/scripts/tests/test_check_hook_registrations.py`
+- `README.md`
+- `.claude/registries/MECHANISMS.md`
+- `.claude/registries/JOURNAL.md`
+
+**Pre-written TASK block:**
+```
+TASK: Make the Hook registration check's vendored file list complete: add _preview_apply.py and _plugin_root.py to
+  VENDORED_FILES, make the refusal text and the tests read that one list, correct README step 2, and add one
+  Correction line under the "Hook registration check" mechanism entry, so that the landing's hook-registration-tests
+  step passes; and append the amendment-10 journal lesson.
+CONTEXT: concept contract amendment 10 ("Amendment 10 record" with every file:line and its critique fold; Q28, Q29;
+  "Import chain"; block 2).
+  Landing run 20261109T154140Z-97de67, gate P8; its log is in the main checkout at
+  .claude/logs/landing/2026-11-04-domain-split-registries/20261109T154140Z-97de67/hook-registration-tests/output.log.
+FILES: as listed. No other file changes.
+CONSTRAINTS:
+  - First step, on the task branch: git fetch origin ; git merge --ff-only origin/fix/235-domain-split-registries.
+    It is a fast-forward or "Already up to date". If it is neither, stop and report. Follow the contract as it
+    stands after this step (amendment 10).
+  - RED proof, before any edit: py -3 .claude/scripts/tests/test_check_hook_registrations.py exits 1 with
+    "FAILED (failures=3)". The three failing tests are test_a_vendored_copy_leaves_the_tree_byte_identical_with_dash_B,
+    test_a_vendored_copy_leaves_the_tree_byte_identical_without_dash_B and
+    test_the_vendored_copy_fails_the_same_way_as_the_repository_copy, each with "cannot import the module
+    '_preview_apply'". Paste the raw output. If the failures differ, stop and report AMENDMENT.
+  - Tests first (test_check_hook_registrations.py):
+    (t1) Delete the FIVE_FILES literal (:28-34). After "import check_hook_registrations as chk" add
+        VENDORED_FILES = chk.VENDORED_FILES. Every use (:712, :808, :830, :845) reads that name, so the tests can
+        never hold a second copy of the set.
+    (t2) Rename test_dependency_import_failure_is_exit_2_naming_the_five_files to
+        test_dependency_import_failure_is_exit_2_naming_every_vendored_file. Its body is unchanged apart from the
+        name it loops over.
+    (t3) Add one pin test: chk.VENDORED_FILES equals exactly ("check_hook_registrations.py",
+        "auto_improve_finish_install.py", "pr_merged.py", "plugin_doctor.py", "check_version_bump.py",
+        "_preview_apply.py", "_plugin_root.py"), in that order.
+    Run the suite: it exits 1 with 4 failures (the three above and the pin). Paste the output.
+    Leave every other "five" in the file alone: it counts Registration rules or test classes, not files.
+  - Checker (check_hook_registrations.py):
+    (c1) VENDORED_FILES gains "_preview_apply.py" and "_plugin_root.py" after "check_version_bump.py".
+    (c2) The checker-dependency-missing message and its remedy (:512-514) take the count from len(VENDORED_FILES)
+        and name no number word: "Vendor all %d files together into one folder: %s" and "Copy the %d files listed
+        above next to check_hook_registrations.py, then rerun."
+    (c3) The docstring (:14-15) names all seven files. The comment at :32 ("its four dependencies") says the folder
+        holds the other files of VENDORED_FILES.
+    Nothing else changes: the refusal code, the exit codes, the guarded import at :49-52 and the bytecode flag
+    order (pinned by test_the_bytecode_flag_is_the_first_statement_before_the_guarded_import) stay as they are.
+  - README.md step 2 (:1501-1506): "Vendor seven files.", listing the seven names in VENDORED_FILES order, and "The
+    checker imports the other six." No other README line changes.
+  - MECHANISMS.md: one Correction line, through the single write path (I-7; never hand-edit), in a commit of its own
+    (Q29: the owner may drop that commit). In PowerShell:
+    'A vendored copy needs seven files in one folder, not five: the five named above plus `_preview_apply.py` and `_plugin_root.py`, which `auto_improve_finish_install.py` imports at module level since issue #235 (sub-task 2). `VENDORED_FILES` in `check_hook_registrations.py` is the one list; its refusal message and its tests read it.' | py -3 .claude/scripts/registry_append.py --project . --registry mechanisms --from-file - --correction-of "Hook registration check" --source "issue #235, amendment 10"
+    The single quotes are required: in PowerShell a backtick inside double quotes is an escape character. Paste
+    the printed file:line. correction-target-missing, or any other rejection, stops the sub-task with AMENDMENT.
+    Then git show --stat HEAD lists only MECHANISMS.md, with 1 insertion, and the new line sits directly under
+    the entry's last line. The entry's original "needs five files" text stays: a Correction line is an append (I-7).
+  - Journal lesson (Q28, owner 2026-11-09; the Q20 and Q25 precedent): append the lesson quoted at the end of the
+    "Amendment 10 record" (title "A change that adds a module-level import to a vendored script must update the
+    vendored-file list in the same change"), verbatim, in a commit of its own (the owner may drop it), never inside
+    another commit and never by hand-editing JOURNAL.md (I-7). The text holds an em dash, so write the entry file
+    without a byte-order mark and do not pipe it. In PowerShell:
+    $p = Join-Path $env:TEMP 't17-lesson.md' ; [IO.File]::WriteAllText($p, <the quoted entry as a single-quoted here-string @'...'@>)
+    py -3 .claude/scripts/registry_append.py --project . --registry journal --universal --from-file $p
+    Paste the printed file:line. Then:
+    git grep -c -F "A change that adds a module-level import to a vendored script" -- .claude/registries/JOURNAL.md
+    prints ".claude/registries/JOURNAL.md:1", and the entry's line number is lower than the "## Project tier"
+    pointer's. A rejection stops the sub-task with AMENDMENT. The entry enters the parent branch only through this
+    pull request, under the landing's single raise; no version file changes.
+  - Run each literal command in this block once before relying on it, and record its exit code. git grep exits 1
+    when nothing matches. git has no -x switch (t16 N1): to match a whole line, use git grep -c -E "^...$".
+  - Older-test search, one question per change, each with its own command and its raw result:
+    (1) tests that assert the refusal or remedy wording:
+        git grep -n -E "five files|Vendor all|Copy the" -- .claude/scripts/tests .claude/hooks/tests
+    (2) tests that pin README step 2:
+        git grep -n -F -e "Vendor five files" -e "imports the other four" -- .claude/scripts/tests .claude/hooks/tests
+    (3) tests that pin the mechanism entry or MECHANISMS.md lines or counts:
+        git grep -n -F "Hook registration check" -- .claude/scripts/tests .claude/hooks/tests
+        Run every file this search names.
+    (5) tests that count or key entries of the live JOURNAL.md (the lesson adds one Universal entry):
+        git grep -n -l -F "registries/JOURNAL.md" -- .claude/scripts/tests .claude/hooks/tests
+        Run every file this search names, plus test_registry_entries.py and test_registry_layout.py.
+    (4) other readers of the set, run after every commit of this block (the pathspec keeps out .claude/concepts,
+        whose contract text names both identifiers):
+        git grep -c -w -e VENDORED_FILES -e FIVE_FILES -- .claude/scripts README.md .claude/registries
+        Expected: exactly three files, .claude/scripts/check_hook_registrations.py,
+        .claude/scripts/tests/test_check_hook_registrations.py and .claude/registries/MECHANISMS.md (the Correction
+        line), exit 0.
+        git grep -c -w FIVE_FILES -- .claude/scripts README.md .claude/registries
+        Expected: no output, exit 1.
+    A hit that this change breaks is fixed only if its file is in Files to touch. Otherwise stop and report
+    AMENDMENT.
+  - Run (GREEN), each exit 0 unless stated. First, the landing's four verification steps. Read their commands from
+    .claude/work-item-conventions.json contractLanding.verification.steps, which land_contract.py reads. The lines
+    below are copies of that file. Compare each one with it before you run it, record that they match, and run the
+    file's version if they differ. land_contract.py --verify-here runs those steps itself, but it is not usable
+    here: it reads .claude/test-baseline.json from origin/master first, and with that file absent it ends
+    "no-baseline" at gate V1 without running any step (land_contract.py:3124-3128).
+    (v1) version-bump, in parent mode for a sub-task:
+         py -3 .claude/scripts/check_version_bump.py --base origin/fix/235-domain-split-registries --default-branch
+         master --head-ref <this task branch>
+         Expected: "keeps version <v>", where <v> is the base's version (0.16.5 per t16). The landing runs its bare
+         form, py -3 .claude/scripts/check_version_bump.py, after its own raise.
+    (v2) py -3 .claude/scripts/tests/test_pr_merged.py (about 23 minutes).
+    (v3) py -3 .claude/scripts/tests/test_check_hook_registrations.py, 73 tests, OK.
+    (v4) the hook-tests step, verbatim:
+         py -3 -c "import glob,subprocess,sys; fs=sorted(f for f in glob.glob('.claude/hooks/tests/test_*.py') if not f.endswith('test_gate_cost.py')); rcs=[subprocess.call([sys.executable,f]) for f in fs]; sys.exit(1 if (not fs or any(rcs)) else 0)"
+    Then these suites:
+      py -3 .claude/scripts/tests/test_auto_improve_finish_install.py
+      py -3 .claude/scripts/tests/test_preview_apply.py
+      py -3 .claude/scripts/tests/test_plugin_root.py
+      py -3 .claude/scripts/tests/test_land_contract_verification.py
+      py -3 .claude/scripts/tests/test_registry_append.py
+      py -3 .claude/scripts/tests/test_registry_layout.py
+      py -3 .claude/scripts/tests/test_plugin_text_scans.py
+      py -3 .claude/scripts/tests/test_plugin_manifests.py
+        This one exits non-zero with exactly one failing row, the amendment-6 INV-O1 exception. Any other red row
+        is a real failure.
+    Then live:
+      py -3 .claude/scripts/registry_migrate.py --check --project .
+        Expected: exit 0, state current.
+      py -3 .claude/scripts/validate_registries.py --check-structure --project .
+        Expected: exit 0, printing only R4 lines, the digest: line and at most one "advisory: R3 universal-candidate
+        skipped" line. Any R1, R2, R3, R5 or A1 line stops the sub-task with AMENDMENT.
+  - Version: edit no version file. Only the landing raises the version.
+  - Route: an ordinary task-branch pull request into fix/235-domain-split-registries. No merge of origin/master,
+    no push to the parent branch, no rebase, amend or force-push. Block 18's live last check judges whether
+    origin/master has moved into a conflict.
+  - Evidence (t14 W1): paste every output this TASK names, raw, in the pull request description or one pull request
+    comment. A ticked line is not evidence.
+  - No registry append besides the MECHANISMS.md Correction line and the journal lesson.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-04-domain-split-registries.md
+  contract_status: approved
+```
+
+### 18. Review (`fullstack-code-reviewer`)
+
+**Depends on:** 17
+
+**Files to touch:**
+- `.claude/reviews/2026-11-04-domain-split-registries/t18-review-fullstack-code-reviewer.md`
+
+**Pre-written TASK block:**
+```
+TASK: Review sub-task 17 (the completed vendored file list of the Hook registration check), and write a review
+  artefact. It supersedes nothing.
+CONTEXT: concept contract at .claude/concepts/2026-11-04-domain-split-registries.md (amendment 10: "Amendment 10
+  record", Q28, Q29). Effective earlier report: .claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md
+  (it stays effective; its W1 on Q27 is still open). Landing run 20261109T154140Z-97de67 (main checkout,
+  .claude/state/landing/2026-11-04-domain-split-registries/report.json).
+FILES: .claude/reviews/2026-11-04-domain-split-registries/t18-review-fullstack-code-reviewer.md
+CONSTRAINTS:
+  - The header has no Supersedes line. The Gate Output t18-review-fullstack-code-reviewer.gate.json sets
+    "supersedes": [] and lists every Review checklist item verbatim. t16 is not superseded: t17 does not touch the
+    t15 merge t16 judged, and t16's W1 must stay visible.
+  - Run each literal command you rely on once, and record its exit code. git grep exits 1 when nothing matches.
+    git has no -x switch (t16 N1: blocks 15 and 16's git grep -c -x -F exits 129); for a whole line use
+    git grep -c -E "^...$".
+  - Commit range: <the parent tip t17 was cut from>..<the merge commit of t17's pull request>. List the first-parent
+    commits inside it.
+  - Check, one line each:
+    - RED proof in t17's pull request: the three landing failures, each with "cannot import the module
+      '_preview_apply'", then 4 failures after the test edits. Both are raw outputs.
+    - VENDORED_FILES is exactly the seven names, in block 17's order.
+    - The refusal message and the remedy take the count from len(VENDORED_FILES). git grep -n -w five --
+      .claude/scripts/check_hook_registrations.py: record each hit; none may count files.
+    - The tests read chk.VENDORED_FILES. The pathspec keeps out .claude/concepts, whose contract text names both
+      identifiers:
+      - git grep -c -w FIVE_FILES -- .claude/scripts README.md .claude/registries: no output, exit 1.
+      - git grep -c -w VENDORED_FILES -- .claude/scripts README.md .claude/registries: exactly the checker, its test
+        and .claude/registries/MECHANISMS.md, exit 0.
+      The pin test exists, and the renamed test exists.
+    - The old count survives only where I-7 keeps it:
+      git grep -c -E "needs five files|Vendor five files|all five files|the five files" -- .claude/scripts README.md .claude/registries
+      prints exactly ".claude/registries/MECHANISMS.md:1", the original "Hook registration check" entry, kept
+      verbatim because the Correction line is an append, and exits 0. The pattern is narrow on purpose:
+      MECHANISMS.md:51 "thirty-five files" and test_cleanup_delivered.py "five files, three shown" are not about
+      the vendored set.
+    - Your own closure check: for each of the seven files, list its module-level imports of non-standard-library
+      modules (read the top of each file). Each one must be in VENDORED_FILES. A lazy import is not counted, but
+      name each one that the check's path could reach.
+    - README step 2 names the seven files and "the other six", and no other README line changed.
+    - MECHANISMS.md: exactly one added Correction line under "Hook registration check", in a non-merge commit that
+      touches only that file and was written by registry_append (t17 pastes its file:line output).
+    - JOURNAL.md (Q28): the lesson quoted at the end of the "Amendment 10 record" is present, byte-equal to the
+      quoted text, exactly once:
+      git grep -c -F "A change that adds a module-level import to a vendored script" -- .claude/registries/JOURNAL.md
+      prints ":1". It sits above "## Project tier" and was added by a non-merge commit of its own that touches only
+      JOURNAL.md.
+    - The defect is this contract's, not master's:
+      - git cat-file -e origin/master:.claude/scripts/_preview_apply.py. Expected: non-zero, the file is absent.
+      - git grep -n -F "_preview_apply" origin/master -- .claude/scripts/auto_improve_finish_install.py.
+        Expected: exit 1.
+      Record both exit codes. If master already has the defect, it is a finding: the landing's remedy then lies on
+      the default branch too.
+    - No version file edited by hand: no non-merge commit in the range touches plugin.json, .claude-plugin or
+      .cursor-plugin.
+    - Read origin/master's version: git show origin/master:plugin.json, and record it.
+    - The older-test search outputs (four questions) are in the pull request.
+    - Q28 and Q29 are answered (owner, 2026-11-09). Q27 is still open: name it, do not decide it, and do not ask
+      the owner.
+  - Re-run the landing's four verification steps, exactly as .claude/work-item-conventions.json
+    contractLanding.verification.steps declares them (land_contract.py reads that list at :987, :2713 and :3104).
+    The lines below are copies of that file. Compare each one with it, record that they match, and run the file's
+    version if they differ. land_contract.py --verify-here is not usable here: with .claude/test-baseline.json absent
+    on origin/master it ends "no-baseline" at gate V1 and runs no step (land_contract.py:3124-3128).
+    Run the steps twice:
+    (A) on the parent tip, as described below;
+    (B) on a throwaway landing merge, as in the next constraint.
+    (v1) version-bump:
+         - The landing's bare command, py -3 .claude/scripts/check_version_bump.py. Run it once and record the exit
+           code and the first line. The landing runs it after its own raise. Before the raise, a non-zero exit whose
+           message says the version did not rise over the default branch is expected, not a finding. Any other
+           failure is a finding.
+         - Parent mode, which must exit 0 with "keeps version":
+           py -3 .claude/scripts/check_version_bump.py --base origin/fix/235-domain-split-registries
+           --default-branch master --head-ref <your task branch>
+    (v2) loop-script-tests: py -3 .claude/scripts/tests/test_pr_merged.py (exit 0).
+    (v3) hook-registration-tests: py -3 .claude/scripts/tests/test_check_hook_registrations.py (exit 0, 73 tests).
+    (v4) hook-tests, verbatim:
+         py -3 -c "import glob,subprocess,sys; fs=sorted(f for f in glob.glob('.claude/hooks/tests/test_*.py') if not f.endswith('test_gate_cost.py')); rcs=[subprocess.call([sys.executable,f]) for f in fs]; sys.exit(1 if (not fs or any(rcs)) else 0)"
+         (exit 0)
+    Also re-run every suite and live command in block 17's Run list. test_plugin_manifests.py fails exactly one
+    row, the INV-O1 exception. That row is not a finding; any other red row is.
+    Any non-zero step other than the two expected cases above is a finding, and the verdict is "blocked", because
+    the landing would halt at P8 again.
+  - (B) Throwaway landing merge. P8 runs on the landing checkout after it merges origin/master into the parent branch
+    and raises the version, so a pass on the parent tip alone does not prove P8. In PowerShell, from the worktree
+    root:
+      git fetch origin
+      git worktree add --detach .claude/worktrees/t18-landing-merge-scratch origin/fix/235-domain-split-registries
+      Push-Location .claude/worktrees/t18-landing-merge-scratch
+      git merge --no-ff --no-edit origin/master
+        On a conflict: git merge --abort, record each conflicting path as a finding (the verdict is "blocked"), and
+        skip to the cleanup.
+      py -3 .claude/scripts/check_version_bump.py --raise --default-branch master
+      git commit -am "scratch: landing raise (never pushed)"
+      py -3 .claude/scripts/check_version_bump.py --exact --default-branch master
+      then (v1) to (v4) here; (v1) is the bare form, which must now exit 0
+      Pop-Location
+      git worktree remove .claude/worktrees/t18-landing-merge-scratch
+        If it refuses because untracked files remain, record them, then use --force.
+      git worktree list
+        Expected: the scratch worktree is gone.
+    Record every command with its exit code, the merged origin/master commit and the raised version. Push nothing;
+    the scratch commits are never pushed and leave with the worktree. Any non-zero step here is a finding, and the
+    verdict is "blocked".
+  - Last check, run live after every other check: git fetch origin ; git merge-tree --write-tree --name-only
+    origin/master origin/fix/235-domain-split-registries. Record origin/master's commit, the parent's commit (it
+    must hold t17's merge), the tree and the exit code.
+    - Exit 0 with no conflicting path: the landing can merge cleanly against that commit.
+    - Any conflicting path: list each one as a finding and set "**Verdict:** blocked", because the landing would
+      halt on it (land_contract.py:1028-1040). The remedy is another small merge block added by amendment, written
+      like block 15.
+  - Write in "## Evidence" that the version proof is the landing's own check_version_bump.py --raise, then --exact
+    (P7b), and its version-bump step. Each must exit 0, with the raised version minor + 1 and patch 0 over
+    origin/master's version at landing time. That was 0.16.5 -> 0.17.0 at amendment time; verify it against the
+    version you read.
+  - End "## Evidence" with the exact landing command for the operator, which you do not run: in Claude Code,
+    /advance 2026-11-04-domain-split-registries
+    The operator answers Q27 first, then re-runs the last check immediately before launching. A clean result is
+    valid only for the origin/master commit it names.
+  - Write the six-section artefact. The file does NOT exist yet; you create it. "## Evidence" lists every command with
+    its exit code and is never empty. Block 17 already appended the Q28 lesson; do not append it again.
   - The header ends with exactly one of: "**Verdict:** pass", "**Verdict:** pass-with-findings",
     "**Verdict:** blocked".
 PRIOR_FINDINGS:
