@@ -13,9 +13,9 @@ branch: fix/235-domain-split-registries
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261104-bug-235-domain-split-registries
 north_stars: none
 contract: .claude/concepts/2026-11-04-domain-split-registries.md
-pr: none
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/337
+issue_link: closes
+status: shipped
 created: 2026-11-04
 ---
 
