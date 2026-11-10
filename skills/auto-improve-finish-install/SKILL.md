@@ -287,7 +287,7 @@ their decision, not this skill's.
 
 The project's record of its design history is its **Project history record**. It is made of:
 
-- the three registries the doctor seeds: `.claude/registries/MECHANISMS.md`, `VOCABULARY.md` and `JOURNAL.md`;
+- the three registries the doctor seeds: `.claude/registries/MECHANISMS.md`, `VOCABULARY.md` and `JOURNAL.md`, and their domain skeletons `.claude/registries/MECHANISMS/general.md`, `VOCABULARY/general.md` and `JOURNAL/general.md`;
 - `INTEGRATION.md` in the same folder, where the project keeps one (no seed exists for it, so the doctor never creates it);
 - the concept contracts and follow-up stubs under `.claude/concepts/`;
 - the Work Item Briefs under `.claude/work-items/`.

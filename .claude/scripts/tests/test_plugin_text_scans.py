@@ -208,6 +208,162 @@ class TestSubagentTypeLiteralsFollowTheDispatchRule(unittest.TestCase):
                          % NAMESPACE)
 
 
+TEMPLATES = PLUGIN_ROOT / ".claude" / "templates"
+REGISTRY_NAMES = ("MECHANISMS", "VOCABULARY", "JOURNAL")
+
+#: Contract .claude/concepts/2026-11-04-domain-split-registries.md, sub-task 7 (issue 247). The three sentences
+#: every registry writer states, in these words.
+FALLBACK_SENTENCE = ("on a project not yet on registry layout 2 it appends to a domain file and prints an "
+                     "advisory line; that is success")
+EXIT2_SENTENCE = "Exit 2: fix the entry file and re-run."
+EXIT3_SENTENCE = "Exit 3: stop and show the message to the user."
+RECEIVER_SECTION = "Run the data-architect's registry appends"
+#: The §2.2-B writers: every one appends through registry_append.py.
+WRITERS = ("agents/fullstack-code-reviewer.md", "agents/data-architect.md", "skills/journal-add/SKILL.md",
+           "skills/design-first/SKILL.md")
+#: Readers that name the general.md files of the three registries.
+GENERAL_READERS = ("agents/data-architect.md", "agents/contract-critic.md")
+#: Readers that search the journal and must reach the domain files too.
+JOURNAL_SEARCHERS = ("agents/ui-ux-designer.md", "skills/application-design/SKILL.md",
+                     "skills/website-design/SKILL.md", "skills/promote-ui-rule/SKILL.md")
+
+_PROJECT_SECTION_RE = re.compile(r"project\s+sections?\b|under\s+<project>", re.I)
+_EDIT_RE = re.compile(r"`Edit`|\bdirect Edit\b|\bby Edit\b|\bvia Edit\b")
+
+
+def squash(text: str) -> str:
+    return re.sub(r"\s+", " ", text)
+
+
+def flat_registry_lines(text: str) -> list[str]:
+    """Lines naming a flat registry path (`registries/<NAME>.md`) without the domain form (`<NAME>/`).
+
+    The registry seeds under templates/registries/ are the registries themselves and are not references.
+    """
+    hits = []
+    for line in text.splitlines():
+        for name in REGISTRY_NAMES:
+            m = re.search(r"(?<!templates/)registries/%s\.md" % name, line)
+            if m and (name + "/") not in line:
+                hits.append(line.strip())
+                break
+    return hits
+
+
+def project_section_lines(text: str) -> list[str]:
+    return [l.strip() for l in text.splitlines() if _PROJECT_SECTION_RE.search(l)]
+
+
+def edit_append_lines(text: str) -> list[str]:
+    """Lines that tell a reader to write a registry by the Edit tool: a registry named, and `Edit` used as the way."""
+    hits = []
+    for line in text.splitlines():
+        names = any(("registries/%s" % n) in line or ("%s.md" % n) in line for n in REGISTRY_NAMES)
+        if names and _EDIT_RE.search(line):
+            hits.append(line.strip())
+    return hits
+
+
+def shipped_instruction_files() -> list[tuple[Path, str]]:
+    files = read_all(AGENTS) + read_all(SKILLS) + [
+        (p, p.read_text(encoding="utf-8", errors="replace")) for p in sorted(TEMPLATES.glob("*.md"))]
+    return files
+
+
+def read_rel(rel: str) -> str:
+    path = PLUGIN_ROOT / rel
+    assert path.is_file(), "%s must exist in the plugin" % rel
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+class TestRegistryLayout2Instructions(unittest.TestCase):
+    """Sub-task 7 of the domain-split registries contract: every writer goes through registry_append.py, every
+    reader reaches the domain files, and no shipped text names a flat registry path alone."""
+
+    def test_matcher_controls(self):
+        self.assertTrue(flat_registry_lines("read `.claude/registries/JOURNAL.md` first"),
+                        "control: a flat path alone is reported")
+        self.assertFalse(flat_registry_lines("read `.claude/registries/JOURNAL.md` and `JOURNAL/*.md`"),
+                         "control: the domain form beside it is accepted")
+        self.assertFalse(flat_registry_lines("copy `.claude/templates/registries/JOURNAL.md`"),
+                         "control: a seed under templates/registries/ is not a registry reference")
+        self.assertTrue(project_section_lines("under the matching project section"), "control: project section")
+        self.assertTrue(project_section_lines("Add it under <project>."), "control: under <project>")
+        self.assertFalse(project_section_lines("the project profile names the roots"), "control: other prose")
+        self.assertTrue(edit_append_lines("append the entry to JOURNAL.md using `Edit`"), "control: Edit append")
+        self.assertTrue(edit_append_lines("update `.claude/registries/MECHANISMS.md` (a direct Edit)"),
+                        "control: direct Edit")
+        self.assertFalse(edit_append_lines("Edit MECHANISMS.md is not yours to do"),
+                         "control: the plain verb in a prohibition is not an instruction")
+        self.assertFalse(edit_append_lines("run registry_append.py to append to JOURNAL.md"),
+                         "control: the script is the sanctioned way")
+
+    def test_writers_append_through_registry_append_py(self):
+        for rel in WRITERS:
+            text = squash(read_rel(rel))
+            with self.subTest(file=rel):
+                self.assertIn("registry_append.py", text, "%s must name registry_append.py" % rel)
+                self.assertIn('--project "$CLAUDE_PROJECT_DIR"', text,
+                              "%s must pass --project \"$CLAUDE_PROJECT_DIR\"" % rel)
+                self.assertIn(FALLBACK_SENTENCE, text, "%s must state the layout-2 fallback sentence" % rel)
+                self.assertIn(EXIT2_SENTENCE, text, "%s must state the exit 2 rule" % rel)
+                self.assertIn(EXIT3_SENTENCE, text, "%s must state the exit 3 rule" % rel)
+
+    def test_data_architect_and_contract_critic_name_the_general_files_and_drop_the_fixed_domain_list(self):
+        for rel in GENERAL_READERS:
+            text = read_rel(rel)
+            with self.subTest(file=rel):
+                for name in REGISTRY_NAMES:
+                    self.assertIn("%s/general.md" % name, text, "%s must name %s/general.md" % (rel, name))
+                self.assertNotIn("{backend,frontend,data,trading}", text,
+                                 "%s must not fix the domain list: the set is the files on disk" % rel)
+
+    def test_data_architect_names_the_receiver_section_and_design_first_contains_it(self):
+        self.assertIn(RECEIVER_SECTION, read_rel("agents/data-architect.md"))
+        self.assertIn("Registry appends:", read_rel("agents/data-architect.md"))
+        design_first = read_rel("skills/design-first/SKILL.md")
+        self.assertRegex(design_first, r"(?m)^#{2,4} .*" + re.escape(RECEIVER_SECTION),
+                         "design-first must carry the receiver as a section heading")
+        self.assertIn("Registry appends:", design_first)
+
+    def test_journal_searchers_reach_the_domain_files(self):
+        for rel in JOURNAL_SEARCHERS:
+            with self.subTest(file=rel):
+                self.assertIn("JOURNAL/", read_rel(rel), "%s must search JOURNAL/*.md as well as JOURNAL.md" % rel)
+
+    def test_verify_before_done_runs_the_structure_lint_and_validate_registries_describes_it(self):
+        text = squash(read_rel("skills/verify-before-done/SKILL.md"))
+        self.assertIn("validate_registries.py", text)
+        self.assertIn("--check-structure", text)
+        self.assertIn("NOT-READY", text)
+        text = read_rel("skills/validate-registries/SKILL.md")
+        for needle in ("--check-structure", "--strict", "R4", "registry_append.py", "--correction-of"):
+            self.assertIn(needle, text, "validate-registries must describe %s" % needle)
+
+    def test_registry_scout_describes_the_full_index(self):
+        text = squash(read_rel("agents/registry-scout.md"))
+        self.assertIn("legacy", text.lower())
+        self.assertIn("R1", text)
+        self.assertIn("R2", text)
+
+    def test_no_shipped_text_names_a_flat_registry_path_alone(self):
+        files = shipped_instruction_files()
+        self.assertGreater(len(files), 0, "the scan must have read at least one file")
+        offenders = ["%s: %s" % (p.relative_to(PLUGIN_ROOT).as_posix(), l)
+                     for p, t in files for l in flat_registry_lines(t)]
+        self.assertEqual(offenders, [], "name the root file together with its domain form (<NAME>/...)")
+
+    def test_no_shipped_text_says_project_section(self):
+        offenders = ["%s: %s" % (p.relative_to(PLUGIN_ROOT).as_posix(), l)
+                     for p, t in shipped_instruction_files() for l in project_section_lines(t)]
+        self.assertEqual(offenders, [], "layout 2 has Universal root files and domain files, no project section")
+
+    def test_no_shipped_text_appends_to_a_registry_by_edit(self):
+        offenders = ["%s: %s" % (p.relative_to(PLUGIN_ROOT).as_posix(), l)
+                     for p, t in shipped_instruction_files() for l in edit_append_lines(t)]
+        self.assertEqual(offenders, [], "registry entries are written by registry_append.py, never by Edit")
+
+
 # --- (4) only the memory adapter names the memory tools ---------------------------------------------------------
 # Contract: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md, Extension Points. The file set is
 # built by walking the named shipped folders from this checkout's own root (never the current directory, never a

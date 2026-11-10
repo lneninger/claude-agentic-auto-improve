@@ -8,7 +8,7 @@ user_invocable: true
 
 This skill holds the design foundation: the rules every page of a project obeys, whatever kind of page it is. The rules live in `references/foundation.md` beside this file. A data-dense, always-on product screen is designed with `agentic-auto-improve:application-design`, which loads this foundation first and adds its own layer.
 
-The `ui-ux-designer` agent keeps one step this skill does not repeat: **Step 0, the `ui-evolution` journal lessons.** When you run this skill on its own, do that step first (grep `.claude/registries/JOURNAL.md` for `Tags:.*ui-evolution`, apply each lesson whose `Apply when:` matches, treat `recurring-mistake` as load-bearing), exactly as Step 0 of `agents/ui-ux-designer.md` words it.
+The `ui-ux-designer` agent keeps one step this skill does not repeat: **Step 0, the `ui-evolution` journal lessons.** When you run this skill on its own, do that step first (grep `.claude/registries/JOURNAL.md` and `.claude/registries/JOURNAL/*.md` for `Tags:.*ui-evolution`, apply each lesson whose `Apply when:` matches, treat `recurring-mistake` as load-bearing), exactly as Step 0 of `agents/ui-ux-designer.md` words it.
 
 ## Step 1 - Read the project profile (halt on anything unusable)
 

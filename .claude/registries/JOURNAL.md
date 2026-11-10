@@ -1,3 +1,5 @@
+<!-- registry-layout: 2 -->
+
 # Adaptive Engineering Journal
 
 > **Purpose:** append-only log of lessons learned across concept contracts. Captures pitfalls caught pre-approval by `contract-critic`, contract-vs-code divergences caught post-implementation by `fullstack-code-reviewer`, and manually-logged insights via `/journal-add`. Read by `data-architect` (Step 1) and `contract-critic` on every run so past lessons become forward-looking checklist items.
@@ -7,7 +9,7 @@
 > - `fullstack-code-reviewer` post-implementation, when it detects justified contract-vs-code divergence (the contract had a defect) → entry appended with `Trigger: post-impl divergence`.
 > - `/journal-add` skill → manual entry, any project, any time.
 >
-> **Structure:** two tiers. Universal lessons apply across every project. Project sections hold codebase-specific lessons. `data-architect` and `contract-critic` always consult BOTH tiers.
+> **Structure:** two tiers. Universal lessons apply across every project. Project lessons (registry layout 2) live in domain files `JOURNAL/<domain>.md` beside this file, named by the `## Project tier` pointer at its end. `data-architect` and `contract-critic` always consult BOTH tiers.
 >
 > **Append-only:** never reorder or rewrite past entries. If a lesson is later refined, append a new entry that references the old one by date+title. The historical trail matters.
 
@@ -482,3 +484,78 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 
 <!-- empty on day 1 — populated as lessons are discovered -->
 
+### 2026-11-06 — A plugin repository that is also installed resolves its own older copy as "the plugin"
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** When a check compares a project against "the installed plugin", decide explicitly what happens when the project IS the plugin's source and an older installed copy exists; a stale cache copy turns the plugin's newest entries into "client-authored" findings. Skip only the advisory that the stale copy makes false (here R3 universal-candidate) when the project holds the plugin's own manifest, print one line saying how many were skipped, and never downgrade a finding: a vendored client that copied the manifest then loses an advisory, never a finding.
+- **Apply when:** a contract resolves a separate plugin root (separate_plugin_root, find_plugin_root) to classify ownership, and the plugin's own repository is one of the projects it runs on.
+- **Tags:** plugin-root, vendoring, ownership, cache-copy, assumption-falsified
+
+### 2026-11-06 — A sub-task that flips the state an earlier sub-task's test pins must re-run that suite
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** A sub-task that changes the state that an earlier sub-task's test pins must re-run that suite. Briefs that flip repository state (migration applies, registry rewrites) need a `Run:` line that names every suite pinning that state; here t8 migrated this repository to layout 2 and t3's suite, which pinned the old flat state, stayed red on the parent branch because nothing re-ran it.
+- **Apply when:** a brief flips repository state (a migration apply, a registry rewrite, a layout marker) that a test written by an earlier sub-task asserts on, and no CI workflow runs that suite.
+- **Tags:** sub-task, regression, state-pin, run-line, brief
+
+### 2026-11-07 — A fail-soft reader must not record "seen" for what it could not read
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** When a reader degrades to "no entries" because a dependency is missing, the caller must tell that apart from an empty file and skip every state write (seen sets, seeded markers, reader versions); otherwise the first healthy run treats all history as new.
+- **Apply when:** a tracker or cache keys "already processed" on the output of a parser that has an ImportError or fail-soft path returning an empty result.
+- **Tags:** fail-soft, seen-cache, retroactive-fire, lazy-import, degraded-path
+
+### 2026-11-07 — A parent branch that shares files with a moving default branch must take the default branch in through a sub-task before its landing
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** The landing merges the default branch and resolves only union and regenerated paths. When the default branch rewrote a file the parent branch also rewrote (here the journal tracker, moved by each side onto a different shared reader), the landing halts. As soon as both sides touch one file, merge the default branch into the parent branch through a reviewed sub-task, decide which shared reader survives, and run the default branch's new suites there.
+- **Apply when:** a contract delivered through a parent branch changes a file the default branch has changed since the parent branch was cut.
+- **Tags:** parent-branch, landing, merge, shared-reader, unresolvable-conflict
+
+### 2026-11-07 — Merge rules written for a long-lived branch must heed the default branch's journal, not only the branch's own
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** A lesson the default branch added after the branch was cut is not in the branch's journal, yet it arrives with the merge and binds it. Read the default branch's JOURNAL.md (git show origin/<default>:.claude/registries/JOURNAL.md) before writing conflict-resolution rules.
+- **Apply when:** a contract writes rules for merging the default branch into a parent or other long-lived branch.
+- **Tags:** merge, journal, parent-branch, conflict-resolution
+
+### 2026-11-07 — No tool enforces how a pull request into a parent branch is merged; the next block must prove it
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** The repository allows merge commit, squash and rebase, and the Merge-direction check judges only the target. When a sub-task's value depends on a merge commit (a merge of the default branch), say so to the owner in its pull request, and open the next block with a check from the parent tip that the default branch's merge base moved.
+- **Apply when:** a sub-task's pull request must be merged with a merge commit.
+- **Tags:** merge-method, parent-branch, squash, run-first
+
+### 2026-11-07 — Adapters that rebuild an old reader over a stricter grammar must list every behaviour difference
+- **Trigger:** pre-approval critic
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** Keeping the old reader's tests as acceptance tests proves only the forms those fixtures hold. Read both readers side by side, list each form they read differently (fences, prose sections, legacy headings, continuation, field repeats), and pin each with a fixture row.
+- **Apply when:** a contract replaces a reader's body with an adapter over another reader and keeps the old names.
+- **Tags:** adapter, shared-reader, behaviour-difference, fixtures
+
+### 2026-11-07 — A clean landing check goes stale when the default branch moves; re-run it immediately before launching
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** a merge-tree check proves a clean merge for the two commits it named, nothing more. Here the t14 review's check passed against origin/master a241f5c, and one registry-mirroring commit later (aa3f715) the same command conflicted in MECHANISMS.md and VOCABULARY.md, because new entries landed beside lines the parent branch had rewritten. Record the default branch's commit with every clean result, re-run the check as the last step before launching the landing, and treat a registry-only conflict as a small merge block, not a redesign.
+- **Apply when:** a contract delivered through a parent branch waits between its last review and its landing while the default branch keeps merging.
+- **Tags:** parent-branch, landing, merge-tree, stale-check, registries
+
+### 2026-11-07 — A merge block's pull request must paste each required output, not tick a line that says it passed
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** When a contract block says "paste the output in the pull request" (Base-line checks, side-by-side comparisons, older-test greps), the description must carry the raw output per item; a ticked summary turns a verified check into an asserted one, and the reviewer must redo every check. Likewise, when the implementer finds that the contract mis-predicts the code (an exit code, a grep that cannot pass), the next block or an amendment must fix the text, not only the pull request note.
+- **Apply when:** a contract block lists evidence to paste in a pull request, or a pull request records "the contract's wording does not match the code".
+- **Tags:** evidence, pull-request, merge-block, contract-text, review
+
+### 2026-11-09 — A change that adds a module-level import to a vendored script must update the vendored-file list in the same change
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-04-domain-split-registries.md
+- **Lesson:** Sub-task 2 of issue #235 moved helpers into `_preview_apply.py` and `_plugin_root.py` and made `auto_improve_finish_install.py` import them at module level, but the Hook registration check's `VENDORED_FILES`, its test's own copy of that list and README step 2 still named five files, so a vendored five-file copy exited 2. No block ran `test_check_hook_registrations.py`, and no CI workflow runs it, so the landing's P8 step was the first to fail (run 20261109T154140Z-97de67). When a change adds or moves a module-level import in a script that a checker vendors, update that checker's vendored-file list, its docs and its registry entry in the same change, and put that checker's suite and the landing's verification steps in the block's Run list.
+- **Apply when:** a block adds or moves a module-level import in a script named in a vendored-file list (a `VENDORED_FILES` constant, a README copy list or a sync configuration).
+- **Tags:** vendoring, imports, landing, verification, test-coverage
+
+## Project tier
+
+This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.
+
+The file `general.md` always exists in that folder, and every `.md` file in the folder is read.

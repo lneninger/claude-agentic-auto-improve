@@ -13,7 +13,7 @@ When this skill is invoked, execute the following steps. This is the ONLY correc
 Before anything else, remember:
 
 1. **Business concept first, code last.** Data shapes and mechanism reuse are decided before any file is edited.
-2. **Reuse is the default, creation is the exception.** The data-architect MUST extend existing mechanisms from `.claude/registries/MECHANISMS.md` unless an explicit justification is written.
+2. **Reuse is the default, creation is the exception.** The data-architect MUST extend existing mechanisms from `.claude/registries/MECHANISMS.md` (the Universal root) and the domain files beside it (`.claude/registries/MECHANISMS/general.md` and the other `MECHANISMS/*.md`) unless an explicit justification is written.
 3. **Communication gate.** The contract is presented to the user and Open Questions resolved BEFORE implementer agents are invoked.
 4. **Hard block.** `~/.claude/hooks/concept-gate.py` blocks Edit/Write on non-trivial files inside a project (a `.git`, `CLAUDE.md`, `package.json`, `pyproject.toml` or `*.sln` on the path) without an approved contract; a file outside every project is not gated.
 
@@ -94,15 +94,52 @@ FILES: <files the user mentioned, if any>
 PRIOR_AGENT: none
 PRIOR_FINDINGS:
   registry_digest: .claude/.scout-cache/registry-digest.md
-  mechanisms_registry: .claude/registries/MECHANISMS.md
-  vocabulary_registry: .claude/registries/VOCABULARY.md
+  mechanisms_registry: .claude/registries/MECHANISMS.md (root) and .claude/registries/MECHANISMS/*.md (domain files)
+  vocabulary_registry: .claude/registries/VOCABULARY.md (root) and .claude/registries/VOCABULARY/*.md (domain files)
   contract_template: .claude/templates/concept-contract.md
   memory_items: <only when Step 1.5 produced `applies` items: each item's id, version, scope, status, title and summary, as quoted data>
 ```
 
 Omit `memory_items` altogether when Step 1.5 printed nothing or produced no `applies` item.
 
-The data-architect will read the registry-scout digest first (< 15K tokens) for a high-level overview, then selectively drill down into domain-specific registry files as needed. The architect will read relevant code (read-only) and produce a concept contract file at `.claude/concepts/<YYYY-MM-DD>-<slug>.md` with `Status: draft`. The `## Critique` section is left empty for Step 2.5; the `## Lessons referenced` section is filled by the architect if any JOURNAL.md entries applied.
+The data-architect will read the registry-scout digest first (< 15K tokens) for a high-level overview, then selectively drill down into domain-specific registry files as needed. The architect will read relevant code (read-only) and produce a concept contract file at `.claude/concepts/<YYYY-MM-DD>-<slug>.md` with `Status: draft`. The `## Critique` section is left empty for Step 2.5; the `## Lessons referenced` section is filled by the architect if any journal entries (`JOURNAL.md` root or `JOURNAL/*.md`) applied.
+
+When the data-architect's HANDOFF has `Registry appends:` lines, run them now, as the next section says. The same applies after any later re-invocation of the data-architect to promote a mechanism or a term.
+
+## Run the data-architect's registry appends
+
+`data-architect` has no shell. It writes each registry entry it wants added to a file under `.claude/cache/registry-appends/`, lists one `registry_append.py` command per entry under `Registry appends:` in its HANDOFF, and names this section as the step that runs them. This is the only place those commands run; it is also where the lookup block for `registry_append.py` lives, and Step 3 and Step 5 use the same block (the lookup text is pinned by `test_skill_script_lookup.py`, class `TestRegistryScriptLookupInAgentsAndSkills`):
+
+```bash
+RAP=
+S=.claude/scripts/registry_append.py
+if [ -f "$S" ]; then RAP=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then RAP=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  RAP=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$RAP" --project "$CLAUDE_PROJECT_DIR" --registry mechanisms --from-file .claude/cache/registry-appends/<entry>.md
+```
+
+**If `RAP` comes back empty, stop and say so.** For each `Registry appends:` line in a data-architect HANDOFF, in the order listed:
+
+1. Run it through the lookup block: the line's command with `registry_append.py` replaced by `py -3 "$RAP"`, keeping its `--project "$CLAUDE_PROJECT_DIR"`, `--registry`, `--universal` or `--domain`, and `--from-file` arguments.
+2. Show the user the `file:line` the script printed.
+3. Stop at the first exit 2 or 3, and show it. Do not run the lines after it.
+4. After a successful run, delete that line's entry file under `.claude/cache/registry-appends/`.
+
+What the exits mean: on a project not yet on registry layout 2 it appends to a domain file and prints an advisory line; that is success. Exit 2: fix the entry file and re-run. Exit 3: stop and show the message to the user.
 
 ## Step 2.5: Critique the draft
 
@@ -172,7 +209,7 @@ PRIOR_FINDINGS:
   contract_status: draft
 ```
 
-The critic reads the contract plus MECHANISMS.md / VOCABULARY.md / INTEGRATION.md / JOURNAL.md (both tiers), applies its adversarial checklist (reuse drift, vocabulary drift, hidden Open Questions, integration-surface omissions, journal-lesson applicability, End-User View completeness, etc.) and **appends a `## Critique` section to the contract file** with BLOCKER / WARN / NIT findings.
+The critic reads the contract plus the root registry files and their domain files (`MECHANISMS/general.md`, `VOCABULARY/general.md`, `JOURNAL/general.md` and the other `MECHANISMS/*.md`, `VOCABULARY/*.md`, `JOURNAL/*.md` that match the contract) and INTEGRATION.md, applies its adversarial checklist (reuse drift, vocabulary drift, hidden Open Questions, integration-surface omissions, journal-lesson applicability, End-User View completeness, etc.) and **appends a `## Critique` section to the contract file** with BLOCKER / WARN / NIT findings.
 
 The critic is **advisory** — it does NOT flip `Status` and does NOT block the workflow. Its only output is the appended `## Critique` section plus a HANDOFF summary. Do NOT proceed to Step 3 until the critic returns.
 
@@ -202,7 +239,7 @@ Read the contract file. Show the user:
 
 Use the `AskUserQuestion` tool to resolve each Open Question AND to walk the user through every BLOCKER and WARN from the `## Critique` section. Phrase critique questions as: *"The critic flagged this as `<BLOCKER|WARN>`: `<summary>`. Address it (how?), defer it (note your reasoning), or reject the finding (why)?"* Do NOT guess answers. Do NOT flip `Status` to `approved` until every Open Question has a documented answer AND every BLOCKER has an explicit user response.
 
-For each critic finding the user **agrees with and addresses** (or agrees with and defers with justification), append a corresponding entry to `.claude/registries/JOURNAL.md` under the matching project section using this shape:
+For each critic finding the user **agrees with and addresses** (or agrees with and defers with justification), add a corresponding journal entry with `registry_append.py`, never by hand. Write the entry to `.claude/cache/registry-appends/<slug>.md` in this shape:
 
 ```markdown
 ### YYYY-MM-DD — <Finding summary distilled into one-line title>
@@ -212,6 +249,8 @@ For each critic finding the user **agrees with and addresses** (or agrees with a
 - **Apply when:** <pattern future critic should match against — copy from the finding's "Prior artifact ignored" or derive from "What is wrong">
 - **Tags:** <2-5 grep-friendly keywords>
 ```
+
+Then run `py -3 "$RAP" --project "$CLAUDE_PROJECT_DIR" --registry journal --from-file .claude/cache/registry-appends/<slug>.md` through the lookup block under "Run the data-architect's registry appends" above (the script picks the domain file from the Source contract's area; add `--domain <slug>` to choose one). Show the printed `file:line`, and delete the entry file after success. On a project not yet on registry layout 2 it appends to a domain file and prints an advisory line; that is success. Exit 2: fix the entry file and re-run. Exit 3: stop and show the message to the user.
 
 A registry append is a shipped change: batch it into a change that already raises the plugin version, or raise at least a patch version (see CLAUDE.md, "Every change to shipped plugin files bumps the plugin version").
 
@@ -359,9 +398,9 @@ PRIOR_FINDINGS:
   contract_status: approved
   extra_checklist:
     - Did the implementation diverge from the concept contract's Data Shapes? If so, is the divergence justified?
-    - Did this introduce a new reusable mechanism that belongs in .claude/registries/MECHANISMS.md? If yes, append it.
-    - Did this introduce new domain vocabulary that belongs in .claude/registries/VOCABULARY.md? If yes, append it.
-    - Did the implementation reveal a CONTRACT DEFECT (justified divergence = the contract was wrong)? If yes, the reviewer's janitor duty appends an entry to .claude/registries/JOURNAL.md with Trigger: post-impl divergence.
+    - Did this introduce a new reusable mechanism that belongs in .claude/registries/MECHANISMS.md or a MECHANISMS/<domain>.md file? If yes, append it with registry_append.py.
+    - Did this introduce new domain vocabulary that belongs in .claude/registries/VOCABULARY.md or a VOCABULARY/<domain>.md file? If yes, append it with registry_append.py.
+    - Did the implementation reveal a CONTRACT DEFECT (justified divergence = the contract was wrong)? If yes, the reviewer's janitor duty appends a journal entry with registry_append.py (JOURNAL.md root or a JOURNAL/<domain>.md file) with Trigger: post-impl divergence.
 ```
 
 ### Multi-pass review: always spawn fresh, never `SendMessage`
@@ -382,7 +421,7 @@ After review passes and the merge is recorded, the flip is automatic: `pr_merged
 
 - **User asks for trivial change and gets wrongly classified as non-trivial:** user can override by re-stating as trivial. You must respect the override.
 - **User wants to bypass the hook entirely:** document that they can set `CLAUDE_CONCEPT_GATE=off` in their environment for the session. Use sparingly.
-- **Contract promotion:** if a contract's implementation introduces something genuinely reusable, the review step (Step 5) appends it to `MECHANISMS.md`. This is how the registry grows.
+- **Contract promotion:** if a contract's implementation introduces something genuinely reusable, the review step (Step 5) appends it with `registry_append.py` (`MECHANISMS.md` root or a `MECHANISMS/<domain>.md` file). When `data-architect` is re-invoked after approval to promote a mechanism or a term, its HANDOFF lists `Registry appends:` and you run them as "Run the data-architect's registry appends" says. This is how the registry grows.
 
 ## What this skill does NOT do
 

@@ -1,56 +1,41 @@
 #!/usr/bin/env python3
-"""Tests for the shared registry reader: entry_blocks, journal_entries, tier_split, and the hook caller.
+"""Tests for the registry readers that serve the memory adapter: entry_blocks and journal_entries (adapters over
+_registry_layout.parse_text, re-exported by generate_registry_digest) and accuracy_update.parse_journal_entries.
 
-Contract: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md, "Candidate reading".
+Contracts: .claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md, "Candidate reading", and
+.claude/concepts/2026-11-04-domain-split-registries.md, block 12 (Q21 (a)).
 
   * entry_blocks / journal_entries take TEXT; sub-bullets attach to their parent; an entry ends at the next
     top-level match or a heading; tier comes from the text's own headings; an entry before any tier heading is
-    Project; per_domain=True makes everything Project.
-  * tier_split keeps its (title, line) output byte for byte: the pre-change function is copied verbatim below and
-    main() is run once with it and once with the new one, on a temporary copy of the registries. No golden file.
-  * The hook's parse_entries is a thin caller of journal_entries and differs from the old regex output only for the
-    listed Source contract forms.
+    Project; per_domain=True makes everything Project. EntryBlocksTests and JournalEntriesTests are the adapters'
+    acceptance tests and were not changed by the move to the one grammar.
+  * AdapterDifferenceTests pins each place where the adapters, which read through parse_text, differ on purpose from
+    the default branch's old functions (D1-D5 for entry_blocks, J1-J5 for journal_entries).
+  * TierSplitIsByteIdentical is gone: it pinned the pre-contract digest byte for byte, and the contract's Digest
+    generator replaces that digest (test_registry_layout.py's digest tests cover the new one).
+  * AccuracyParserTests: the hook's journal parser lives in accuracy_update.parse_journal_entries. It keeps the old
+    regex output's sig, date, title and trigger on the frozen copy of the journal, and differs only in the source forms.
+    The missing-reader row moved to block 13; test (d) of test_journal_post_approval_tracker.py covers it until then.
 
 Run: py -3 .claude/scripts/tests/test_registry_entries.py
 """
 from __future__ import annotations
 
-import contextlib
 import hashlib
-import importlib.util
-import io
-import os
 import re
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SCRIPTS_DIR.parent.parent
-HOOK_PATH = REPO_ROOT / ".claude" / "hooks" / "journal-post-approval-tracker.py"
+FROZEN_JOURNAL = REPO_ROOT / ".claude" / "hooks" / "tests" / "fixtures" / "journal-signatures-2026-11-06.md"
 sys.path.insert(0, str(SCRIPTS_DIR))
+import accuracy_update as au  # noqa: E402
 import generate_registry_digest as grd  # noqa: E402
 
 
-# --- the pre-change code, copied verbatim, as the oracle -------------------------------------------------------
-def old_tier_split(path, pattern):
-    """Split a two-tier registry into (universal, project) entry lists."""
-    uni, proj, tier = [], [], None
-    for i, ln in enumerate(grd.read(path), 1):
-        if ln.startswith('## Universal'):
-            tier = 'U'
-            continue
-        if ln.startswith('## Project:'):
-            tier = 'P'
-            continue
-        m = pattern.match(ln)
-        if m:
-            (uni if tier == 'U' else proj).append((m.group(1).strip(), i))
-    return uni, proj
-
-
+# --- the pre-change parser, copied verbatim, as the oracle ------------------------------------------------------
 OLD_ENTRY_HEADER = re.compile(r"^###\s+(\d{4}-\d{2}-\d{2})\s+(?:—|--|-)\s+(.+?)\s*$", re.MULTILINE)
 OLD_TRIGGER_LINE = re.compile(r"^\s*-\s*\*\*Trigger:\*\*\s*(.+?)\s*$", re.MULTILINE)
 OLD_SOURCE_LINE = re.compile(r"^\s*-\s*\*\*Source contract:\*\*\s*`?([^\s`]+)`?", re.MULTILINE)
@@ -79,13 +64,6 @@ def old_parse_entries(text):
             "body": body,
         })
     return entries
-
-
-def load_hook():
-    spec = importlib.util.spec_from_file_location("journal_post_approval_tracker_under_test", HOOK_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 BULLETS = """\
@@ -251,100 +229,139 @@ class JournalEntriesTests(unittest.TestCase):
         self.assertEqual(self.source(" `%s`" % path), path)
 
 
-class FixtureRegistries:
-    """A temporary project tree holding a copy of a registries folder."""
+class AdapterDifferenceTests(unittest.TestCase):
+    """One fixture row per intended difference from the default branch's old functions (block 12, Q21 (a)).
 
-    def __init__(self, source=None, files=None):
-        self.tmp = Path(tempfile.mkdtemp(prefix="registry-entries-"))
-        reg = self.tmp / ".claude" / "registries"
-        if source is not None:
-            shutil.copytree(source, reg)
-        else:
-            reg.mkdir(parents=True)
-        for rel, text in (files or {}).items():
-            target = reg / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8", newline="\n")
+    The adapters read through _registry_layout.parse_text, the one grammar. Each row names what the old function did
+    so a reader sees why the result moved.
+    """
 
-    def close(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
+    def blocks(self, text, **kw):
+        return grd.entry_blocks(text, grd.BULLET, **kw)
+
+    def titles(self, text, **kw):
+        return [b["title"] for b in self.blocks(text, **kw)]
+
+    # --- D1-D5: entry_blocks -------------------------------------------------------------------------------------
+    def test_d1_a_bullet_inside_a_fence_is_not_an_entry_and_a_column_zero_fence_ends_the_open_entry(self):
+        text = ("## Universal Patterns\n\n- **Real** — body\n```markdown\n- **Fake** — in a fence\n```\n"
+                "- **After** — b\n")
+        blocks = {b["title"]: b for b in self.blocks(text)}
+        self.assertEqual(list(blocks), ["Real", "After"], "old: Fake was an entry")
+        self.assertEqual(blocks["Real"]["text"], "- **Real** — body", "old: the fence lines folded into the text")
+
+    def test_d2_bullets_under_a_non_tier_heading_are_prose_to_the_next_heading(self):
+        text = ("## Universal Patterns\n\n- **Real** — body\n\n## Notes\n\n- **Prose** — not an entry\n\n"
+                "## Project: demo\n\n- **Proj** — x\n")
+        self.assertEqual(self.titles(text), ["Real", "Proj"], "old: Prose was an entry")
+
+    def test_d3_a_dated_second_level_heading_is_a_legacy_entry(self):
+        text = ("## Universal Patterns\n\n- **Real** — body\n\n## 2026-09-01 — Old way\nFree text.\n- plain bullet\n\n"
+                "## Project: demo\n\n- **Proj** — x\n")
+        blocks = {b["title"]: b for b in self.blocks(text)}
+        self.assertEqual(list(blocks), ["Real", "Old way", "Proj"], "old: the heading only ended the previous entry")
+        legacy = blocks["Old way"]
+        self.assertEqual(legacy["line"], 5)
+        self.assertEqual(legacy["text"], "## 2026-09-01 — Old way\nFree text.\n- plain bullet")
+        self.assertEqual(legacy["subs"], [])
+        self.assertEqual(blocks["Real"]["text"], "- **Real** — body")
+
+    def test_d4_an_entry_continues_only_on_blank_and_indented_lines(self):
+        text = "## Universal Patterns\n\n- **Alpha** — first\n  continued\nplain column-0 line\n- **Beta** — b\n"
+        alpha = self.blocks(text)[0]
+        self.assertEqual(alpha["text"], "- **Alpha** — first\n  continued", "old: the column-0 line continued it")
+        text = "## Universal Patterns\n\n- **Gamma** — g\n one-space line\n- **Delta** — d\n"
+        self.assertEqual(self.blocks(text)[0]["text"], "- **Gamma** — g", "old: the one-space line continued it")
+
+    def test_d5_an_entry_below_the_pointer_is_project(self):
+        text = "## Universal Patterns\n\n- **Up** — u\n\n## Project tier\n\n- **Below** — b\n"
+        tiers = {b["title"]: b["tier"] for b in self.blocks(text)}
+        self.assertEqual(tiers, {"Up": "Universal", "Below": "Project"}, "old: Below stayed Universal")
+
+    def test_entry_blocks_returns_legacy_entries_to_readers_with_the_keys_of_an_entry(self):
+        text = "## Universal Patterns\n\n## 2026-09-02 -- Legacy term\nDefined here.\n"
+        (legacy,) = self.blocks(text)
+        self.assertEqual(set(legacy), {"title", "line", "tier", "text", "subs"})
+        self.assertEqual((legacy["title"], legacy["line"], legacy["tier"]), ("Legacy term", 3, "Universal"))
+        self.assertIn("Defined here.", legacy["text"])
+
+    # --- J1-J5: journal_entries ----------------------------------------------------------------------------------
+    def entries(self, text, **kw):
+        return grd.journal_entries(text, **kw)
+
+    def test_j1_a_dated_heading_inside_a_fence_is_not_an_entry(self):
+        text = ("## Universal lessons\n\n### 2026-01-01 — Real\n- **Trigger:** manual\n```text\n"
+                "### 2026-02-02 — Fake in fence\n```\n- **Source contract:** .claude/concepts/x.md\n")
+        (real,) = self.entries(text)
+        self.assertEqual(real["title"], "Real", "old: Fake in fence was a second entry")
+        self.assertIn("### 2026-02-02 — Fake in fence", real["text"])
+        self.assertEqual(real["source"], ".claude/concepts/x.md")
+
+    def test_j2_entries_under_a_non_tier_heading_are_prose(self):
+        text = ("## Universal lessons\n\n### 2026-01-01 — Real\n- **Trigger:** manual\n\n## Notes\n\n"
+                "### 2026-02-02 — In notes\n- **Trigger:** manual\n")
+        self.assertEqual([e["title"] for e in self.entries(text)], ["Real"], "old: In notes was an entry")
+
+    def test_j3_the_text_ends_at_the_next_heading_of_any_level(self):
+        text = ("## Universal lessons\n\n### 2026-01-01 — Real\n- **Trigger:** manual\n- **Lesson:** l\n\n"
+                "### Tag conventions\n\n- **`x`** — prose\n")
+        (real,) = self.entries(text)
+        self.assertEqual(real["text"], "### 2026-01-01 — Real\n- **Trigger:** manual\n- **Lesson:** l",
+                         "old: the Tag conventions heading and its bullets folded into the entry")
+        text = "## Universal lessons\n\n### 2026-01-01 — Real\n- **Trigger:** manual\n#### Sub\nmore\n"
+        self.assertEqual(self.entries(text)[0]["text"], "### 2026-01-01 — Real\n- **Trigger:** manual")
+
+    def test_j4_a_heading_with_no_separator_or_an_en_dash_is_a_malformed_entry(self):
+        text = "## Universal lessons\n\n### 2026-01-01\n- **Trigger:** manual\n\n### 2026-01-02 – En dash title\n- **Trigger:** manual\n"
+        got = self.entries(text)
+        self.assertEqual([(e["date"], e["title"]) for e in got], [("2026-01-01", ""), ("2026-01-02", "En dash title")],
+                         "old: neither was an entry, and both folded into the previous one")
+        self.assertNotIn("En dash", got[0]["text"])
+
+    def test_j5_the_last_field_line_wins_and_indented_lines_fold_into_the_value(self):
+        text = ("## Universal lessons\n\n### 2026-01-01 — T\n- **Trigger:** manual\n- **Trigger:** Pre-Approval Critic\n"
+                "- **Source contract:** .claude/concepts/a.md\n  continued-b\n")
+        (entry,) = self.entries(text)
+        self.assertEqual(entry["trigger"], "pre-approval critic", "old: the first Trigger line won")
+        self.assertEqual(entry["source"], ".claude/concepts/a.md continued-b", "old: its own line only")
+
+    def test_journal_entries_returns_entries_only_never_legacy_ones(self):
+        text = ("## Universal lessons\n\n## 2026-09-01 — Old heading\nFree text.\n\n- 2026-09-02 — Old bullet\n\n"
+                "### 2026-10-01 — Real\n- **Trigger:** manual\n")
+        self.assertEqual([e["title"] for e in self.entries(text)], ["Real"])
+
+    def test_the_returned_keys_are_the_default_branch_keys(self):
+        (entry,) = self.entries("## Universal lessons\n\n### 2026-10-01 — Real\n- **Trigger:** manual\n")
+        self.assertEqual(set(entry), {"sig", "date", "title", "line", "tier", "trigger", "source", "text"})
+        (block,) = self.blocks("- **Alpha** — a\n")
+        self.assertEqual(set(block), {"title", "line", "tier", "text", "subs"})
 
 
-def run_main(tmp: Path, tier_split_fn):
-    cwd = os.getcwd()
-    original = grd.tier_split
-    os.chdir(tmp)
-    grd.tier_split = tier_split_fn
-    try:
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            code = grd.main()
-        return code, buf.getvalue(), (tmp / grd.OUT).read_bytes()
-    finally:
-        grd.tier_split = original
-        os.chdir(cwd)
+class AccuracyParserTests(unittest.TestCase):
+    """accuracy_update.parse_journal_entries: the parser the journal tracker hook calls (block 12)."""
 
-
-class TierSplitIsByteIdentical(unittest.TestCase):
-    def compare(self, source=None, files=None):
-        new = grd.tier_split
-        fx = FixtureRegistries(source=source, files=files)
-        try:
-            old_run = run_main(fx.tmp, old_tier_split)
-            new_run = run_main(fx.tmp, new)
-        finally:
-            fx.close()
-        self.assertEqual(old_run[0], new_run[0], "exit code must match")
-        self.assertEqual(old_run[1], new_run[1], "printed summary must match")
-        self.assertEqual(old_run[2], new_run[2], "the generated digest must match byte for byte")
-        self.assertGreater(len(new_run[2]), 200)
-
-    def test_current_registries(self):
-        self.compare(source=REPO_ROOT / ".claude" / "registries")
-
-    def test_fixtures_with_a_pre_heading_entry_and_correction_subbullets(self):
-        self.compare(files={
-            "MECHANISMS.md": BULLETS,
-            "VOCABULARY.md": BULLETS.replace("Alpha", "Vocab"),
-            "JOURNAL.md": JOURNAL,
-            "MECHANISMS/backend.md": "- **Dom A** x\n  - **Correction (d, `c`):** y\n",
-            "JOURNAL/data.md": "### 2026-02-02 — Domain lesson\n- **Trigger:** manual\n",
-        })
-
-    def test_new_tier_split_keeps_its_signature_and_shape(self):
-        fx = FixtureRegistries(files={"MECHANISMS.md": BULLETS})
-        try:
-            path = str(fx.tmp / ".claude" / "registries" / "MECHANISMS.md")
-            self.assertEqual(grd.tier_split(path, grd.BULLET), old_tier_split(path, grd.BULLET))
-            self.assertEqual(grd.tier_split(path + ".missing", grd.BULLET), ([], []))
-        finally:
-            fx.close()
-
-
-class HookCallerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.hook = load_hook()
-        cls.journal_text = (REPO_ROOT / ".claude" / "registries" / "JOURNAL.md").read_text(encoding="utf-8")
+        cls.frozen = FROZEN_JOURNAL.read_text(encoding="utf-8")
 
-    def test_parse_entries_keeps_its_signature_and_keys(self):
-        entries = self.hook.parse_entries(JOURNAL)
+    def test_the_parser_keeps_its_signature_and_keys(self):
+        entries = au.parse_journal_entries(JOURNAL)
         self.assertEqual(len(entries), 3)
         self.assertEqual(set(entries[0]), {"sig", "date", "title", "trigger", "source_contract", "body"})
 
-    def test_sig_trigger_and_source_equal_the_old_output_on_the_current_journal(self):
-        new = self.hook.parse_entries(self.journal_text)
-        old = old_parse_entries(self.journal_text)
+    def test_sig_date_title_and_trigger_equal_the_old_output_on_the_frozen_journal(self):
+        new = au.parse_journal_entries(self.frozen)
+        old = old_parse_entries(self.frozen)
         self.assertGreater(len(old), 20)
         self.assertEqual(len(new), len(old))
         for n, o in zip(new, old):
-            self.assertEqual((n["sig"], n["date"], n["title"], n["trigger"], n["source_contract"]),
-                             (o["sig"], o["date"], o["title"], o["trigger"], o["source_contract"]))
+            self.assertEqual((n["sig"], n["date"], n["title"], n["trigger"]),
+                             (o["sig"], o["date"], o["title"], o["trigger"]))
 
     def test_only_the_listed_source_forms_differ_from_the_old_output(self):
         text = ("### 2026-01-01 — Spaces\n- **Trigger:** manual\n- **Source contract:** `a b/c d.md`\n\n"
                 "### 2026-01-02 — NotApplicable\n- **Trigger:** manual\n- **Source contract:** N/A\n")
-        new = {e["title"]: e for e in self.hook.parse_entries(text)}
+        new = {e["title"]: e for e in au.parse_journal_entries(text)}
         old = {e["title"]: e for e in old_parse_entries(text)}
         self.assertEqual(old["Spaces"]["source_contract"], "a")
         self.assertEqual(new["Spaces"]["source_contract"], "a b/c d.md")
@@ -354,17 +371,8 @@ class HookCallerTests(unittest.TestCase):
         for key in ("sig", "date", "title", "trigger"):
             self.assertEqual(new["Spaces"][key], old["Spaces"][key])
 
-    def test_a_missing_reader_makes_the_hook_skip_and_log(self):
-        events = []
-        original = (self.hook._journal_entries, self.hook.log_event)
-        self.hook._journal_entries = None
-        self.hook.log_event = lambda *a, **k: events.append(k.get("event"))
-        try:
-            self.assertEqual(self.hook.main(), 0)
-            self.assertEqual(self.hook.parse_entries(JOURNAL), [])
-        finally:
-            self.hook._journal_entries, self.hook.log_event = original
-        self.assertIn("journal-tracker-reader-missing", events)
+    def test_the_source_rule_is_the_one_in_the_registry_layout_module(self):
+        self.assertFalse(hasattr(au, "_SOURCE_VALUE"), "the source rule lives in _registry_layout.source_value")
 
 
 if __name__ == "__main__":

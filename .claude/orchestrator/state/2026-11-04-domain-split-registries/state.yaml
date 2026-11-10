@@ -1,0 +1,115 @@
+contract: 2026-11-04-domain-split-registries
+started_at: '2026-11-04T20:35:51.387237+00:00'
+sub_tasks:
+  t1-reconcile-the-duplicate-vocabulary-entries:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t1-reconcile-the-duplicate-vocabulary-entries
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/250
+    issue: 241
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-241-t1-reconcile-the-duplicate-vocabulary-entries.md
+  t2-extract-the-shared-apply-and-plugin-root-helpers:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t2-extract-the-shared-apply-and-plugin-root-helpers
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/252
+    issue: 242
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-242-t2-extract-the-shared-apply-and-plugin-root-helpers.md
+  t3-layout-spec-shared-reader-structure-lint-and-digest:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t3-layout-spec-shared-reader-structure-lint-and-digest
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/254
+    issue: 243
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-243-t3-layout-spec-shared-reader-structure-lint-and-digest.md
+  t4-single-write-path-and-journal-tracker:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t4-single-write-path-and-journal-tracker
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/256
+    issue: 244
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-244-t4-single-write-path-and-journal-tracker.md
+  t5-script-readers-through-the-resolver:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t5-script-readers-through-the-resolver
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/258
+    issue: 245
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-245-t5-script-readers-through-the-resolver.md
+  t6-migration-0001-layout-gate-and-doctor:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t6-migration-0001-layout-gate-and-doctor
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/273
+    issue: 246
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-246-t6-migration-0001-layout-gate-and-doctor.md
+  t7-agent-skill-and-template-instructions:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t7-agent-skill-and-template-instructions
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/278
+    issue: 247
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-247-t7-agent-skill-and-template-instructions.md
+  t8-plugin-registries-on-layout-2-registry-appends-and-docs:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t8-plugin-registries-on-layout-2-registry-appends-and-docs
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/280
+    issue: 248
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-248-t8-plugin-registries-on-layout-2-registry-appends-and-docs.md
+  t9-review:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t9-review
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/285
+    issue: 249
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-04-249-t9-review.md
+  t10-fix-the-t9-review-findings:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t10-fix-the-t9-review-findings
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/294
+    issue: 292
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-06-292-t10-fix-the-t9-review-findings.md
+  t11-review:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t11-review
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/299
+    issue: 293
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-06-293-t11-review.md
+  t12-merge-the-default-branch-into-the-parent-branch:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t12-merge-the-default-branch-into-the-parent-branch
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/309
+    issue: 304
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-07-304-t12-merge-the-default-branch-into-the-parent-branch.md
+  t13-fix-the-t11-review-findings:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t13-fix-the-t11-review-findings
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/312
+    issue: 305
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-07-305-t13-fix-the-t11-review-findings.md
+  t14-review:
+    status: completed
+    branch: task/2026-11-04-domain-split-registries/t14-review
+    pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/315
+    issue: 306
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-07-306-t14-review.md
+  t15-merge-the-default-branch-into-the-parent-branch-again:
+    status: awaiting-merge
+    branch: task/2026-11-04-domain-split-registries/t15-merge-the-default-branch-into-the-parent-branch-again
+    pull_request: null
+    issue: 319
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-08-319-t15-merge-the-default-branch-into-the-parent-branch-again.md
+  t16-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 320
+    base: fix/235-domain-split-registries
+    brief: .claude/work-items/2026-11-08-320-t16-review.md

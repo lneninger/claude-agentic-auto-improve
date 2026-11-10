@@ -11,8 +11,9 @@ The five Registration rules (one pure function each, evaluated together, never s
   row-count-unchanged, rows-unchanged-apart-from-if, if-keys-unchanged,
   every-registration-profiled-or-excluded, every-exclusion-matches-a-row.
 
-A vendored copy needs five files in one folder: check_hook_registrations.py,
-auto_improve_finish_install.py, pr_merged.py, plugin_doctor.py and check_version_bump.py.
+A vendored copy needs seven files in one folder: check_hook_registrations.py,
+auto_improve_finish_install.py, pr_merged.py, plugin_doctor.py, check_version_bump.py,
+_preview_apply.py and _plugin_root.py.
 The Hook registration profile is written by ``auto_improve_finish_install.py record-registrations``.
 This module also owns the one Settings shape validator (``load_settings``) that the recorder reuses.
 """
@@ -29,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# The checker's own folder holds its four dependencies (a one-shot process; the folder is its own).
+# The checker's own folder holds the other files of VENDORED_FILES (a one-shot process; the folder is its own).
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
@@ -40,6 +41,8 @@ VENDORED_FILES: Tuple[str, ...] = (
     "pr_merged.py",
     "plugin_doctor.py",
     "check_version_bump.py",
+    "_preview_apply.py",
+    "_plugin_root.py",
 )
 
 _IMPORT_FAILURE: Optional[BaseException] = None
@@ -509,9 +512,10 @@ def _dependency_refusal(exc: BaseException, settings: Optional[Path], profile: O
         module = getattr(exc, "name", None) or str(exc)
         return _refuse(
             "checker-dependency-missing",
-            "cannot import the module %r that this check needs. Vendor all five files together into one "
-            "folder: %s" % (module, ", ".join(VENDORED_FILES)),
-            None, "Copy the five files listed above next to check_hook_registrations.py, then rerun.",
+            "cannot import the module %r that this check needs. Vendor all %d files together into one "
+            "folder: %s" % (module, len(VENDORED_FILES), ", ".join(VENDORED_FILES)),
+            None, "Copy the %d files listed above next to check_hook_registrations.py, then rerun."
+            % len(VENDORED_FILES),
             settings, profile)
     return _refuse("checker-internal-error", "%s: %s" % (type(exc).__name__, exc), None,
                    "Report this failure; the check could not run.", settings, profile)

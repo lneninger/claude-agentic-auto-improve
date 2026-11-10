@@ -26,9 +26,10 @@ sync script reads it; nothing about the synced set is hard-coded in the script.
 - `skills/` and `agents/` — **at this repository's root**, mapping to the consuming
   project's `.claude/skills/` and `.claude/agents/`
 - `.claude/hooks/`, `scripts/`, `templates/`, `references/`
-- `.claude/registries/` — the Universal section only, above the first `## Project:`
-  heading. `MECHANISMS.md`, `VOCABULARY.md` and `JOURNAL.md` are the three that
-  travel that way.
+- `.claude/registries/` — the Universal tier only. Under registry layout 2 that is the three
+  root files `MECHANISMS.md`, `VOCABULARY.md` and `JOURNAL.md` (Universal entries plus the
+  `## Project tier` pointer); the domain folders beside them are project-owned and never
+  travel. Under layout 1 it was the section above the first `## Project:` heading.
 
 > **`INTEGRATION.md` is the exception, and it does not travel at all.** It is the one
 > registry with no Universal tier, so there is no section of it that is generic:
@@ -142,12 +143,23 @@ worktree workflow.
 
 ## Registries
 
-- Edit only the Universal section, above the first `## Project:` heading.
-- Everything from that heading to the end of the file belongs to the consuming project and
-  is never compared or copied.
-- **A cross-project mechanism entry must live in the Universal tier.** An entry below the
-  project heading can never reach this repository, so filing one there silently guarantees
-  no other project sees it. Three entries were misfiled that way until 2026-09-12.
+- Registries are on registry layout 2. The three root files (`MECHANISMS.md`, `VOCABULARY.md`,
+  `JOURNAL.md`) hold only the Universal tier and the fixed `## Project tier` pointer. The sync
+  compares and copies the whole root file. Under layout 1 the boundary was the first
+  `## Project:` heading; that heading no longer exists in a layout 2 root.
+- Everything under `.claude/registries/<REGISTRY>/` (the domain files) belongs to the
+  consuming project and is never compared, copied or deleted.
+- **A cross-project mechanism entry must live in the Universal tier.** An entry in a domain
+  file can never reach this repository, so filing one there silently guarantees no other
+  project sees it. Three entries were misfiled that way until 2026-09-12.
+- Append entries with `registry_append.py` (`--universal` for the Universal tier), never by hand.
+  Entries are append-only: add a new entry or a `Correction` line, and do not reorder or
+  rewrite old ones.
+- Before a sync, run `py -3 .claude/scripts/registry_migrate.py --check --project <root>`.
+  Exit 0 means go on. Exit 6 (`pending` or `stale-sync`) means halt and migrate the project
+  first, as README.md describes under "Moving a project onto registry layout 2". Exit 2
+  means halt. A sync tool that does not do this yet is a follow-up outside this repository.
+- Any pull request that touches a registry file raises the plugin version (see CLAUDE.md).
 
 ## Naming a memory tool
 

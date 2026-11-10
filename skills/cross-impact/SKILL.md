@@ -41,11 +41,11 @@ Surface the top-3 adjacent areas for a contract or a synthetic file list.
    - **CodeGraph signal** (weight 3): shells out to the `codegraph` CLI if
      present and parses its impact data. Falls back gracefully when
      CodeGraph is unavailable or the impact subcommand is missing.
-   - **JOURNAL co-occurrence** (weight 2): greps `.claude/registries/JOURNAL.md` for
+   - **JOURNAL co-occurrence** (weight 2): greps `.claude/registries/JOURNAL.md` and `JOURNAL/*.md` (the domain files) for
      entries whose source contract or tags reference the contract's primary
      area, then maps each match's source contract to its own area set.
    - **MECHANISMS co-citation** (weight 1): for each mechanism the contract
-     reuses, greps `.claude/registries/MECHANISMS.md` and pulls file path tokens
+     reuses, greps `.claude/registries/MECHANISMS.md` and `MECHANISMS/*.md` (the domain files) and pulls file path tokens
      from the surrounding description; matches them through area patterns.
    - **Seed adjacency** (weight 1): reads optional `seed_adjacency` field
      per area in `.claude/area-mapping.json`.
