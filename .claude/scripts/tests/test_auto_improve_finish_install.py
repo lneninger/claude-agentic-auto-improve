@@ -4032,18 +4032,21 @@ class TestAddonInstall(AddonHarness):
         self.assertIn(ANGULAR_DOCS[0], parsed["message"], msg="the message names the document")
         self.assertTreeSame(before, "nothing is written")
 
-    def test_a_disabled_hook_file_or_row_in_the_project_is_refused_under_either_name(self):
+    def test_a_disabled_hook_row_in_the_local_layer_is_refused_and_the_other_forms_are_retired_under_either_name(self):
+        """Issue #262 (C-8): a settings.local.json row is still refused as ``disabled-hook-present`` (the install does not write that
+        layer). A row in settings.json, and a file with no row, are no longer refused: the first is retired in two steps and the second is
+        kept or deleted at step B (the rows of TestRetireInTwoSteps pin the details)."""
         row = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "py", "args": [
             "-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/%s"]}]}]}}
         string_row = {"hooks": {"UserPromptSubmit": [{"hooks": [{
             "type": "command", "command": 'py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/%s"'}]}]}}
         cases = []
         for name in (DISABLED_ADVISOR, DISABLED_FORMER):
-            cases.append(("file " + name, {"file": name}))
-            cases.append(("exec row " + name, {"settings": json.loads(json.dumps(row).replace("%s", name))}))
-            cases.append(("string row " + name, {"settings": json.loads(json.dumps(string_row).replace("%s", name))}))
-            cases.append(("local row " + name, {"local": json.loads(json.dumps(row).replace("%s", name))}))
-        for label, spec in cases:
+            cases.append(("file " + name, {"file": name}, "plan"))
+            cases.append(("exec row " + name, {"settings": json.loads(json.dumps(row).replace("%s", name))}, "plan"))
+            cases.append(("string row " + name, {"settings": json.loads(json.dumps(string_row).replace("%s", name))}, "plan"))
+            cases.append(("local row " + name, {"local": json.loads(json.dumps(row).replace("%s", name))}, "refused"))
+        for label, spec, want in cases:
             with self.subTest(case=label):
                 shutil.rmtree(str(self.project / ".claude"), ignore_errors=True)
                 self.put_profile()
@@ -4057,11 +4060,14 @@ class TestAddonInstall(AddonHarness):
                     write_json(self.project / ".claude" / "settings.local.json", spec["local"])
                 before = snapshot(self.tmp)
                 rc, out, parsed = self.cli(self.addon_argv("angular-tailwind"))
-                self.assertRefused(parsed, "disabled-hook-present", "the project carries the retired advisor")
-                self.assertEqual(rc, 2, msg="exit 2")
-                self.assertIn("auto-improve-angular-tailwind-uninstall", parsed["message"],
-                              msg="the message names the uninstall skill")
-                self.assertTreeSame(before, "nothing is written")
+                if want == "refused":
+                    self.assertRefused(parsed, "disabled-hook-present", "the install does not write the local layer")
+                    self.assertEqual(rc, 2, msg="exit 2")
+                    self.assertIn("auto-improve-angular-tailwind-uninstall", parsed["message"],
+                                  msg="the message names the uninstall skill")
+                else:
+                    self.assertEqual((rc, (parsed or {}).get("status")), (0, "plan"), msg=repr(parsed or out))
+                self.assertTreeSame(before, "a preview writes nothing")
 
     def test_an_unrelated_row_and_file_do_not_count_as_a_disabled_hook(self):
         write_json(self.settings_path(), {"hooks": {"UserPromptSubmit": [{"hooks": [
@@ -7088,18 +7094,24 @@ class TestCodegraphUpgradeInPlace(CodegraphHarness):
         self.assertEqual((real / GUARD).read_bytes(), OLD_GUARD_TEXT.encode("utf-8"))
 
     def test_the_shipped_manifest_lists_every_released_version_of_the_guard_and_the_reset_hook(self):
-        shipped = json.loads((Path(fi.__file__).resolve().parents[1] / "addons" / "codegraph" / "addon.json")
-                             .read_text(encoding="utf-8"))["released_sha256"]
+        manifest = json.loads((Path(fi.__file__).resolve().parents[1] / "addons" / "codegraph" / "addon.json")
+                              .read_text(encoding="utf-8"))
+        disabled = {e["hook"]: e["released_sha256"] for e in manifest["disabled"]}
+        shipped = dict(manifest["released_sha256"], **disabled)  # issue #262: the reset hook's hashes moved into its disabled entry
         guard_hashes = {
             "40c8e4c21ec8fbc312649fc2dad2d6ee24b0eb3febb2a5a5b2e463ff6af39934",  # 5876b17, the add-on's first release
             "712055e623e8e2b7afaf41131f8b1480127fb8efa238809f64d1fa5120eb4c22",  # 4c53a44, the kill switches removed
             "8c44ed6044e3ca3069b6d14b7161e6dad88af180649c171eebbbcd2af6b63d9d",  # 3780c2f, #259 (0.15.2)
             "575c83f3aa031391b8d502d245b7e0fe02e4b91c4d632c4686240532175ac9c2",  # origin/master at the #271 merge (0.16.2)
+            "89e8373c7ada0b764722075f9dceddb8167a34c8e3d2fe89f88223a0e6e15a1b",  # 0.16.3 to 0.16.4
+            "e48725ec3d984269b0bae51f23e2bc38b8d1aba1e89be0978617b6734b75e831",  # 0.16.5, the release before the cut-over
         }
         reset_hashes = {
             "9e1164fde61f340bb688725b3379ecc2b457713a62413a240e0ce28a70347807",  # 5876b17 and 4c53a44
             "900db4ad8fe4eb7aab83db6f834072a84c66b49cb554059a457ee301b002dd03",  # 3780c2f, #259 (0.15.2)
             "3a1658c93f5d2b29c445e185985df4e5946bbec61f333c23a0adee6f0707925d",  # origin/master at the #271 merge (0.16.2)
+            "d9372806ad9d9061b67e0e330b583bc3beb5e2a4286fa6efa1382433fa486ece",  # 0.16.3 to 0.16.4
+            "c29895fe27d098d943c804308b16c25606a5f712505a7c805d0488571a4f2492",  # 0.16.5, the release before the cut-over
         }
         self.assertTrue(guard_hashes <= set(shipped["codegraph-first-guard.py"]), msg=repr(shipped))
         self.assertTrue(reset_hashes <= set(shipped["codegraph-turn-reset.py"]), msg=repr(shipped))
@@ -7115,11 +7127,11 @@ class TestCodegraphUpgradeInPlace(CodegraphHarness):
 # .claude-plugin/plugin.json, so the "first manifest" rule is also pinned.
 # ======================================================================================================================
 REAL_REPO = Path(__file__).resolve().parents[3]
-FRESH_PLUGIN_VERSION = "0.16.5"
+FRESH_PLUGIN_VERSION = "0.17.0"  # the version the landing raises the plugin to (check_version_bump.py --exact)
 BASELINE_REF = "db61fd7"  # the 0.16.1 release; a missing commit FAILS, never skips, and never falls back to HEAD
 BASELINE_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "codegraph-db61fd7"
 BASH_IF = "Bash(codegraph *)"
-FRESH_HOOKS = ("codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py")
+FRESH_HOOKS = ("codegraph-first-guard.py",)  # issue #262: the one active hook (the tracker and the reset hook are disabled)
 
 
 class CodegraphFreshnessHarness(AddonHarness):
@@ -7161,7 +7173,8 @@ class CodegraphFreshnessHarness(AddonHarness):
         data = path.read_bytes()
         folded = hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
         listed = json.loads((REAL_REPO / ".claude" / "addons" / "codegraph" / "addon.json").read_text(encoding="utf-8"))
-        self.assertIn(folded, listed.get("released_sha256", {}).get(hook, []),
+        disabled = {e["hook"]: e["released_sha256"] for e in listed.get("disabled", [])}
+        self.assertIn(folded, listed.get("released_sha256", {}).get(hook) or disabled.get(hook, []),
                       msg="the %s fixture of %s must equal a copy that addon.json lists in released_sha256" % (BASELINE_REF, hook))
         return data
 
@@ -7172,13 +7185,12 @@ class CodegraphFreshnessHarness(AddonHarness):
         return path
 
     def strip_new_row(self, settings):
-        """The settings of a 0.16.1 install: the Bash row (args cli / an if) removed from the installed settings."""
+        """The settings of a 0.16.x install: the guard's ``notice`` row (the row the cut-over added) removed from the installed settings."""
         out = copy.deepcopy(settings)
         for event, groups in list(out.get("hooks", {}).items()):
             kept = []
             for group in groups:
-                group["hooks"] = [h for h in group.get("hooks", []) if "if" not in h and "cli" not in json.dumps(h.get("args", [])) and
-                                  ' cli' not in str(h.get("command", ""))]
+                group["hooks"] = [h for h in group.get("hooks", []) if (key_of(h) or ("", ()))[1] != ("notice",)]
                 if group["hooks"]:
                     kept.append(group)
             out["hooks"][event] = kept
@@ -7202,40 +7214,36 @@ class CodegraphFreshnessHarness(AddonHarness):
 
 
 class TestAddonRowIfKey(CodegraphFreshnessHarness):
+    """The ``if`` key of a registration row (issue #295). The shipped manifest's rows carry none since the cut-over (issue #262: the
+    tracker's Bash row left with it), so a row that has one is put into the plugin's copy of the manifest by the row that needs it."""
+
+    def with_if_on_the_notice_row(self, value):
+        path = self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for row in data["registrations"]:
+            if row.get("args") == ["notice"]:
+                row["if"] = value
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
     def test_the_install_keys_include_if(self):
         self.assertIn("if", fi.ADDON_ROW_KEYS, msg="an add-on row's `if` must survive into the written registration")
 
     def test_a_manifest_row_with_an_if_is_written_with_its_if(self):
-        regs = flat_registrations(self.read_settings())
-        bash = [r for r in regs if r[2] == "codegraph-turn-tracker.py" and r[0] == "PostToolUse" and r[1] == "Bash"]
-        self.assertEqual(len(bash), 1, msg="the manifest's Bash row is installed; rows: %r" % ([(r[0], r[1], r[2]) for r in regs],))
-        self.assertEqual(bash[0][4].get("if"), BASH_IF, msg="and carries the manifest's if")
+        shutil.rmtree(str(self.project / ".claude" / "hooks"), ignore_errors=True)
+        self.settings_path().unlink()
+        self.with_if_on_the_notice_row("Bash(codegraph *)")
+        self.install_addon("codegraph")
+        notice = [r for r in flat_registrations(self.read_settings()) if r[2] == "codegraph-first-guard.py" and r[3] == ("notice",)]
+        self.assertEqual(len(notice), 1, msg="the manifest's notice row is installed")
+        self.assertEqual(notice[0][4].get("if"), BASH_IF, msg="and carries the manifest's if")
 
     def test_an_if_that_is_not_a_non_empty_string_is_refused(self):
-        path = self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
         for bad in ("", "   ", 5, ["Bash(x)"]):
             with self.subTest(bad=bad):
-                data = json.loads(path.read_text(encoding="utf-8"))
-                for row in data["registrations"]:
-                    if row.get("args") == ["cli"]:
-                        row["if"] = bad
-                path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                self.with_if_on_the_notice_row(bad)
                 rc, out, parsed = self.cli(self.addon_argv("codegraph"))
                 self.assertEqual((parsed or {}).get("status"), "refused", msg="a bad if is a manifest problem: %r" % (parsed or out))
                 self.assertNotEqual(rc, 0)
-
-    def test_a_0_16_1_install_gets_exactly_one_to_add_row_and_the_apply_writes_it_with_its_if(self):
-        old = self.strip_new_row(self.read_settings())
-        self.assertTrue(old != self.read_settings(), "control: the installed settings carry a Bash row to strip "
-                                                     "(the manifest has the cli row)")
-        self.write_settings("project", old)
-        plan = self.preview("codegraph")
-        self.assertEqual([r["registration-key"] for r in plan["to-add"]], ["PostToolUse|codegraph-turn-tracker.py|cli"],
-                         msg="the cli argument gives the row its own key, so an old install has exactly one to-add: %r" % (plan["to-add"],))
-        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
-        self.assertEqual(rc, 0, msg=repr(parsed or out))
-        bash = [r for r in flat_registrations(self.read_settings()) if r[2] == "codegraph-turn-tracker.py" and r[1] == "Bash"]
-        self.assertEqual([r[4].get("if") for r in bash], [BASH_IF], msg="the added row carries the if")
 
 
 class TestCodegraphHookFreshness(CodegraphFreshnessHarness):
@@ -7266,7 +7274,7 @@ class TestCodegraphHookFreshness(CodegraphFreshnessHarness):
                                  msg="%s: a row registered in this form must not be reported: %r" % (label, parsed or out))
                 self.assertEqual((rc, (parsed or {}).get("freshness")), (0, "checked"), msg="%s: %r" % (label, parsed or out))
 
-    def test_0_16_1_settings_report_the_bash_row_missing(self):
+    def test_settings_without_the_notice_row_report_it_missing(self):
         self.write_settings("project", self.strip_new_row(self.read_settings()))
         before = snapshot(self.tmp)
         rc, out, parsed = self.run_check()
@@ -7274,30 +7282,30 @@ class TestCodegraphHookFreshness(CodegraphFreshnessHarness):
         found = self.of_code(parsed, "addon-row-missing")
         self.assertEqual(len(found), 1, msg="exactly one row is missing: %r" % (parsed or out))
         self.assertEqual({k: found[0].get(k) for k in ("event", "matcher", "hook", "args")},
-                         {"event": "PostToolUse", "matcher": "Bash", "hook": "codegraph-turn-tracker.py", "args": ["cli"]})
+                         {"event": "UserPromptSubmit", "matcher": None, "hook": "codegraph-first-guard.py", "args": ["notice"]})
         self.assertTreeSame(before, "--check only reads")
 
-    def test_a_registered_bash_row_without_its_if_is_outdated(self):
-        settings = self.read_settings()
-        for groups in settings["hooks"].values():
-            for group in groups:
-                for entry in group["hooks"]:
-                    entry.pop("if", None)
-        self.write_settings("project", settings)
+    def test_a_registered_row_without_its_if_is_outdated(self):
+        path = self.plugin / ".claude" / "addons" / "codegraph" / "addon.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for row in data["registrations"]:
+            if row.get("args") == ["notice"]:
+                row["if"] = BASH_IF
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         rc, out, parsed = self.run_check()
         self.assertEqual(rc, 1, msg="exit 1 with a finding: %r" % (parsed or out))
         found = self.of_code(parsed, "addon-row-outdated")
         self.assertEqual(len(found), 1, msg="one row is outdated: %r" % (parsed or out))
         self.assertEqual((found[0].get("key"), found[0].get("want"), found[0].get("hook"), found[0].get("args")),
-                         ("if", BASH_IF, "codegraph-turn-tracker.py", ["cli"]))
+                         ("if", BASH_IF, "codegraph-first-guard.py", ["notice"]))
         self.assertIn("have", found[0], msg="and says what it has")
         self.assertEqual(self.of_code(parsed, "addon-row-missing"), [], msg="a registered row is outdated, not missing")
 
     def test_a_missing_hook_file_is_reported(self):
-        (self.hooks_dir / "codegraph-turn-reset.py").unlink()
+        (self.hooks_dir / "codegraph-first-guard.py").unlink()
         rc, out, parsed = self.run_check()
         self.assertEqual(rc, 1, msg=repr(parsed or out))
-        self.assertEqual([f.get("file") for f in self.of_code(parsed, "addon-hook-missing")].count("codegraph-turn-reset.py"), 1,
+        self.assertEqual([f.get("file") for f in self.of_code(parsed, "addon-hook-missing")].count("codegraph-first-guard.py"), 1,
                          msg=repr(parsed or out))
 
     def test_a_hook_copy_from_an_older_release_is_outdated_with_both_versions(self):
@@ -7346,6 +7354,331 @@ class TestCodegraphHookFreshness(CodegraphFreshnessHarness):
         self.write_settings("project", self.strip_new_row(self.read_settings()))
         rc, out, parsed = self.run_check()
         self.assertIn("auto-improve-codegraph-install", out, msg="a missing row is repaired by re-running the install: %r" % out)
+
+
+# ======================================================================================================================
+# Issue #262 (concept contract 2026-11-09-codegraph-hooks-cutover, C-8): the install RETIRES a Disabled add-on hook in
+# TWO STEPS, for every add-on that has a ``disabled`` list.
+#   Step A (the first run that finds a retired row in the project's settings.json): the rows go, whether or not the file
+#           exists, and NO FILE is deleted in that run. A session that already loaded a plain exec-form row would exit 2
+#           on a missing script and block every prompt, so the file must outlive the row.
+#   Step B (a later run, with no project or local row naming the hook): an unedited released copy is deleted; an edited
+#           copy is kept and listed under ``kept``. Step B never refuses.
+# Refused as ``disabled-hook-present`` (nothing written): a settings.local.json row, and step A while an edited copy of
+# that hook is present. A user-layer row is not read by this check (no install writes one).
+# ======================================================================================================================
+ADVISOR_ROW_EXEC = {"type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/%s"]}
+ADVISOR_ROW_STRING = {"type": "command", "command": 'py -3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/%s"'}
+
+
+class RetireHarness(AddonHarness):
+    """angular-tailwind in the fake plugin: its advisor is a disabled hook with a former name and three released copies."""
+
+    def advisor_settings(self, name, form="exec", event="UserPromptSubmit"):
+        row = json.loads(json.dumps(ADVISOR_ROW_EXEC if form == "exec" else ADVISOR_ROW_STRING).replace("%s", name))
+        return {"hooks": {event: [{"hooks": [row]}]}}
+
+    def put_advisor(self, name, text=ADVISOR_RELEASE_ONE):
+        path = self.project / ".claude" / "hooks" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+        return path
+
+    def run_addon(self, name="angular-tailwind"):
+        plan = self.preview(name)
+        rc, out, parsed = self.apply(name, plan["plan-sha256"])
+        return plan, rc, parsed or {}
+
+    def advisor_rows(self):
+        return [r for r in flat_registrations(self.read_settings()) if r[2] in (DISABLED_ADVISOR, DISABLED_FORMER)] \
+            if self.settings_path().exists() else []
+
+    def hooks_dir(self):
+        return self.project / ".claude" / "hooks"
+
+
+class TestRetireInTwoSteps(RetireHarness):
+    def test_step_a_removes_the_row_and_keeps_the_file_then_step_b_deletes_it(self):
+        for form in ("exec", "string"):
+            for name in (DISABLED_ADVISOR, DISABLED_FORMER):
+                with self.subTest(form=form, name=name):
+                    shutil.rmtree(str(self.project / ".claude"), ignore_errors=True)
+                    self.put_profile()
+                    write_json(self.settings_path(), self.advisor_settings(name, form))
+                    path = self.put_advisor(name)
+                    plan, rc, parsed = self.run_addon()
+                    self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg=repr(parsed))
+                    self.assertEqual((plan.get("retire") or {}).get("step"), "A", msg="the preview says step A: %r" % (plan,))
+                    self.assertEqual(self.advisor_rows(), [], msg="step A removed the retired row")
+                    self.assertTrue(path.is_file(), msg="and deleted NO file in the run that removed its row")
+                    self.assertEqual(len(parsed.get("retired-rows", [])), 1, msg=repr(parsed))
+                    self.assertIn("run this install again", json.dumps(plan) + json.dumps(parsed),
+                                  msg="the preview and the result say to start a new session, then run the install again")
+                    plan, rc, parsed = self.run_addon()
+                    self.assertEqual((plan.get("retire") or {}).get("step"), "B", msg="the next run is step B: %r" % (plan,))
+                    self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg=repr(parsed))
+                    self.assertFalse(path.exists(), msg="step B deleted the unedited released copy")
+                    self.assertIn(".claude/hooks/" + name, parsed.get("deleted", []), msg=repr(parsed))
+                    plan, rc, parsed = self.run_addon()
+                    self.assertEqual((rc, parsed.get("status")), (0, "nothing-to-do"), msg="a re-run after step B changes nothing: %r" % (parsed,))
+
+    def test_rows_but_no_files_step_a_removes_the_rows(self):
+        write_json(self.settings_path(), self.advisor_settings(DISABLED_ADVISOR))
+        plan, rc, parsed = self.run_addon()
+        self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg=repr(parsed))
+        self.assertEqual(self.advisor_rows(), [], msg="a dangling row is healed by step A")
+
+    def test_files_but_no_rows_step_b_deletes_released_copies_and_keeps_an_edited_one(self):
+        released = self.put_advisor(DISABLED_ADVISOR, ADVISOR_RELEASE_TWO)
+        edited = self.put_advisor(DISABLED_FORMER, "# my own edits\n")
+        plan, rc, parsed = self.run_addon()
+        self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg="step B never refuses: %r" % (parsed,))
+        self.assertFalse(released.exists(), msg="the released copy is deleted")
+        self.assertEqual(edited.read_text(encoding="utf-8"), "# my own edits\n", msg="the edited copy is kept")
+        kept = {k["path"]: k for k in parsed.get("kept", [])}
+        self.assertIn(".claude/hooks/" + DISABLED_FORMER, kept, msg="and listed under kept: %r" % (parsed,))
+        self.assertEqual(kept[".claude/hooks/" + DISABLED_FORMER]["reason"], fi.KEPT_REASONS["kept-differs"],
+                         msg="with the removal's kept-differs reason: %r" % (kept,))
+        plan, rc, parsed = self.run_addon()
+        self.assertEqual((rc, parsed.get("status")), (0, "nothing-to-do"), msg="a leftover edited copy never walls a later install: %r" % (parsed,))
+
+    def test_an_edited_copy_present_at_step_a_is_refused(self):
+        write_json(self.settings_path(), self.advisor_settings(DISABLED_ADVISOR))
+        self.put_advisor(DISABLED_ADVISOR, "# edited by the project\n")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("angular-tailwind"))
+        self.assertRefused(parsed, "disabled-hook-present", "removing the row would switch off the project's own edits")
+        self.assertIn("auto-improve-angular-tailwind-uninstall", parsed["message"], msg="the message names the uninstall route")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_settings_local_row_is_refused(self):
+        write_json(self.project / ".claude" / "settings.local.json", self.advisor_settings(DISABLED_ADVISOR))
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("angular-tailwind"))
+        self.assertRefused(parsed, "disabled-hook-present", "the install does not write the local layer")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_user_layer_row_is_ignored_as_before(self):
+        write_json(self.home / "settings.json", self.advisor_settings(DISABLED_ADVISOR))
+        user_before = (self.home / "settings.json").read_bytes()
+        plan, rc, parsed = self.run_addon()
+        self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg=repr(parsed))
+        self.assertEqual((self.home / "settings.json").read_bytes(), user_before, msg="the user layer is never touched")
+
+    def test_a_preview_then_a_changed_retired_file_is_changed_since_preview(self):
+        path = self.put_advisor(DISABLED_ADVISOR, ADVISOR_RELEASE_ONE)
+        plan = self.preview("angular-tailwind")
+        self.assertEqual((plan.get("retire") or {}).get("step"), "B", msg=repr(plan))
+        path.write_bytes(ADVISOR_RELEASE_TWO.encode("utf-8"))
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.apply("angular-tailwind", plan["plan-sha256"])
+        self.assertRefused(parsed, "changed-since-preview", "the file changed after the preview")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_keep_retired_files_applies_the_rest_and_leaves_step_b_out(self):
+        """Q7: when the user cannot confirm a new session, the install applies the rest of the plan with the deletion left out."""
+        path = self.put_advisor(DISABLED_ADVISOR, ADVISOR_RELEASE_ONE)
+        argv = self.addon_argv("angular-tailwind") + ["--keep-retired-files"]
+        rc, out, plan = self.cli(argv)
+        self.assertEqual((rc, plan.get("status")), (0, "plan"), msg=repr(plan or out))
+        self.assertEqual(plan["retire"]["delete"], [], msg="the preview leaves the deletion out: %r" % (plan["retire"],))
+        self.assertFalse(plan["retire"]["confirm-new-session"], msg="and so asks for no confirmation")
+        rc, out, parsed = self.cli(self.addon_argv("angular-tailwind", apply=True, sha=plan["plan-sha256"]) + ["--keep-retired-files"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="the documents are copied: %r" % (parsed or out))
+        self.assertTrue(path.is_file(), msg="and the retired file is still there")
+        again, rc, parsed = self.run_addon()
+        self.assertEqual(again["retire"]["delete"], [".claude/hooks/" + DISABLED_ADVISOR], msg="a later run without the flag deletes it")
+        self.assertTrue(again["retire"]["confirm-new-session"], msg="and tells the skill to ask the new-session question first")
+        self.assertFalse(path.exists())
+
+    def test_the_uninstall_works_after_step_a_and_after_step_b(self):
+        write_json(self.settings_path(), self.advisor_settings(DISABLED_ADVISOR))
+        path = self.put_advisor(DISABLED_ADVISOR)
+        self.run_addon()
+        self.assertTrue(path.is_file(), msg="control: step A kept the file")
+        plan = self.preview_remove("angular-tailwind")
+        rc, out, parsed = self.cli(["addon-remove", "--name", "angular-tailwind", "--project", str(self.project), "--json",
+                                    "--claude-home", str(self.home), "--apply", "--expect-sha256", plan["plan-sha256"]])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg=repr(parsed or out))
+        self.assertFalse(path.exists(), msg="the uninstall deleted the leftover released copy")
+
+    def preview_remove(self, name):
+        rc, out, parsed = self.cli(["addon-remove", "--name", name, "--project", str(self.project), "--json",
+                                    "--claude-home", str(self.home)])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "plan"), msg=repr(parsed or out))
+        return parsed
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# The real codegraph add-on, upgraded from an install the 0.16.x line wrote: the OLD manifest (three hooks, four rows) is
+# installed first with the released 0.16.1 copies, then the plugin's folder is swapped for the cut-over one.
+# ----------------------------------------------------------------------------------------------------------------------
+OLD_CODEGRAPH_MANIFEST = {
+    af.KEY_HOOKS: ["codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py"],
+    af.KEY_HELPERS: [".claude/hooks/_project_paths.py", ".claude/hooks/_error_log.py"],
+    af.KEY_ROWS: [
+        {"event": "PreToolUse", "matcher": "Read|Grep|Glob", "hook": "codegraph-first-guard.py", "args": []},
+        {"event": "UserPromptSubmit", "hook": "codegraph-turn-reset.py", "args": []},
+        {"event": "PostToolUse", "matcher": "mcp__codegraph__.*", "hook": "codegraph-turn-tracker.py", "args": []},
+        {"event": "PostToolUse", "matcher": "Bash", "hook": "codegraph-turn-tracker.py", "args": ["cli"], "if": "Bash(codegraph *)"}],
+    af.KEY_PREREQUISITES: [{"kind": "mcp-server", "name": "codegraph"}],
+    af.KEY_PERMISSIONS_ALLOW: ["mcp__codegraph__*"],
+    af.KEY_INSTALL_SKILL: "auto-improve-codegraph-install", af.KEY_UNINSTALL_SKILL: "auto-improve-codegraph-uninstall"}
+RESET = "codegraph-turn-reset.py"
+TRACKER = "codegraph-turn-tracker.py"
+
+
+class CutoverHarness(AddonHarness):
+    """A project the 0.16.x install wrote, and the plugin folder of the cut-over release to upgrade it with."""
+
+    def setUp(self):
+        super().setUp()
+        self.addon_folder = self.plugin / ".claude" / "addons" / "codegraph"
+        self.use_old_plugin()
+        self.configure_mcp("project")
+        self.install_addon("codegraph")  # the 0.16.1 install: three released copies, four rows
+        self.use_new_plugin()
+
+    def swap_in(self, folder_source=None, manifest=None, hooks=None):
+        shutil.rmtree(str(self.addon_folder), ignore_errors=True)
+        if folder_source is not None:
+            shutil.copytree(folder_source, str(self.addon_folder), ignore=shutil.ignore_patterns("__pycache__"))
+        (self.addon_folder / "hooks").mkdir(parents=True, exist_ok=True)
+        for name, source in (hooks or {}).items():
+            shutil.copyfile(str(source), str(self.addon_folder / "hooks" / name))
+        if manifest is not None:
+            (self.addon_folder / "addon.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        for rel in (".claude/hooks/_project_paths.py", ".claude/hooks/_error_log.py"):
+            target = self.plugin / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(REAL_REPO / rel), str(target))
+        (self.plugin / "plugin.json").write_text(json.dumps({"name": PLUGIN_NAME, "version": "0.17.0"}), encoding="utf-8")
+
+    def use_old_plugin(self):
+        hooks = {h: BASELINE_FIXTURES / h for h in OLD_CODEGRAPH_MANIFEST[af.KEY_HOOKS]}
+        self.swap_in(None, copy.deepcopy(OLD_CODEGRAPH_MANIFEST), hooks)
+
+    def use_new_plugin(self):
+        self.swap_in(REAL_REPO / ".claude" / "addons" / "codegraph")
+
+    def hook(self, name):
+        return self.project / ".claude" / "hooks" / name
+
+    def rows(self):
+        return [(e, h, tuple(x)) for e, _m, h, x, _entry in flat_registrations(self.read_settings())]
+
+    def run_install(self):
+        plan = self.preview("codegraph")
+        rc, out, parsed = self.apply("codegraph", plan["plan-sha256"])
+        return plan, rc, parsed or {}
+
+    def make_rows_plain(self):
+        """The rows an install wrote BEFORE the Project hook launcher: the plain exec form."""
+        settings = self.read_settings()
+        for groups in settings["hooks"].values():
+            for group in groups:
+                for entry in group["hooks"]:
+                    script = key_of(entry)[0]
+                    extras = list(key_of(entry)[1])
+                    keep = {k: v for k, v in entry.items() if k not in ("command", "args")}
+                    entry.clear()
+                    entry.update(keep)
+                    entry.update({"type": "command", "command": "py", "args": ["-3", "${CLAUDE_PROJECT_DIR}/.claude/hooks/" + script] + extras})
+        write_json(self.settings_path(), settings)
+
+
+class TestCodegraphCutoverUpgrade(CutoverHarness):
+    NEW_ROWS = {("PreToolUse", "codegraph-first-guard.py", ()), ("UserPromptSubmit", "codegraph-first-guard.py", ("notice",))}
+
+    def test_the_old_install_is_four_rows_and_three_files(self):
+        self.assertEqual(len(self.rows()), 4, msg="control: %r" % (self.rows(),))
+        for name in ("codegraph-first-guard.py", RESET, TRACKER):
+            self.assertTrue(self.hook(name).is_file(), msg=name)
+
+    def test_a_0_16_x_install_runs_step_a_then_step_b(self):
+        for form in ("launcher", "plain"):
+            with self.subTest(form=form):
+                if form == "plain":
+                    self.use_old_plugin()
+                    shutil.rmtree(str(self.project / ".claude"), ignore_errors=True)
+                    self.put_profile()
+                    self.install_addon("codegraph")
+                    self.make_rows_plain()
+                    self.use_new_plugin()
+                plan, rc, parsed = self.run_install()
+                self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg=repr(parsed))
+                self.assertEqual((plan.get("retire") or {}).get("step"), "A", msg=repr(plan))
+                self.assertEqual(set(self.rows()), self.NEW_ROWS, msg="step A leaves one hook and two rows: %r" % (self.rows(),))
+                self.assertTrue(self.hook(RESET).is_file() and self.hook(TRACKER).is_file(),
+                                msg="and both retired files are still on disk")
+                self.assertEqual(self.hook("codegraph-first-guard.py").read_bytes(),
+                                 (self.addon_folder / "hooks" / "codegraph-first-guard.py").read_bytes(), msg="the guard was updated")
+                notice = [entry for _e, _m, _h, x, entry in flat_registrations(self.read_settings()) if x == ("notice",)]
+                self.assertEqual(len(notice), 1, msg="the guard's prompt row is written")
+                plan, rc, parsed = self.run_install()
+                self.assertEqual((plan.get("retire") or {}).get("step"), "B", msg=repr(plan))
+                self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg=repr(parsed))
+                self.assertFalse(self.hook(RESET).exists() or self.hook(TRACKER).exists(), msg="step B deleted both released copies")
+                plan, rc, parsed = self.run_install()
+                self.assertEqual((rc, parsed.get("status")), (0, "nothing-to-do"), msg=repr(parsed))
+
+    def test_no_run_deletes_a_file_whose_row_it_removes(self):
+        before = {n: self.hook(n).read_bytes() for n in (RESET, TRACKER)}
+        self.run_install()
+        for name, data in before.items():
+            self.assertEqual(self.hook(name).read_bytes(), data, msg="%s survives the run that removed its row" % name)
+
+    def test_an_edited_retired_copy_with_its_row_is_refused(self):
+        self.hook(RESET).write_bytes(self.hook(RESET).read_bytes() + b"\n# my edit\n")
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertRefused(parsed, "disabled-hook-present", "step A would switch off the project's own edits")
+        self.assertIn("auto-improve-codegraph-uninstall", parsed["message"])
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_a_settings_local_row_for_a_retired_hook_is_refused(self):
+        write_json(self.project / ".claude" / "settings.local.json",
+                   {"hooks": {"UserPromptSubmit": [{"hooks": [json.loads(json.dumps(ADVISOR_ROW_EXEC).replace("%s", RESET))]}]}})
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.cli(self.addon_argv("codegraph"))
+        self.assertRefused(parsed, "disabled-hook-present", "the install does not write the local layer")
+        self.assertTreeSame(before, "nothing is written")
+
+    def test_the_uninstall_works_after_the_upgrade(self):
+        self.run_install()
+        rc, out, parsed = self.cli(["addon-remove", "--name", "codegraph", "--project", str(self.project), "--json",
+                                    "--claude-home", str(self.home)])
+        plan = parsed
+        rc, out, parsed = self.cli(["addon-remove", "--name", "codegraph", "--project", str(self.project), "--json",
+                                    "--claude-home", str(self.home), "--apply", "--expect-sha256", plan["plan-sha256"]])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg=repr(parsed or out))
+        self.assertEqual([r for r in self.rows() if r[1].startswith("codegraph-")], [], msg="no codegraph row is left")
+        for name in ("codegraph-first-guard.py", RESET, TRACKER):
+            self.assertFalse(self.hook(name).exists(), msg="%s is gone" % name)
+
+    def test_a_revert_manifest_restores_both_hooks_and_rows_and_the_leftover_notice_row_exits_0(self):
+        self.run_install()
+        self.run_install()  # step B: the project is now the plain cut-over state
+        cut_over = fi._sha256(fi._fold_text_bytes(self.hook("codegraph-first-guard.py").read_bytes()))
+        revert = copy.deepcopy(OLD_CODEGRAPH_MANIFEST)
+        revert[af.KEY_RELEASED] = {"codegraph-first-guard.py": [cut_over], RESET: [cut_over], TRACKER: [cut_over]}
+        revert[af.KEY_RELEASED_VERSIONS] = {h: {cut_over: "0.17.0"} for h in revert[af.KEY_RELEASED]}
+        # the revert release's guard is the old one (the leftover notice row will run it)
+        self.swap_in(None, revert, {h: BASELINE_FIXTURES / h for h in revert[af.KEY_HOOKS]})
+        plan, rc, parsed = self.run_install()
+        self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg=repr(parsed))
+        for name in revert[af.KEY_HOOKS]:
+            self.assertTrue(self.hook(name).is_file(), msg="%s is back" % name)
+        self.assertEqual(self.hook("codegraph-first-guard.py").read_bytes(), (BASELINE_FIXTURES / "codegraph-first-guard.py").read_bytes(),
+                         msg="the install updated the guard to the revert release's copy")
+        rows = set(self.rows())
+        self.assertTrue({("UserPromptSubmit", RESET, ()), ("PostToolUse", TRACKER, ()), ("PostToolUse", TRACKER, ("cli",)),
+                         ("PreToolUse", "codegraph-first-guard.py", ())} <= rows, msg=repr(rows))
+        payload = json.dumps({"session_id": "s-revert", "cwd": str(self.project), "hook_event_name": "UserPromptSubmit", "prompt": "hi"})
+        proc = subprocess.run([sys.executable, "-B", str(self.hook("codegraph-first-guard.py")), "notice"], input=payload,
+                              capture_output=True, text=True, cwd=str(self.project),
+                              env={k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")})
+        self.assertEqual(proc.returncode, 0, msg="the leftover notice row runs the old guard, which exits 0: %r" % proc.stderr)
 
 
 if __name__ == "__main__":

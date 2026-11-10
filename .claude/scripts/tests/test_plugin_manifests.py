@@ -67,6 +67,7 @@ THE INVARIANTS
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import re
@@ -789,7 +790,7 @@ import _addon_fixture as af  # noqa: E402
 ADDONS_DIR = ROOT / ".claude" / "addons"
 EXPECTED_ADDON_HOOKS = {
     "angular-tailwind": [],
-    "codegraph": ["codegraph-first-guard.py", "codegraph-turn-reset.py", "codegraph-turn-tracker.py"],
+    "codegraph": ["codegraph-first-guard.py"],  # issue #262: the tracker and the reset hook are Disabled add-on hooks
     "strict-shell-gate": ["bash-gate.py"],
 }
 #: The documents the angular-tailwind add-on ships, and the disabled hook it keeps (issue #84).
@@ -800,13 +801,16 @@ ANGULAR_FORMER_NAMES = ["architecture-advisor.py"]
 #: Events that run once per prompt or per turn. No angular-tailwind row may sit on one (I-4).
 PER_PROMPT_EVENTS = {"UserPromptSubmit", "UserPromptExpansion", "Stop", "SubagentStop"}
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
-#: The set of (event, matcher) of every registration row, per file. A matcher of None is an event that takes none. Issue #295:
-#: the tracker has two rows (the MCP row and the Bash row with its own `cli` argument), so a file maps to a set of rows.
+#: The set of (event, matcher) of every registration row, per ACTIVE file. A matcher of None is an event that takes none. Issue #262:
+#: the guard has two rows (the PreToolUse gate and the UserPromptSubmit `notice` row); the tracker (two rows) and the reset hook (one
+#: row) are Disabled add-on hooks and carry their rows in their ``disabled`` entries (EXPECTED_DISABLED_CODEGRAPH_ROWS).
 EXPECTED_ADDON_ROWS = {
-    "codegraph-first-guard.py": {("PreToolUse", "Read|Grep|Glob")},
+    "codegraph-first-guard.py": {("PreToolUse", "Read|Grep|Glob"), ("UserPromptSubmit", None)},
+    "bash-gate.py": {("PreToolUse", "Bash")},
+}
+EXPECTED_DISABLED_CODEGRAPH_ROWS = {
     "codegraph-turn-reset.py": {("UserPromptSubmit", None)},
     "codegraph-turn-tracker.py": {("PostToolUse", "mcp__codegraph__.*"), ("PostToolUse", "Bash")},
-    "bash-gate.py": {("PreToolUse", "Bash")},
 }
 
 
@@ -843,12 +847,14 @@ def disabled_problems(name: str, entries, root: pathlib.Path, default_hooks: set
         if not isinstance(former, list) or not all(_plain_name(f, ".py") for f in former):
             problems.append("%s: %r of %s is not a list of plain .py names" % (name, af.DISABLED_FORMER, hook))
         row = entry.get(af.DISABLED_ROW)
-        if not (isinstance(row, dict) and isinstance(row.get(af.ROW_EVENT), str) and row[af.ROW_EVENT]
-                and isinstance(row.get(af.ROW_ARGS, []), list)
-                and all(isinstance(a, str) for a in row.get(af.ROW_ARGS, []))
-                and isinstance(row.get(af.ROW_MATCHER, ""), str)):
+        rows = row if isinstance(row, list) and row else [row]  # issue #262: one row object, or a non-empty list of them
+        if not all(isinstance(r, dict) and isinstance(r.get(af.ROW_EVENT), str) and r[af.ROW_EVENT]
+                   and isinstance(r.get(af.ROW_ARGS, []), list)
+                   and all(isinstance(a, str) for a in r.get(af.ROW_ARGS, []))
+                   and isinstance(r.get(af.ROW_MATCHER, ""), str)
+                   and (af.ROW_IF not in r or (isinstance(r[af.ROW_IF], str) and r[af.ROW_IF].strip())) for r in rows):
             problems.append("%s: the registration of disabled hook %s needs an event, optional matcher and "
-                            "args (the row older installs carry)" % (name, hook))
+                            "args (the row older installs carry), as one row or a list of rows" % (name, hook))
         note = entry.get(af.DISABLED_NOTE)
         if not _plain_name(note, ".md") or not (folder / note).is_file():
             problems.append("%s: the note %r of disabled hook %s is not a .md file in the add-on folder"
@@ -1127,12 +1133,20 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
             "codegraph-turn-reset.py": "900db4ad8fe4eb7aab83db6f834072a84c66b49cb554059a457ee301b002dd03",
             "codegraph-turn-tracker.py": "7e2daa3aead78342d70d87db6565ffdaccc03d9f39b4f80c04088ec7e7751dbc",
         }
+        _disabled_hashes = {e.get(af.DISABLED_HOOK): e.get(af.DISABLED_HASHES) or [] for e in _data.get(af.KEY_DISABLED) or []}
+
+        def _listed(hook: str) -> list:
+            """Where a codegraph hook's released hashes live: ``released_sha256`` for the active guard, its ``disabled`` entry for the other two."""
+            return (_data.get(af.KEY_RELEASED, {}) or {}).get(hook) or _disabled_hashes.get(hook, [])
+
         _missing = []
         for _hook, _folded in _released_0152.items():
-            if _folded not in (_data.get(af.KEY_RELEASED, {}) or {}).get(_hook, []):
+            if _folded not in _listed(_hook):
                 _missing.append("%s: 0.15.2 hash %s is not listed" % (_hook, _folded))
-        check("codegraph: released_sha256 covers the 0.15.2 copies of the three hooks (pinned from e4f392c)",
-              not _missing and len(_data.get(af.KEY_RELEASED, {})) == 3, "\n".join(_missing))
+        check("codegraph: the released hashes cover the 0.15.2 copies of the three hooks (pinned from e4f392c); the guard's are in "
+              "released_sha256 and the tracker's and reset hook's moved into their disabled entries",
+              not _missing and sorted(_data.get(af.KEY_RELEASED, {})) == ["codegraph-first-guard.py"]
+              and sorted(_disabled_hashes) == ["codegraph-turn-reset.py", "codegraph-turn-tracker.py"], "\n".join(_missing))
         # The 0.16.2 copies (origin/master at the merge of issue #271) are released too: the 0.16.3 hooks replace them.
         # Pinned literals (folded SHA-256 of each hook at 0.16.2; the tracker did not change between 0.15.2 and 0.16.2).
         _released_0162 = {
@@ -1142,10 +1156,42 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
         }
         _missing_0162 = []
         for _hook, _folded in _released_0162.items():
-            if _folded not in (_data.get(af.KEY_RELEASED, {}) or {}).get(_hook, []):
+            if _folded not in _listed(_hook):
                 _missing_0162.append("%s: 0.16.2 hash %s is not listed" % (_hook, _folded))
-        check("codegraph: released_sha256 covers the 0.16.2 copies of the three hooks (pinned literals)",
+        check("codegraph: the released hashes cover the 0.16.2 copies of the three hooks (pinned literals)",
               not _missing_0162, "\n".join(_missing_0162))
+        # Issue #262: the 0.16.5 copies (the release before the cut-over) are released too. An install on 0.16.5 carries them, and a
+        # guard copy that is not listed would be refused as edited. Pinned literals (folded SHA-256 at the 0.16.5 release, 2c79ddd).
+        _released_0165 = {
+            "codegraph-first-guard.py": "e48725ec3d984269b0bae51f23e2bc38b8d1aba1e89be0978617b6734b75e831",
+            "codegraph-turn-reset.py": "c29895fe27d098d943c804308b16c25606a5f712505a7c805d0488571a4f2492",
+            "codegraph-turn-tracker.py": "f0cf188e8adf197fb54f6bb59ea0e159b15d32ddc388c5445061f6da557d169d",
+        }
+        _missing_0165 = [("%s: 0.16.5 hash %s is not listed" % (_hook, _folded)) for _hook, _folded in _released_0165.items()
+                         if _folded not in _listed(_hook)]
+        check("codegraph: the released hashes cover the 0.16.5 copies of the three hooks (pinned literals)", not _missing_0165,
+              "\n".join(_missing_0165))
+        _guard_now = hashlib.sha256((ADDONS_DIR / "codegraph" / "hooks" / "codegraph-first-guard.py").read_bytes()
+                                    .replace(b"\r\n", b"\n")).hexdigest()
+        check("codegraph: the cut-over guard's own folded hash is in released_sha256, labelled 0.17.0 (the landing version)",
+              _guard_now in _listed("codegraph-first-guard.py")
+              and (_data.get(af.KEY_RELEASED_VERSIONS, {}).get("codegraph-first-guard.py") or {}).get(_guard_now) == "0.17.0",
+              "guard hash %s, labels %r" % (_guard_now, (_data.get(af.KEY_RELEASED_VERSIONS, {}) or {}).get("codegraph-first-guard.py")))
+        _disabled_rows = {}
+        for _entry in _data.get(af.KEY_DISABLED) or []:
+            _rows_of = _entry.get(af.DISABLED_ROW)
+            for _r in (_rows_of if isinstance(_rows_of, list) else [_rows_of]):
+                _disabled_rows.setdefault(_entry.get(af.DISABLED_HOOK), set()).add((_r.get(af.ROW_EVENT), _r.get(af.ROW_MATCHER) or None))
+        check("codegraph: the disabled entries carry the tracker's two rows and the reset hook's one row (a registration may be a list)",
+              _disabled_rows == EXPECTED_DISABLED_CODEGRAPH_ROWS, "rows %r" % (_disabled_rows,))
+        check("codegraph: the released hashes moved out of the top level: no tracker or reset key is left in released_sha256 or released_versions",
+              not (set(_data.get(af.KEY_RELEASED, {})) | set(_data.get(af.KEY_RELEASED_VERSIONS, {}))) & set(_disabled_hashes),
+              "left: %s" % sorted((set(_data.get(af.KEY_RELEASED, {})) | set(_data.get(af.KEY_RELEASED_VERSIONS, {}))) & set(_disabled_hashes)))
+        _note_text = (ADDONS_DIR / "codegraph" / "DISABLED.md").read_text(encoding="utf-8") if (ADDONS_DIR / "codegraph" / "DISABLED.md").is_file() else ""
+        for _label, _needle in (("what the tracker did", "tracker"), ("what the reset hook did", "reset hook"), ("the Connection notice", "Connection notice"),
+                                ("the cost removed", "104.7 ms"), ("the tracker's cost", "101.4 ms"), ("how to turn them back on", "turn them back on"),
+                                ("the rollback by a revert release", "revert release"), ("step A", "Step A"), ("step B", "Step B")):
+            check("codegraph DISABLED.md states %s" % _label, _needle in _note_text, "%r is not in DISABLED.md" % _needle)
         # Controls for the two validators above: they are test code, so they pass today, and they prove the checks can fail.
         _base = {af.KEY_HOOKS: ["a.py", "b.py"], af.KEY_PERMISSIONS_ALLOW: [CODEGRAPH_WILDCARD],
                  af.KEY_RELEASED: {"a.py": ["0" * 64], "b.py": ["f" * 64]}}
@@ -1173,12 +1219,14 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
         check("codegraph: released_versions labels every hash of released_sha256 with a release version, and only those",
               af.KEY_RELEASED_VERSIONS in _data and not _version_problems,
               "\n".join(_version_problems) or "no %r key" % af.KEY_RELEASED_VERSIONS)
-        check("codegraph: every registration row's if is a non-empty string, and the tracker's Bash row carries Bash(codegraph *)",
+        _tracker_rows = [e.get(af.DISABLED_ROW) for e in _data.get(af.KEY_DISABLED) or [] if e.get(af.DISABLED_HOOK) == "codegraph-turn-tracker.py"]
+        _tracker_rows = _tracker_rows[0] if _tracker_rows and isinstance(_tracker_rows[0], list) else (_tracker_rows or [[]])[0]
+        check("codegraph: every active registration row's if is a non-empty string, and the disabled tracker's Bash row still carries "
+              "Bash(codegraph *) and its cli argument (the row older installs carry)",
               not row_if_problems(_name, _data) and any(
-                  r.get(af.ROW_HOOK) == "codegraph-turn-tracker.py" and r.get(af.ROW_MATCHER) == "Bash"
-                  and r.get(af.ROW_IF) == "Bash(codegraph *)" and r.get(af.ROW_ARGS) == ["cli"]
-                  for r in _data.get(af.KEY_ROWS) or []),
-              "rows: %r" % (_data.get(af.KEY_ROWS),))
+                  r.get(af.ROW_MATCHER) == "Bash" and r.get(af.ROW_IF) == "Bash(codegraph *)" and r.get(af.ROW_ARGS) == ["cli"]
+                  for r in _tracker_rows),
+              "tracker rows: %r" % (_tracker_rows,))
         _vbase = {af.KEY_HOOKS: ["a.py"], af.KEY_RELEASED: {"a.py": ["0" * 64, "f" * 64]},
                   af.KEY_RELEASED_VERSIONS: {"a.py": {"0" * 64: "0.9.9", "f" * 64: "0.16.1"}}}
         check("control: a fully labelled released_versions is accepted", not released_version_problems("demo", _vbase))
@@ -1379,6 +1427,18 @@ with tempfile.TemporaryDirectory(prefix="addon-controls-") as _ctl_name:
     _m[af.KEY_DISABLED] = [_disabled_entry()]
     check("control: a well-formed disabled hook entry has no problem", _ctl_problems(_m) == [],
           str(_ctl_problems(_m)))
+    _m = _docs_only()
+    _m[af.KEY_DISABLED] = [dict(_disabled_entry(), **{af.DISABLED_ROW: [
+        {af.ROW_EVENT: "PostToolUse", af.ROW_MATCHER: "Bash", af.ROW_ARGS: ["cli"], af.ROW_IF: "Bash(x *)"},
+        {af.ROW_EVENT: "PostToolUse", af.ROW_ARGS: []}]})]
+    check("control (issue #262): a disabled registration may be a list of rows, each with an optional if",
+          _ctl_problems(_m) == [], str(_ctl_problems(_m)))
+    for _label, _bad_row in (("an empty list", []), ("a list holding a row with no event", [{af.ROW_ARGS: []}]),
+                             ("a list holding a row whose if is blank", [{af.ROW_EVENT: "PostToolUse", af.ROW_IF: " "}]),
+                             ("a string", "PostToolUse")):
+        _m = _docs_only()
+        _m[af.KEY_DISABLED] = [dict(_disabled_entry(), **{af.DISABLED_ROW: _bad_row})]
+        check("control (issue #262): a disabled registration that is %s is reported" % _label, bool(_ctl_problems(_m)))
     _m = _docs_only()
     _m[af.KEY_DISABLED] = [dict(_disabled_entry(), **{af.DISABLED_HOOK: "gone.py"})]
     check("control I-3: a disabled hook whose file does not exist is reported", bool(_ctl_problems(_m)))
