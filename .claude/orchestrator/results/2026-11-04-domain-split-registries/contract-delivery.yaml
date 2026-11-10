@@ -1,0 +1,31 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/337
+number: 337
+head_ref: fix/235-domain-split-registries
+base_ref: master
+base_is_default: true
+commit: d3cd07b2dd5d51324a45c62f5ffc176accd23d8d
+merged_at: '2026-11-10T03:24:37Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-10T03:45:22.163721+00:00'
+blocks_recorded: []
+blocks_already_recorded:
+- t1-reconcile-the-duplicate-vocabulary-entries
+- t2-extract-the-shared-apply-and-plugin-root-helpers
+- t3-layout-spec-shared-reader-structure-lint-and-digest
+- t4-single-write-path-and-journal-tracker
+- t5-script-readers-through-the-resolver
+- t6-migration-0001-layout-gate-and-doctor
+- t7-agent-skill-and-template-instructions
+- t8-plugin-registries-on-layout-2-registry-appends-and-docs
+- t9-review
+- t10-fix-the-t9-review-findings
+- t11-review
+- t12-merge-the-default-branch-into-the-parent-branch
+- t13-fix-the-t11-review-findings
+- t14-review
+- t15-merge-the-default-branch-into-the-parent-branch-again
+- t16-review
+- t17-complete-the-hook-registration-check-s-vendored-file-list
+- t18-review

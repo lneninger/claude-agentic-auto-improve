@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-11-04
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-11-10, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/250, https://github.com/lneninger/claude-agentic-auto-improve/pull/252, https://github.com/lneninger/claude-agentic-auto-improve/pull/254, https://github.com/lneninger/claude-agentic-auto-improve/pull/256, https://github.com/lneninger/claude-agentic-auto-improve/pull/258, https://github.com/lneninger/claude-agentic-auto-improve/pull/273, https://github.com/lneninger/claude-agentic-auto-improve/pull/278, https://github.com/lneninger/claude-agentic-auto-improve/pull/280, https://github.com/lneninger/claude-agentic-auto-improve/pull/285, https://github.com/lneninger/claude-agentic-auto-improve/pull/294, https://github.com/lneninger/claude-agentic-auto-improve/pull/299, https://github.com/lneninger/claude-agentic-auto-improve/pull/309, https://github.com/lneninger/claude-agentic-auto-improve/pull/312, https://github.com/lneninger/claude-agentic-auto-improve/pull/315, https://github.com/lneninger/claude-agentic-auto-improve/pull/321, https://github.com/lneninger/claude-agentic-auto-improve/pull/323, https://github.com/lneninger/claude-agentic-auto-improve/pull/329, https://github.com/lneninger/claude-agentic-auto-improve/pull/333, https://github.com/lneninger/claude-agentic-auto-improve/pull/337; 4 checklist items from review reports, 0 with no structured evidence; not performed (disclosed on #240): none; owner confirmed resolved: none
 **Work Item Brief:** .claude/work-items/2026-11-04-235-domain-split-registries.md
 **Tracking issue:** pending (opened by `/design-first` Step 3.4)
 **Budget:** 18,000 tokens (XL contract). Superseded text and every critique round live in `.claude/contract-history/2026-11-04-domain-split-registries.round-{1,2,3}.md`.
@@ -2240,11 +2241,11 @@ PRIOR_FINDINGS:
 
 `pr_merged.py` fills this list when the contract's work is merged and nothing is pending. Do not tick lines by hand.
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [x] Implementation matches Data Shapes exactly — evidence: .claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md
+- [x] Reused Mechanisms are actually reused (no parallel implementations introduced) — evidence: .claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md
+- [x] New Mechanisms (if any) promoted to `MECHANISMS.md` — evidence: .claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md
+- [x] New vocabulary terms promoted to `VOCABULARY.md` — evidence: .claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md
+- [ ] Integration surfaces reflected on both backend and frontend sides — not applicable (.claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md)
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — not applicable (.claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md)
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — not applicable (.claude/reviews/2026-11-04-domain-split-registries/t16-review-fullstack-code-reviewer.md)
+- [x] `Status` flipped to `implemented`
