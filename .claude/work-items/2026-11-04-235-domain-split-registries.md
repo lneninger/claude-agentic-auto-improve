@@ -13,9 +13,9 @@ branch: fix/235-domain-split-registries
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261104-bug-235-domain-split-registries
 north_stars: none
 contract: .claude/concepts/2026-11-04-domain-split-registries.md
-pr: none
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/337
+issue_link: closes
+status: shipped
 created: 2026-11-04
 ---
 
@@ -77,3 +77,6 @@ XL — new layout spec, a new writer script, a shared resolver touching about te
 
 ## Routing
 non-trivial → /design-first (mandatory; contract with parent branch expected)
+
+## Run log
+- 2026-11-10: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/250, https://github.com/lneninger/claude-agentic-auto-improve/pull/252, https://github.com/lneninger/claude-agentic-auto-improve/pull/254, https://github.com/lneninger/claude-agentic-auto-improve/pull/256, https://github.com/lneninger/claude-agentic-auto-improve/pull/258, https://github.com/lneninger/claude-agentic-auto-improve/pull/273, https://github.com/lneninger/claude-agentic-auto-improve/pull/278, https://github.com/lneninger/claude-agentic-auto-improve/pull/280, https://github.com/lneninger/claude-agentic-auto-improve/pull/285, https://github.com/lneninger/claude-agentic-auto-improve/pull/294, https://github.com/lneninger/claude-agentic-auto-improve/pull/299, https://github.com/lneninger/claude-agentic-auto-improve/pull/309, https://github.com/lneninger/claude-agentic-auto-improve/pull/312, https://github.com/lneninger/claude-agentic-auto-improve/pull/315, https://github.com/lneninger/claude-agentic-auto-improve/pull/321, https://github.com/lneninger/claude-agentic-auto-improve/pull/323, https://github.com/lneninger/claude-agentic-auto-improve/pull/329, https://github.com/lneninger/claude-agentic-auto-improve/pull/333, https://github.com/lneninger/claude-agentic-auto-improve/pull/337); contract 2026-11-04-domain-split-registries flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #240: none
