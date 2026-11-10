@@ -36,6 +36,15 @@ Usage:
   py -3 .claude/scripts/auto_improve_finish_install.py record-registrations --project . [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py record-registrations --project . --apply \\
       --expect-sha256 <plan hash>
+  py -3 .claude/scripts/auto_improve_finish_install.py protect-databases --project . [--name <database>]... [--json]
+  py -3 .claude/scripts/auto_improve_finish_install.py protect-databases --project . [--name <database>]... --apply \\
+      --expect-sha256 <plan hash> [--confirm-narrowing]
+
+The ``protect-databases`` subcommand appends the database names the person confirmed to ``protected_databases`` in
+the project's ``.claude/hooks/db-destructive-guard.rules.json`` (see the section "The database guard's protected
+names" below). It only appends: existing entries keep their bytes and order, every other byte is unchanged, and it
+never reads or writes ``production_path_allowlist`` or ``human_only_commands``, never edits a ``.sql`` file and never
+runs a database command.
 
 The ``record-registrations`` subcommand records the project's hook registrations: it reads
 ``.claude/settings.json`` through the one Settings shape validator (``check_hook_registrations.load_settings``)
@@ -191,10 +200,15 @@ REFUSAL_CODES: Tuple[str, ...] = (
     "hook-registration-profile-unreadable",
     "project-hook-launcher-missing",
     "codegraph-tool-named",
+    "rules-unreadable",
+    "name-invalid",
+    "name-is-disposable",
+    "narrowing-unconfirmed",
+    "guard-unreadable",
 )
 
 _ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing",
-                      "addon-manifest-missing", "project-hook-launcher-missing")
+                      "addon-manifest-missing", "project-hook-launcher-missing", "guard-unreadable")
 
 # Refusal code -> process exit code (3 environment problem, 2 operator-correctable).
 EXIT_CLASS: Dict[str, int] = {
@@ -1115,6 +1129,12 @@ def _scan_env_vars(hooks_dir: Path) -> List[str]:
     return sorted(found - _ENV_EXCLUDED)
 
 
+#: What to run while the database guard's rules name no real database (the rules state is ``absent-fail-closed`` or
+#: ``template-placeholders``): the skill that appends the project's own database names.
+DB_RULES_NEXT_STEP = ("The database guard has no list of this project's own databases yet. Run "
+                      "/auto-improve-database-guard-install to add them.")
+
+
 def _db_rules_state(install: Path) -> str:
     data = _load_json_lenient(install / ".claude" / "hooks" / "db-destructive-guard.rules.json")
     names = data.get("protected_databases") if isinstance(data, dict) else None
@@ -1211,6 +1231,8 @@ def _readiness(project: Path, home: Path, verdict: Result, platform: str) -> Res
         "not-verifiable": list(NOT_VERIFIABLE), "code-search-first-note": CODE_SEARCH_NOTE,
         "add-ons": _addon_listing(install),
     }
+    if report["database-guard-rules"] in ("absent-fail-closed", "template-placeholders"):
+        report["database-guard-rules-next"] = DB_RULES_NEXT_STEP
     if posix:
         report["platform-note"] = PLATFORM_NOTE
     return report
@@ -3793,6 +3815,429 @@ def apply_hook_registration_profile(project: Path, expect_sha256: str) -> Dict[s
 
 
 # =======================================================================================
+# The database guard's protected names (protect-databases)
+# =======================================================================================
+#
+# Contract 2026-10-13-database-guard-names-in-rules-file, Commands "Protect databases". The subcommand
+# APPENDS names to ``protected_databases`` in the project's rules file and nothing else: existing entries
+# keep their bytes and order, every byte outside the array is unchanged, ``production_path_allowlist`` and
+# ``human_only_commands`` are never read or written, no ``.sql`` file is edited and no database command is
+# run. It prints the server-trigger change and the install command; a person runs them.
+
+DB_RULES_REL = ".claude/hooks/db-destructive-guard.rules.json"
+DB_GUARD_REL = ".claude/hooks/db-destructive-guard.py"
+DB_NAMES_KEY = "protected_databases"
+#: A name the guard can match with word boundaries: letters, digits and underscores, not starting with a digit.
+DB_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+#: Tracked configuration files whose connection strings are evidence for a proposed name.
+DB_CONFIG_SUFFIXES = (".json", ".config", ".yml", ".yaml", ".toml", ".ini", ".properties", ".xml", ".env")
+DB_CONFIG_SKIP = ("package-lock.json", "yarn.lock", "composer.lock")
+DB_CONFIG_MAX_BYTES = 1_000_000
+DB_EVIDENCE_MAX = 5
+DB_CONNECTION_RE = re.compile(r"(?:\bDatabase|\bInitial\s+Catalog)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+DB_TRIGGER_SQL_REL = "tools/db-protection/install-dev-db-protect-trigger.sql"
+DB_TRIGGER_IN_RE = re.compile(r"\bIN\s*\(([^)]*)\)", re.IGNORECASE)
+DB_NARROWING_STATEMENT = (
+    "Today the guard stops writes to every database in this project, because no list exists. After this "
+    "change it stops writes only to the databases listed; writes to any other database are no longer stopped "
+    "by this check. Dropping a database still needs a disposable name.")
+DB_DROP_STATEMENT = (
+    "Only a database whose name carries an allow-listed disposable suffix (_DryRun, _MigrationVerify, "
+    "_Sandbox, _Scratch, _Throwaway, _Test_<hex>, _E2E_<hex>, _Temp_<hex>), an in-memory SQLite database and "
+    "tempdb may be dropped. Nothing on the protected list can be.")
+DB_TRIGGER_NOTE = ("The server trigger's IN list is the workstation-wide list of protected names. This command "
+                   "never edits or installs it: a person runs the printed install command once per workstation, "
+                   "from PowerShell or cmd.")
+DB_DEFAULT_INSTALL_COMMAND = ('sqlcmd -S "(localdb)\\mssqllocaldb" -E -i '
+                              'tools\\db-protection\\install-dev-db-protect-trigger.sql')
+
+
+def _read_db_rules(path: Path) -> Tuple[Optional[Result], Optional[bytes], List[str]]:
+    """The rules file's bytes and protected names, or a ``rules-unreadable`` refusal.
+
+    Strict, like the guard's own loader: UTF-8 with no byte order mark, no duplicate key anywhere, a JSON object,
+    and ``protected_databases`` (absent counts as an empty list) a list of strings."""
+    if not os.path.lexists(str(path)):
+        return None, None, []
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return refusal("rules-unreadable", "the rules file cannot be read: %s; a person repairs it" % exc, path), None, []
+    try:
+        text = data.decode("utf-8")
+        if text.startswith("﻿"):
+            raise ValueError("a byte order mark begins the file (the guard cannot read it)")
+        parsed = json.loads(text, object_pairs_hook=_strict_pairs)
+        if not isinstance(parsed, dict):
+            raise ValueError("the top level is not an object")
+        names = parsed.get(DB_NAMES_KEY, [])
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ValueError("%s is not a list of strings" % DB_NAMES_KEY)
+    except (ValueError, UnicodeDecodeError) as exc:  # _DuplicateKey and JSONDecodeError are ValueErrors
+        return refusal("rules-unreadable", "the rules file is not usable (%s); a person repairs it by hand, "
+                       "nothing was written" % exc, path), None, []
+    return None, data, list(names)
+
+
+def _load_disposable_patterns(path: Path) -> Optional[List[Any]]:
+    """The guard's own ``DISPOSABLE_RE`` (a list of ``(label, compiled pattern)``), loaded from the guard file by
+    path; ``None`` when the file cannot be loaded. The import leaves ``sys.path`` and ``sys.modules`` as it found them."""
+    import importlib.util
+    saved_path = list(sys.path)
+    saved_modules = set(sys.modules)
+    try:
+        spec = importlib.util.spec_from_file_location("_database_guard_for_names", str(path))
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        patterns = getattr(module, "DISPOSABLE_RE", None)
+        if not isinstance(patterns, list) or not patterns or not all(hasattr(rx, "search") for _l, rx in patterns):
+            return None
+        return list(patterns)
+    except BaseException:  # noqa: BLE001 -- a guard that exits or raises on load is "cannot be loaded"
+        return None
+    finally:
+        sys.path[:] = saved_path
+        for added in set(sys.modules) - saved_modules:
+            sys.modules.pop(added, None)
+
+
+def _git_tracked_files(project: Path) -> List[str]:
+    return [line for line in _git_output(project, "ls-files").splitlines() if line.strip()]
+
+
+def _is_config_file(rel: str) -> bool:
+    name = posixpath.basename(rel)
+    low = name.lower()
+    if low in DB_CONFIG_SKIP or "/node_modules/" in "/" + rel:
+        return False
+    return low.endswith(DB_CONFIG_SUFFIXES) or low.startswith(".env") or low.startswith("appsettings")
+
+
+def _database_proposals(project: Path, protected: Sequence[str], disposable: List[Any]
+                        ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """Names found in tracked configuration files (``Database=`` or ``Initial Catalog=``), with the file and
+    line that names each. A disposable name is listed as excluded with the reason, never proposed."""
+    protected_folded = {n.lower() for n in protected}
+    found: Dict[str, Dict[str, Any]] = {}
+    excluded: Dict[str, Dict[str, str]] = {}
+    for rel in sorted(_git_tracked_files(project)):
+        if not _is_config_file(rel):
+            continue
+        path = project / Path(*rel.split("/"))
+        try:
+            if path.stat().st_size > DB_CONFIG_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            for match in DB_CONNECTION_RE.finditer(line):
+                name = match.group(1)
+                key = name.lower()
+                if key == "tempdb" or any(rx.search(name) for _l, rx in disposable):
+                    excluded.setdefault(key, {
+                        "name": name,
+                        "reason": "%s is a disposable database name (an allow-listed disposable suffix, or tempdb): "
+                                  "it can never be protected, because it is meant to be dropped" % name})
+                    continue
+                entry = found.setdefault(key, {"name": name, "evidence": [], "already-protected": key in protected_folded})
+                if len(entry["evidence"]) < DB_EVIDENCE_MAX:
+                    entry["evidence"].append({"path": rel, "line": number})
+    return [found[k] for k in sorted(found)], [excluded[k] for k in sorted(excluded)]
+
+
+def _json_string_end(text: str, start: int) -> int:
+    """Index just past the JSON string that starts at ``start`` (a double quote)."""
+    match = _STRING_AT.match(text, start)
+    if match is None:
+        raise ValueError("a string was expected at offset %d" % start)
+    return match.end()
+
+
+def _scan_object_members(text: str) -> Tuple[int, int, List[Tuple[str, int, int]]]:
+    """For the top-level object of ``text``: ``(open_brace, close_brace, members)`` where each member is
+    ``(key, value_start, value_end)``. Strict enough for a file that already parsed as a JSON object."""
+    i = _scan_space(text, 0)
+    if i >= len(text) or text[i] != "{":
+        raise ValueError("the top level is not an object")
+    opening = i
+    i += 1
+    members: List[Tuple[str, int, int]] = []
+    while True:
+        i = _scan_space(text, i)
+        if text[i] == "}":
+            return opening, i, members
+        if text[i] == ",":
+            i += 1
+            continue
+        key_end = _json_string_end(text, i)
+        key = json.loads(text[i:key_end])
+        i = _scan_space(text, key_end)
+        if text[i] != ":":
+            raise ValueError("a colon was expected after a key")
+        value_start = _scan_space(text, i + 1)
+        value_end = _scan_value_end(text, value_start)
+        members.append((key, value_start, value_end))
+        i = value_end
+
+
+def _file_style(text: str, region_start: int, region_end: int) -> Tuple[str, str]:
+    """``(newline, indent)`` of the lines in ``text[region_start:region_end]``: the file's own line ending, and the
+    indentation of the first line that begins with a non-space character inside the region."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    for match in re.finditer(r"\n([ \t]*)\S", text[region_start:region_end]):
+        return newline, match.group(1)
+    return newline, "  "
+
+
+def _inline_list(names: Sequence[str]) -> str:
+    return "[" + ", ".join(json.dumps(n, ensure_ascii=False) for n in names) + "]"
+
+
+def _append_to_array(text: str, start: int, end: int, add: Sequence[str]) -> str:
+    """``text`` with ``add`` appended inside the array ``text[start:end]`` (``[`` to just past ``]``), in the file's
+    own indentation and line ending. Every byte outside the array, and every old entry, is kept."""
+    inner_start, inner_end = start + 1, end - 1
+    items = [m.end() for m in _STRING_AT.finditer(text, inner_start, inner_end)]
+    newline = "\r\n" if "\r\n" in text else "\n"
+    quoted = [json.dumps(n, ensure_ascii=False) for n in add]
+    if items:
+        last = items[-1]
+        multiline = "\n" in text[inner_start:inner_end]
+        if multiline:
+            line_start = text.rfind("\n", inner_start, last - 1) + 1
+            first_item = _STRING_AT.search(text, inner_start, inner_end)
+            indent_source = text.rfind("\n", inner_start, first_item.start()) + 1 if first_item else line_start
+            indent = re.match(r"[ \t]*", text[indent_source:]).group(0)
+            piece = "".join("," + newline + indent + q for q in quoted)
+        else:
+            piece = "".join(", " + q for q in quoted)
+        return text[:last] + piece + text[last:]
+    # an empty array
+    if "\n" in text[inner_start:inner_end]:
+        close_line = text.rfind("\n", inner_start, inner_end) + 1
+        closing_indent = re.match(r"[ \t]*", text[close_line:]).group(0)
+        body = newline + "".join(closing_indent + "  " + q + ("," if k < len(quoted) - 1 else "") + newline
+                                 for k, q in enumerate(quoted)) + closing_indent
+        return text[:inner_start] + body + text[inner_end:]
+    return text[:inner_start] + ", ".join(quoted) + text[inner_end:]
+
+
+def _add_names_key(text: str, add: Sequence[str]) -> str:
+    """``text`` with ``protected_databases`` added as the LAST key of the top-level object."""
+    opening, closing, members = _scan_object_members(text)
+    newline, indent = _file_style(text, opening, closing)
+    member = '"%s": %s' % (DB_NAMES_KEY, _inline_list(add))
+    if members:
+        last_end = members[-1][2]
+        return text[:last_end] + "," + newline + indent + member + text[last_end:]
+    if "\n" in text[opening:closing]:
+        return text[:opening + 1] + newline + indent + member + newline + text[closing:]
+    return text[:opening + 1] + member + text[closing:]
+
+
+def _planned_rules_bytes(old: Optional[bytes], current: List[str], add: List[str],
+                         template_root: Optional[Path]) -> bytes:
+    """The rules file after the append. A new file takes the names and the template's comment keys, nothing else."""
+    if old is None:
+        body: Dict[str, Any] = {}
+        template = _load_json_lenient(template_root / Path(*DB_RULES_REL.split("/"))) if template_root else None
+        if isinstance(template, dict):
+            body.update({k: v for k, v in template.items() if isinstance(k, str) and k.startswith("_")})
+        body[DB_NAMES_KEY] = list(add)
+        return (json.dumps(body, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    if not add:
+        return old
+    text = old.decode("utf-8")
+    _open, _close, members = _scan_object_members(text)
+    entry = next(((s, e) for k, s, e in members if k == DB_NAMES_KEY), None)
+    if entry is None:
+        return _add_names_key(text, add).encode("utf-8")
+    return _append_to_array(text, entry[0], entry[1], add).encode("utf-8")
+
+
+def _trigger_change(project: Path, names: Sequence[str]) -> Dict[str, Any]:
+    """The server trigger's IN list as it would read with every protected name, and the install command. Printed
+    for a person; this command never edits the file and never runs the command."""
+    listing = ", ".join("N'%s'" % n for n in names)
+    proposed_in = "IN (%s)" % listing
+    result: Dict[str, Any] = {"file": DB_TRIGGER_SQL_REL, "proposed-in-list": proposed_in,
+                              "install-command": DB_DEFAULT_INSTALL_COMMAND, "current-line": None,
+                              "proposed-line": None, "line": None}
+    sql = project / Path(*DB_TRIGGER_SQL_REL.split("/"))
+    try:
+        text = sql.read_text(encoding="utf-8", errors="replace") if sql.is_file() else ""
+    except OSError:
+        text = ""
+    if not text:
+        result["note"] = "%s is not in this project: add the names to your server trigger's IN list" % DB_TRIGGER_SQL_REL
+        return result
+    for number, line in enumerate(text.splitlines(), start=1):
+        if DB_TRIGGER_IN_RE.search(line):
+            result.update({"line": number, "current-line": line.strip(),
+                           "proposed-line": DB_TRIGGER_IN_RE.sub(lambda _m: proposed_in, line, count=1).strip()})
+            break
+    install = re.search(r"(sqlcmd\b[^\r\n]*)", text)
+    if install:
+        result["install-command"] = install.group(1).strip()
+    return result
+
+
+def _plan_protect_databases(project: Path, names: Sequence[str], plugin_root: Optional[Path],
+                            home: Optional[Path]) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """What a ``protect-databases`` run would write, shared by the preview and the apply so both hash the same."""
+    bad = _check_project(project)
+    if bad:
+        return bad, {}
+    if _manifest_names_plugin(project):
+        return refusal("plugin-source-checkout",
+                       "this project is the plugin's own checkout; its rules file is the shipped template, "
+                       "which this command never fills", project / ".claude-plugin" / "plugin.json"), {}
+    target = project / Path(*DB_RULES_REL.split("/"))
+    problem, old_bytes, current = _read_db_rules(target)
+    if problem:
+        return problem, {}
+    # The first admissible plugin tree (CLAUDE_PLUGIN_ROOT first): no ``needs`` test, so a plugin tree without the
+    # guard file is never silently replaced by another copy of the plugin.
+    root = _separate_plugin_root(project, plugin_root, home)
+    disposable: Optional[List[Any]] = None
+    guard_paths = ([root / Path(*DB_GUARD_REL.split("/"))] if root is not None else []) \
+        + [project / Path(*DB_GUARD_REL.split("/"))]
+    for guard in guard_paths:
+        if guard.is_file():
+            disposable = _load_disposable_patterns(guard)
+            if disposable:
+                break
+    if not disposable:
+        return refusal("guard-unreadable", "the database guard file cannot be loaded, so its disposable-name "
+                       "patterns are unknown; update the plugin or repair the guard file",
+                       guard_paths[0] if guard_paths else project / Path(*DB_GUARD_REL.split("/"))), {}
+    confirmed: List[str] = []
+    for name in names:
+        if not isinstance(name, str) or not DB_NAME_RE.match(name):
+            return refusal("name-invalid", "%r is not a database name the guard can match: use 1 to 128 letters, "
+                           "digits and underscores, not starting with a digit" % (name,), target), {}
+        if name.lower() == "tempdb" or any(rx.search(name) for _l, rx in disposable):
+            return refusal("name-is-disposable", "%s carries a disposable name (an allow-listed disposable "
+                           "suffix or tempdb): such a name is meant to be dropped, so it can never be protected"
+                           % name, target), {}
+        if name.lower() not in {c.lower() for c in confirmed}:
+            confirmed.append(name)
+    present = {n.lower() for n in current}
+    add = [n for n in confirmed if n.lower() not in present]
+    proposals, excluded = _database_proposals(project, current, disposable)
+    new_list = current + add
+    try:
+        new_bytes = _planned_rules_bytes(old_bytes, current, add, root)
+        check_problem, _data, check_names = _read_db_rules_bytes(new_bytes, target)
+    except (ValueError, UnicodeDecodeError) as exc:
+        return refusal("write-failed", "the planned rules file could not be built (%s); nothing was written" % exc,
+                       target), {}
+    if check_problem or check_names != new_list:
+        return refusal("write-failed", "the planned rules file failed its own check (it would not hold exactly the "
+                       "old names followed by the new ones); nothing was written", target), {}
+    narrows = bool(add) and not current
+    plan_sha = _plan_digest(old_bytes if old_bytes is not None else b"absent", new_bytes,
+                            "\n".join(confirmed).encode("utf-8"))
+    return None, {"target": target, "old-bytes": old_bytes, "new-bytes": new_bytes, "plan-sha256": plan_sha,
+                  "current": current, "add": add, "new-list": new_list, "narrows": narrows,
+                  "proposals": proposals, "excluded": excluded, "root": root}
+
+
+def _read_db_rules_bytes(data: bytes, path: Path) -> Tuple[Optional[Result], Optional[bytes], List[str]]:
+    """The same strict reading as ``_read_db_rules``, for bytes that are not on disk yet."""
+    try:
+        text = data.decode("utf-8")
+        if text.startswith("﻿"):
+            raise ValueError("a byte order mark")
+        parsed = json.loads(text, object_pairs_hook=_strict_pairs)
+        names = parsed.get(DB_NAMES_KEY, []) if isinstance(parsed, dict) else None
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ValueError("%s is not a list of strings" % DB_NAMES_KEY)
+    except (ValueError, UnicodeDecodeError) as exc:
+        return refusal("write-failed", "the planned rules file is not valid: %s" % exc, path), None, []
+    return None, data, list(names)
+
+
+def propose_protect_databases(project: Path, names: Sequence[str] = (), claude_home: Optional[Path] = None,
+                              plugin_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Preview the append of ``names`` to the protected list. Writes nothing.
+
+    ``plan-sha256`` binds the old bytes, the planned bytes and the names the person confirmed. When the current
+    list protects every database (no file, no key or an empty list) ``narrows_write_protection`` is true and the
+    plain statement of the narrowing is part of the plan; the apply then needs ``--confirm-narrowing``."""
+    project = Path(project)
+    problem, plan = _plan_protect_databases(project, list(names), plugin_root, claude_home)
+    if problem:
+        return problem
+    result: Dict[str, Any] = {
+        "status": "plan", "target": str(plan["target"]), "existed": plan["old-bytes"] is not None,
+        "plan-sha256": plan["plan-sha256"], "current-list": plan["current"], "names-to-add": plan["add"],
+        "new-list": plan["new-list"], "proposals": plan["proposals"], "excluded": plan["excluded"],
+        "narrows_write_protection": plan["narrows"], "nothing-to-add": not plan["add"],
+        "what-may-be-dropped": DB_DROP_STATEMENT,
+        "server-trigger": _trigger_change(project, plan["new-list"]), "server-trigger-note": DB_TRIGGER_NOTE,
+        "default-branch-note": ("The new names become the protected default-branch list only once a pull request "
+                                "carrying them merges."),
+    }
+    if plan["narrows"]:
+        result["narrowing-statement"] = DB_NARROWING_STATEMENT
+    old, new = plan["old-bytes"], plan["new-bytes"]
+    result["unified-diff"] = "".join(difflib.unified_diff(
+        (old or b"").decode("utf-8").splitlines(keepends=True), new.decode("utf-8").splitlines(keepends=True),
+        fromfile=str(plan["target"]), tofile=str(plan["target"])))
+    return result
+
+
+def apply_protect_databases(project: Path, names: Sequence[str], expect_sha256: str,
+                            confirm_narrowing: bool = False, claude_home: Optional[Path] = None,
+                            plugin_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Append the names the preview showed. Refused (nothing written) when the plan hash is not the current one,
+    when the plan narrows write protection and ``confirm_narrowing`` is false, when the rules file is a symbolic
+    link or sits in a linked folder, or when the write fails. Names already listed (letter case folded) add nothing."""
+    project = Path(project)
+    problem, plan = _plan_protect_databases(project, list(names), plugin_root, claude_home)
+    if problem:
+        return problem
+    target: Path = plan["target"]
+    if expect_sha256 != plan["plan-sha256"]:
+        return refusal("changed-since-preview",
+                       "the rules file or the confirmed names changed since the preview (or the hash was not the "
+                       "plan-sha256); run the preview again", target)
+    trigger = _trigger_change(project, plan["new-list"])
+    if not plan["add"]:
+        return {"status": "nothing-to-do", "target": str(target), "server-trigger": trigger}
+    if plan["narrows"] and not confirm_narrowing:
+        return refusal("narrowing-unconfirmed",
+                       "this change narrows write protection (%s) and was not confirmed; nothing was written. "
+                       "Ask the person the yes-or-no question, then pass --confirm-narrowing" % DB_NARROWING_STATEMENT,
+                       target)
+    linked = _linked_folder_refusal(project, (".claude",), target)
+    if linked:
+        return linked
+    if os.path.islink(str(target)):
+        return refusal("write-failed", "%s is a symbolic link; the apply would write through it, so nothing was "
+                       "written. Edit the file it points to by hand" % target.name, target)
+    try:
+        current = target.read_bytes() if target.is_file() else None
+    except OSError as exc:
+        return refusal("write-failed", "the rules file cannot be read again: %s" % exc, target)
+    if current != plan["old-bytes"]:
+        return refusal("changed-since-preview", "the rules file changed while the apply was running", target)
+    error = _atomic_write(target, plan["new-bytes"])
+    if error:
+        return refusal("write-failed", "the rules file could not be written: %s" % error, target)
+    return {"status": "applied", "target": str(target), "added": plan["add"], "new-list": plan["new-list"],
+            "server-trigger": trigger, "server-trigger-note": DB_TRIGGER_NOTE,
+            "default-branch-note": ("The new names become the protected default-branch list only once a pull "
+                                    "request carrying them merges."),
+            "rollback": ("delete %s" % target) if plan["old-bytes"] is None
+                        else "remove the appended entries from %s by hand (only a person removes a name)" % target}
+
+
+# =======================================================================================
 # Command line
 # =======================================================================================
 
@@ -3842,6 +4287,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("record-registrations", parents=[common],
                    help="record .claude/settings.json's hook registrations in the hook registration profile")
+
+    protect = sub.add_parser("protect-databases", parents=[common],
+                             help="append database names to the database guard's protected list")
+    protect.add_argument("--name", action="append", default=[], metavar="DATABASE",
+                         help="a database name the person confirmed (repeatable; pass it at preview time too, "
+                              "because the plan hash covers the names)")
+    protect.add_argument("--confirm-narrowing", action="store_true",
+                         help="the person answered yes to the narrowing question (needed when no list exists yet)")
     return parser
 
 
@@ -3884,6 +4337,26 @@ def _render_text(result: Result) -> str:
             out.append("stylesheet candidates (pass one with --stylesheet): %s" % ", ".join(sheet["candidates"]))
         if sheet["unified-diff"]:
             out.append(sheet["unified-diff"])
+    if "narrows_write_protection" in result:
+        out.append("current list: %s" % (", ".join(result["current-list"]) or "none"))
+        out.append("names to add: %s" % (", ".join(result["names-to-add"]) or "none"))
+        for p in result.get("proposals", []):
+            where = ", ".join("%s:%s" % (e["path"], e["line"]) for e in p["evidence"])
+            out.append("  proposal %-24s %s%s" % (p["name"], where, "  (already protected)" if p["already-protected"] else ""))
+        for e in result.get("excluded", []):
+            out.append("  excluded %-24s %s" % (e["name"], e["reason"]))
+        if result.get("narrowing-statement"):
+            out.append("NARROWS WRITE PROTECTION: " + result["narrowing-statement"])
+        out.append(result["what-may-be-dropped"])
+    if "server-trigger" in result:
+        trigger = result["server-trigger"]
+        out.append("server trigger IN list: " + trigger["proposed-in-list"])
+        out.append("install command (a person runs this once per workstation, from PowerShell or cmd): "
+                   + trigger["install-command"])
+        if result.get("server-trigger-note"):
+            out.append(result["server-trigger-note"])
+        if result.get("default-branch-note"):
+            out.append(result["default-branch-note"])
     if "copied" in result:
         out.append("copied: %s" % (", ".join(result["copied"]) or "none"))
     if "to-add" in result:
@@ -3934,6 +4407,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = apply_hook_registration_profile(project, args.expect_sha256 or "")
         else:
             result = propose_hook_registration_profile(project)
+    elif args.command == "protect-databases":
+        if args.apply:
+            result = apply_protect_databases(project, args.name, args.expect_sha256 or "",
+                                             args.confirm_narrowing, home)
+        else:
+            result = propose_protect_databases(project, args.name, home)
     elif args.command == "addon-remove":
         if args.apply:
             result = apply_addon_removal(project, args.name, args.expect_sha256 or "", home,

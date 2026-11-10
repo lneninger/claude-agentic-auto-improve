@@ -111,7 +111,7 @@ session starts. To check which copy is live, search the cache and not the market
 ### Installing the hooks turns on enforcement
 
 **The plugin is the source of its hooks.** Its `.claude/hooks/hooks.json` registers thirteen
-hooks, and they are active the moment the plugin is enabled. They are gates, not suggestions.
+entries that run its fourteen hooks, and they are active the moment the plugin is enabled. They are gates, not suggestions.
 
 **A project registers none of them itself.** Claude Code does not merge a project hook with the
 same command in a plugin's `hooks.json`; both run. So a hook that your own `settings.json` also
@@ -134,7 +134,7 @@ What the plugin registers. Every entry is in exec form (`"command": "py"`, `"arg
 | PreToolUse | `PowerShell` | `db-research-readonly-guard.py` | yes |
 | UserPromptSubmit | none | `plan-question-advisor.py` | no, it only adds a reminder in plan mode |
 | PostToolUse | `Edit\|Write\|MultiEdit` | `post-edit-dispatcher.py` (asynchronous) | no |
-| Stop | none | `stop-dispatcher.py` (runs `../scripts/concept_changed_check.py`) | yes, with a list of files no contract covers |
+| Stop | none | `stop-dispatcher.py` (runs `../scripts/concept_changed_check.py`, then `protected-names-warning.py`) | yes, with a list of files no contract covers; the warning never stops a turn |
 | Stop | none | `memory-pager.py` (asynchronous) | no |
 
 - **`concept-gate`** blocks `Edit` / `Write` / `MultiEdit` on non-trivial files inside a project
@@ -163,10 +163,18 @@ What the plugin registers. Every entry is in exec form (`"command": "py"`, `"arg
   not an edit. The guard reads the files a command writes with `_shell_write_targets.py`, a
   helper that ships beside it and is never registered. It costs one program start per shell
   command.
-- **`stop-dispatcher`** is the single Stop seam. It runs one check inside its process:
-  `../scripts/concept_changed_check.py`. If the check exits 2 the turn is stopped and its error
-  text is shown. Any other failure is ignored. A later Stop check would join it without a second
-  program start.
+- **`stop-dispatcher`** is the single Stop seam. It runs two checks inside its process:
+  `../scripts/concept_changed_check.py`, then `protected-names-warning.py`. If a check exits 2 the
+  turn is stopped and its error text is shown. Any other failure is ignored. A later Stop check
+  would join them without a second program start.
+- **`protected-names-warning`** is the turn-end half of the Protected-name check. It compares the
+  protected database names in this tree's `.claude/hooks/db-destructive-guard.rules.json` (and in
+  the `CLAUDE_PROJECT_DIR` tree) with the same file at the tip of the local default-branch ref,
+  using `_protected_names.py`. A removal, a respelling or an added space gives one `systemMessage`
+  per session and set. It never stops a turn, never fetches, and makes no git call when neither
+  the rules file nor the default-branch ref changed since its last run in the session. The same
+  check runs from `.claude/scripts/protected_names_check.py` (exit 0 passes, 10 names removed,
+  11 malformed, 12 unverifiable) in `/verify-before-done` Step 5.7 and in the contract landing.
 - **`concept_changed_check.py`** (the Changed-file check, in the scripts folder) is the default enforcement of the concept
   rule for files a shell command or a program writes, which the edit-tool gate cannot see. At
   the end of a turn it asks git which files changed since the session started and judges each
@@ -905,9 +913,9 @@ this repository has already been bitten by once, so the gaps are stated rather t
 
 | Component | Claude Code | Cursor | OpenAI Codex |
 |---|---|---|---|
-| 33 skills | yes | yes | yes |
+| 34 skills | yes | yes | yes |
 | 15 agents | yes | yes | no — not a component of the portable Agent Plugins standard |
-| 13 hooks | yes | no | no |
+| 14 hooks | yes | no | no |
 | 7 working agreements, delivered by a hook | yes | no | no |
 | scripts, templates, references, registries | yes, in the plugin's own tree | yes | yes |
 
@@ -970,12 +978,12 @@ plugin.json                  Agent Plugins manifest -- Cursor and OpenAI Codex
   plugin.json                Cursor-specific manifest (adds agents)
 .agents/plugins/
   marketplace.json           OpenAI Codex marketplace
-skills/          33 generic skills          (plugin root -- all three providers)
+skills/          34 generic skills          (plugin root -- all three providers)
 agents/          15 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    7 shipped working agreements, delivered at session start
   addons/        3 opt-in add-ons (addon.json + hook files), never registered by hooks.json
-  hooks/         13 generic hooks, a gate launcher, 7 shared helper modules, 6 generic data files
+  hooks/         14 generic hooks, a gate launcher, 8 shared helper modules, 6 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
     tests/       23 hook test suites
   scripts/       23 workflow scripts, 3 shared helper modules
@@ -1020,7 +1028,7 @@ flow, task, design-first, tdd-first, advance, pr-merged, verify-before-done,
 git-commit, ship, debug, north-star, north-star-review, list-contracts,
 contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
 validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install,
-auto-improve-angular-tailwind-install, auto-improve-angular-tailwind-uninstall,
+auto-improve-database-guard-install, auto-improve-angular-tailwind-install, auto-improve-angular-tailwind-uninstall,
 auto-improve-codegraph-install, auto-improve-codegraph-uninstall,
 auto-improve-strict-shell-gate-install, auto-improve-strict-shell-gate-uninstall,
 angular-ui-rules, unit-testing, application-design, website-design, cloud-engineering.
@@ -1030,9 +1038,12 @@ A skill or agent that mentions a skill owned by another plugin follows the rule 
 
 `auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
 skill, run once per project after the plugin is installed. Its name carries the plugin's name
-because you may have several plugins installed. The three `auto-improve-*-install` skills
+because you may have several plugins installed. The three `auto-improve-*-install` add-on skills
 after it are not stages either: each installs one opt-in add-on, and its paired
 `auto-improve-*-uninstall` skill removes it (see "Retired hooks, and how to restore one").
+`auto-improve-database-guard-install` is a one-time setup skill too: it appends your project's own
+database names to the database guard's rules file (`protected_databases`), never removes one, and
+prints the server-trigger line for a person to run.
 `angular-ui-rules` is a rule skill, not a stage: the Angular agents preload it.
 
 The rest form one chain, and each stage hands the next a written artefact rather than a memory
@@ -1069,21 +1080,24 @@ concept-gate, architecture-guard, db-destructive-guard,
 db-research-readonly-guard, memory-pager, working-agreements, post-edit-dispatcher, and the
 four checks the dispatcher runs: integration-check, critic-verdict-tracker,
 contract-status-watcher, journal-post-approval-tracker. Since 0.9.8 also plan-question-advisor
-and stop-dispatcher. That is thirteen hook files. The Changed-file check the Stop dispatcher runs
+and stop-dispatcher. Since 0.18.4 also protected-names-warning. That is fourteen hook files. The
+Changed-file check the Stop dispatcher runs
 is not a hook file: it is the script
 `.claude/scripts/concept_changed_check.py`. Beside the hook files
 sit the gate launcher `gate-launch.py` and the shared helpers `_error_log.py`, `_gate_launch.py`,
 `_memory_common.py`, `_project_paths.py`, `_main_checkout_guard.py`, `_shell_write_targets.py`
-(the shell parser the guard reads write targets with) and
+(the shell parser the guard reads write targets with), `_protected_names.py` (the Protected-name
+check's logic) and
 `_inprocess_hook.py` (the dispatchers' in-process runner), and the generic data files
 `architecture-guard.rules.json`, `architecture-guard.exceptions.json`,
 `integration-check.rules.json`,
 `db-destructive-guard.rules.json` and `working-agreements.rules.json`.
 
-All thirteen hook files are accounted for in `.claude/hooks/hooks.json`, which the Claude
+All fourteen hook files are accounted for in `.claude/hooks/hooks.json`, which the Claude
 manifest references: nine are registered there directly (`concept-gate.py` through the gate
-launcher) and four are named in the post-edit dispatcher's constant list. The Stop dispatcher's
-list names only the Changed-file check script.
+launcher), four are named in the post-edit dispatcher's constant list and one
+(`protected-names-warning.py`) in the Stop dispatcher's list, which also names the Changed-file
+check script.
 That makes thirteen registrations: the nine files registered directly make nine entries, plus
 two more for `db-destructive-guard.py` (three matchers in all), one more for
 `db-research-readonly-guard.py` (two matchers) and one more for the gate launcher (two matchers),

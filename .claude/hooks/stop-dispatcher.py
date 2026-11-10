@@ -2,8 +2,9 @@
 """
 stop-dispatcher.py -- the one Stop seam.
 
-This is the single Stop seam. The Changed-file check (../scripts/concept_changed_check.py) is its
-only member today. A later Stop member added to CHECKS costs no extra program start (a second start
+This is the single Stop seam. Its members today are the Changed-file check
+(../scripts/concept_changed_check.py) and the protected-names warning (protected-names-warning.py,
+which never stops a turn). A later Stop member added to CHECKS costs no extra program start (a second start
 would add 90 to 120 milliseconds to every turn): this dispatcher starts one process and runs the
 members one after another inside it, in the order of CHECKS, through the in-process runner
 (_inprocess_hook.py). Each member gets the same input bytes it would have been given on its own.
@@ -52,6 +53,7 @@ from pathlib import Path
 #: nor named here is a file nothing runs (the manifest suite checks this).
 CHECKS = [
     "../scripts/concept_changed_check.py",
+    "protected-names-warning.py",
 ]
 
 #: The exit code that stops the turn.

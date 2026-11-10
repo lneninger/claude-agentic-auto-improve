@@ -42,7 +42,11 @@ Hook contract (Claude Code PreToolUse):
     stdin:  JSON with { tool_name, tool_input }
     exit 0: allow
     exit 2: block (stderr shown to Claude)
-    other:  error (fails open per project convention)
+    other:  error (a Python crash exits 1, which Claude Code does not treat as a block)
+
+Guard error path (fails CLOSED): an unexpected error before anything has matched, and
+input that is not JSON, exit 2 with the internal-error banner. An empty payload still
+exits 0 (it carries no command), and a payload is never refused for its encoding.
 """
 from __future__ import annotations
 
@@ -565,28 +569,27 @@ _DDL_ALTS = "|".join(
 )
 WRITE_KEYWORD_PATTERN = r"\b(?:" + "|".join(_DML_WRITES) + "|" + _DDL_ALTS + r")\b"
 
-# Path prefixes where protected-DB connection strings legitimately appear in
-# source (production app config / EF persistence layer / docs / this guard
-# script's own helper tooling / Claude config tree).
+# Folders where protected-database connection strings legitimately appear in source
+# (production app config, the persistence layer, the protection tooling, the Claude
+# configuration tree, the documentation). Each entry of the rules file's
+# `production_path_allowlist` names whole folders counted from the project root (the
+# Folder-name match, see _file_in_production_allowlist): never a substring of the path.
 #
-# The .claude/ entry is intentionally broad: concept contracts, plans,
-# templates, journal entries, CLAUDE.md, and hook code all live under .claude/
-# and need to reference the protected DB names verbatim in documentation. The
-# tree is curated config — any write into it is already a deliberate, human-
-# approved action. The Layer 1 SQL Server DDL trigger is the catch-all that
-# protects against any path-allow-list false-negative.
+# The `.claude/` entry is intentionally broad: concept contracts, plans, templates, journal
+# entries, CLAUDE.md and hook code all live under the project's own `.claude/` and need to
+# reference the protected names verbatim in documentation. The tree is curated config, so a
+# write into it is already a deliberate, human-approved action. The Layer 1 SQL Server DDL
+# trigger is the catch-all that protects against any path-allow-list false-negative.
 #
-# Every worktree segment (.claude/worktrees/<name>/) is removed from the
-# file_path before this list is matched (issue #222) -- so this entry still
-# exempts a worktree's OWN .claude/ file, but no longer exempts worktree
-# SOURCE, which is judged exactly like the same file in the main checkout.
+# Every LEADING worktree segment (.claude/worktrees/<name>/) is removed from the file's folders
+# (counted from the project root) before the match, so an entry still exempts a worktree's OWN
+# `.claude/` file, but never worktree SOURCE, which is judged exactly like the same file in the
+# main checkout.
 #
-# Normalized to forward slashes; matched case-insensitively against the same
-# normalization of file_path.
-# Read from the rules file. With no rules file the list narrows to the two
-# entries that name no project, which is the strict direction: fewer paths are
-# allowed to carry a protected-database connection string, never more.
-_DEFAULT_PATH_ALLOWLIST = [".claude/", "/.claude/"]
+# Normalized to forward slashes and lower case. With no rules file the list narrows to the one
+# entry that names no project, which is the strict direction: fewer paths are allowed to carry a
+# protected-database connection string, never more.
+_DEFAULT_PATH_ALLOWLIST = [".claude/"]
 
 
 def _allowlist_from_rules() -> list[str]:
@@ -594,15 +597,59 @@ def _allowlist_from_rules() -> list[str]:
     if raw is None:
         return list(_DEFAULT_PATH_ALLOWLIST)
     if not _is_str_list(raw):
-        # Wrong type: narrow to the built-in defaults, never widen.
+        # Wrong type: narrow to the built-in default, never widen.
         _RULE_PROBLEMS.append("production_path_allowlist")
         return list(_DEFAULT_PATH_ALLOWLIST)
     return raw or list(_DEFAULT_PATH_ALLOWLIST)
 
 
-PRODUCTION_PATH_ALLOWLIST: tuple[str, ...] = tuple(
-    p.strip().lower() for p in _allowlist_from_rules() if p.strip()
-)
+_DRIVE_LETTER_RE = re.compile(r"^[a-z]:", re.IGNORECASE)
+
+
+def _folder_names(path_text: str) -> list[str] | None:
+    """The folder names of a path: backslashes to ``/``, lower case, doubled ``/`` collapsed and ``.``
+    folders dropped. ``None`` when any folder is ``..`` (such a path is never allow-listed)."""
+    names: list[str] = []
+    for part in path_text.replace("\\", "/").lower().split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            return None
+        names.append(part)
+    return names
+
+
+def _allowlist_entry_folders(entry: str) -> tuple[str, ...] | None:
+    """One allow-list entry as folder names, or ``None`` when it is malformed (a drive letter, a
+    ``..`` folder, or nothing left). One leading ``/`` is removed: an entry anchors at the project
+    root, as a ``.gitignore`` entry does."""
+    text = entry.strip().replace("\\", "/").lower()
+    if text.startswith("/"):
+        text = text[1:]
+    if _DRIVE_LETTER_RE.match(text):
+        return None
+    names = _folder_names(text)
+    if not names:
+        return None
+    return tuple(names)
+
+
+def _parse_allowlist(entries: list[str]) -> list[tuple[str, ...]]:
+    parsed: list[tuple[str, ...]] = []
+    for entry in entries:
+        folders = _allowlist_entry_folders(entry)
+        if folders is None:
+            if "production_path_allowlist" not in _RULE_PROBLEMS:
+                _RULE_PROBLEMS.append("production_path_allowlist")  # a malformed entry is skipped and named
+            continue
+        parsed.append(folders)
+    return parsed
+
+
+_ALLOWLIST_FOLDERS: tuple[tuple[str, ...], ...] = tuple(_parse_allowlist(_allowlist_from_rules()))
+
+#: The entries as they are matched, for the block banner.
+PRODUCTION_PATH_ALLOWLIST: tuple[str, ...] = tuple("/".join(f) + "/" for f in _ALLOWLIST_FOLDERS)
 
 
 def _rules_problem_lines() -> list[str]:
@@ -730,31 +777,75 @@ def _extract_file_path(payload: dict) -> str:
     return str(raw).replace("\\", "/").lower()
 
 
+def _base_root_folders(root_names: list[str]) -> list[str] | None:
+    """The folder names of the main checkout the project root belongs to.
+
+    Normal mode: ``_project_paths.checkout_equivalent_path`` of the root. Fallback mode (the helper is
+    missing, or it imports but has no such function, a stale helper): the root cut before its first
+    worktree segment, found with the guard's own marker pattern. ``None`` when it cannot be read."""
+    joined = "/".join(root_names)
+    if _pp_checkout_equivalent_path is not None:
+        return _folder_names(_pp_checkout_equivalent_path(joined))
+    match = _FALLBACK_WORKTREE_MARKER_RE.search("/" + joined)
+    if match is None:
+        return list(root_names)
+    return _folder_names(("/" + joined)[:match.start()])
+
+
+def _strip_leading_worktree_segments(relative: list[str]) -> list[str]:
+    """Remove every worktree segment (three folders) that BEGINS the relative path. A worktree
+    segment anywhere else is not removed. Normal mode asks the helper whether the first three folders
+    alone are a worktree segment; fallback mode uses the marker pattern anchored at the start."""
+    rest = list(relative)
+    while len(rest) >= 3:
+        head = "/".join(rest[:3])
+        if _pp_checkout_equivalent_path is not None:
+            is_segment = _pp_checkout_equivalent_path(head) == ""
+        else:
+            found = _FALLBACK_WORKTREE_MARKER_RE.match("/" + head)
+            is_segment = found is not None and found.end() == len(head) + 1
+        if not is_segment:
+            break
+        rest = rest[3:]
+    return rest
+
+
 def _file_in_production_allowlist(file_path: str) -> bool:
-    """True iff the (normalized, lowercased) file_path starts with one of the
-    PRODUCTION_PATH_ALLOWLIST entries OR contains one of them as a substring.
-    Substring matching is intentional -- file_path on Windows often starts
-    with a drive letter, so an entry like "src/<backend-project>/" must
-    match "d:/dev/.../src/<backend-project>/program.cs"."""
+    """The Folder-name match. True iff an entry of ``production_path_allowlist`` names the first
+    folders of the file's path, counted from the project root (``CLAUDE_PROJECT_DIR``, reduced to its
+    main checkout) after every LEADING worktree segment is removed; folder names are compared whole and
+    without letter case, never as a substring.
+
+    So ``.cs`` matches only a top-level item named ``.cs``; ``src/`` matches ``src/a/b.cs`` but not
+    ``tools/src/x.cs`` or ``srcx/a.cs``; ``.claude/`` matches ``<root>/.claude/concepts/a.md`` and a
+    worktree's own ``.claude/`` file, but not ``src/.claude/x.cs``. A file outside the project root, on
+    another drive or under a sibling folder is never exempt, a ``..`` folder anywhere is never exempt,
+    and with ``CLAUDE_PROJECT_DIR`` unset nothing is allow-listed. The match anchors under the base root
+    in both helper modes.
+
+    Fails CLOSED on any exception: this function feeds ``in_allowlist``, which only ever WIDENS what
+    main() allows, so an error here returns False and the scan runs as if the target were not
+    allow-listed."""
     if not file_path:
         return False
-    # INV-2: the substring test reads the checkout-equivalent path (every
-    # worktree segment removed) of the already-normalised file_path.
-    #
-    # Fail CLOSED on any exception (round 3 task D): this function feeds
-    # `in_allowlist`, which only ever WIDENS what main() allows -- an
-    # exception here must never be allowed to propagate up to main()'s
-    # bare `except Exception` (which fails OPEN, exit 0, skipping the
-    # destructive-command scan entirely). Returning False keeps the scan
-    # running as if the target were NOT in the allow-list.
     try:
-        checkout_equivalent = _segment_test_path(file_path)
-    except Exception:  # noqa: BLE001
+        root_text = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+        if not root_text:
+            return False
+        file_names = _folder_names(file_path)
+        root_names = _folder_names(root_text)
+        if not file_names or not root_names:
+            return False
+        base = _base_root_folders(root_names)
+        if not base or file_names[:len(base)] != base:
+            return False  # outside the project: not allow-listed
+        relative = _strip_leading_worktree_segments(file_names[len(base):])
+        for folders in _ALLOWLIST_FOLDERS:
+            if len(folders) <= len(relative) and tuple(relative[:len(folders)]) == folders:
+                return True
         return False
-    for prefix in PRODUCTION_PATH_ALLOWLIST:
-        if prefix in checkout_equivalent:
-            return True
-    return False
+    except Exception:  # noqa: BLE001 -- fail closed
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1143,7 +1234,7 @@ def _dynamic_labels(text: str, is_shell: bool) -> list[str]:
         # the input. main() then runs the protected-write scan (Pass B) in its handler and fails
         # closed when a pattern matched, a pattern-less trigger is present or Pass B finds a
         # protected-database name, so this can never turn a block into an allow; with no match
-        # at all the hook stays fail-open.
+        # at all the guard refuses the command (Guard error path).
         raise RuntimeError("injected fault: DB_GUARD_FAULT_INJECTION=parser")
     labels: list[str] = []
     for c in _ef_commands(text):
@@ -1678,14 +1769,40 @@ def _fail_closed(payload: dict, tool_name: str, file_path: str, labels: list[str
     return 2
 
 
-def main() -> int:
+def _refuse_unchecked() -> None:
+    """Write the Guard error path banner: the command was not checked, so it is refused."""
     try:
-        raw = sys.stdin.read()
+        sys.stderr.write(
+            "[db-destructive-guard] BLOCKED: the database guard failed with an internal error, so this "
+            "command was not checked and is refused.\n"
+            "The error is in db-guard.log; a person fixes the guard.\n"
+        )
+    except Exception:  # noqa: BLE001 -- the exit code is what refuses the command
+        pass
+
+
+def main() -> int:
+    # Read stdin as bytes and decode it here, so a console code page can never make a payload
+    # undecodable: drop one leading UTF-8 byte order mark, decode as UTF-8 and, on a decoding
+    # failure, decode again with replacement characters and go on checking. Protected names are
+    # letters, digits and underscores, so a replaced byte never hides one.
+    try:
+        raw_bytes = sys.stdin.buffer.read()
+        if raw_bytes.startswith(b"\xef\xbb\xbf"):
+            raw_bytes = raw_bytes[3:]
+        try:
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            log_event(HOOK_NAME, "stdin-decode-replaced", str(exc))
+            raw = raw_bytes.decode("utf-8", errors="replace")
         payload = json.loads(raw) if raw.strip() else {}
     except Exception as exc:
+        # Claude Code sends JSON: only genuinely unparseable input is refused.
         log_event(HOOK_NAME, "stdin-parse-error", str(exc))
-        # Fail open -- agent should not be blocked by hook bug.
-        return 0
+        _refuse_unchecked()
+        return 2
+    if not isinstance(payload, dict):
+        return 0  # valid JSON that carries no tool call: nothing to check
 
     tool_name = payload.get("tool_name") or ""
     if tool_name not in {"Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit"}:
@@ -1739,7 +1856,7 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             protected_db_hits = []
         if not matched_destructive and not protected_db_hits and not _holds_pattern_less_trigger(text):
-            raise  # nothing matched: keep the hook's fail-open contract for a plain bug
+            raise  # nothing matched: the top-level handler refuses the command (Guard error path)
         log_event(HOOK_NAME, "internal-error-after-match", repr(exc))
         return _fail_closed(payload, tool_name, file_path, matched_destructive, exc)
     # A protected-DB-write violation requires BOTH a protected-DB pattern AND
@@ -1936,6 +2053,8 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        # Fail open. Never let a hook bug block legitimate work.
-        log_event(HOOK_NAME, "uncaught-exception", repr(exc))
-        sys.exit(0)
+        # Fail CLOSED (Guard error path): an unexpected error before anything matched means the
+        # command was never checked, so it is refused. The error is in the log.
+        log_event(HOOK_NAME, "uncaught-exception-refused", repr(exc))
+        _refuse_unchecked()
+        sys.exit(2)

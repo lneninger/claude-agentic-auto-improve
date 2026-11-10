@@ -369,7 +369,7 @@ settings file that already has every registration is not rewritten.
 - To finish the other per-project files (the area map, the title conventions, the protected
   names list). This skill does not fill them. They are Quick start step 3.
 - To set up the sync configuration. That is Quick start step 6.
-- To change how a hook behaves, or to give the database guards the project's own database
-  names under a plugin install.
+- To change how a hook behaves. To give the database guards the project's own database
+  names, use `/auto-improve-database-guard-install`.
 - To register hooks for Cursor or Codex. Hooks are Claude-only in this release.
 - Inside the plugin's own checkout. The script refuses it as `plugin-source-checkout`.
