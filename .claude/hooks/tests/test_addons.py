@@ -16,15 +16,14 @@ WHAT IS PINNED
   * none of the installed hooks prints a fallback-mode banner: the helpers the manifest names are enough;
   * angular-tailwind-advisor.py prints the CSS reminder for a UI prompt, stays silent for another prompt, and
     reads the PROJECT's architecture-guard.rules.json first (it names the project's reference document);
-  * the CodeGraph trio (issue #259): with a Project index (.codegraph/codegraph.db) and a configured server the
-    codegraph-first-guard.py blocks a source Read with no marker; codegraph-turn-tracker.py writes the SESSION-keyed
-    marker (turn.json in <Per-user session parent>/auto-improve-codegraph-<session_id>/: the folder
-    auto-improve-codegraph under %LOCALAPPDATA% on Windows, under $XDG_CACHE_HOME or ~/.cache on POSIX; never the
-    system temp folder) after any CodeGraph tool call (and
-    ignores any other tool); the guard then allows the Read; codegraph-turn-reset.py removes the marker so the
-    guard blocks again. The guard fails open, with a logged reason, when there is no index, no server, a disabled
-    server or a subagent; the identical retry of a blocked call is allowed once; the manifest grants the wildcard
-    only and lists released hashes; (issue #271) a folder planted in the shared temp folder opens no gate, an
+  * the CodeGraph guard (issues #259 and #262): with a Project index (.codegraph/codegraph.db) and a configured server
+    codegraph-first-guard.py blocks a source Read when the session transcript shows no CodeGraph use since the last human
+    prompt (a closed turn), and allows it when it does (an mcp__codegraph__* tool use, a Counted `codegraph` command in
+    the Bash tool, or an Agent / Task dispatch); a new human prompt closes the gate again. The tracker and the reset
+    hook are DISABLED add-on hooks: the manifest lists them under ``disabled`` and no install copies them. The guard
+    fails open, with a logged reason, when there is no index, no server, a disabled server, a subagent or a transcript
+    it cannot read; the identical retry of a blocked call is allowed once, in the same prompt; the manifest grants the
+    wildcard only and lists released hashes; (issue #271) a folder planted in the shared temp folder opens no gate, an
     unusable session parent blocks with session-state-unusable, and a run leaves nothing in the real parent or the
     real temp folder;
   * bash-gate.py blocks a redirect into an uncovered source file, allows a covered one and a trivial one,
@@ -122,11 +121,11 @@ class AddonCase(unittest.TestCase):
         self.hooks = {p.name: p for p in self.INSTALLER(self.ADD_ON, self.project)}
 
     def run_hook(self, name: str, payload: dict, *, cwd: Path | None = None, extra_env: dict | None = None,
-                 raw: bytes | None = None) -> Run:
+                 raw: bytes | None = None, argv: list | None = None) -> Run:
         data = raw if raw is not None else json.dumps(payload).encode("utf-8")
         env = {"TMP": str(self.tmp), "TEMP": str(self.tmp), "TMPDIR": str(self.tmp)}
         env.update(extra_env or {})
-        proc = subprocess.run([sys.executable, "-B", str(self.hooks[name])], input=data, capture_output=True,
+        proc = subprocess.run([sys.executable, "-B", str(self.hooks[name])] + list(argv or []), input=data, capture_output=True,
                               cwd=str(cwd or self.project), env=clean_env(self.project, self.home, env),
                               timeout=60)
         return Run(proc)
@@ -315,10 +314,6 @@ class CodegraphAddonTests(AddonCase):
         af.plant_server(self.project)
         self.sid = "s" + uuid.uuid4().hex
 
-    def marker(self, session: str | None = None) -> Path:
-        """The Turn marker: turn.json in the session's folder under the (fixture) Per-user session parent."""
-        return af.session_folder(self.parent(), session or self.sid) / "turn.json"
-
     def parent(self) -> Path:
         """The fixture's Per-user session parent, NOT created here (the hooks create it)."""
         return af.session_parent(self.home, create=False)
@@ -342,11 +337,27 @@ class CodegraphAddonTests(AddonCase):
             pass
         return out
 
-    def legacy_sentinel(self) -> Path:
-        return self.project / ".claude" / ".codegraph-used-this-turn"
+    def transcript(self, *lines: str) -> str:
+        """A session transcript holding ``lines`` (the guard decides from it since the cut-over, issue #262)."""
+        path = self.tmp / "transcripts" / (uuid.uuid4().hex + ".jsonl")
+        af.write_transcript(path, list(lines))
+        return str(path)
+
+    def closed(self) -> str:
+        """This test's CLOSED transcript: one file for the whole test, as a real session has one (a call that names another file
+        reads as a rewritten transcript and fails open)."""
+        if not hasattr(self, "_closed"):
+            self._closed = self.transcript(af.t_human(1))
+        return self._closed
+
+    def append_to_transcript(self, *lines: str) -> None:
+        """Append ``lines`` to this test's transcript: a session's transcript only grows, so the same session sees the same file."""
+        with open(self.closed(), "ab") as fh:
+            fh.write(("\n".join(lines) + "\n").encode("utf-8"))
 
     def payload(self, tool: str, tool_input: dict, **extra) -> dict:
-        body = {"session_id": self.sid, "cwd": str(self.project), "tool_name": tool, "tool_input": tool_input}
+        body = {"session_id": self.sid, "cwd": str(self.project), "tool_name": tool, "tool_input": tool_input,
+                "transcript_path": self.closed()}
         body.update(extra)
         return body
 
@@ -358,104 +369,75 @@ class CodegraphAddonTests(AddonCase):
         self.assertIn("[codegraph-first-guard] allowed", run.err, msg="one stderr line says why: " + run.describe())
         self.assertIn(reason, run.err, msg="and names the reason " + reason + ": " + run.describe())
 
-    def test_a_source_read_with_no_marker_is_blocked_with_the_guards_own_banner(self):
+    def test_a_source_read_with_a_closed_turn_is_blocked_with_the_guards_own_banner(self):
         run = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(run.rc, 2, msg="a source Read with an index, a server and no CodeGraph call this turn must be "
                                         "blocked: " + run.describe())
         self.assertIn("[codegraph-first-guard] BLOCKED", run.err, msg="the guard's own banner: " + run.describe())
         self.assertNoFallbackBanner(run)
 
-    def test_the_tracker_writes_the_session_marker_and_the_guard_then_allows_the_read(self):
+    def test_a_codegraph_call_in_the_transcript_opens_the_gate_and_the_next_prompt_closes_it(self):
         blocked = self.run_hook(self.GUARD, self.read_payload())
-        self.assertEqual(blocked.rc, 2, msg="control: blocked before the tracker ran: " + blocked.describe())
-        tracked = self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "Thing"}))
-        self.assertEqual(tracked.rc, 0, msg=tracked.describe())
-        self.assertTrue(self.marker().is_file(), msg="the tracker must write turn.json in the session's folder under "
-                                                     "the Per-user session parent: " + str(self.marker()))
-        self.assertEqual(self.planted_in_tmp(), [],
-                         msg="and nothing under the system temp folder: " + repr(self.planted_in_tmp()))
-        self.assertFalse(self.legacy_sentinel().exists(), msg="and no longer writes <cwd>/.claude/.codegraph-used-this-turn")
+        self.assertEqual(blocked.rc, 2, msg="control: blocked before any CodeGraph call: " + blocked.describe())
+        self.append_to_transcript(af.t_mcp_use("mcp__codegraph__codegraph_search"), af.t_tool_result())
         allowed = self.run_hook(self.GUARD, self.read_payload())
-        self.assertEqual(allowed.rc, 0, msg="after the tracker ran the same Read is allowed: " + allowed.describe())
+        self.assertEqual(allowed.rc, 0, msg="after a CodeGraph call in this turn the same Read is allowed: " + allowed.describe())
         # The blocked call above issued a retry ticket for this exact Read, so the retry escape would allow it too.
-        # Only the absence of an `allowed (` line proves that the MARKER did it (the escape always prints one).
-        self.assertNotIn("allowed (", allowed.err,
-                         msg="allowed by the marker, not by the retry escape (which prints `allowed (...)`): "
-                             + allowed.describe())
-        for run in (tracked, allowed):
+        # Only the absence of an `allowed (` line proves that the TRANSCRIPT did it (the escape always prints one).
+        self.assertNotIn("allowed (", allowed.err, msg="allowed by the transcript, not by the retry escape: " + allowed.describe())
+        self.assertEqual(self.planted_in_tmp(), [], msg="and nothing under the system temp folder")
+        folder = af.session_folder(self.parent(), self.sid)
+        self.assertFalse((folder / "turn.json").exists(), msg="no Turn marker is written any more")
+        self.assertFalse((self.project / ".claude" / ".codegraph-used-this-turn").exists(), msg="and no legacy sentinel")
+        next_prompt = self.transcript(af.t_human(1), af.t_mcp_use(), af.t_tool_result(), af.t_human(2))
+        again = self.run_hook(self.GUARD, self.read_payload(session_id="s" + uuid.uuid4().hex, transcript_path=next_prompt))
+        self.assertEqual(again.rc, 2, msg="a new human prompt closes the gate again: " + again.describe())
+        for run in (allowed, again):
             self.assertNoFallbackBanner(run)
 
-    def test_a_subagents_tracker_call_opens_the_gate_for_the_parent_session(self):
-        # A subagent's payload carries the PARENT's session_id plus agent_id: the marker lands in the parent's folder.
+    def test_a_subagent_dispatch_opens_the_gate_for_the_main_session(self):
+        # C-7: the parent transcript holds the Agent tool use, not the subagent's own calls. The dispatch opens the turn.
         control = self.run_hook(self.GUARD, self.read_payload())
-        self.assertEqual(control.rc, 2, msg="control: the parent's Read is blocked first: " + control.describe())
-        session = "s" + uuid.uuid4().hex
-        tracked = self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_explore", {"query": "q"},
-                                                           session_id=session, agent_id="a1",
-                                                           agent_type="general-purpose"))
-        self.assertEqual(tracked.rc, 0, msg=tracked.describe())
-        parent = self.run_hook(self.GUARD, self.read_payload(session_id=session))
-        self.assertEqual(parent.rc, 0, msg="the parent's plain Read is allowed: " + parent.describe())
-        self.assertNotIn("allowed (", parent.err,
-                         msg="by the shared marker (nothing printed), not by an escape: " + parent.describe())
+        self.assertEqual(control.rc, 2, msg="control: the main session's Read is blocked first: " + control.describe())
+        for name in ("Agent", "Task"):
+            dispatched = self.transcript(af.t_human(1), af.t_agent_use(name), af.t_tool_result())
+            main = self.run_hook(self.GUARD, self.read_payload(session_id="s" + uuid.uuid4().hex, transcript_path=dispatched))
+            self.assertEqual(main.rc, 0, msg="%s: the main session's plain Read is allowed: %s" % (name, main.describe()))
+            self.assertNotIn("allowed (", main.err, msg="by the transcript (nothing printed), not by an escape: " + main.describe())
+        sub = self.run_hook(self.GUARD, self.read_payload(agent_id="agent-1", agent_type="general-purpose"))
+        self.assertAllowedBecause(sub, "fail-open:subagent")
 
-    def test_the_tracker_writes_the_marker_for_the_explore_tool_and_for_a_future_tool_name(self):
-        for tool, extra in (("mcp__codegraph__codegraph_explore", {"mcp_server": "codegraph"}),
-                            ("mcp__codegraph__codegraph_zz_future_tool", {})):
+    def test_any_codegraph_tool_name_in_the_transcript_opens_the_turn_and_no_other_tool_does(self):
+        for tool in ("mcp__codegraph__codegraph_explore", "mcp__codegraph__codegraph_zz_future_tool"):
             with self.subTest(tool=tool):
-                session = "s" + uuid.uuid4().hex
-                body = {"session_id": session, "cwd": str(self.project), "tool_name": tool,
-                        "tool_input": {"query": "q"}}
-                body.update(extra)
-                run = self.run_hook(self.TRACKER, body)
-                self.assertEqual(run.rc, 0, msg=run.describe())
-                marker = self.marker(session)
-                self.assertTrue(marker.is_file(), msg="any mcp__codegraph__ tool opens the turn: " + str(marker))
-                data = json.loads(marker.read_text(encoding="utf-8"))
-                self.assertEqual(sorted(data), ["pid", "route", "session", "summary", "tool", "ts", "writer"],
-                                 msg="the marker shape (stamped by #271, route added by #295): " + repr(data))
-                self.assertEqual(data["tool"], tool)
-                self.assertEqual(data["writer"], "codegraph-turn-tracker", msg="the stamp names the writer")
-                self.assertEqual(data["session"], session, msg="and the Session key")
+                run = self.run_hook(self.GUARD, self.read_payload(
+                    session_id="s" + uuid.uuid4().hex, transcript_path=self.transcript(af.t_human(1), af.t_mcp_use(tool))))
+                self.assertEqual(run.rc, 0, msg="any mcp__codegraph__ tool opens the turn: " + run.describe())
+        for tool in ("mcp__other__codegraph_search", "Read", "Bash"):
+            with self.subTest(other=tool):
+                line = af.t_assistant({"type": "tool_use", "id": "t", "name": tool, "input": {"command": "ls"}})
+                run = self.run_hook(self.GUARD, self.read_payload(
+                    session_id="s" + uuid.uuid4().hex, transcript_path=self.transcript(af.t_human(1), line)))
+                self.assertEqual(run.rc, 2, msg="%s does not open the gate: %s" % (tool, run.describe()))
 
-    def test_the_tracker_ignores_a_tool_that_is_not_a_codegraph_tool(self):
-        run = self.run_hook(self.TRACKER, self.payload("Bash", {"command": "ls"}))
-        self.assertEqual(run.rc, 0, msg=run.describe())
-        self.assertFalse(self.marker().exists(), msg="only mcp__codegraph__* tools open the gate")
-        # Control: a CodeGraph tool does write it (a legacy tool name still counts), so the absence above is the rule.
-        self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_node", {}))
-        self.assertTrue(self.marker().exists(), msg="control: a codegraph tool writes the marker")
-
-    def test_the_marker_survives_a_directory_change(self):
-        self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_explore", {"query": "q"}))
+    def test_the_gate_follows_the_transcript_not_the_working_directory(self):
+        opened = self.transcript(af.t_human(1), af.t_mcp_use())
         elsewhere = self.project / "src" / "deeper"
         elsewhere.mkdir(parents=True, exist_ok=True)
-        moved = self.payload("Read", {"file_path": str(self.project / "src" / "Thing.cs")}, cwd=str(elsewhere))
+        moved = self.payload("Read", {"file_path": str(self.project / "src" / "Thing.cs")}, cwd=str(elsewhere), transcript_path=opened)
         run = self.run_hook(self.GUARD, moved, cwd=elsewhere)
-        self.assertEqual(run.rc, 0, msg="same session, another cwd: the marker still opens the gate: " + run.describe())
-        other = dict(moved, session_id="s" + uuid.uuid4().hex)
+        self.assertEqual(run.rc, 0, msg="same transcript, another cwd: the gate stays open: " + run.describe())
+        other = dict(moved, session_id="s" + uuid.uuid4().hex, transcript_path=self.closed())
         self.assertEqual(self.run_hook(self.GUARD, other, cwd=elsewhere).rc, 2,
-                         msg="control: another session does not share it")
+                         msg="control: another session with its own closed transcript is blocked")
 
-    def test_the_reset_removes_the_marker_so_the_guard_blocks_again(self):
-        self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "Thing"}))
-        self.assertTrue(self.marker().is_file(), msg="control: the tracker wrote the session marker: " + str(self.marker()))
-        self.assertEqual(self.run_hook(self.GUARD, self.read_payload()).rc, 0,
-                         msg="control: with the marker the Read is allowed")
-        reset = self.run_hook(self.RESET, self.payload("", {}, prompt="next question"))
-        self.assertEqual(reset.rc, 0, msg=reset.describe())
-        self.assertFalse(self.marker().exists(), msg="a new prompt removes the marker")
-        self.assertEqual(self.run_hook(self.GUARD, self.read_payload()).rc, 2,
-                         msg="and the guard blocks the same Read again")
-        self.assertNoFallbackBanner(reset)
-
-    def test_a_non_source_read_is_allowed_without_the_marker(self):
+    def test_a_non_source_read_is_allowed_with_a_closed_turn(self):
         blocked = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(blocked.rc, 2, msg="control: a source Read is blocked: " + blocked.describe())
         run = self.run_hook(self.GUARD, self.read_payload("docs/notes.md"))
         self.assertEqual(run.rc, 0, msg="a markdown Read needs no CodeGraph call: " + run.describe())
 
-    # --- the five reasons to let reads through (issue #259) ---------------------------------------------------------
+    # --- the reasons to let reads through (issues #259 and #262) ----------------------------------------------------
     def test_no_project_index_lets_the_read_through_even_when_a_decoy_codegraph_folder_exists(self):
         for ancestor in af.ancestors_holding(self.project, *af.CODEGRAPH_INDEX):
             if ancestor.resolve() != self.project.resolve():
@@ -487,26 +469,33 @@ class CodegraphAddonTests(AddonCase):
         plain = self.run_hook(self.GUARD, self.read_payload(session_id="s" + uuid.uuid4().hex))
         self.assertEqual(plain.rc, 2, msg="control: the main session's payload (no agent_id) is blocked: " + plain.describe())
 
+    def test_an_unknown_transcript_state_lets_the_read_through_with_its_cause(self):
+        for label, path, cause in (("no transcript_path", None, "no-transcript"), ("a missing file", str(self.tmp / "gone.jsonl"), "no-transcript")):
+            with self.subTest(label):
+                body = self.read_payload(session_id="s" + uuid.uuid4().hex)
+                body.pop("transcript_path")
+                if path is not None:
+                    body["transcript_path"] = path
+                self.assertAllowedBecause(self.run_hook(self.GUARD, body), "fail-open:transcript-" + cause)
+
     def test_the_identical_retry_of_a_blocked_call_is_allowed_once(self):
-        first = self.run_hook(self.GUARD, self.read_payload())
+        first = self.run_hook(self.GUARD, self.read_payload(prompt_id="prompt-1"))
         self.assertEqual(first.rc, 2, msg="control: the first call is blocked: " + first.describe())
-        retry = self.run_hook(self.GUARD, self.read_payload())
+        retry = self.run_hook(self.GUARD, self.read_payload(prompt_id="prompt-1"))
         self.assertEqual(retry.rc, 0, msg="the identical retry is allowed (retry escape): " + retry.describe())
         self.assertIn("retry-escape-used", retry.err, msg="and says so on stderr: " + retry.describe())
-        again = self.run_hook(self.GUARD, self.read_payload())
+        again = self.run_hook(self.GUARD, self.read_payload(prompt_id="prompt-1"))
         self.assertEqual(again.rc, 2, msg="single use: the next identical call is blocked again: " + again.describe())
 
-    def test_the_next_prompt_clears_a_retry_ticket(self):
-        self.assertEqual(self.run_hook(self.GUARD, self.read_payload()).rc, 2, msg="control: blocked, ticket issued")
+    def test_a_retry_ticket_does_not_survive_into_the_next_prompt(self):
+        self.assertEqual(self.run_hook(self.GUARD, self.read_payload(prompt_id="prompt-1")).rc, 2, msg="control: blocked, ticket issued")
         tickets = list(af.session_folder(self.parent(), self.sid).glob("ticket-*"))
         self.assertEqual(len(tickets), 1, msg="the block must issue ticket-<fingerprint> in the Session folder: %s" % tickets)
-        self.run_hook(self.RESET, self.payload("", {}, prompt="next"))
-        self.assertEqual(list(af.session_folder(self.parent(), self.sid).glob("ticket-*")), [],
-                         msg="the reset hook deletes this session's tickets")
-        again = self.run_hook(self.GUARD, self.read_payload())
-        self.assertEqual(again.rc, 2, msg="after the reset the identical call has no ticket: " + again.describe())
+        again = self.run_hook(self.GUARD, self.read_payload(prompt_id="prompt-2"))
+        self.assertEqual(again.rc, 2, msg="a ticket is keyed to its prompt: the identical call in the next prompt is blocked: "
+                                          + again.describe())
 
-    # --- issue #271: per-user session parent, fail closed, foreign marker ------------------------------------------
+    # --- issue #271: per-user session parent, fail closed ---------------------------------------------------------
     def test_a_session_folder_planted_in_the_shared_temp_folder_opens_no_gate(self):
         # criterion 2: the victim's first source Read, with a marker planted where the hooks used to keep it.
         victim = "s" + uuid.uuid4().hex
@@ -515,22 +504,24 @@ class CodegraphAddonTests(AddonCase):
         self.assertEqual(run.rc, 2, msg="a marker planted under the system temp folder must not open the gate: "
                                         + run.describe())
         self.assertIn("[codegraph-first-guard] BLOCKED", run.err, msg=run.describe())
-        # control: the same marker under the Per-user session parent opens it
+        # control: a marker under the Per-user session parent opens nothing either (the marker is retired); the transcript does
         mine = "s" + uuid.uuid4().hex
         af.write_marker(af.session_parent(self.home), mine)
-        ok = self.run_hook(self.GUARD, self.read_payload(session_id=mine))
-        self.assertEqual(ok.rc, 0, msg="control: the same marker under the Per-user session parent allows: " + ok.describe())
+        still = self.run_hook(self.GUARD, self.read_payload(session_id=mine))
+        self.assertEqual(still.rc, 2, msg="control: a turn.json under the Per-user session parent opens nothing: " + still.describe())
+        ok = self.run_hook(self.GUARD, self.read_payload(session_id=mine, transcript_path=self.transcript(af.t_human(1), af.t_mcp_use())))
+        self.assertEqual(ok.rc, 0, msg="control: an open transcript allows: " + ok.describe())
 
     def test_the_hooks_write_nothing_under_the_system_temp_folder(self):
         self.run_hook(self.GUARD, self.read_payload())
-        self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "q"}))
-        self.run_hook(self.RESET, self.payload("", {}, prompt="next"))
+        notice = self.run_hook(self.GUARD, self.payload("", {}, prompt="next"), argv=["notice"])
+        self.assertEqual(notice.rc, 0, msg=notice.describe())
         self.assertEqual(self.planted_in_tmp(), [],
                          msg="no hook creates, reads or prunes a Session folder in the system temp folder")
         self.assertTrue(self.parent().is_dir() and any(self.parent().glob("auto-improve-codegraph-*")),
                         msg="control: the hooks did keep state, under the Per-user session parent " + str(self.parent()))
 
-    def test_an_unusable_session_parent_blocks_with_session_state_unusable_and_the_tracker_writes_no_marker(self):
+    def test_an_unusable_session_parent_blocks_with_session_state_unusable_and_the_prompt_row_prunes_nothing(self):
         # the parent path is a plain FILE: not a folder. Fails closed, says why; no retry offered.
         base = self.home / "AppData" / "Local" if os.name == "nt" else self.home / ".cache"
         base.mkdir(parents=True, exist_ok=True)
@@ -545,9 +536,10 @@ class CodegraphAddonTests(AddonCase):
         self.assertNotIn("repeat this exact call once", run.err,
                          msg="a session-state-unusable block offers no retry: " + run.describe())
         self.assertIn("/auto-improve-codegraph-uninstall", run.err, msg="but names the uninstall way out: " + run.describe())
-        tracked = self.run_hook(self.TRACKER, self.payload("mcp__codegraph__codegraph_search", {"query": "q"}))
-        self.assertEqual(tracked.rc, 0, msg=tracked.describe())
-        self.assertIn("the gate stays shut", tracked.err, msg="the tracker says the gate stays shut: " + tracked.describe())
+        notice = self.run_hook(self.GUARD, self.payload("", {}, prompt="next"), argv=["notice"])
+        self.assertEqual(notice.rc, 0, msg=notice.describe())
+        self.assertIn("cannot be used", notice.err, msg="the prompt row says why: " + notice.describe())
+        self.assertNotIn("gate stays shut", notice.err, msg="and makes no claim about the gate: " + notice.describe())
         self.assertTrue((base / "auto-improve-codegraph").is_file(), msg="and wrote nothing through the unusable parent")
         # control: with the file removed (a usable parent) the same Read blocks as source-target, with its retry line
         (base / "auto-improve-codegraph").unlink()
@@ -555,21 +547,14 @@ class CodegraphAddonTests(AddonCase):
         self.assertIn("repeat this exact call once", first.err,
                       msg="control: a usable parent keeps today's source-target banner: " + first.describe())
 
-    def test_a_foreign_marker_opens_the_gate_and_is_logged_once(self):
+    def test_a_leftover_turn_marker_opens_nothing_and_logs_no_foreign_marker_record(self):
         (self.project / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
-        af.write_marker(af.session_parent(self.home), self.sid, stamped=False)
-        for _ in range(2):
-            run = self.run_hook(self.GUARD, self.read_payload())
-            self.assertEqual(run.rc, 0, msg="a Foreign marker still opens the gate: " + run.describe())
-        self.assertEqual(len(self.log_records("foreign-marker")), 1,
-                         msg="logged once per session: " + repr(self.log_records("foreign-marker")))
-
-    def test_an_own_stamped_marker_logs_no_foreign_marker_record(self):
-        (self.project / ".claude" / "logs").mkdir(parents=True, exist_ok=True)
-        af.write_marker(af.session_parent(self.home), self.sid)
-        run = self.run_hook(self.GUARD, self.read_payload())
-        self.assertEqual(run.rc, 0, msg="control: an own marker opens the gate: " + run.describe())
-        self.assertEqual(self.log_records("foreign-marker"), [], msg="and logs no foreign-marker record")
+        for stamped in (False, True):
+            session = "s" + uuid.uuid4().hex
+            af.write_marker(af.session_parent(self.home), session, stamped=stamped)
+            run = self.run_hook(self.GUARD, self.read_payload(session_id=session))
+            self.assertEqual(run.rc, 2, msg="a turn.json (stamped=%s) is neither read nor trusted: %s" % (stamped, run.describe()))
+        self.assertEqual(self.log_records("foreign-marker"), [], msg="the Foreign marker check is gone")
 
     # --- the manifest (acceptance criteria 7 and the upgrade path) --------------------------------------------------
     def test_the_manifest_grants_the_wildcard_only(self):
@@ -580,7 +565,9 @@ class CodegraphAddonTests(AddonCase):
         released = af.released_hashes("codegraph")
         hooks = af.hook_files("codegraph")
         self.assertEqual(sorted(released), sorted(hooks), msg="released_sha256 has one entry per active hook")
-        for name in hooks:
+        # the guard at the baseline commit is an active hook; the tracker and the reset hook are disabled and carry their own lists
+        disabled = {e[af.DISABLED_HOOK]: e for e in af.disabled_entries("codegraph")}
+        for name in (self.GUARD, self.RESET, self.TRACKER):
             shown = subprocess.run(["git", "show", "%s:.claude/addons/codegraph/hooks/%s" % (self.BASELINE_COMMIT, name)],
                                    capture_output=True, cwd=str(af.PROJECT_ROOT))
             if shown.returncode != 0:
@@ -591,54 +578,58 @@ class CodegraphAddonTests(AddonCase):
             if data.startswith(b"\xef\xbb\xbf"):
                 data = data[3:]
             folded = hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
-            self.assertIn(folded, released[name],
-                          msg="%s as released at %s (folded) must be in released_sha256, so addon-remove can delete an "
+            listed = released[name] if name in released else disabled[name][af.DISABLED_HASHES]
+            self.assertIn(folded, listed,
+                          msg="%s as released at %s (folded) must be listed, so addon-remove can delete an "
                               "unedited old copy" % (name, self.BASELINE_COMMIT))
 
-
-    # --- issue #295: the command-line route, the Bash row and the version labels ------------------------------------
-    BASH_OK = {"stdout": "", "stderr": "", "interrupted": False, "isImage": False, "noOutputExpected": False}
-
-    def bash_payload(self, command: str, event: str = "PostToolUse", **extra) -> dict:
-        body = self.payload("Bash", {"command": command, "description": "x"}, hook_event_name=event, **extra)
-        if event == "PostToolUse":
-            body["tool_response"] = dict(self.BASH_OK)
-        else:
-            body.update({"error": "Exit code 1\nnope", "is_interrupt": False})
-        return body
-
-    def test_a_successful_counted_codegraph_command_opens_the_gate_like_an_mcp_call(self):
+    # --- issue #262: the command-line route is counted from the transcript --------------------------------------------
+    def test_a_counted_codegraph_command_in_the_transcript_opens_the_gate_like_an_mcp_call(self):
         blocked = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(blocked.rc, 2, msg="control: blocked first: " + blocked.describe())
-        tracked = self.run_hook(self.TRACKER, self.bash_payload('codegraph explore "Thing"'))
-        self.assertEqual(tracked.rc, 0, msg=tracked.describe())
-        self.assertTrue(self.marker().is_file(), msg="a counted command-line call must write the Turn marker")
-        self.assertEqual(json.loads(self.marker().read_text(encoding="utf-8")).get("route"), "cli", msg="with route cli")
+        self.append_to_transcript(af.t_bash_use('codegraph explore "Thing"'), af.t_tool_result())
         allowed = self.run_hook(self.GUARD, self.read_payload())
         self.assertEqual(allowed.rc, 0, msg=allowed.describe())
-        self.assertNotIn("allowed (", allowed.err, msg="allowed by the marker, not the retry escape: " + allowed.describe())
+        self.assertNotIn("allowed (", allowed.err, msg="allowed by the transcript, not the retry escape: " + allowed.describe())
 
-    def test_a_failed_or_compound_or_uncounted_codegraph_command_does_not_open_the_gate(self):
-        for label, payload in (("a failed call (PostToolUseFailure)", self.bash_payload("codegraph explore Thing", "PostToolUseFailure")),
-                               ("a compound command", self.bash_payload("cd src && codegraph explore Thing")),
-                               ("an uncounted subcommand", self.bash_payload("codegraph status")),
-                               ("a path form", self.bash_payload("/c/bin/codegraph explore Thing"))):
+    def test_a_compound_or_uncounted_or_background_codegraph_command_does_not_open_the_gate(self):
+        for label, line in (("a compound command", af.t_bash_use("cd src && codegraph explore Thing")),
+                            ("an uncounted subcommand", af.t_bash_use("codegraph status")),
+                            ("a path form", af.t_bash_use("/c/bin/codegraph explore Thing")),
+                            ("a background run", af.t_bash_use("codegraph explore Thing", background=True))):
             with self.subTest(label):
-                self.run_hook(self.TRACKER, payload)
-                self.assertFalse(self.marker().exists(), msg="%s must not write a marker" % label)
+                run = self.run_hook(self.GUARD, self.read_payload(session_id="s" + uuid.uuid4().hex,
+                                                                  transcript_path=self.transcript(af.t_human(1), line)))
+                self.assertEqual(run.rc, 2, msg="%s must leave the turn closed: %s" % (label, run.describe()))
 
-    def test_the_manifest_registers_the_tracker_on_a_bash_row_with_its_own_cli_argument_and_if(self):
-        rows = [r for r in af.registrations("codegraph") if r.get(af.ROW_HOOK) == self.TRACKER]
-        by_args = {tuple(r.get(af.ROW_ARGS) or []): r for r in rows}
-        self.assertEqual(sorted(by_args), [(), ("cli",)], msg="the tracker has the MCP row (no args) and the cli row: %r" % rows)
-        cli = by_args[("cli",)]
-        self.assertEqual((cli.get(af.ROW_EVENT), cli.get(af.ROW_MATCHER), cli.get(af.ROW_IF)),
-                         ("PostToolUse", "Bash", "Bash(codegraph *)"), msg="the Bash row: %r" % cli)
-        self.assertEqual(by_args[()].get(af.ROW_MATCHER), "mcp__codegraph__.*", msg="the MCP row is unchanged")
-        self.assertIsNone(by_args[()].get(af.ROW_IF), msg="and carries no if")
-        self.assertEqual(len(af.registrations("codegraph")), 4, msg="four rows in all")
-        self.assertEqual(sorted(af.hook_files("codegraph")), sorted([self.GUARD, self.RESET, self.TRACKER]),
-                         msg="still exactly three hook files (AC8)")
+    def test_the_manifest_has_one_hook_two_rows_and_the_tracker_and_reset_disabled(self):
+        self.assertEqual(af.hook_files("codegraph"), [self.GUARD], msg="one active hook file (AC8)")
+        rows = {(r.get(af.ROW_EVENT), r.get(af.ROW_MATCHER), r.get(af.ROW_HOOK), tuple(r.get(af.ROW_ARGS) or [])) for r in af.registrations("codegraph")}
+        self.assertEqual(rows, {("PreToolUse", "Read|Grep|Glob", self.GUARD, ()), ("UserPromptSubmit", None, self.GUARD, ("notice",))},
+                         msg="the guard's two rows: %r" % rows)
+        disabled = {e[af.DISABLED_HOOK]: e for e in af.disabled_entries("codegraph")}
+        self.assertEqual(sorted(disabled), sorted([self.RESET, self.TRACKER]), msg="the other two hooks are disabled")
+        tracker_rows = disabled[self.TRACKER][af.DISABLED_ROW]
+        self.assertIsInstance(tracker_rows, list, msg="the tracker's registration is a list of its two rows")
+        by_args = {tuple(r.get(af.ROW_ARGS) or []): r for r in tracker_rows}
+        self.assertEqual(sorted(by_args), [(), ("cli",)])
+        self.assertEqual((by_args[("cli",)].get(af.ROW_EVENT), by_args[("cli",)].get(af.ROW_MATCHER), by_args[("cli",)].get(af.ROW_IF)),
+                         ("PostToolUse", "Bash", "Bash(codegraph *)"))
+        self.assertEqual(by_args[()].get(af.ROW_MATCHER), "mcp__codegraph__.*")
+        self.assertEqual((disabled[self.RESET][af.DISABLED_ROW].get(af.ROW_EVENT), disabled[self.RESET][af.DISABLED_ROW].get(af.ROW_ARGS)),
+                         ("UserPromptSubmit", []))
+        for entry in disabled.values():
+            self.assertTrue((af.addon_dir("codegraph") / entry[af.DISABLED_NOTE]).is_file(), msg="each entry names a note that exists")
+            self.assertTrue(entry[af.DISABLED_HASHES], msg="and carries the released hashes it moved from released_sha256")
+        self.assertNotIn(self.RESET, af.released_hashes("codegraph"), msg="the released hashes moved into the disabled entries")
+        self.assertNotIn(self.TRACKER, af.released_hashes("codegraph"))
+
+    def test_the_cut_over_guard_is_listed_as_released_under_the_landing_version(self):
+        guard = hashlib.sha256(af.source("codegraph", self.GUARD).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        self.assertIn(guard, af.released_hashes("codegraph")[self.GUARD],
+                      msg="the cut-over guard's folded hash must be in released_sha256, so the next release reads it as released")
+        self.assertRegex(af.released_versions("codegraph")[self.GUARD][guard], r"^0\.17\.0$",
+                         msg="labelled with the version the landing raises the plugin to (check_version_bump.py --exact)")
 
     @staticmethod
     def earliest_release_labels(hook: str) -> dict:
@@ -716,6 +707,14 @@ class CodegraphAddonTests(AddonCase):
             self.assertIn(folded, released[hook], msg="%s at db61fd7 (0.16.1) is a released copy and must be listed" % hook)
             self.assertIn(folded, versions.get(hook, {}), msg="and labelled")
             self.assertRegex(versions[hook][folded], r"^0\.(?:9\.9|9\.\d+|1\d\.\d+)$", msg="with a release label that is not later than 0.16.1")
+        for entry in af.disabled_entries("codegraph"):
+            hook = entry[af.DISABLED_HOOK]
+            shown = subprocess.run(["git", "show", "db61fd7:.claude/addons/codegraph/hooks/%s" % hook], capture_output=True,
+                                   cwd=str(af.PROJECT_ROOT))
+            self.assertEqual(shown.returncode, 0, msg="the pinned commit db61fd7 is absent: fetch the full history")
+            data = shown.stdout[3:] if shown.stdout.startswith(b"\xef\xbb\xbf") else shown.stdout
+            folded = hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+            self.assertIn(folded, entry[af.DISABLED_HASHES], msg="%s at db61fd7 (0.16.1) is a released copy of a disabled hook and must be listed" % hook)
 
 
 class StrictShellGateAddonTests(AddonCase):

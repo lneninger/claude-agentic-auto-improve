@@ -7,8 +7,10 @@ bench_codegraph_guard.py -- cost per call of the CodeGraph guard, old design aga
                                                        [--json out.json] [--keep]
     py -3 .claude/hooks/tests/bench_codegraph_guard.py --reset-budget [--runs 30]
 
-``--reset-budget`` (issue #295) measures the reset hook's Connection notice against its time budget instead; see
-``reset_budget``. It never builds the #259 ``Workspace`` and must be run from a Claude Code session.
+``--reset-budget`` (issue #295) measures the Connection notice against its time budget instead; see ``reset_budget``. Since the
+cut-over of issue #262 the "new" side is the guard's prompt row (``codegraph-first-guard.py notice``, which took over the notice from
+the reset hook) and the baseline is the 0.16.1 reset hook. It never builds the #259 ``Workspace`` and must be run from a Claude
+Code session.
 
 Not a test (no ``test_`` prefix): it measures, it asserts nothing about speed. It runs every case ``--runs`` times, each run a
 fresh ``python <hook>`` process fed the hook payload on stdin, timed from the parent (interpreter start included, as the host
@@ -16,22 +18,25 @@ pays it). Runs are interleaved round by round across all cases, so a slow minute
 
   old   the #259 guard, reset hook and tracker, read with ``git show <old-ref>:<path>`` (default origin/master; the local
         ``master`` branch can be stale) into a temp folder, with the helpers of the same ref
-  new   this working tree's guard, reset hook and tracker, copied into a second temp folder
+  new   this working tree's guard, copied into a second temp folder (the tracker and the reset hook are disabled since the cut-over
+        of issue #262: the new side runs the guard's prompt row where the old side runs the reset hook and the tracker)
 
 Everything the hooks touch lives under one private scratch folder: TMP/TEMP/TMPDIR (the OLD design's Session folders and the
 reset hook's pruner never see the real temp folder), LOCALAPPDATA and XDG_CACHE_HOME (and HOME) pointing at ``<scratch>/home``
 (the NEW design keeps its Session folders under the Per-user session parent, ``<base>/auto-improve-codegraph``, created 0700
 with the same helper the test fixtures use; the bench NEVER writes into the real %LOCALAPPDATA% or ~/.cache),
 USERPROFILE/CLAUDE_CONFIG_DIR (so no real settings enable or disable the server), and a throwaway project with a Project index
-and a configured server. The folder is removed at the end unless ``--keep``. The "new" marker is stamped (writer + session)
-as the merged tracker writes it.
+and a configured server. The folder is removed at the end unless ``--keep``. The OLD design's gate is its Turn marker; the NEW
+design's gate is the transcript: "marker present" means a transcript whose turn is open, "marker absent" one whose last entry is
+a human prompt.
 
 --old-ref MUST name a PRE-SHADOW ref (for example c8653e3, the #259 guard): the default origin/master now contains the shadow
 (and the Per-user session parent), so ``_check_old_is_259`` stops a plain run before it starts. The OLD design keeps its
 Session folders in the temp folder; the NEW design (this working tree) keeps them under the Per-user session parent.
 
-Cases (guard): allowlisted target; gated target with the Turn marker present; gated target with the marker absent (a block);
-new only: marker present with the transcript open, at each size, warm and cold cursor. Also the reset hook and the tracker.
+Cases (guard): allowlisted target; gated target with the gate open; gated target with the gate closed (a block);
+new only: gate open with the transcript open, at each size, warm and cold cursor. Also the reset hook and the tracker (old side)
+and the guard's prompt row (new side).
 The plain guard cases carry a 64 KB transcript, as an early session would. A case is MEASURED when every one of its runs
 exited with the expected code; the transcript states the shadow reached are listed beside it (a cold scan that runs out of the
 50 ms budget shows as unknown:time-exceeded, not as a failure).
@@ -123,6 +128,15 @@ def write_transcript(path: Path, size: int) -> None:
                 fh.write(cycle)
             if part is head:
                 fh.write(boundary)
+
+
+def write_closed_transcript(path: Path, size: int) -> None:
+    """A transcript of about ``size`` bytes whose last entry is a human prompt: the turn is CLOSED (the new guard blocks)."""
+    cycle = _filler_cycle()
+    with open(path, "wb") as fh:
+        for _ in range(max(1, size // len(cycle))):
+            fh.write(cycle)
+        fh.write(_line({"type": "user", "uuid": "p2", "promptSource": "sdk", "message": {"role": "user", "content": "now this"}}))
 
 
 @dataclass
@@ -242,6 +256,8 @@ class Workspace:
         out: list[Case] = []
         small = self.transcripts / "small.jsonl"
         write_transcript(small, SMALL_TRANSCRIPT_BYTES)
+        closed = self.transcripts / "closed.jsonl"
+        write_closed_transcript(closed, SMALL_TRANSCRIPT_BYTES)
         big: dict[int, Path] = {}
         for mb in self.sizes:
             big[mb] = self.transcripts / f"t{mb}.jsonl"
@@ -282,31 +298,37 @@ class Workspace:
         for design in ("old", "new"):
             s_marker, s_block = f"bench-{design}-marker-present", f"bench-{design}-marker-absent"
             out.append(guard_case(design, "allowlisted", "allowlisted target (README.md), no marker", "README.md", 0, lambda: None))
-            put_marker(s_marker, design)()
-            out.append(guard_case(design, "marker-present", "gated target (src/app.py), marker present", "src/app.py", 0,
-                                  lambda: None))
-            out.append(guard_case(design, "marker-absent", "gated target (src/app.py), marker absent: block", "src/app.py", 2,
-                                  drop_tickets(s_block, design), prime=True))
+            if design == "old":
+                put_marker(s_marker, design)()  # the old gate is its Turn marker; the new gate is the transcript
+            out.append(guard_case(design, "marker-present", "gated target (src/app.py), gate open (old: marker, new: open transcript)",
+                                  "src/app.py", 0, lambda: None))
+            out.append(guard_case(design, "marker-absent", "gated target (src/app.py), gate closed: block", "src/app.py", 2,
+                                  drop_tickets(s_block, design), prime=True, transcript=(closed if design == "new" else small)))
         # new, shadow cost removed (no <project>/.claude, so no log is written): splits the G-1 saving from the shadow's cost
         for key, label, target, expected in (("allowlisted", "allowlisted target (README.md), no marker", "README.md", 0),
                                              ("marker-present", "gated target (src/app.py), marker present", "src/app.py", 0)):
             case = guard_case("new", key, label, target, expected, lambda: None, project=self.project_nolog)
             case.design, case.key, case.session = "new-nolog", f"new-nolog:{key}", f"bench-new-nolog-{key}"
             case.payload = guard_payload(case.session, self.project_nolog, target, small)
-            if key == "marker-present":
-                put_marker(case.session, "new")()
             out.append(case)
         for mb in self.sizes:
             for cursor in ("warm", "cold"):
                 key = f"transcript-{mb}mb-{cursor}"
                 session = f"bench-new-{key}"
-                put_marker(session, "new")()
-                out.append(guard_case("new", key, f"marker present, transcript open, {mb} MB, {cursor} cursor", "src/app.py", 0,
+                out.append(guard_case("new", key, f"gate open, transcript open, {mb} MB, {cursor} cursor", "src/app.py", 0,
                                       drop_cursor(session, "new") if cursor == "cold" else (lambda: None),
                                       prime=(cursor == "warm"), transcript=big[mb], mb=mb, cursor=cursor))
-        # reset hook and tracker, both designs
-        for design in ("old", "new"):
-            hooks = self.old_dir if design == "old" else self.new_dir
+        # the guard's prompt row (new): it took over the reset hook's two duties
+        s_notice = "bench-new-notice"
+        out.append(Case(key="new:notice", label="guard prompt row start (UserPromptSubmit, argument notice)", design="new", hook="reset",
+                        argv=[sys.executable, str(self.new_dir / Path(GUARD_REL).name), "notice"], cwd=str(self.project),
+                        env=self.env(self.project),
+                        payload=json.dumps({"session_id": s_notice, "cwd": str(self.project), "hook_event_name": "UserPromptSubmit",
+                                            "prompt": "hello", "prompt_id": "bench-prompt"}).encode("utf-8"),
+                        expected_exit=0, session=s_notice, prime=True))
+        # reset hook and tracker, the old design only (disabled since the cut-over)
+        for design in ("old",):
+            hooks = self.old_dir
             s_reset, s_track = f"bench-{design}-reset", f"bench-{design}-tracker"
 
             def reset_prepare(session=s_reset, design=design) -> None:
@@ -513,10 +535,11 @@ def render_markdown(result: dict) -> str:
 def reset_budget(runs: int) -> int:
     """The Connection notice's time budget (contract 2026-11-07-295, "Notice time budget").
 
-    Baseline: the reset hook at ``RESET_BASELINE_REF`` (read with ``git show``). New side: this working tree's three hooks.
+    Baseline: the reset hook at ``RESET_BASELINE_REF`` (read with ``git show``). New side: this working tree's guard, whose prompt
+    row (``notice``) took the notice over from the reset hook (issue #262).
     Completion check: the notice section is run in process, with natural Host detection, on the fixture and the new-side
-    copy; unless its outcome is ``shown`` or ``silent:probe-present`` the run would not measure the probe (a missing guard, an
-    untrusted Host or a spent budget all end silent and fast) and it fails. T1: subprocess p50 of the new reset hook <= the
+    copy; unless its outcome is ``shown`` or ``silent:probe-present`` the run would not measure the probe (an untrusted Host or a
+    spent budget ends silent and fast) and it fails. T1: subprocess p50 of the new prompt row <= the
     baseline's p50 + 150 ms. T2: in-process p95 of 20 runs <= 150 ms, every run with that outcome. Exit 1 on an incomplete run,
     a breach, or when the baseline commit is absent. It must run from a Claude Code session (the Host is that session)."""
     ref = RESET_BASELINE_REF
@@ -534,7 +557,7 @@ def reset_budget(runs: int) -> int:
         old_dir, new_dir = root / "old_hooks", root / "new_hooks"
         for target, from_ref in ((old_dir, ref), (new_dir, None)):
             target.mkdir(parents=True, exist_ok=True)
-            rels = (RESET_REL,) + HELPER_RELS if from_ref else (GUARD_REL, RESET_REL, TRACKER_REL) + HELPER_RELS
+            rels = (RESET_REL,) + HELPER_RELS if from_ref else (GUARD_REL,) + HELPER_RELS
             for rel in rels:
                 if from_ref is None:
                     data = (REPO_ROOT / rel).read_bytes()
@@ -563,7 +586,7 @@ def reset_budget(runs: int) -> int:
             os.environ.update(isolated_env(tmp, home, project))
             os.chdir(str(project))
             sys.dont_write_bytecode = True
-            spec = util.spec_from_file_location("cg_bench_reset", str(new_dir / Path(RESET_REL).name))
+            spec = util.spec_from_file_location("cg_bench_reset", str(new_dir / Path(GUARD_REL).name))
             reset = util.module_from_spec(spec)
             sys.modules[spec.name] = reset
             spec.loader.exec_module(reset)
@@ -586,7 +609,7 @@ def reset_budget(runs: int) -> int:
         ok_outcomes = ("shown", "silent:probe-present")
         if outcomes[0] not in ok_outcomes:
             print(f"--reset-budget: the notice section ended {outcomes[0]!r} on the fixture: this run would not measure the "
-                  "probe (run it from a Claude Code session, with the sibling guard beside the reset hook)", file=sys.stderr)
+                  "probe (run it from a Claude Code session)", file=sys.stderr)
             return 1
         bad = [o for o in outcomes[1:] if o not in ok_outcomes]
         if bad:
@@ -597,8 +620,11 @@ def reset_budget(runs: int) -> int:
 
         # -- T1: the whole hook as a process, baseline against new -----------------------------------------------------
         def one(hooks: Path, session: str) -> tuple[float, int]:
+            # the baseline is the 0.16.1 reset hook; the new side is the guard's prompt row (argument ``notice``)
+            argv = [sys.executable, str(hooks / Path(RESET_REL).name)] if hooks is old_dir else \
+                [sys.executable, str(hooks / Path(GUARD_REL).name), "notice"]
             start = time.perf_counter()
-            proc = subprocess.run([sys.executable, str(hooks / Path(RESET_REL).name)], input=json.dumps(payload(session)).encode("utf-8"),
+            proc = subprocess.run(argv, input=json.dumps(payload(session)).encode("utf-8"),
                                   capture_output=True, env=isolated_env(tmp, home, project), cwd=str(project))
             return (time.perf_counter() - start) * 1000.0, proc.returncode
 

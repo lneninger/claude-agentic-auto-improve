@@ -1,58 +1,66 @@
 #!/usr/bin/env python3
 """
-codegraph-first-guard.py -- PreToolUse hook for the CodeGraph-First Protocol.
+codegraph-first-guard.py -- the CodeGraph-First Protocol's one hook file (PreToolUse guard and UserPromptSubmit row).
 
-Asks the agent to start an investigation with a CodeGraph tool: it blocks Read / Grep / Glob on source-code paths
-until one has been called in the current investigation turn. It lets reads through whenever CodeGraph is provably
-unavailable, and the identical retry of a call it just blocked is allowed once. When its own session folder cannot be
-used it blocks instead (session-state-unusable), says why and how to fix it, and offers no retry: planted or broken
-state must never open the gate.
+PreToolUse (no argument). Asks the agent to start an investigation with a CodeGraph tool: it blocks Read / Grep / Glob on
+source-code paths until CodeGraph has been used in the current investigation turn. It lets reads through whenever
+CodeGraph is provably unavailable, and the identical retry of a call it just blocked is allowed once (in the same prompt).
+When its own session folder cannot be used it blocks instead (session-state-unusable), says why and how to fix it, and
+offers no retry: planted or broken state must never open the gate.
 
-The "turn" is bounded by UserPromptSubmit and keyed to the SESSION, not to a directory:
-    UserPromptSubmit -> codegraph-turn-reset.py deletes the session's marker and retry tickets
-    PostToolUse on mcp__codegraph__*, or on a Bash call of a Counted `codegraph` command -> codegraph-turn-tracker.py
-        writes the marker (route mcp or cli)
-    PreToolUse on Read|Grep|Glob -> this hook checks for the marker
+The "turn" is read from the SESSION TRANSCRIPT, the log file Claude Code itself writes (issue #262, the cut-over). The turn
+is the span after the last human prompt. Three things open it, each counted when the main session issues the call, whether
+or not the call succeeds:
+    * a tool use named mcp__codegraph__*                                      (route mcp)
+    * a Bash tool use of a Counted ``codegraph`` command, strict form        (route cli)
+    * an Agent (or older Task) tool use, a subagent dispatch                 (route agent, C-7)
+A new human prompt closes it. A background task notification does not. Every transcript read that is not a clear open or
+closed answer allows, with a logged reason (fail-open:transcript-<cause>).
 
 Hook contract (Claude Code):
-    stdin:  JSON with { session_id, cwd, tool_name, tool_input: {...}, agent_id (subagents only) }
+    stdin:  JSON with { session_id, cwd, tool_name, tool_input: {...}, transcript_path, prompt_id, agent_id (subagents only) }
     exit 0: allow (a `[codegraph-first-guard] allowed (<reason>)` line on stderr when it is a fail-open or a retry)
     exit 2: block (stderr shown to Claude)
     other:  error (hook fails open -- logs to stderr, allows the call)
 
-Session folder (shared by the three hooks), under the Per-user session parent (issue #271): the folder
-auto-improve-codegraph in %LOCALAPPDATA% on Windows, in $XDG_CACHE_HOME (else ~/.cache) on POSIX, mode 0700. The
-system temp folder is never read, written or pruned:
+UserPromptSubmit (the argument ``notice``). Two duties that the retired reset hook had, and nothing else: once per session it
+creates the session folder and prunes old ones (``prune_session_folders``), then it runs the Connection notice
+(``notice_section``): one JSON object when the CodeGraph server is configured and its index exists but no
+``codegraph serve --mcp`` process belongs to this session. It always exits 0, never blocks a prompt, swallows whatever it
+raises (SystemExit included), writes no bytecode and deletes no ticket.
+
+Session folder, under the Per-user session parent (issue #271): the folder auto-improve-codegraph in %LOCALAPPDATA% on Windows,
+in $XDG_CACHE_HOME (else ~/.cache) on POSIX, mode 0700. The system temp folder is never read, written or pruned:
     <Per-user session parent>/auto-improve-codegraph-<session key>/
-        turn.json            the Turn marker {ts, tool, summary, pid, route, writer, session}
-        mcp-seen             set by the tracker after a successful mcp__codegraph__* call (sticky for the session)
-        ticket-<64 hex>      a Retry escape ticket, issued at a block, consumed by the identical retry
+        ticket-<64 hex>      a Retry escape ticket {ts, tool, fingerprint, prompt_key}, issued at a block, consumed by the
+                             identical retry in the same prompt
         availability.json    the cached server and index verdicts
-        logged-<reason>      at most one log record per session per fail-open reason (and for a Foreign marker)
+        logged-<reason>      at most one log record per session per fail-open reason (and for cli-fallback)
+        pruned               set on the first prompt of a session (the prompt row prunes once)
+        transcript-cursor.json   the Transcript cursor; transcript-cursor.<pid>.tmp is its temp file
+    (turn.json and mcp-seen belong to the retired tracker: nothing writes them any more; the pruner still knows both names
+    so a folder an older release left behind is removed.)
 
-        transcript-cursor.json   the shadow's Transcript cursor (issue #261); transcript-cursor.<pid>.tmp is its temp file
-
-Decision order (concept contracts 2026-11-05-codegraph-guard-fail-open, 2026-11-05-codegraph-hooks-redesign (G-1) and
-2026-11-06-session-folder-owner-and-tool-named):
+Decision order (concept contracts 2026-11-05-codegraph-guard-fail-open, 2026-11-05-codegraph-hooks-redesign (G-1),
+2026-11-06-session-folder-owner-and-tool-named and 2026-11-09-codegraph-hooks-cutover (C-1)):
     0. resolve the Session state                 -> unusable: the Stateless session (it reads and writes nothing)
-    1. the Turn marker exists                    -> allow (checked BEFORE the paths are classified: the next step is also
-                                                    a silent allow, so only the internal reason differs; a Foreign
-                                                    marker is logged once per session)
-    2. no target / only non-source targets       -> allow
-    3-5. the proof steps, each an allow (their stderr line prints on every call, and nothing is logged, while the
-         Session state is unusable):
-         the payload carries a non-empty agent_id  (fail-open:subagent)
-         no Project index / index of another tree  (fail-open:no-index / fail-open:index-other-tree)
-         the server is not configured / disabled   (fail-open:server-not-configured / server-disabled)
-    6. a ticket matches the call's fingerprint   -> delete it, allow (retry-escape-used)
+    1. the Transcript turn state                 -> open: allow transcript-open (silent). Read only when step 0 found the
+                                                    Session folder usable; an unusable folder reads as closed.
+    2. no target / only non-source targets       -> allow (silent, whatever the state)
+    3. the payload carries a non-empty agent_id  -> allow fail-open:subagent
+    3a. any other unknown:<cause> state          -> allow fail-open:transcript-<cause>
+    4-5. no Project index / index of another tree (fail-open:no-index / fail-open:index-other-tree);
+         the server is not configured / disabled  (fail-open:server-not-configured / server-disabled)
+    6. a ticket matches the call's fingerprint AND the call's prompt_key -> delete it, allow (retry-escape-used)
     7. otherwise write the ticket and block; the Session state unusable blocks here (session-state-unusable) without a
        ticket; when the write fails, resolve the Session state again: unusable -> session-state-unusable, still usable
        -> retry-ticket-unwritten. It never allows.
 
-main() runs the decision in three parts (G-2): the Live plan (a pure function: it reads, it writes nothing), the SHADOW
-SECTION (the same planner with the Transcript turn state in place of the Turn marker; it logs one Shadow record to
-<CLAUDE_PROJECT_DIR>/.claude/logs/codegraph-shadow.jsonl and enforces nothing; whatever it raises is swallowed), then the
-Live plan's effects (availability.json, the ticket, the notice flags, log records, the stderr line, the exit code).
+main() runs the decision in two parts (C-2): the Live plan (a pure function: it reads, it writes nothing but the Session
+folder's lazy creation), then its effects in this order: availability.json, the ticket, the cursor, the cli-fallback record,
+the notice flags and log records, one Measurement record in <CLAUDE_PROJECT_DIR>/.claude/logs/codegraph-shadow.jsonl, then
+stderr and the exit code. Every effect after the ticket is wrapped: whatever it raises, BaseException included, changes
+neither the exit code nor stderr.
 
 There is no kill switch: no environment variable turns the guard off.
 """
@@ -73,7 +81,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 # Issue #261, G-1: the two helpers are imported on first USE (classification, the fallback banner, a log record), not at
-# module load, so a call the Turn marker allows never pays for them. Every module-level name below keeps its meaning and
+# module load, so a call an open turn allows never pays for them. Every module-level name below keeps its meaning and
 # stays patchable (``mock.patch.object(guard, "_pp", None)``): the names resolve through the module ``__getattr__`` on
 # first read, a value set before that read is never overwritten, and this file reads them through ``_late``.
 #:   log_event                        ``_error_log.log_event`` (passive error logging), or a no-op when it cannot be imported.
@@ -286,14 +294,24 @@ BYPASS_FILENAMES = {
 # the project lacks it, so an old project helper must not be a dependency).
 # ---------------------------------------------------------------------------
 SESSION_PREFIX = "auto-improve-codegraph-"
-MARKER_NAME = "turn.json"
 AVAILABILITY_NAME = "availability.json"
 TICKET_PREFIX = "ticket-"
 LOGGED_PREFIX = "logged-"
-LEGACY_SENTINEL_NAME = ".codegraph-used-this-turn"
 SERVER_NAME = "codegraph"
-MARKER_WRITER = "codegraph-turn-tracker"
-FOREIGN_MARKER_FLAG = LOGGED_PREFIX + "foreign-marker"
+CLI_FALLBACK_FLAG = LOGGED_PREFIX + "cli-fallback"
+PRUNED_FLAG = "pruned"
+#: The only file names a session folder may hold (the atomic-write ``.tmp-<16 hex>`` siblings included); a folder with any other
+#: entry is kept whole. ``turn.json`` and ``mcp-seen`` are the retired tracker's names: nothing writes them any more, but a folder an
+#: older release left behind must still prune. The Transcript cursor ``transcript-cursor.json`` and its temp file are known names.
+KNOWN_FILE_RE = re.compile(
+    r"turn\.json|mcp-seen|availability\.json|pruned|logged-[a-z0-9-]+|ticket-[0-9a-f]{64}|\.tmp-[0-9a-f]{16}"
+    r"|transcript-cursor\.json|transcript-cursor\.[0-9]+\.tmp")
+#: A session folder younger than this (by its newest file) is never pruned.
+MIN_AGE_SECONDS = 7 * 24 * 60 * 60
+#: The Counted commands: the subcommands whose command line mirrors a CodeGraph MCP tool (moved verbatim from the retired tracker).
+COUNTED_COMMANDS = frozenset({"query", "explore", "context", "node", "callers", "callees", "impact", "files"})
+_CONTROL_RE = re.compile(r"[;&|<>`\n\r]|\$\(")
+_SUMMARY_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_. -]+")
 _SESSION_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?")  # never ends in "." (Windows strips it)
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
@@ -347,8 +365,9 @@ def _payload_cwd(payload: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-user session parent (issue #271). The tracker and the reset hook carry the same block inline (a parity test pins
-# the three copies): an add-on copies a helper only when the project lacks it, so an old helper must not be a dependency.
+# Per-user session parent (issue #271). This is its one active inline copy since the cut-over (C-6); the disabled tracker and
+# reset hooks keep their last released copies, and a parity test pins them to this one: an add-on copies a helper only when
+# the project lacks it, so an old helper must not be a dependency.
 # ---------------------------------------------------------------------------
 PARENT_NAME = "auto-improve-codegraph"
 #: The closed set of Parent problems. The Session folder inside a usable parent adds ``session-<link / not-a-folder /
@@ -1089,8 +1108,8 @@ def call_fingerprint(tool_name: str, tool_input: dict) -> str:
 class Plan:
     """One planned decision: the outcome and the state effects that would be applied, none of them applied yet."""
 
-    __slots__ = ("session", "decision", "reason", "fingerprint", "step0_ok", "turn_marker", "target_class", "availability",
-                 "availability_write", "ticket_op")
+    __slots__ = ("session", "decision", "reason", "fingerprint", "step0_ok", "target_class", "availability",
+                 "availability_write", "ticket_op", "prompt_key", "transcript")
 
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -1098,11 +1117,12 @@ class Plan:
         self.reason = ""
         self.fingerprint = ""
         self.step0_ok = True
-        self.turn_marker: bool | None = None  # None until step 1 read it
         self.target_class = "not-computed"
-        self.availability: tuple[str, str] | None = None  # (server verdict, index verdict) once step 3 computed them
+        self.availability: tuple[str, str] | None = None  # (server verdict, index verdict) once step 4 computed them
         self.availability_write: str | None = None  # availability.json body to write at apply
         self.ticket_op: tuple | None = None  # ("delete", name) or ("write", name, body)
+        self.prompt_key = "none"  # 12 hex of the SHA-256 of the payload's prompt_id; "none" when the host sends none
+        self.transcript: dict = _empty_read("closed")  # what step 1 read (the Transcript turn state and its facts)
 
     def done(self, decision: str, reason: str) -> "Plan":
         self.decision, self.reason = decision, reason
@@ -1115,39 +1135,54 @@ def _class_of(all_classes: list[str]) -> str:
     return "unknown" if any(c == "unknown" for c in all_classes) else "allowed"
 
 
-def _plan(tool_name: str, tool_input: dict, payload: dict | None, gate: str | None, base: "Plan | None") -> Plan:
-    """The decision as a pure function (it reads, it writes nothing but the Session folder's lazy creation). Order 0-7 (G-1).
+def _prompt_key(payload: dict) -> str:
+    """The prompt a call belongs to: 12 hex characters of the SHA-256 of ``prompt_id``, or ``none`` when there is none (Q6: a ticket
+    keyed ``none`` may match)."""
+    prompt_id = payload.get("prompt_id")
+    if isinstance(prompt_id, str) and prompt_id:
+        return hashlib.sha256(prompt_id.encode("utf-8", "replace")).hexdigest()[:12]
+    return "none"
 
-    ``gate`` is None for the Live plan (step 2 reads the Turn marker). For the Shadow decision it is the Transcript
-    turn state, and ``base`` is the Live plan whose step-0 and availability verdicts are reused, never recomputed (S-1);
-    the planned effects of a Shadow decision are never applied."""
+
+def _read_turn(payload: dict, session: Session, usable: bool) -> dict:
+    """Step 1's read. An unusable Session folder skips it and the state reads ``closed`` (C-1: no transcript is read from an
+    unusable folder, exactly as the marker was never read from one). An exception inside the read is the cause ``error``."""
+    if not usable:
+        return _empty_read("closed")
+    started = time.perf_counter()
+    try:
+        result = read_transcript(payload, session, True, started + TRANSCRIPT_TIME_BUDGET_S)
+    except Exception:  # noqa: BLE001 - anything unexpected is an unknown state, which allows (fail open)
+        result = _empty_read("unknown:error")
+    result["ms"] = round((time.perf_counter() - started) * 1000, 1)
+    return result
+
+
+def _ticket_matches(session: Session, name: str, prompt_key: str) -> bool:
+    """A Retry escape ticket matches only when it is a plain file, its JSON parses and its ``prompt_key`` equals the call's. An old
+    ticket (no key), an unparseable one or one from another prompt reads as absent (step 7 overwrites it)."""
+    body = session.read_json(name)
+    return isinstance(body.get("prompt_key"), str) and body["prompt_key"] == prompt_key
+
+
+def _plan(tool_name: str, tool_input: dict, payload: dict | None) -> Plan:
+    """The decision as a pure function (it reads, it writes nothing but the Session folder's lazy creation). Order 0-7 (C-1)."""
     payload = payload if isinstance(payload, dict) else {}
-    shadow = gate is not None and base is not None
-    session = base.session if shadow else Session(payload)
+    session = Session(payload)
     plan = Plan(session)
 
     # 0. the Session state verdict (the Per-user session parent, then the Session folder). Unusable: the Stateless
     #    session reads and writes nothing, the proof steps still run, and the call is blocked at step 7 (fail closed:
-    #    planted or broken state must never open the gate). The folder resolution is the plan's one lazy creation
-    #    (idempotent, identical with or without the shadow); the Shadow decision reuses the Live plan's verdict.
-    if shadow:
-        plan.step0_ok = base.step0_ok
-    else:
-        session.resolve()
-        plan.step0_ok = session.problem is None
+    #    planted or broken state must never open the gate).
+    session.resolve()
+    plan.step0_ok = session.problem is None
+    plan.prompt_key = _prompt_key(payload)
 
-    # 1. the Turn marker of this session (the Transcript turn state in the Shadow decision; unknown counts as open;
-    #    never read from an unusable folder). Checked before the paths are classified: both steps allow with no effect
-    #    and no output.
-    if shadow:
-        if gate == "open":
-            return plan.done("allow", "transcript-open")
-        if gate.startswith("unknown"):
-            return plan.done("allow", "transcript-unknown")
-    else:
-        plan.turn_marker = session.has_plain_file(MARKER_NAME) if plan.step0_ok else None  # not read from an unusable folder
-        if plan.turn_marker:
-            return plan.done("allow", "turn-marker-present")
+    # 1. the Transcript turn state. It is read before the paths are classified (C-3); ``open`` allows with no effect and no output.
+    plan.transcript = _read_turn(payload, session, plan.step0_ok)
+    state = plan.transcript["state"]
+    if state == "open":
+        return plan.done("allow", "transcript-open")
 
     # 2. no target, or only non-source targets.
     paths, patterns = extract_targets(tool_name, tool_input)
@@ -1164,13 +1199,13 @@ def _plan(tool_name: str, tool_input: dict, payload: dict | None, gate: str | No
     if isinstance(agent_id, str) and agent_id:
         return plan.done("allow", "fail-open:subagent")
 
-    if shadow and base.availability is not None:
-        server, index = base.availability
-    else:
-        cwd = _payload_cwd(payload) if payload.get("cwd") else (_project_dir_env() or os.getcwd())
-        server, index, body = availability_plan(session, cwd)
-        if not shadow:
-            plan.availability_write = body
+    # 3a. any other unknown state: fail open with the cause (after classification, so an allowlisted read prints nothing).
+    if state.startswith("unknown:"):
+        return plan.done("allow", "fail-open:transcript-" + state.split(":", 1)[1])
+
+    cwd = _payload_cwd(payload) if payload.get("cwd") else (_project_dir_env() or os.getcwd())
+    server, index, body = availability_plan(session, cwd)
+    plan.availability_write = body
     plan.availability = (server, index)
 
     # 4. no Project index, or an index that belongs to another working tree.
@@ -1181,18 +1216,18 @@ def _plan(tool_name: str, tool_input: dict, payload: dict | None, gate: str | No
     if server in ("not-configured", "disabled"):
         return plan.done("allow", "fail-open:server-" + server)
 
-    # 6. the identical retry of a call this session just had blocked (a read: the live apply consumes the ticket).
+    # 6. the identical retry of a call this session just had blocked IN THIS PROMPT (the live apply consumes the ticket).
     plan.fingerprint = call_fingerprint(tool_name, tool_input)
     ticket = TICKET_PREFIX + plan.fingerprint
-    if session.has_plain_file(ticket):
-        if not shadow:
-            plan.ticket_op = ("delete", ticket)
+    if _ticket_matches(session, ticket, plan.prompt_key):
+        plan.ticket_op = ("delete", ticket)
         return plan.done("allow", "retry-escape-used")
 
     # 7. issue the ticket (at apply) and block. Never an allow: an unusable Session state blocks without a ticket, and
     #    a ticket write that fails at apply resolves the verdict again (apply_state).
-    if plan.step0_ok and not shadow:
-        body = json.dumps({"ts": int(time.time()), "tool": tool_name, "fingerprint": plan.fingerprint}) + "\n"
+    if plan.step0_ok:
+        body = json.dumps({"ts": int(time.time()), "tool": tool_name, "fingerprint": plan.fingerprint,
+                           "prompt_key": plan.prompt_key}) + "\n"
         plan.ticket_op = ("write", ticket, body)
     if not plan.step0_ok:
         return plan.done("block", "session-state-unusable")
@@ -1203,16 +1238,17 @@ def _plan(tool_name: str, tool_input: dict, payload: dict | None, gate: str | No
 
 
 def plan_live(tool_name: str, tool_input: dict, payload: dict | None = None) -> Plan:
-    """The Live plan (G-2 step 1): the decision and its planned state effects, none applied."""
-    return _plan(tool_name, tool_input, payload, None, None)
+    """The Live plan (C-2 step 1): the decision and its planned state effects, none applied."""
+    return _plan(tool_name, tool_input, payload)
 
 
 def apply_state(plan: Plan) -> tuple[str, str]:
-    """The Live plan's STATE effects (G-2 step 3): the availability.json write, the ticket delete or write. Returns the final
+    """The Live plan's STATE effects (C-2): the availability.json write, the ticket delete or write. Returns the final
     (decision, reason). A ticket already gone (an identical parallel call consumed it after the plan) keeps the planned
     allow; apply never re-decides. A ticket that cannot be written resolves the Session state again (the
     folder may have changed since the plan, for example it became a link): unusable -> block session-state-unusable,
-    still usable -> block retry-ticket-unwritten. It never allows. Output, notice flags and log records are main()'s effects."""
+    still usable -> block retry-ticket-unwritten. It never allows. Output, the cursor, notice flags and log records are
+    main()'s effects."""
     session = plan.session
     if plan.availability_write is not None:
         session.write(AVAILABILITY_NAME, plan.availability_write)
@@ -1477,16 +1513,11 @@ def block(reason: str, tool_name: str, tool_input: dict, session: Session | None
         sys.exit(2)
 
 
-def announce(reason: str, tool_name: str, session: Session, fingerprint: str) -> None:
-    """The stderr line of a fail-open or a retry, and its log record (fail-open: once per session per reason).
+def announce_record(reason: str, tool_name: str, session: Session, fingerprint: str) -> None:
+    """The log record of a fail-open or a retry (fail-open: once per session per reason, the flag created after the record landed).
 
-    While the Session state is unusable (the Stateless session) the line prints on every call and NOTHING is logged: no
-    state exists to rate-limit a record, and no flag is created inside or through the unusable folder."""
-    try:
-        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001
-        pass
-    log(f"allowed ({reason}): {NOTICES.get(reason, '')}")
+    While the Session state is unusable (the Stateless session) NOTHING is logged: no state exists to rate-limit a record, and no
+    flag is created inside or through the unusable folder."""
     if session.problem is not None:
         return
     log_event = _late("log_event")
@@ -1506,108 +1537,147 @@ def announce(reason: str, tool_name: str, session: Session, fingerprint: str) ->
         session.create_once(flag)
 
 
-def marker_cause(session: Session) -> str | None:
-    """None when the Turn marker is this session's own (``writer`` and ``session`` match); else the cause of a Foreign
-    marker: ``unreadable`` (not JSON, not an object), ``missing-stamp`` (no tracker stamp, the 0.15.2 shape) or
-    ``other-session`` (stamped for another session)."""
-    marker_file = session.path(MARKER_NAME)  # a READ of the marker (the AC8 scan looks for writes)
+def announce_line(reason: str) -> None:
+    """The one stderr line of a fail-open or a retry. It prints on every such call, whatever the Session state."""
     try:
-        with open(marker_file, "r", encoding="utf-8") as fh:
-            data = json.loads(fh.read(65536))
-    except (OSError, ValueError):
-        return "unreadable"
-    if not isinstance(data, dict):
-        return "unreadable"
-    if data.get("writer") != MARKER_WRITER or not isinstance(data.get("session"), str):
-        return "missing-stamp"
-    return None if data["session"] == session.key else "other-session"
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+    log(f"allowed ({reason}): {NOTICES.get(reason, '')}")
 
 
-def note_foreign_marker(session: Session, tool_name: str) -> None:
-    """The gate opened from a marker this session's tracker did not write: one stderr line and one log record per
-    session. It still opens (the marker sits in a parent the checks proved the user's own); the stamp only detects it.
-    The flag is created only after the record did not fail."""
-    cause = marker_cause(session)
-    if cause is None or session.has_plain_file(FOREIGN_MARKER_FLAG):
-        return
-    log(f"the gate opened from a turn marker this session's tracker did not write ({cause}).")
-    written = _late("log_event")(hook="codegraph-first-guard", event="foreign-marker", file=None, session_id=session.key,
-                        details={"cause": cause, "tool": tool_name, "session": session.key})
-    if written is not False:
-        session.create_once(FOREIGN_MARKER_FLAG)
+def announce(reason: str, tool_name: str, session: Session, fingerprint: str) -> None:
+    """The log record, then the stderr line (the pair main() splits so that the line is the last effect). A record that
+    raises is swallowed: it must never change the line."""
+    try:
+        announce_record(reason, tool_name, session, fingerprint)
+    except BaseException:  # noqa: BLE001
+        pass
+    announce_line(reason)
 
 
 # ---------------------------------------------------------------------------
-# SHADOW SECTION (issue #261): the Shadow decision, computed beside the live one, logged, never enforced.
-# main() runs it between the Live plan and the Live plan's effects (G-2). It is wrapped so that nothing it raises,
-# SystemExit included, can change the exit code, stdout, stderr or the Session folder (S-3). Its only writes are the
-# Transcript cursor (in the Session folder) and one Shadow record (in the project's measurement log).
+# TRANSCRIPT TURN STATE (issues #261 and #262). The Transcript turn state is the live input of step 1 since the cut-over: a true
+# tail read of the session transcript, a cursor kept in the Session folder, and one Measurement record per guarded call
+# in the project's measurement log. The cursor write, the cli-fallback record, the record and the notice flags are effects that
+# main() wraps one by one: whatever they raise, SystemExit included, cannot change the exit code or stderr (C-2).
 # ---------------------------------------------------------------------------
 CURSOR_NAME = "transcript-cursor.json"
-SHADOW_LOG_NAME = "codegraph-shadow.jsonl"
+SHADOW_LOG_NAME = "codegraph-shadow.jsonl"  #: unchanged path (the file's name outlived the shadow era)
 SHADOW_LOG_CAP = 10 * 1024 * 1024  #: at this size one {"event":"log-full"} line is written and writing stops
 SHADOW_LINE_MAX = 1024
-SHADOW_TIME_BUDGET_S = 0.05  #: wall clock for the whole shadow section; checked between chunks and lines
+TRANSCRIPT_TIME_BUDGET_S = 0.05  #: wall clock (perf_counter) for the whole turn read; checked between chunks and lines
 TRANSCRIPT_READ_LIMIT = 2 * 1024 * 1024  #: bytes read per call; also the cold window; also the longest line parsed
 TRANSCRIPT_CHUNK = 256 * 1024
 CODEGRAPH_TOOL_PREFIX = "mcp__codegraph__"
 _CODEGRAPH_TOOL_BYTES = CODEGRAPH_TOOL_PREFIX.encode("ascii")
+#: The tool names of a subagent dispatch: ``Agent`` (Claude Code 2.1.318) and ``Task`` (older hosts).
+DISPATCH_TOOLS = ("Agent", "Task")
+#: Which route opened the turn, strongest first: ``mcp`` beats ``cli``, which beats ``agent``.
+_ROUTE_RANK = {"mcp": 3, "cli": 2, "agent": 1}
+_BYTE_MARKERS = (b'"user"', _CODEGRAPH_TOOL_BYTES, b"codegraph ", b'"Agent"', b'"Task"')
 
 
-def classify_entry(obj) -> str:
-    """The Transcript entry class of one parsed transcript line: 'human-prompt' (a boundary), 'codegraph-use' or 'other'.
-    The rule is the one the t1 live checks recorded for Claude Code 2.1.318. Fail-open bias: only an entry positively
-    identified as a human prompt is a boundary."""
+def counted_subcommand(tool_input) -> tuple[str, str] | None:
+    """(subcommand, summary) when the Bash command is a Counted command in the strict form, else None. Moved verbatim from the
+    retired tracker (the Transcript entry rule counts it from the transcript).
+
+    One simple command, an optional single trailing `` 2>&1``, no control operator, no background run; the raw text starts
+    with ``codegraph `` and token 0 is exactly ``codegraph``. That is narrower than the row's ``if``, which matches each
+    sub-command of a compound command and strips ``VAR=`` prefixes."""
+    if not isinstance(tool_input, dict):
+        return None
+    command = tool_input.get("command")
+    if not isinstance(command, str) or tool_input.get("run_in_background"):
+        return None
+    text = command[:-5] if command.endswith(" 2>&1") else command
+    if _CONTROL_RE.search(text) or not command.startswith("codegraph "):
+        return None
+    import shlex  # deferred: only a Bash line that survived the checks above needs it
+    try:
+        tokens = shlex.split(text, posix=True)
+    except ValueError:
+        return None
+    if len(tokens) < 2 or tokens[0] != "codegraph" or tokens[1] not in COUNTED_COMMANDS:
+        return None
+    summary = _SUMMARY_UNSAFE_RE.sub(" ", " ".join(tokens[1:3])).strip()[:80]
+    return tokens[1], summary
+
+
+def entry_facts(obj) -> tuple[str, str | None, str | None]:
+    """``(class, route, command)`` of one parsed transcript line. ``class``: 'human-prompt' (a boundary), 'codegraph-use' (route ``mcp``:
+    a ``mcp__codegraph__*`` tool use; route ``cli``: a Bash tool use of a Counted command, ``command`` its subcommand),
+    'subagent-dispatch' (route ``agent``: an Agent or Task tool use, C-7) or 'other'. Only an assistant entry of the main chain counts. The
+    rule is the one the t1 live checks recorded for Claude Code 2.1.318. Fail-open bias: only an entry positively identified as a
+    human prompt is a boundary."""
     if not isinstance(obj, dict):
-        return "other"
+        return "other", None, None
     kind = obj.get("type")
     if kind == "assistant":
         if obj.get("isSidechain"):
-            return "other"
+            return "other", None, None
         message = obj.get("message")
         content = message.get("content") if isinstance(message, dict) else None
+        cli: tuple[str, str] | None = None
+        dispatch = False
         for block in content if isinstance(content, list) else ():
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name")
-                if isinstance(name, str) and name.startswith(CODEGRAPH_TOOL_PREFIX):
-                    return "codegraph-use"
-        return "other"
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            if not isinstance(name, str):
+                continue
+            if name.startswith(CODEGRAPH_TOOL_PREFIX):
+                return "codegraph-use", "mcp", None
+            if name == "Bash" and cli is None:
+                cli = counted_subcommand(block.get("input"))
+            elif name in DISPATCH_TOOLS:
+                dispatch = True
+        if cli is not None:
+            return "codegraph-use", "cli", cli[0]
+        if dispatch:
+            return "subagent-dispatch", "agent", None
+        return "other", None, None
     if kind != "user":
-        return "other"
+        return "other", None, None
     if obj.get("isSidechain") or obj.get("isMeta") or obj.get("isCompactSummary"):
-        return "other"
+        return "other", None, None
     if any(key in obj for key in ("origin", "toolUseResult", "sourceToolAssistantUUID")):
-        return "other"
+        return "other", None, None
     message = obj.get("message")
     if not isinstance(message, dict) or message.get("role") != "user":
-        return "other"
+        return "other", None, None
     source = obj.get("promptSource")
     if not isinstance(source, str) or source == "system":
-        return "other"
+        return "other", None, None
     content = message.get("content")
     if isinstance(content, str):
-        return "human-prompt"
+        return "human-prompt", None, None
     if isinstance(content, list):
         if any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
-            return "other"
-        return "human-prompt"
-    return "other"
+            return "other", None, None
+        return "human-prompt", None, None
+    return "other", None, None
 
 
-def _classify_line(line: bytes) -> str:
-    """'human-prompt', 'codegraph-use', 'other', or 'error' (a complete line that is not a JSON object). A line holding
-    neither marker is not parsed, only checked for the braces of an object."""
+def classify_entry(obj) -> str:
+    """The Transcript entry class of one parsed transcript line: 'human-prompt', 'codegraph-use', 'subagent-dispatch' or 'other'."""
+    return entry_facts(obj)[0]
+
+
+def _classify_line(line: bytes) -> tuple[str, str | None, str | None]:
+    """``entry_facts`` of a line, or ``('error', None, None)`` for a complete line that is not a JSON object. A line holding none
+    of the byte markers is not parsed, only checked for the braces of an object."""
     text = line.strip()
     if not text:
-        return "other"
-    if b'"user"' in text or _CODEGRAPH_TOOL_BYTES in text:
+        return "other", None, None
+    if any(marker in text for marker in _BYTE_MARKERS):
         try:
-            return classify_entry(json.loads(text))
+            return entry_facts(json.loads(text))
         except Exception:  # noqa: BLE001 - malformed JSON, bad bytes, nesting too deep
-            return "error"
+            return "error", None, None
     if text[:1] != b"{" or text[-1:] != b"}":
-        return "error"
-    return "other"
+        return "error", None, None
+    return "other", None, None
 
 
 def _identity(st: os.stat_result) -> str:
@@ -1617,7 +1687,8 @@ def _identity(st: os.stat_result) -> str:
 
 
 def _valid_cursor(raw) -> dict | None:
-    """The cursor when it has the contract's shape, else None (an unparseable or misshapen cursor reads as absent)."""
+    """The cursor when it has the contract's shape, else None (an unparseable or misshapen cursor reads as absent). A cursor
+    written before the cut-over has no ``open_route``, ``open_command`` or ``mcp_seen``: it reads as absent and forces a cold scan."""
     if not isinstance(raw, dict):
         return None
     if not isinstance(raw.get("path"), str) or not isinstance(raw.get("identity"), str):
@@ -1629,26 +1700,28 @@ def _valid_cursor(raw) -> dict | None:
         return None
     if raw.get("turn") not in ("open", "closed", None):
         return None
+    if raw.get("open_route") not in ("mcp", "cli", "agent", None) or not isinstance(raw.get("mcp_seen"), bool):
+        return None
+    command = raw.get("open_command")
+    if command is not None and not isinstance(command, str):
+        return None
     return raw
 
 
-def _cursor_folder_ok(session: Session) -> bool:
-    """The cursor is read and written only inside an EXISTING Session folder that is a real folder (never a link). The
-    shadow never creates the folder: the reset hook does on the first prompt, and the live ticket write otherwise."""
-    try:
-        st = os.lstat(session.folder)
-    except OSError:
-        return False
-    return stat.S_ISDIR(st.st_mode) and not _is_link_stat(st)
+def _empty_read(state: str) -> dict:
+    """A read result that read nothing: ``state`` and the zero facts."""
+    return {"state": state, "session_seen": False, "mcp_seen": False, "open_route": None, "open_command": None,
+            "bytes_read": 0, "skipped": 0, "cursor": None, "ms": 0.0}
 
 
 def read_transcript(payload: dict, session: Session, use_cursor: bool, deadline: float) -> dict:
     """The Transcript turn state of this call, by a true tail read.
 
-    Returns {state, session_seen, bytes_read, skipped, cursor}. ``cursor`` is the dict to persist (or None). ``state`` is
-    'open', 'closed' or 'unknown:<cause>'. A cold scan starts 2 MB before the end; at most 2 MB is read per call; only
-    complete lines are parsed; a hit limit always answers window-exceeded, boundary found or not."""
-    res: dict = {"state": "", "session_seen": False, "bytes_read": 0, "skipped": 0, "cursor": None}
+    Returns {state, session_seen, mcp_seen, open_route, open_command, bytes_read, skipped, cursor}. ``cursor`` is the dict to persist
+    (or None). ``state`` is 'open', 'closed' or 'unknown:<cause>'. ``deadline`` is a ``time.perf_counter()`` value. A cold scan starts
+    2 MB before the end; at most 2 MB is read per call; only complete lines are parsed; a hit limit always answers
+    window-exceeded, boundary found or not."""
+    res = _empty_read("")
     agent_id = payload.get("agent_id")
     if isinstance(agent_id, str) and agent_id:
         res["state"] = "unknown:subagent"  # a subagent's own entries are in another file; the parent's would read closed
@@ -1668,7 +1741,7 @@ def read_transcript(payload: dict, session: Session, use_cursor: bool, deadline:
     if not stat.S_ISREG(st.st_mode):  # a FIFO or a device would block open(); a folder is not a transcript
         res["state"] = "unknown:no-transcript"
         return res
-    if time.monotonic() >= deadline:
+    if time.perf_counter() >= deadline:
         res["state"] = "unknown:time-exceeded"
         return res
     size, ident, norm = st.st_size, _identity(st), _norm_path(path)
@@ -1681,9 +1754,11 @@ def read_transcript(payload: dict, session: Session, use_cursor: bool, deadline:
             cursor, rewritten = None, True  # a different file, or shorter than scanned_to: a cold scan
     if cursor is not None:
         pos, skipping, turn, seen = cursor["scanned_to"], cursor["skipping"], cursor["turn"], cursor["session_seen"]
+        route, command, mcp_seen = cursor["open_route"], cursor["open_command"], cursor["mcp_seen"]
     else:
         pos = max(0, size - limit)
         skipping, turn, seen = False, ("closed" if pos == 0 else None), False
+        route, command, mcp_seen = None, None, False
 
     try:
         fh = open(path, "rb")
@@ -1700,7 +1775,7 @@ def read_transcript(payload: dict, session: Session, use_cursor: bool, deadline:
                     skipping = True
             fh.seek(pos)
             while read_to < size:
-                if time.monotonic() >= deadline:
+                if time.perf_counter() >= deadline:
                     timed_out = True
                     break
                 want = min(TRANSCRIPT_CHUNK, budget)
@@ -1727,15 +1802,21 @@ def read_transcript(payload: dict, session: Session, use_cursor: bool, deadline:
                     cut = buf.find(b"\n", begin)
                     if cut < 0:
                         break
-                    kind = _classify_line(buf[begin:cut])
+                    kind, how, what = _classify_line(buf[begin:cut])
                     begin = cut + 1
                     if kind == "human-prompt":
-                        turn = "closed"
-                    elif kind == "codegraph-use":
-                        turn, seen = "open", True
+                        turn, route, command = "closed", None, None
+                    elif kind in ("codegraph-use", "subagent-dispatch"):
+                        turn = "open"
+                        if how == "mcp":
+                            seen, mcp_seen = True, True
+                        elif how == "cli":
+                            seen = True
+                        if route is None or _ROUTE_RANK[how] > _ROUTE_RANK[route]:
+                            route, command = how, (what if how == "cli" else None)
                     elif kind == "error":
                         errors += 1
-                    if time.monotonic() >= deadline:
+                    if time.perf_counter() >= deadline:
                         timed_out = True
                         break
                 pos += begin
@@ -1751,7 +1832,8 @@ def read_transcript(payload: dict, session: Session, use_cursor: bool, deadline:
         res["state"] = "unknown:unreadable"
         return res
     hit_limit = read_to < size and not timed_out
-    res["skipped"], res["session_seen"] = skipped, seen
+    res["skipped"], res["session_seen"], res["mcp_seen"] = skipped, seen, mcp_seen
+    res["open_route"], res["open_command"] = route, command
     if timed_out:
         res["state"] = "unknown:time-exceeded"  # the cursor is not written
         return res
@@ -1766,7 +1848,8 @@ def read_transcript(payload: dict, session: Session, use_cursor: bool, deadline:
     unchanged = cursor is not None and pos == start_pos and skipping == cursor["skipping"]
     if use_cursor and not unchanged:
         res["cursor"] = {"path": norm, "identity": ident, "scanned_to": pos, "skipping": skipping, "turn": turn,
-                         "session_seen": seen, "updated_at": int(time.time())}
+                         "session_seen": seen, "updated_at": int(time.time()), "open_route": route,
+                         "open_command": command, "mcp_seen": mcp_seen}
     return res
 
 
@@ -1831,61 +1914,517 @@ def _append_shadow_line(path: str, record: dict) -> bool:
         os.close(fd)
 
 
-def _outcome(live: str, shadow: str) -> str:
-    if live == shadow:
-        return "agree"
-    return "shadow-more-open" if shadow == "allow" else "shadow-more-closed"
-
-
-def _marker_route(session: Session) -> str:
-    """``cli`` when the Turn marker says the command-line route opened the turn, else ``mcp`` (also for a marker with no
-    route, written by an older tracker)."""
-    return "cli" if session.read_json(MARKER_NAME).get("route") == "cli" else "mcp"
-
-
-def shadow_section(tool_name: str, tool_input: dict, payload: dict, live: Plan) -> None:
-    """The shadow (G-2 step 2): read the transcript, recompute the decision with the Transcript turn state in place of the
-    Turn marker, persist the cursor, append one Shadow record. Reads and writes nothing else. main() swallows whatever this
-    raises."""
-    started = time.monotonic()
-    log_path = _shadow_log_path()
-    if log_path is None:
-        return  # nothing could be recorded: the section costs nothing
-    deadline = started + SHADOW_TIME_BUDGET_S
-    session = live.session
-    use_cursor = live.step0_ok and _cursor_folder_ok(session)  # #259 step 0: never through a link, a not-a-folder or a foreign folder
-    result = read_transcript(payload, session, use_cursor, deadline)
-    shadow = _plan(tool_name, tool_input, payload, result["state"], live)
-    if use_cursor and result["cursor"] is not None:
-        _write_cursor(session, result["cursor"])
-    prompt_id = payload.get("prompt_id")
+def measurement_record(tool_name: str, payload: dict, plan: Plan, decision: str, reason: str) -> dict:
+    """The enforced Measurement record (contract C-1, Data Shapes). It keeps the Shadow record's keys so the report reads it as it
+    is: ``outcome`` is ``enforced``, ``shadow_*`` equal ``live_*`` (the enforced decision and reason), ``turn_marker`` is null and
+    ``turn_route`` names the route that opened the turn. It carries no second decision, so it cannot mark a block as false."""
     agent_id = payload.get("agent_id")
-    record = {
+    found = plan.transcript
+    return {
         "ts": int(time.time()),
-        "session": hashlib.sha256(session.key.encode("utf-8", "replace")).hexdigest()[:12],
+        "session": hashlib.sha256(plan.session.key.encode("utf-8", "replace")).hexdigest()[:12],
         "agent": isinstance(agent_id, str) and bool(agent_id),
         "tool": tool_name,
-        "target_class": shadow.target_class,
-        "live_decision": live.decision,
-        "live_reason": live.reason,
-        "turn_marker": live.turn_marker,
-        "marker_route": _marker_route(session) if live.turn_marker else None,
-        "transcript_turn": result["state"],
-        "session_seen": bool(result["session_seen"]),
-        "shadow_decision": shadow.decision,
-        "shadow_reason": shadow.reason,
-        "outcome": _outcome(live.decision, shadow.decision),
-        "fp": live.fingerprint[:12] or "none",
-        "prompt_key": (hashlib.sha256(prompt_id.encode("utf-8", "replace")).hexdigest()[:12]
-                       if isinstance(prompt_id, str) and prompt_id else "none"),
-        "shadow_ms": round((time.monotonic() - started) * 1000, 1),
-        "bytes_read": result["bytes_read"],
-        "skipped_long_line": result["skipped"],
+        "target_class": plan.target_class,
+        "live_decision": decision,
+        "live_reason": reason,
+        "turn_marker": None,
+        "turn_route": found["open_route"] if found["state"] == "open" else None,
+        "transcript_turn": found["state"],
+        "session_seen": bool(found["session_seen"]),
+        "shadow_decision": decision,
+        "shadow_reason": reason,
+        "outcome": "enforced",
+        "fp": plan.fingerprint[:12] or "none",
+        "prompt_key": plan.prompt_key,
+        "shadow_ms": found["ms"],
+        "bytes_read": found["bytes_read"],
+        "skipped_long_line": found["skipped"],
     }
-    _append_shadow_line(log_path, record)
+
+
+def _apply_cursor(plan: Plan) -> None:
+    """The cursor write (C-2 effect 3): inside a usable Session folder only, created first when absent (the reset hook that used to
+    create it retired). A failed write is ignored."""
+    cursor = plan.transcript.get("cursor")
+    session = plan.session
+    if cursor is None or not plan.step0_ok or session.problem is not None or not session.ensure_folder():
+        return
+    _write_cursor(session, cursor)
+
+
+def _apply_cli_fallback(plan: Plan) -> None:
+    """The ``cli-fallback`` record (C-4, moved from the tracker): the turn is open by the command-line route and no MCP call was seen
+    this session. One record per session; the flag is created only after the record landed."""
+    found, session = plan.transcript, plan.session
+    if found["state"] != "open" or found["open_route"] != "cli" or found["mcp_seen"] or session.problem is not None:
+        return
+    if session.has_plain_file(CLI_FALLBACK_FLAG):
+        return
+    landed = _late("log_event")(hook="codegraph-first-guard", event="cli-fallback", file=None, session_id=session.key,
+                                details={"reason": "mcp-unavailable", "command": found["open_command"]})
+    if landed is not False:
+        session.create_once(CLI_FALLBACK_FLAG)
+
+
+def _apply_measurement(tool_name: str, payload: dict, plan: Plan, decision: str, reason: str) -> None:
+    """One Measurement record in the project's log, when a log can be written (C-2 effect 6)."""
+    path = _shadow_log_path()
+    if path is None:
+        return
+    _append_shadow_line(path, measurement_record(tool_name, payload, plan, decision, reason))
+
+
+def _quiet(effect, *args) -> None:
+    """Run one late effect. Whatever it raises, BaseException included, is swallowed: it can change neither the exit code nor stderr."""
+    try:
+        effect(*args)
+    except BaseException:  # noqa: BLE001
+        pass
+
+
+# ---------------------------------------------------------------------------
+# The prompt row (``notice``): pruning once per session and the Connection notice, moved from the retired reset hook (C-5).
+# ---------------------------------------------------------------------------
+def _usable_folder(folder: str) -> bool:
+    """An existing folder that is not a link, is ours (POSIX) and is writable."""
+    try:
+        st = os.lstat(folder)
+    except OSError:
+        return False
+    if _is_link_stat(st) or not stat.S_ISDIR(st.st_mode):
+        return False
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return False
+    return os.access(folder, os.W_OK)
+
+
+def _no_op(_path: str) -> None:
+    return None
+
+
+def _eligible_files(folder: str, now: float):
+    """The file names to delete in ``folder``, or None when the folder must be kept (the Folder test)."""
+    try:
+        st = os.lstat(folder)
+    except OSError:
+        return None
+    if _is_link_stat(st) or not stat.S_ISDIR(st.st_mode):
+        return None
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return None
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return None
+    newest = st.st_mtime if not names else 0.0
+    for name in names:
+        if not KNOWN_FILE_RE.fullmatch(name):
+            return None
+        try:
+            fst = os.lstat(os.path.join(folder, name))
+        except OSError:
+            return None
+        if not stat.S_ISREG(fst.st_mode) or _is_link_stat(fst):
+            return None
+        newest = max(newest, fst.st_mtime)
+    if now - newest < MIN_AGE_SECONDS:
+        return None
+    return names
+
+
+def _remove_folder(folder: str, names: list, before_remove) -> bool:
+    """Delete the known files one at a time, re-checking each immediately before its removal, then the empty
+    folder with ``os.rmdir``. Any mismatch stops and keeps the rest."""
+    real_folder = os.path.normcase(os.path.realpath(folder))
+    for name in names:
+        path = os.path.join(folder, name)
+        try:
+            before_remove(path)
+        except Exception:  # noqa: BLE001 - a failing seam keeps the folder
+            return False
+        try:
+            fst = os.lstat(folder)
+            st = os.lstat(path)
+        except OSError:
+            return False
+        if _is_link_stat(fst) or not stat.S_ISDIR(fst.st_mode):
+            return False
+        if not stat.S_ISREG(st.st_mode) or _is_link_stat(st) or not KNOWN_FILE_RE.fullmatch(name):
+            return False
+        if os.path.normcase(os.path.realpath(os.path.dirname(path))) != real_folder:
+            return False
+        try:
+            os.remove(path)
+        except OSError:
+            return False
+    try:
+        fst = os.lstat(folder)
+        if _is_link_stat(fst) or not stat.S_ISDIR(fst.st_mode):
+            return False
+        os.rmdir(folder)
+    except OSError:
+        return False
+    return True
+
+
+def prune_session_folders(root, before_remove=_no_op, now=None) -> list:
+    """Delete the leftover ``auto-improve-codegraph-*`` folders of old sessions in ``root`` (the caller's own Per-user
+    session parent, passed only after a usable parent verdict; never the system temp folder); return their names.
+
+    A folder is skipped (never deleted) when it is a link or not a folder, when on POSIX it is owned by another
+    user, when it holds anything other than plain, non-link files named ``turn.json``, ``availability.json``,
+    ``pruned``, ``logged-<reason>``, ``ticket-<64 hex>``, ``transcript-cursor.json`` or ``transcript-cursor.<digits>.tmp``,
+    or when its newest file is younger than 7 days.
+    Immediately before each ``os.remove`` the file and the folder are checked again (still plain, still known,
+    the folder still not a link, the file's real parent still the folder's real path); any mismatch stops and keeps
+    the rest. The folder goes with ``os.rmdir`` (never a recursive delete).
+
+    ``before_remove(path)`` is a test seam, called after the folder test and immediately before each per-file
+    re-check; the default does nothing.
+    """
+    removed: list = []
+    moment = time.time() if now is None else now
+    try:
+        entries = os.listdir(str(root))
+    except OSError:
+        return removed
+    for entry in entries:
+        if not entry.startswith(SESSION_PREFIX):
+            continue
+        folder = os.path.join(str(root), entry)
+        names = _eligible_files(folder, moment)
+        if names is None:
+            continue
+        if _remove_folder(folder, names, before_remove):
+            removed.append(entry)
+    return removed
+
+
+def _first_prompt_of_session(folder: str) -> bool:
+    """True only on the first call of a session: creates the ``pruned`` flag in the session's folder."""
+    try:
+        os.mkdir(folder, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return False
+    if not _usable_folder(folder):
+        return False
+    try:
+        fd = os.open(os.path.join(folder, PRUNED_FLAG), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
+#: Images (lower case, ``.exe`` stripped) the walk up from the hook skips: Python interpreters, launchers and shells.
+SKIP_IMAGES = frozenset({"python", "python3", "pythonw", "py", "bash", "sh", "dash", "zsh", "cmd", "powershell", "pwsh", "env"})
+#: The Hook host process images recorded from a live trial (native ``claude``); any other image is not trusted.
+HOST_IMAGES = frozenset({"claude"})
+MAX_HOPS = 8
+MAX_DEPTH = 4
+NOTICE_BUDGET_S = 0.1
+GUARD_FILE = "codegraph-first-guard.py"
+_STRIP_SUFFIXES = (".exe", ".cmd", ".bat", ".js", ".mjs", ".cjs")
+_QUOTE_RE = re.compile(r"[\^\"']")
+
+NOTICE_TEXT = (
+    "CodeGraph connection notice: no `codegraph serve --mcp` process belongs to this session, so the "
+    "mcp__codegraph__* tools are likely gone. Run /mcp to reconnect them. Meanwhile a CodeGraph command in the Bash tool, "
+    "run on its own (for example `codegraph explore \"SymbolName\"`; also query, context, node, callers, callees, impact, "
+    "files), opens the gate for the turn. In a worktree the command line reads the main checkout's index unless one was "
+    "built there. "
+    "A project instruction or a skill's explicit gate that forbids shell commands wins over this notice; follow that rule instead."
+)
+
+
+def _image_key(image) -> str:
+    key = str(image or "").lower()
+    return key[:-4] if key.endswith(".exe") else key
+
+
+def _walk_to_host(table, start_pid):
+    """(host pid, the hook's ancestor pids up to the host) or (None, reason): ``host-untrusted`` when the start process is
+    unknown, the walk runs out, passes 8 hops, or meets an image that is neither skipped nor a known host."""
+    by_pid = {row[0]: row for row in table}
+    chain = [start_pid]
+    current = by_pid.get(start_pid)
+    if current is None:
+        return None, "host-untrusted"
+    for _hop in range(MAX_HOPS):
+        parent = by_pid.get(current[1])
+        if parent is None or parent[0] in chain:
+            return None, "host-untrusted"
+        key = _image_key(parent[2])
+        if key in HOST_IMAGES:
+            return parent[0], chain
+        if key not in SKIP_IMAGES:
+            return None, "host-untrusted"
+        chain.append(parent[0])
+        current = parent
+    return None, "host-untrusted"
+
+
+def _candidate_pids(table, host_pid, chain):
+    """Every descendant of the host within 4 levels, of any image, leaving out the hook's own ancestor chain."""
+    children: dict = {}
+    for pid, parent, _image, _cmd in table:
+        children.setdefault(parent, []).append(pid)
+    found, level, seen = [], [host_pid], {host_pid}
+    for _depth in range(MAX_DEPTH):
+        nxt = []
+        for pid in level:
+            for child in children.get(pid, ()):
+                if child in seen or child in chain:
+                    continue
+                seen.add(child)
+                nxt.append(child)
+        found.extend(nxt)
+        level = nxt
+    return found
+
+
+def _is_codegraph_token(token: str) -> bool:
+    parts = [p for p in re.split(r"[\\/]", token) if p]
+    if not parts:
+        return False
+    base = parts[-1].lower()
+    for suffix in _STRIP_SUFFIXES:
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base == "codegraph" or any(p.lower() == "codegraph" for p in parts[:-1])
+
+
+def _judge(cmdline):
+    """``match``, ``ambiguous`` (serve and --mcp without a CodeGraph token, or an unreadable line) or ``other``."""
+    if cmdline is None:
+        return "ambiguous"
+    tokens = _QUOTE_RE.sub("", cmdline).split()
+    if "serve" not in tokens or "--mcp" not in tokens:
+        return "other"
+    return "match" if any(_is_codegraph_token(t) for t in tokens) else "ambiguous"
+
+
+def _probe(table, start_pid):
+    host, chain = _walk_to_host(table, start_pid)
+    if host is None:
+        return "undecidable", chain
+    by_pid = {row[0]: row for row in table}
+    verdicts = [_judge(by_pid[pid][3]) for pid in _candidate_pids(table, host, set(chain))]
+    if "match" in verdicts:
+        return "present", ""
+    if "ambiguous" in verdicts:
+        return "undecidable", "undecidable"
+    return "absent", ""
+
+
+def connection_probe(table, start_pid):
+    """``present`` / ``absent`` / ``undecidable`` over a list of (pid, parent pid, image, command line or None): is there a
+    ``codegraph serve --mcp`` process under this session's Hook host process?"""
+    return _probe(table, start_pid)[0]
+
+
+def command_line(pid):
+    """The exact command line of process ``pid`` on Windows (``NtQueryInformationProcess`` class 60), or None when it cannot
+    be read."""
+    import ctypes
+    from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", ctypes.c_ushort), ("MaximumLength", ctypes.c_ushort), ("Buffer", ctypes.c_void_p)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    k32.OpenProcess.restype = ctypes.c_void_p
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+    ntdll.NtQueryInformationProcess.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong,
+                                                ctypes.POINTER(ctypes.c_ulong)]
+    handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        size = 1024
+        for _try in range(3):
+            buf = ctypes.create_string_buffer(size)
+            needed = ctypes.c_ulong(0)
+            status = ntdll.NtQueryInformationProcess(handle, 60, buf, size, ctypes.byref(needed))  # ProcessCommandLine
+            if status == 0:
+                text = UnicodeString.from_buffer(buf)
+                return ctypes.wstring_at(text.Buffer, text.Length // 2) if text.Buffer else ""
+            if (status & 0xFFFFFFFF) in (0xC0000004, 0xC0000023, 0x80000005) and needed.value > size:
+                size = needed.value
+                continue
+            return None
+        return None
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _read_table_windows(start_pid):
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry)]
+    k32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry)]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    snapshot = k32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snapshot is None or snapshot == ctypes.c_void_p(-1).value:
+        raise OSError("CreateToolhelp32Snapshot failed")
+    rows = []
+    try:
+        entry = ProcessEntry()
+        entry.dwSize = ctypes.sizeof(ProcessEntry)
+        ok = k32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            rows.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID), entry.szExeFile))
+            ok = k32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snapshot)
+
+    bare = [(pid, parent, image, None) for pid, parent, image in rows]
+    # Read command lines only where the probe will look: the descendants of the Hook host process.
+    host, chain = _walk_to_host(bare, start_pid) if start_pid is not None else (None, [])
+    wanted = set(_candidate_pids(bare, host, set(chain))) if host is not None else set()
+    return [(pid, parent, image, command_line(pid) if pid in wanted else None) for pid, parent, image, _c in bare]
+
+
+def _read_table_linux():
+    rows = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name, "rb") as fh:
+                stat_text = fh.read().decode("utf-8", "replace")
+            comm = stat_text[stat_text.index("(") + 1: stat_text.rindex(")")]
+            parent = int(stat_text[stat_text.rindex(")") + 2:].split()[1])
+            with open("/proc/%s/cmdline" % name, "rb") as fh:
+                cmd = fh.read().decode("utf-8", "replace").replace("\0", " ").strip()
+        except (OSError, ValueError):
+            continue
+        rows.append((int(name), parent, comm, cmd or None))
+    return rows
+
+
+def _read_table_ps(timeout):
+    import subprocess  # deferred: only macOS reads the table this way
+    out = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, timeout=max(timeout, 0.01),
+                         check=False).stdout
+    rows = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        first = parts[2].split()[0]
+        rows.append((int(parts[0]), int(parts[1]), os.path.basename(first), parts[2]))
+    return rows
+
+
+def read_process_table(start_pid=None, timeout=NOTICE_BUDGET_S):
+    """The process table as (pid, parent pid, image, command line or None). The ONLY platform code of the probe.
+    Windows: Toolhelp32 and ``NtQueryInformationProcess`` (class 60) through ctypes; Linux: ``/proc``; macOS: ``ps``;
+    any other platform: an empty table (the probe is then undecidable)."""
+    if sys.platform == "win32":
+        return _read_table_windows(start_pid)
+    if sys.platform.startswith("linux"):
+        return _read_table_linux()
+    if sys.platform == "darwin":
+        return _read_table_ps(timeout)
+    return []
+
+
+def notice_section(payload) -> str:
+    """The Connection notice. Returns a closed-set outcome (``shown``, ``silent:probe-present``, ``silent:precondition``,
+    ``silent:host-untrusted``, ``silent:undecidable``, ``silent:budget``, ``silent:error``); prints the notice JSON itself only for
+    ``shown``. Writes no file (no bytecode): ``sys.dont_write_bytecode`` is set throughout."""
+    started = time.perf_counter()
+    saved_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        payload = payload if isinstance(payload, dict) else {}
+        agent_id = payload.get("agent_id")
+        if isinstance(agent_id, str) and agent_id:
+            return "silent:precondition"
+        cwd = payload.get("cwd")
+        cwd = cwd if isinstance(cwd, str) and cwd else os.getcwd()
+        server, index, _body = availability_plan(Session(payload), cwd)
+        if server != "configured" or index != "index-present" or not server_starts_process(cwd):
+            return "silent:precondition"
+        if time.perf_counter() - started > NOTICE_BUDGET_S:
+            return "silent:budget"
+        table = read_process_table(os.getpid(), max(NOTICE_BUDGET_S - (time.perf_counter() - started), 0.01))
+        if time.perf_counter() - started > NOTICE_BUDGET_S:
+            return "silent:budget"
+        verdict, why = _probe(table, os.getpid())
+        if verdict == "present":
+            return "silent:probe-present"
+        if verdict == "undecidable":
+            return "silent:" + why
+        print(json.dumps({"systemMessage": NOTICE_TEXT,
+                          "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": NOTICE_TEXT}}))
+        return "shown"
+    except Exception:  # noqa: BLE001
+        return "silent:error"
+    finally:
+        sys.dont_write_bytecode = saved_bytecode
+
+
+def notice_main() -> None:
+    """The ``notice`` row (UserPromptSubmit). It always exits 0 and never blocks a prompt: whatever a duty raises, SystemExit
+    included, is swallowed, and one duty failing does not skip the other. It writes no bytecode and deletes no ticket, no turn
+    marker and no legacy sentinel."""
+    saved_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        try:
+            raw = sys.stdin.read()
+            payload = json.loads(raw) if raw.strip() else {}
+        except (ValueError, OSError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        parent, problem, detail = resolve_session_parent()
+        folder = ""
+        if problem is None:
+            folder = os.path.join(parent, SESSION_PREFIX + session_key(payload))
+            problem, detail = session_folder_problem(folder)
+        if problem is not None:
+            # Fail closed (I-8): prune nothing under the parent. The line says why and makes no claim about the gate.
+            where = folder or parent
+            extra = f": {detail}" if detail else ""
+            log(f"the per-user session folder {where} cannot be used ({problem}{extra}); nothing was pruned")
+        else:
+            _quiet(_prune_once, folder, parent)
+            _quiet(notice_section, payload)  # prints the notice itself when it shows one; its outcome is for the bench and the tests
+    except BaseException:  # noqa: BLE001
+        pass
+    finally:
+        sys.dont_write_bytecode = saved_bytecode
+    sys.exit(0)
+
+
+def _prune_once(folder: str, parent: str) -> None:
+    if _first_prompt_of_session(folder):
+        prune_session_folders(parent)
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["notice"]:
+        notice_main()
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
@@ -1903,22 +2442,20 @@ def main() -> None:
     if not isinstance(tool_input, dict):
         sys.exit(0)
 
-    # G-2: (1) the Live plan, (2) the shadow, (3) the Live plan's effects.
+    # C-2: the Live plan, then its effects in this order: availability.json and the ticket (apply_state), the cursor, the
+    # cli-fallback record, the notice flags and log record, one Measurement record, then stderr and the exit code.
     plan = plan_live(tool_name, tool_input, payload)
-    try:
-        shadow_section(tool_name, tool_input, payload, plan)
-    except BaseException:  # noqa: BLE001 - S-3: nothing the shadow raises, SystemExit included, may change the live outcome
-        pass
     decision, reason = apply_state(plan)
     session, fingerprint = plan.session, plan.fingerprint
+    _quiet(_apply_cursor, plan)
+    _quiet(_apply_cli_fallback, plan)
+    announced = decision == "allow" and (reason.startswith("fail-open:") or reason == "retry-escape-used")
+    if announced:
+        _quiet(announce_record, reason, tool_name, session, fingerprint)
+    _quiet(_apply_measurement, tool_name, payload, plan, decision, reason)
     if decision == "allow":
-        if reason == "turn-marker-present":
-            try:
-                note_foreign_marker(session, tool_name)
-            except Exception:  # noqa: BLE001 - a notice must never change the verdict
-                pass
-        elif reason.startswith("fail-open:") or reason == "retry-escape-used":
-            announce(reason, tool_name, session, fingerprint)
+        if announced:
+            announce_line(reason)
         sys.exit(0)
 
     block(reason, tool_name, tool_input, session)
