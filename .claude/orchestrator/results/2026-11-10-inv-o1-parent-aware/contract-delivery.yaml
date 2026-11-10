@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/344
+number: 344
+head_ref: fix/240-inv-o1-parent-aware
+base_ref: master
+base_is_default: true
+commit: 6acaa9d05ec6e7e56763227b1cdd2a98127d4a77
+merged_at: '2026-11-10T16:36:15Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-10T16:50:05.695220+00:00'
+blocks_recorded:
+- t1-parent-aware-inv-o1-row-and-shared-parent-reader
+blocks_already_recorded: []
