@@ -1,0 +1,20 @@
+status: completed
+commit: 5960ebc55d813190875fbc80999779ca46f3d8e4
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/329
+merged_at: '2026-11-10T01:12:35Z'
+verified: github
+sub_issue_closed: closed
+hand_resolved:
+  files: []
+  merge_commits: 0
+  commits_inspected: 4
+  commits_unread: 0
+base_ref: fix/235-domain-split-registries
+base_is_default: false
