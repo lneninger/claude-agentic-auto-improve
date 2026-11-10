@@ -13,7 +13,7 @@ branch: task/2026-10-13-database-guard-names-in-rules-file/t1-plugin-failing-tes
 worktree: none
 north_stars: inherited from the parent work item in lneninger/StockToolScalpingMachine
 parent_issue: 623
-base: master
+base: feature/623-db-guard-names-in-rules-file
 contract: none (the contract lives in lneninger/StockToolScalpingMachine at .claude/concepts/2026-10-13-database-guard-names-in-rules-file.md)
 pr: none
 issue_link: none
