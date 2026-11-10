@@ -636,6 +636,72 @@ def remove_marker(parent: Path, session_id: str) -> None:
         marker.unlink()
 
 
+# ------------------------------------------------------------------------------------------------------
+# TRANSCRIPT BUILDERS (issue #262, the cut-over). The guard decides from the session transcript, so a row that expects
+# a block needs a CLOSED transcript (a human prompt and nothing after it) and a row that expects an allow through the
+# gate needs an OPEN one. The shapes are the ones the t1 live checks recorded for Claude Code 2.1.318.
+# ------------------------------------------------------------------------------------------------------
+def t_human(n: int = 0, prompt_id: str | None = None) -> str:
+    """One human prompt entry (the only entry that closes a turn)."""
+    return json.dumps({"type": "user", "isSidechain": False, "promptId": prompt_id or ("p%d" % n), "promptSource": "sdk",
+                       "turnOrigin": "sdk", "message": {"role": "user", "content": "question %d" % n}})
+
+
+def t_assistant(*blocks: dict) -> str:
+    """One assistant entry holding the given content blocks."""
+    return json.dumps({"type": "assistant", "isSidechain": False,
+                       "message": {"role": "assistant", "content": list(blocks)}})
+
+
+def t_mcp_use(name: str = "mcp__codegraph__" + "codegraph_explore") -> str:
+    return t_assistant({"type": "tool_use", "id": "toolu_mcp", "name": name, "input": {"query": "x"}})
+
+
+def t_bash_use(command: str, background: bool = False) -> str:
+    tool_input: dict = {"command": command}
+    if background:
+        tool_input["run_in_background"] = True
+    return t_assistant({"type": "tool_use", "id": "toolu_bash", "name": "Bash", "input": tool_input})
+
+
+def t_agent_use(name: str = "Agent") -> str:
+    return t_assistant({"type": "tool_use", "id": "toolu_agent", "name": name,
+                        "input": {"description": "look", "prompt": "look around", "subagent_type": "Explore"}})
+
+
+def t_tool_result() -> str:
+    return json.dumps({"type": "user", "isSidechain": False, "toolUseResult": {}, "sourceToolAssistantUUID": "u",
+                       "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x"}]}})
+
+
+def t_task_notification() -> str:
+    """A background task notification: it fires the prompt event but is NOT a human prompt (t1, point b)."""
+    return json.dumps({"type": "user", "isSidechain": False, "promptId": "pn", "promptSource": "system",
+                       "origin": {"kind": "task-notification"}, "message": {"role": "user", "content": "<task-notification/>"}})
+
+
+def t_filler(size: int = 1000) -> str:
+    return json.dumps({"type": "attachment", "attachment": {"type": "x", "content": "x" * size}})
+
+
+def write_transcript(path: Path | str, lines: list) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    return path
+
+
+def closed_transcript(folder: Path | str, name: str = "closed.jsonl") -> Path:
+    """A transcript whose last entry is a human prompt: the gate is CLOSED (a source read blocks)."""
+    return write_transcript(Path(folder) / name, [t_human(1)])
+
+
+def open_transcript(folder: Path | str, name: str = "open.jsonl", route: str = "mcp") -> Path:
+    """A transcript with a CodeGraph use after the last human prompt: the gate is OPEN. ``route``: mcp, cli or agent."""
+    use = {"mcp": t_mcp_use, "cli": lambda: t_bash_use("codegraph explore Thing"), "agent": t_agent_use}[route]()
+    return write_transcript(Path(folder) / name, [t_human(1), use, t_tool_result()])
+
+
 def isolated_env(home: Path, tmp: Path, project: Path | None = None, extra: dict | None = None) -> dict:
     """The environment of a codegraph row: HOME, USERPROFILE and CLAUDE_CONFIG_DIR at the fixture home, LOCALAPPDATA at
     ``<home>/AppData/Local`` and XDG_CACHE_HOME at ``<home>/.cache`` (so the Per-user session parent is inside the

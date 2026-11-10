@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-test_codegraph_shadow.py -- the CodeGraph guard's shadow decision and cheaper hot path (issue #261, block 2).
+test_codegraph_shadow.py -- the CodeGraph guard's Transcript turn state, its cursor, read limits, Measurement log and cheaper
+hot path (issue #261, block 2, kept after the cut-over of issue #262: the rows that guarded the shadow now guard the LIVE read).
 
-Contract: .claude/concepts/2026-11-05-codegraph-hooks-redesign.md (G-1, G-2, S-1..S-4, Read limits, Measurement log).
+Contract: .claude/concepts/2026-11-05-codegraph-hooks-redesign.md (G-1, Read limits, Measurement log) and
+.claude/concepts/2026-11-09-codegraph-hooks-cutover.md (C-1..C-6: the guard decides from the transcript).
 
 House style: plain runnable script, NO pytest. check(name, cond, detail) accumulator, PASS/FAIL/SKIP summary,
 non-zero exit on any failure.
@@ -18,9 +20,10 @@ WHAT THIS PINS DOWN
   SH-R*   the Read limits: true tail read, hit limit with a boundary, cold window, a line over 2 MB
   SH-E*   the entry classifier, over the committed t1 fixtures too
   SH-L*   the Measurement log: location, log-full, no path or prompt text, two concurrent writers
-  SH-G2*  plan, shadow, effects: ticket, availability.json, blocked call, forced raise, byte identity
+  SH-G2*  plan, effects: ticket, availability.json, blocked call, forced raise of a late effect, byte identity
   SH-G1*  the lazy imports and the reorder; decide() keeps its signature and effects
-  SH-P*   the reset hook's pruner knows the cursor and its temp file
+  SH-P*   the guard's pruner knows the cursor and its temp file
+  SH-M*   the Measurement record names the route that opened the turn and carries no command text
 """
 
 from __future__ import annotations
@@ -50,7 +53,6 @@ import _addon_fixture as af  # noqa: E402
 
 ADD_ON = "codegraph"
 HOOK_FILE = "codegraph-first-guard.py"
-RESET_FILE = "codegraph-turn-reset.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "codegraph-transcripts"
 CURSOR_NAME = "transcript-cursor.json"
 LIMIT = 2 * 1024 * 1024
@@ -130,7 +132,6 @@ class World:
         self.sb = af.Sandbox("cgshadow-")
         installed = {p.name: p for p in af.install(ADD_ON, self.sb.root / "installed")}
         self.guard = installed[HOOK_FILE]
-        self.reset = installed[RESET_FILE]
         self.count = 0
 
     def close(self) -> None:
@@ -253,28 +254,28 @@ def run_states(w: World) -> None:
     tdir = w.sb.root / "tr"
     tdir.mkdir()
 
-    # closed: the last human prompt has no CodeGraph use after it. Live and shadow both block.
+    # closed: the last human prompt has no CodeGraph use after it. The guard blocks.
     t = tdir / "closed.jsonl"
     write_lines(t, [filler_line(), human_line(1)])
     s = sid()
     proc = w.run(project, s, t)
     rec = last_record(project)
-    check("SH-C1 closed: the live call is blocked (exit 2)", proc.returncode == 2 and "BLOCKED" in proc.stderr, describe(proc))
-    check("SH-C1 closed: transcript_turn closed, shadow blocks too, outcome agree, target_class source",
+    check("SH-C1 closed: the call is blocked (exit 2)", proc.returncode == 2 and "BLOCKED" in proc.stderr, describe(proc))
+    check("SH-C1 closed: transcript_turn closed, the enforced record blocks, outcome enforced, target_class source",
           rec.get("transcript_turn") == "closed" and rec.get("shadow_decision") == "block"
-          and rec.get("live_decision") == "block" and rec.get("outcome") == "agree" and rec.get("target_class") == "source", rec)
-    check("SH-C1 closed: the record carries the live reason and the paired fp",
+          and rec.get("live_decision") == "block" and rec.get("outcome") == "enforced" and rec.get("target_class") == "source", rec)
+    check("SH-C1 closed: the record carries the reason and the fp",
           rec.get("live_reason") == "source-target" and isinstance(rec.get("fp"), str) and len(rec["fp"]) == 12, rec)
 
-    # open: a CodeGraph use follows the last human prompt. The live gate (no marker) blocks; the shadow allows.
+    # open: a CodeGraph use follows the last human prompt. The guard allows, silently.
     t = tdir / "open.jsonl"
     write_lines(t, [human_line(1), use_line(), result_line()])
     proc = w.run(project, sid(), t)
     rec = last_record(project)
-    check("SH-C2 open: the live call is still blocked (the shadow enforces nothing)", proc.returncode == 2, describe(proc))
-    check("SH-C2 open: transcript_turn open, shadow allow transcript-open, outcome shadow-more-open",
-          rec.get("transcript_turn") == "open" and rec.get("shadow_decision") == "allow"
-          and rec.get("shadow_reason") == "transcript-open" and rec.get("outcome") == "shadow-more-open", rec)
+    check("SH-C2 open: the call is allowed with no stderr line", proc.returncode == 0 and "allowed (" not in proc.stderr, describe(proc))
+    check("SH-C2 open: transcript_turn open, allow transcript-open, outcome enforced, route mcp",
+          rec.get("transcript_turn") == "open" and rec.get("live_decision") == "allow"
+          and rec.get("live_reason") == "transcript-open" and rec.get("outcome") == "enforced" and rec.get("turn_route") == "mcp", rec)
     check("SH-C3 not-computed: with the state open the target is not classified",
           rec.get("target_class") == "not-computed", rec)
 
@@ -283,8 +284,8 @@ def run_states(w: World) -> None:
     write_lines(t, [human_line(1), use_line(), human_line(2), filler_line()])
     proc = w.run(project, sid(), t)
     rec = last_record(project)
-    check("SH-C4 a use before the last human prompt leaves the new turn closed",
-          rec.get("transcript_turn") == "closed" and rec.get("outcome") == "agree", rec)
+    check("SH-C4 a use before the last human prompt leaves the new turn closed: blocked",
+          rec.get("transcript_turn") == "closed" and rec.get("outcome") == "enforced" and proc.returncode == 2, rec)
 
     # unknown causes
     causes = [
@@ -295,24 +296,26 @@ def run_states(w: World) -> None:
     for label, path, want in causes:
         proc = w.run(project, sid(), path)
         rec = last_record(project)
-        check(f"SH-C5 {label}: transcript_turn {want}, the shadow allows (transcript-unknown), the live call is unchanged",
-              rec.get("transcript_turn") == want and rec.get("shadow_decision") == "allow"
-              and rec.get("shadow_reason") == "transcript-unknown" and proc.returncode == 2, "%s %s" % (rec, describe(proc)))
+        check(f"SH-C5 {label}: transcript_turn {want}, the guard fails open (fail-open:transcript-{want.split(':')[1]}), exit 0",
+              rec.get("transcript_turn") == want and rec.get("live_decision") == "allow"
+              and rec.get("live_reason") == "fail-open:transcript-" + want.split(":")[1] and proc.returncode == 0,
+              "%s %s" % (rec, describe(proc)))
 
     # parse-error and a CORRUPT transcript
     t = tdir / "corrupt.jsonl"
     t.write_bytes(b'{"type": "user", "message": {broken\n\xff\xfe\x00garbage\n' + human_line(1).encode() + b"\n")
     proc = w.run(project, sid(), t)
     rec = last_record(project)
-    check("SH-C6 a CORRUPT transcript: exit and block unchanged, transcript_turn unknown:parse-error, shadow allows",
-          proc.returncode == 2 and rec.get("transcript_turn") == "unknown:parse-error"
-          and rec.get("shadow_decision") == "allow" and "internal error" not in proc.stderr, "%s %s" % (rec, describe(proc)))
+    check("SH-C6 a CORRUPT transcript: fails open (exit 0), transcript_turn unknown:parse-error, no internal error",
+          proc.returncode == 0 and rec.get("transcript_turn") == "unknown:parse-error"
+          and rec.get("live_reason") == "fail-open:transcript-parse-error" and "internal error" not in proc.stderr,
+          "%s %s" % (rec, describe(proc)))
     t = tdir / "binary.jsonl"
     t.write_bytes(bytes(range(256)) * 40)
     proc = w.run(project, sid(), t)
     rec = last_record(project)
-    check("SH-C6 a binary file with no newline: the call still ends as without the shadow (exit 2, no internal error)",
-          proc.returncode == 2 and "internal error" not in proc.stderr, describe(proc))
+    check("SH-C6 a binary file (garbage lines): fails open as parse-error (exit 0), never an internal error",
+          proc.returncode == 0 and "fail-open:transcript-parse-error" in proc.stderr and "internal error" not in proc.stderr, describe(proc))
 
     # subagent: no transcript is read
     t = tdir / "sub.jsonl"
@@ -320,30 +323,29 @@ def run_states(w: World) -> None:
     s = sid()
     proc = w.run(project, s, t, extra_payload={"agent_id": "agent-1", "agent_type": "general-purpose"})
     rec = last_record(project)
-    check("SH-C7 subagent: transcript_turn unknown:subagent, nothing read, shadow allows at the transcript step",
-          rec.get("transcript_turn") == "unknown:subagent" and rec.get("bytes_read") == 0 and rec.get("agent") is True
-          and rec.get("shadow_reason") == "transcript-unknown", rec)
-    check("SH-C7 subagent: live allows at step 3 (fail-open:subagent) and the outcome is agree",
-          proc.returncode == 0 and rec.get("live_reason") == "fail-open:subagent" and rec.get("outcome") == "agree",
+    check("SH-C7 subagent: transcript_turn unknown:subagent, nothing read",
+          rec.get("transcript_turn") == "unknown:subagent" and rec.get("bytes_read") == 0 and rec.get("agent") is True, rec)
+    check("SH-C7 subagent: the guard allows at step 3 (fail-open:subagent), not at the transcript step",
+          proc.returncode == 0 and rec.get("live_reason") == "fail-open:subagent" and rec.get("outcome") == "enforced",
           "%s %s" % (rec, describe(proc)))
 
-    # allowlisted target, state closed -> the shadow classifies and allows at the same step as live
+    # allowlisted target, state closed -> allowed at the targets step
     t = tdir / "closed2.jsonl"
     write_lines(t, [human_line(1)])
     proc = w.run(project, sid(), t, tool_input={"file_path": str(project / "docs" / "notes.md")})
     rec = last_record(project)
-    check("SH-C8 allowlisted target: live non-source-target, shadow non-source-target, target_class allowed, agree",
+    check("SH-C8 allowlisted target: non-source-target, target_class allowed, outcome enforced",
           proc.returncode == 0 and rec.get("live_reason") == "non-source-target" and rec.get("shadow_reason") == "non-source-target"
-          and rec.get("target_class") == "allowed" and rec.get("outcome") == "agree", "%s %s" % (rec, describe(proc)))
-    # the Turn marker is read (turn_marker bool) once step 0 passed
-    check("SH-C8 turn_marker is false when no marker exists", rec.get("turn_marker") is False, rec)
+          and rec.get("target_class") == "allowed" and rec.get("outcome") == "enforced", "%s %s" % (rec, describe(proc)))
+    # the Turn marker is neither read nor written: turn_marker is always null
+    check("SH-C8 turn_marker is null (the marker is retired)", rec.get("turn_marker") is None, rec)
     s = sid()
     af.write_marker(af.session_parent(w.sb.home), s)
     proc = w.run(project, s, t)
     rec = last_record(project)
-    check("SH-C9 marker present: live turn-marker-present, turn_marker true, shadow (closed) blocks -> shadow-more-closed",
-          proc.returncode == 0 and rec.get("live_reason") == "turn-marker-present" and rec.get("turn_marker") is True
-          and rec.get("shadow_decision") == "block" and rec.get("outcome") == "shadow-more-closed", "%s %s" % (rec, describe(proc)))
+    check("SH-C9 a turn.json in the Session folder opens nothing: the closed turn blocks, turn_marker stays null",
+          proc.returncode == 2 and rec.get("live_reason") == "source-target" and rec.get("turn_marker") is None
+          and rec.get("outcome") == "enforced", "%s %s" % (rec, describe(proc)))
 
     # step 0 found the Session state unusable (a Session folder that is a link; the live gate blocks, issue #271): no cursor read or written, turn_marker null
     s = sid()
@@ -360,11 +362,11 @@ def run_states(w: World) -> None:
         proc = w.run(project, s, t)
         rec = last_record(project)
         after = sorted(p.name for p in target.iterdir())
-        check("SH-K1 link folder: live blocks (session-state-unusable, issue #271) and turn_marker is null (not read)",
+        check("SH-K1 link folder: the guard blocks (session-state-unusable, issue #271) and turn_marker is null",
               proc.returncode == 2 and rec.get("live_reason") == "session-state-unusable" and rec.get("turn_marker") is None,
               "%s %s" % (rec, describe(proc)))
-        check("SH-K1 link folder: the planted cursor was not read (a cold scan answered open, not the planted closed)",
-              rec.get("transcript_turn") == "open", rec)
+        check("SH-K1 link folder: no transcript was read (the state reads closed, nothing scanned) and the planted cursor was ignored",
+              rec.get("transcript_turn") == "closed" and rec.get("bytes_read") == 0, rec)
         check("SH-K1 link folder: nothing was written through the link (same names, cursor bytes unchanged)",
               before == after and (target / CURSOR_NAME).read_text(encoding="utf-8") == planted, "%s -> %s" % (before, after))
         af.is_link(folder) and os.rmdir(str(folder))
@@ -387,11 +389,14 @@ def run_cursor(w: World) -> None:
     size1 = t.stat().st_size
     w.run(project, s, t)
     cur = cursor_of(folder)
-    check("SH-K2 a first call writes the cursor: path, identity, scanned_to, skipping, turn, session_seen, updated_at",
-          set(cur) >= {"path", "identity", "scanned_to", "skipping", "turn", "session_seen", "updated_at"}
-          and cur.get("scanned_to") == size1 and cur.get("turn") == "open" and cur.get("session_seen") is True, cur)
+    check("SH-K2 a first call writes the cursor: path, identity, scanned_to, skipping, turn, session_seen, updated_at, "
+          "open_route, open_command, mcp_seen",
+          set(cur) >= {"path", "identity", "scanned_to", "skipping", "turn", "session_seen", "updated_at", "open_route",
+                       "open_command", "mcp_seen"}
+          and cur.get("scanned_to") == size1 and cur.get("turn") == "open" and cur.get("session_seen") is True
+          and cur.get("open_route") == "mcp" and cur.get("mcp_seen") is True and cur.get("open_command") is None, cur)
     check("SH-K2 the cursor stores no transcript text", "mcp__codegraph__" not in json.dumps(cur) and '"x"' not in json.dumps(cur), cur)
-    check("SH-K2 only the cursor was added to the Session folder (the shadow leaves no temp file)",
+    check("SH-K2 only the cursor was added to the Session folder (no temp file is left)",
           sorted(p.name for p in folder.iterdir() if not p.name.startswith("ticket-") and p.name != "availability.json")
           == [CURSOR_NAME], sorted(p.name for p in folder.iterdir()))
 
@@ -416,7 +421,7 @@ def run_cursor(w: World) -> None:
         proc = w.run(project, s2, t)
         rec = last_record(project)
         cur = cursor_of(f2)
-        check(f"SH-K4 corrupt cursor ({label}): cold scan answers closed, the cursor is rewritten valid",
+        check(f"SH-K4 corrupt cursor ({label}): cold scan answers closed (blocked), the cursor is rewritten valid",
               proc.returncode == 2 and rec.get("transcript_turn") == "closed" and cur.get("scanned_to") == t.stat().st_size
               and isinstance(cur.get("turn"), str), "%s %s" % (rec, cur))
 
@@ -469,13 +474,22 @@ def run_cursor(w: World) -> None:
     check("SH-K7 once completed, the line is read (closed) and only its bytes are read",
           rec.get("transcript_turn") == "closed" and rec.get("bytes_read") == len(part) + 1, rec)
 
-    # cold start keeps nothing when the Session folder does not exist yet: no folder is created by the shadow
+    # cold start with no Session folder yet: the guard creates it, as a live effect, to write the cursor (the reset hook that
+    # used to create it retired)
     s5 = sid()
     folder5 = w.folder(s5, create=False)
     proc = w.run(project, s5, t)
-    check("SH-K8 the shadow does not create the Session folder (the live block creates it by writing the ticket)",
-          not (folder5 / CURSOR_NAME).exists() and last_record(project).get("transcript_turn") in ("closed", "open"),
+    check("SH-K8 the guard creates the Session folder and writes the cursor into it when the folder is absent",
+          (folder5 / CURSOR_NAME).is_file() and last_record(project).get("transcript_turn") in ("closed", "open"),
           sorted(p.name for p in folder5.iterdir()) if folder5.exists() else "absent")
+    s6 = sid()
+    cold = w.folder(s6)
+    (cold / CURSOR_NAME).write_text(json.dumps({"path": os.path.normcase(os.path.normpath(str(t))), "identity": "x",
+                                                "scanned_to": 0, "skipping": False, "turn": "closed", "session_seen": False,
+                                                "updated_at": 1}), encoding="utf-8")
+    proc = w.run(project, s6, t)
+    check("SH-K9 a cursor written before the cut-over (no open_route, open_command, mcp_seen) reads as absent: a cold scan, then the new shape",
+          cursor_of(cold).get("mcp_seen") in (True, False) and "open_route" in cursor_of(cold), cursor_of(cold))
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -557,7 +571,7 @@ def run_inproc_states(w: World) -> None:
     with inproc(w, project):
         guard = load_module(w.guard, "cg_shadow_states")
         session = guard.Session({"session_id": sid(), "cwd": str(project)})
-        far = guard.time.monotonic() + 60
+        far = guard.time.perf_counter() + 60
         payload = {"transcript_path": str(t)}
         real_open = open
 
@@ -569,19 +583,20 @@ def run_inproc_states(w: World) -> None:
         with mock.patch("builtins.open", deny):
             res = guard.read_transcript(payload, session, False, far)
         check("SH-C10 unreadable: open() raises -> unknown:unreadable", res["state"] == "unknown:unreadable", res)
-        res = guard.read_transcript(payload, session, False, guard.time.monotonic() - 1)
+        res = guard.read_transcript(payload, session, False, guard.time.perf_counter() - 1)
         check("SH-C11 time-exceeded: a spent deadline -> unknown:time-exceeded and no cursor to write",
               res["state"] == "unknown:time-exceeded" and not res.get("cursor"), res)
 
-        # the full call: a spent budget still ends as without the shadow, the record says time-exceeded, no cursor
+        # the full call: a spent budget fails open, the record says time-exceeded, no cursor is written
         s = sid()
         folder = w.folder(s)
-        guard.SHADOW_TIME_BUDGET_S = -1.0
+        guard.TRANSCRIPT_TIME_BUDGET_S = -1.0
         code, out, err = run_main(guard, payload_for(project, s, t))
         rec = last_record(project)
-        check("SH-C11 time-exceeded end to end: the live block stands (exit 2), the record says unknown:time-exceeded, no cursor written",
-              code == 2 and rec.get("transcript_turn") == "unknown:time-exceeded" and not (folder / CURSOR_NAME).exists()
-              and rec.get("shadow_decision") == "allow", "%s %s" % (code, rec))
+        check("SH-C11 time-exceeded end to end: the guard fails open (exit 0, fail-open:transcript-time-exceeded), the record says "
+              "unknown:time-exceeded, no cursor written",
+              code == 0 and rec.get("transcript_turn") == "unknown:time-exceeded" and not (folder / CURSOR_NAME).exists()
+              and rec.get("live_reason") == "fail-open:transcript-time-exceeded", "%s %s" % (code, rec))
 
 
 def run_classifier(w: World) -> None:
@@ -621,9 +636,34 @@ def run_classifier(w: World) -> None:
         text_only["message"]["content"] = [{"type": "text", "text": "mcp__codegraph__x"}]
         check("SH-E3 an assistant text block naming the tool is other", kind(text_only) == "other")
 
+        def assistant(*blocks):
+            return {"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": list(blocks)}}
+
+        def tool(name, **tool_input):
+            return {"type": "tool_use", "id": "t", "name": name, "input": tool_input}
+
+        facts = guard.entry_facts
+        check("SH-E5 a Bash tool_use of a Counted command is codegraph-use, route cli, with its subcommand",
+              facts(assistant(tool("Bash", command="codegraph explore Thing"))) == ("codegraph-use", "cli", "explore")
+              and facts(assistant(tool("Bash", command="codegraph query x 2>&1"))) == ("codegraph-use", "cli", "query"))
+        for bad in ("codegraph explore x && ls", "codegraph status", "echo codegraph explore x", " codegraph explore x",
+                    "codegraph explore $(id)", "FOO=1 codegraph explore x", "codegraph"):
+            check(f"SH-E5 a Bash command {bad!r} is not a Counted command (other)", kind(assistant(tool("Bash", command=bad))) == "other")
+        check("SH-E5 a background Bash run of a Counted command is other",
+              kind(assistant(tool("Bash", command="codegraph explore x", run_in_background=True))) == "other")
+        check("SH-E6 an Agent or Task tool_use is subagent-dispatch, route agent",
+              facts(assistant(tool("Agent"))) == ("subagent-dispatch", "agent", None)
+              and facts(assistant(tool("Task"))) == ("subagent-dispatch", "agent", None))
+        check("SH-E6 a sidechain dispatch is other", kind(dict(assistant(tool("Agent")), isSidechain=True)) == "other")
+        check("SH-E6 mcp beats cli beats agent inside one entry",
+              facts(assistant(tool("Agent"), tool("Bash", command="codegraph node X"), tool("mcp__codegraph__codegraph_node")))[1] == "mcp"
+              and facts(assistant(tool("Agent"), tool("Bash", command="codegraph node X")))[1] == "cli")
+        check("SH-E6 a human prompt that merely says Agent is still a human prompt",
+              kind(dict(base, message={"role": "user", "content": "use the Agent tool"})) == "human-prompt")
+
         # the t1 fixtures: the line indices the t1 artefact recorded (0-based)
         expected = {"sequential-turns.jsonl": [3, 27, 43], "parallel-calls.jsonl": [3, 27], "compaction.jsonl": [3, 28],
-                    "injected-messages.jsonl": [3, 28], "subagent.jsonl": [3]}
+                    "injected-messages.jsonl": [3, 28], "subagent.jsonl": [3, 27]}  # 27: the Agent dispatch (C-7)
         for name, want in expected.items():
             path = FIXTURES / name
             if not path.is_file():
@@ -658,10 +698,10 @@ def run_log(w: World) -> None:
     before = set(tree_has_log(w.sb.root))
     proc = w.run(project, sid(), t, project_env=False)
     found = set(tree_has_log(w.sb.root)) - before
-    check("SH-L1 CLAUDE_PROJECT_DIR unset: the live call is unchanged (blocked as before), no record anywhere",
+    check("SH-L1 CLAUDE_PROJECT_DIR unset: the call is blocked as before, no record anywhere",
           not found and proc.returncode == 2 and "internal error" not in proc.stderr, "%s %s" % (found, describe(proc)))
-    # The live gate keeps its Session state in the Per-user session parent, which sits inside the fixture home
-    # (LOCALAPPDATA / XDG_CACHE_HOME): that subtree is the gate's, not the shadow's. Everything else must stay empty.
+    # The gate keeps its Session state in the Per-user session parent, which sits inside the fixture home
+    # (LOCALAPPDATA / XDG_CACHE_HOME): that subtree is the gate's, not the log's. Everything else must stay empty.
     parent = af.session_parent(w.sb.home, create=False)
     own_state = {parent, *parent.parents}
     outside = [p for p in w.sb.home.rglob("*") if p not in own_state and parent not in p.parents]
@@ -686,9 +726,9 @@ def run_log(w: World) -> None:
     rec = last_record(project)
     check("SH-L3 the record is one line of at most 1 KB with the contract fields",
           len(log_text.splitlines()) == 1 and len(log_text.encode("utf-8")) <= 1024
-          and set(rec) >= {"ts", "session", "agent", "tool", "target_class", "live_decision", "live_reason", "turn_marker",
-                           "transcript_turn", "session_seen", "shadow_decision", "shadow_reason", "outcome", "fp", "prompt_key",
-                           "shadow_ms", "bytes_read", "skipped_long_line"}, rec)
+          and set(rec) == {"ts", "session", "agent", "tool", "target_class", "live_decision", "live_reason", "turn_marker",
+                           "turn_route", "transcript_turn", "session_seen", "shadow_decision", "shadow_reason", "outcome", "fp",
+                           "prompt_key", "shadow_ms", "bytes_read", "skipped_long_line"}, rec)
     check("SH-L3 session and prompt_key are 12 hex digits", len(rec.get("session", "")) == 12 and len(rec.get("prompt_key", "")) == 12
           and all(c in "0123456789abcdef" for c in rec.get("session", "") + rec.get("prompt_key", "")), rec)
     w.run(project, sid(), t)
@@ -709,7 +749,7 @@ def run_log(w: World) -> None:
 
 
 def _writer(guard_path, barrier, rounds, who, project, session, transcript_dir, results) -> None:
-    """One writer process of the two-process test: round after round, behind a barrier, a cold shadow section."""
+    """One writer process of the two-process test: round after round, behind a barrier, a cold read, a cursor write, a record."""
     guard = load_module(Path(guard_path), "cg_shadow_writer_%d" % who)
     raised = 0
     for n in range(rounds):
@@ -723,8 +763,9 @@ def _writer(guard_path, barrier, rounds, who, project, session, transcript_dir, 
             results.put((who, raised, -1))
             return
         try:
-            live = guard._plan("Read", payload["tool_input"], payload, None, None)
-            guard.shadow_section("Read", payload["tool_input"], payload, live)
+            plan = guard.plan_live("Read", payload["tool_input"], payload)
+            guard._apply_cursor(plan)
+            guard._apply_measurement("Read", payload, plan, plan.decision, plan.reason)
         except BaseException:  # noqa: BLE001
             raised += 1
     results.put((who, raised, rounds))
@@ -771,7 +812,7 @@ def run_two_writers(w: World) -> None:
         except ValueError:
             malformed += 1
     cur = cursor_of(folder)
-    check("SH-L5 two concurrent writers: neither raised out of the shadow section", all(o[1] == 0 and o[2] == rounds for o in outcomes), outcomes)
+    check("SH-L5 two concurrent writers: neither raised out of the cursor write or the record", all(o[1] == 0 and o[2] == rounds for o in outcomes), outcomes)
     check("SH-L5 two concurrent writers: the cursor parses and has the cursor shape",
           set(cur) >= {"path", "identity", "scanned_to", "turn"}, cur)
     check("SH-L5 two concurrent writers: every log line is whole or counted malformed, and records never exceed writes",
@@ -781,7 +822,7 @@ def run_two_writers(w: World) -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------
-# SH-G2: plan, shadow, effects
+# SH-G2: plan and effects (C-2)
 # --------------------------------------------------------------------------------------------------------------
 def folder_snapshot(folder: Path) -> dict:
     """File names and contents of a Session folder, minus the ticket ts, availability checked_at and the cursor files."""
@@ -813,8 +854,10 @@ def run_g2(w: World) -> None:
     tdir.mkdir()
     closed = tdir / "closed.jsonl"
     write_lines(closed, [human_line(1)])
+    opened = tdir / "opened.jsonl"
+    write_lines(opened, [human_line(1), use_line()])
 
-    # a matching ticket is consumed exactly once, by the live path; the record shows retry-escape-used
+    # a matching ticket is consumed exactly once, by apply; the record shows retry-escape-used
     project = w.project()
     s = sid()
     folder = w.folder(s)
@@ -822,16 +865,6 @@ def run_g2(w: World) -> None:
         guard = load_module(w.guard, "cg_shadow_g2a")
         first = run_main(guard, payload_for(project, s, closed))
         tickets = [p.name for p in folder.iterdir() if p.name.startswith("ticket-")]
-        seen_at_shadow: list = []
-        real_shadow = guard.shadow_section
-
-        def watching(*a, **k):
-            seen_at_shadow.append(sorted(p.name for p in folder.iterdir() if p.name.startswith("ticket-")))
-            try:
-                return real_shadow(*a, **k)
-            finally:
-                seen_at_shadow.append(sorted(p.name for p in folder.iterdir() if p.name.startswith("ticket-")))
-
         removed: list = []
         real_remove = os.remove
 
@@ -840,19 +873,17 @@ def run_g2(w: World) -> None:
                 removed.append(str(path))
             return real_remove(path, *a, **k)
 
-        with mock.patch.object(guard, "shadow_section", watching), mock.patch.object(os, "remove", spy):
+        with mock.patch.object(os, "remove", spy):
             second = run_main(guard, payload_for(project, s, closed))
     rec = last_record(project)
     check("SH-G2a the first identical call blocks and issues one ticket", first[0] == 2 and len(tickets) == 1, "%s %s" % (first[0], tickets))
     check("SH-G2a the retry is allowed (retry-escape-used) and the ticket is gone afterwards",
           second[0] == 0 and "retry-escape-used" in second[2] and not [p for p in folder.iterdir() if p.name.startswith("ticket-")],
           second)
-    check("SH-G2a the ticket existed through the whole shadow section (the shadow consumed nothing)",
-          seen_at_shadow == [tickets, tickets], seen_at_shadow)
-    check("SH-G2a the ticket was removed exactly once, by the live path", len(removed) == 1, removed)
-    check("SH-G2a the record shows retry-escape-used for live and for the shadow, outcome agree",
+    check("SH-G2a the ticket was removed exactly once", len(removed) == 1, removed)
+    check("SH-G2a the record shows retry-escape-used for the decision and the shadow_* mirror, outcome enforced",
           rec.get("live_reason") == "retry-escape-used" and rec.get("shadow_reason") == "retry-escape-used"
-          and rec.get("outcome") == "agree", rec)
+          and rec.get("outcome") == "enforced", rec)
 
     # a ticket gone at apply keeps the planned allow
     project = w.project()
@@ -861,32 +892,27 @@ def run_g2(w: World) -> None:
     with inproc(w, project):
         guard = load_module(w.guard, "cg_shadow_g2b")
         run_main(guard, payload_for(project, s, closed))
-        real_shadow = guard.shadow_section
+        real_apply = guard.apply_state
 
-        def steal(*a, **k):
-            try:
-                return real_shadow(*a, **k)
-            finally:
-                for p in list(folder.iterdir()):
-                    if p.name.startswith("ticket-"):
-                        p.unlink()  # an identical parallel call consumed it after the plan
+        def steal(plan):
+            for p in list(folder.iterdir()):
+                if p.name.startswith("ticket-"):
+                    p.unlink()  # an identical parallel call consumed it after the plan
+            return real_apply(plan)
 
-        with mock.patch.object(guard, "shadow_section", steal):
+        with mock.patch.object(guard, "apply_state", steal):
             code, out, err = run_main(guard, payload_for(project, s, closed))
     check("SH-G2b a ticket gone at apply keeps the planned allow (exit 0, retry-escape-used)",
           code == 0 and "retry-escape-used" in err, (code, err))
 
-    # the shadow writes no availability.json: live allows at step 2 (marker), the shadow (closed) computes it read-only
+    # an open turn writes no availability.json and no ticket: only the cursor lands in the Session folder
     project = w.project()
     s = sid()
     folder = w.folder(s)
-    af.write_marker(af.session_parent(w.sb.home), s)
-    proc = w.run(project, s, closed)
-    rec = last_record(project)
-    check("SH-G2c the shadow computed a block from the availability verdicts (shadow-more-closed)...",
-          rec.get("shadow_decision") == "block" and rec.get("outcome") == "shadow-more-closed", "%s %s" % (rec, describe(proc)))
-    check("SH-G2c ...and wrote no availability.json and no ticket", not (folder / "availability.json").exists()
-          and not [p for p in folder.iterdir() if p.name.startswith("ticket-")], sorted(p.name for p in folder.iterdir()))
+    proc = w.run(project, s, opened)
+    check("SH-G2c an open turn: allowed at step 1, so no availability.json and no ticket are written",
+          proc.returncode == 0 and not (folder / "availability.json").exists()
+          and not [p for p in folder.iterdir() if p.name.startswith("ticket-")], "%s %s" % (describe(proc), sorted(p.name for p in folder.iterdir())))
 
     # a blocked call (exit 2) still writes its record
     project = w.project()
@@ -894,11 +920,11 @@ def run_g2(w: World) -> None:
     check("SH-G2d a blocked call (exit 2) still writes its record", proc.returncode == 2 and len(records(project)) == 1 and
           records(project)[0].get("live_decision") == "block", describe(proc))
 
-    # forced raise: byte-identical exit, stdout, stderr; equal Session folder
+    # forced raise of a late effect: byte-identical exit, stdout, stderr; equal Session folder
     for label, indexed in (("a blocked call", True), ("an allowed call (fail-open:no-index)", False)):
         results = {}
-        project = w.project(index=indexed)  # one project for the three runs: availability.json keys on the cwd
-        for mode in ("reference", "exception", "systemexit"):
+        project = w.project(index=indexed)  # one project for the runs: availability.json keys on the cwd
+        for mode in ("reference", "exception", "systemexit", "cursor"):
             s = "sfixed" + ("b" if indexed else "a")
             sandbox = af.Sandbox("cgshadow-g2-")
             try:
@@ -908,11 +934,13 @@ def run_g2(w: World) -> None:
                     with inproc(w, project):
                         guard = load_module(w.guard, "cg_shadow_g2_%s_%s" % (mode, indexed))
                         if mode == "reference":
-                            patch = mock.patch.object(guard, "shadow_section", lambda *a, **k: None)
+                            patch = mock.patch.object(guard, "_append_shadow_line", lambda *a, **k: True)
                         elif mode == "exception":
-                            patch = mock.patch.object(guard, "shadow_section", mock.Mock(side_effect=Exception("forced")))
+                            patch = mock.patch.object(guard, "_append_shadow_line", mock.Mock(side_effect=Exception("forced")))
+                        elif mode == "systemexit":
+                            patch = mock.patch.object(guard, "_append_shadow_line", mock.Mock(side_effect=SystemExit(7)))
                         else:
-                            patch = mock.patch.object(guard, "shadow_section", mock.Mock(side_effect=SystemExit(7)))
+                            patch = mock.patch.object(guard, "_write_cursor", mock.Mock(side_effect=SystemExit(7)))
                         with patch:
                             run = run_main(guard, payload_for(project, s, closed))
                         results[mode] = (run, folder_snapshot(af.session_folder(af.session_parent(sandbox.home), s)))
@@ -921,23 +949,23 @@ def run_g2(w: World) -> None:
             finally:
                 sandbox.remove()
         ref = results["reference"]
-        for mode in ("exception", "systemexit"):
+        for mode in ("exception", "systemexit", "cursor"):
             got = results[mode]
-            check(f"SH-G2e {label}, shadow raising {mode}: exit code, stdout and stderr are byte-identical to a run without it",
+            check(f"SH-G2e {label}, a late effect raising {mode}: exit code, stdout and stderr are byte-identical to a run without it",
                   got[0] == ref[0], "%r vs %r" % (got[0], ref[0]))
-            check(f"SH-G2e {label}, shadow raising {mode}: the Session folder is equal (names and contents, minus ts/checked_at/cursor files)",
-                  got[1] == ref[1] and bool(ref[1]), "%r vs %r" % (got[1], ref[1]))
+            check(f"SH-G2e {label}, a late effect raising {mode}: the Session folder is equal (names and contents, minus ts/checked_at/cursor files)",
+                  got[1] == ref[1], "%r vs %r" % (got[1], ref[1]))
         check(f"SH-G2e {label}: the reference run really {'blocked' if indexed else 'allowed'}",
               ref[0][0] == (2 if indexed else 0), ref[0])
+        check(f"SH-G2e {label}: the reference Session folder is not empty (the fixture bites)", bool(ref[1]), ref[1])
 
-    # a real shadow (not forced) leaves the live outcome and the folder as without it too
+    # a run with a log location and a run without one give the same exit code and the same stderr
     project = w.project()
     s = sid()
     real = w.run(project, s, closed)
     other_project = w.project()
-    # the same call without a project log location (the shadow is skipped): same exit and same stderr
     quiet = w.run(other_project, sid(), closed, project_env=False)
-    check("SH-G2f a run with the shadow and a run without a log location give the same exit code and the same stderr",
+    check("SH-G2f a run with the log and a run without a log location give the same exit code and the same stderr",
           real.returncode == quiet.returncode and real.stderr == quiet.stderr and real.stdout == quiet.stdout,
           "%s | %s" % (describe(real), describe(quiet)))
 
@@ -960,8 +988,9 @@ print("RESULT", "_project_paths" in sys.modules, "_error_log" in sys.modules)
 """
 
 
-def probe(w: World, project: Path, session: str, tool_input: dict) -> tuple:
-    payload = {"session_id": session, "cwd": str(project), "tool_name": "Read", "tool_input": tool_input}
+def probe(w: World, project: Path, session: str, tool_input: dict, transcript: Path) -> tuple:
+    payload = {"session_id": session, "cwd": str(project), "tool_name": "Read", "tool_input": tool_input,
+               "transcript_path": str(transcript)}
     proc = subprocess.run([sys.executable, "-B", "-c", PROBE, str(w.guard), json.dumps(payload)], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", cwd=str(project), env=w.env(project), timeout=60)
     line = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT")]
@@ -973,35 +1002,36 @@ def probe(w: World, project: Path, session: str, tool_input: dict) -> tuple:
 
 def run_g1(w: World) -> None:
     project = w.project()
+    tdir = w.sb.root / "g1"
+    tdir.mkdir(exist_ok=True)
+    opened, closed = tdir / "opened.jsonl", tdir / "closed.jsonl"
+    write_lines(opened, [human_line(1), use_line()])
+    write_lines(closed, [human_line(1)])
     source = {"file_path": str(project / "src" / "Thing.cs")}
-    s = sid()
-    af.write_marker(af.session_parent(w.sb.home), s)
-    pp, el, proc = probe(w, project, s, source)
-    check("SH-G1a marker present, a source Read: allowed and _project_paths is left unimported", pp is False and proc.returncode == 0, describe(proc))
-    check("SH-G1a marker present, a source Read: _error_log is left unimported too", el is False, describe(proc))
-    pp, el, proc = probe(w, project, sid(), source)
-    check("SH-G1a control: with no marker the same Read is classified/blocked and _project_paths IS imported (the probe bites)",
+    pp, el, proc = probe(w, project, sid(), source, opened)
+    check("SH-G1a open turn, a source Read: allowed and _project_paths is left unimported", pp is False and proc.returncode == 0, describe(proc))
+    check("SH-G1a open turn, a source Read: _error_log is left unimported too", el is False, describe(proc))
+    pp, el, proc = probe(w, project, sid(), source, closed)
+    check("SH-G1a control: with a closed turn the same Read is classified/blocked and _project_paths IS imported (the probe bites)",
           pp is True, describe(proc))
-    s = sid()
-    af.write_marker(af.session_parent(w.sb.home), s)
-    pp, el, proc = probe(w, project, s, {"file_path": str(project / "docs" / "n.md")})
-    check("SH-G1a marker present, a non-source Read: _project_paths is left unimported", pp is False, describe(proc))
+    pp, el, proc = probe(w, project, sid(), {"file_path": str(project / "docs" / "n.md")}, opened)
+    check("SH-G1a open turn, a non-source Read: _project_paths is left unimported", pp is False, describe(proc))
 
-    # the reorder: the marker is checked before classification; the outcome of both allows is the same
+    # the reorder: the transcript state is read before classification; the outcome of both allows is the same
     with inproc(w, project):
         guard = load_module(w.guard, "cg_shadow_g1")
         s2 = sid()
-        af.write_marker(af.session_parent(w.sb.home), s2)
-        both = guard.decide("Read", {"file_path": str(project / "docs" / "n.md")}, {"session_id": s2, "cwd": str(project)})
-        check("SH-G1b marker present and a non-source target: allowed, reason is the marker's (checked first)",
-              both == ("allow", "turn-marker-present"), both)
+        both = guard.decide("Read", {"file_path": str(project / "docs" / "n.md")},
+                            {"session_id": s2, "cwd": str(project), "transcript_path": str(opened)})
+        check("SH-G1b open turn and a non-source target: allowed, reason is the transcript's (checked first)",
+              both == ("allow", "transcript-open"), both)
 
         sig = inspect.signature(guard.decide)
         check("SH-G1c decide() keeps its signature (tool_name, tool_input, payload=None)",
               list(sig.parameters) == ["tool_name", "tool_input", "payload"] and sig.parameters["payload"].default is None, sig)
         s3 = sid()
         folder = af.session_folder(af.session_parent(w.sb.home), s3)
-        payload = {"session_id": s3, "cwd": str(project)}
+        payload = {"session_id": s3, "cwd": str(project), "transcript_path": str(closed)}
         first = guard.decide("Read", {"file_path": str(project / "src" / "Thing.cs")}, payload)
         tickets = [p.name for p in folder.iterdir() if p.name.startswith("ticket-")]
         check("SH-G1c decide() still returns (decision, reason) and still issues the ticket and caches availability.json",
@@ -1021,21 +1051,21 @@ def run_g1(w: World) -> None:
               getattr(guard._pp, "__name__", "") == "_project_paths" and callable(guard.log_event))
         guard2 = load_module(w.guard, "cg_shadow_g1_patch")
         with mock.patch.object(guard2, "_pp_checkout_equivalent_path", None):
-            code, out, err = run_main(guard2, payload_for(project, sid(), None))
+            code, out, err = run_main(guard2, payload_for(project, sid(), closed))
         check("SH-G1d patching _pp_checkout_equivalent_path to None shows the fallback-mode banner",
               code == 2 and "could not be imported" in err, (code, err[:300]))
         guard3 = load_module(w.guard, "cg_shadow_g1_patch2")
         logged: list = []
         with mock.patch.object(guard3, "log_event", lambda *a, **k: logged.append(k.get("event"))):
-            run_main(guard3, payload_for(project, sid(), None))
+            run_main(guard3, payload_for(project, sid(), closed))
         check("SH-G1d patching log_event is honoured by the block path", "block" in logged, logged)
 
 
 # --------------------------------------------------------------------------------------------------------------
-# SH-P: the reset hook's pruner
+# SH-P: the guard's pruner (moved from the retired reset hook, C-5)
 # --------------------------------------------------------------------------------------------------------------
 def run_pruner(w: World) -> None:
-    reset = load_module(w.reset, "cg_shadow_reset")
+    reset = load_module(w.guard, "cg_shadow_pruner")
     root = w.sb.root / "prune"
     root.mkdir()
 
@@ -1055,62 +1085,60 @@ def run_pruner(w: World) -> None:
           reset.SESSION_PREFIX + "known" in removed and not f1.exists(), removed)
     check("SH-P1 a folder holding a temp file with a non-digit name is kept whole", f2.exists() and CURSOR_NAME in os.listdir(f2), removed)
 
-    # the reset hook on a prompt leaves the cursor alone
+    # the prompt row leaves the cursor, the ticket and a leftover turn.json alone
     s = sid()
     folder = w.folder(s)
     (folder / CURSOR_NAME).write_text("{}", encoding="utf-8")
     (folder / "turn.json").write_text("{}", encoding="utf-8")
-    proc = subprocess.run([sys.executable, "-B", str(w.reset)], input=json.dumps({"session_id": s, "cwd": str(w.sb.root)}),
+    proc = subprocess.run([sys.executable, "-B", str(w.guard), "notice"], input=json.dumps({"session_id": s, "cwd": str(w.sb.root)}),
                           capture_output=True, text=True, env=w.env(None), timeout=60)
-    check("SH-P2 the reset hook deletes the marker but keeps the cursor", proc.returncode == 0 and not (folder / "turn.json").exists()
-          and (folder / CURSOR_NAME).exists(), describe(proc))
+    check("SH-P2 the prompt row keeps the cursor and deletes no turn.json (nothing reads it any more)",
+          proc.returncode == 0 and (folder / "turn.json").exists() and (folder / CURSOR_NAME).exists(), describe(proc))
 
 
 # --------------------------------------------------------------------------------------------------------------
-# SH-M: issue #295 (contract 2026-11-07-295-codegraph-gate-dropped-mcp, Extension Points "Shadow (Q5)"): the Shadow
-# record gains marker_route: mcp / cli / null. A marker with no route (an older tracker) reads as mcp.
+# SH-M: the Measurement record names the route that opened the turn (mcp / cli / agent / null) and no command text
 # --------------------------------------------------------------------------------------------------------------
-def run_marker_route(w: World) -> None:
+def bash_line(command: str) -> str:
+    return json.dumps({"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "tb", "name": "Bash", "input": {"command": command}}]}})
+
+
+def agent_line() -> str:
+    return json.dumps({"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "ta", "name": "Agent", "input": {"prompt": "SECRET-DISPATCH-PROMPT"}}]}})
+
+
+def run_turn_route(w: World) -> None:
     t = w.sb.root / "trm"
     t.mkdir(exist_ok=True)
-    closed = t / "closed.jsonl"
-    write_lines(closed, [filler_line(), human_line(1)])
-    cases = [("route cli", {"route": "cli"}, "cli"), ("route mcp", {"route": "mcp"}, "mcp"),
-             ("no route key (an older tracker)", {}, "mcp")]
-    for label, extra, want in cases:
+    cases = [("an mcp use", [human_line(1), use_line()], "mcp"), ("a Counted command", [human_line(1), bash_line("codegraph explore SECRETCMD-987")], "cli"),
+             ("a subagent dispatch", [human_line(1), agent_line()], "agent"), ("mcp after cli", [human_line(1), bash_line("codegraph node X"), use_line()], "mcp"),
+             ("cli after agent", [human_line(1), agent_line(), bash_line("codegraph node X")], "cli"), ("a closed turn", [human_line(1)], None)]
+    for label, lines, want in cases:
         project = w.project()
-        s = sid()
-        folder = w.folder(s)
-        (folder / "turn.json").write_text(json.dumps(dict({"ts": 1, "tool": "x", "summary": "y", "pid": 1}, **extra)) + "\n",
-                                          encoding="utf-8")
-        proc = w.run(project, s, closed)
+        path = t / (sid() + ".jsonl")
+        write_lines(path, lines)
+        proc = w.run(project, sid(), path)
         rec = last_record(project)
-        check("SH-M1 marker with %s: the record carries marker_route %r" % (label, want),
-              proc.returncode == 0 and "marker_route" in rec and rec.get("marker_route") == want and rec.get("turn_marker") is True,
-              "%s %s" % (rec, describe(proc)))
-    project = w.project()
-    s = sid()
-    proc = w.run(project, s, closed)
-    rec = last_record(project)
-    check("SH-M2 no marker: the live gate blocks (exit 2) and marker_route is present and null", proc.returncode == 2 and "marker_route" in rec and rec["marker_route"] is None,
-          "%s %s" % (rec, describe(proc)))
-    project = w.project()
-    s = sid()
-    af.write_marker(af.session_parent(w.sb.home), s)
-    w.run(project, s, closed)
-    rec = last_record(project)
-    check("SH-M3 the fixture marker (no route key) reads as mcp", rec.get("marker_route") == "mcp", repr(rec))
-    # SH-M4: real text goes into the marker (tool, summary) and the payload (prompt); none of it may reach the record
+        check("SH-M1 %s: the record carries turn_route %r" % (label, want), "turn_route" in rec and rec.get("turn_route") == want, "%s %s" % (rec, describe(proc)))
+        text = json.dumps(rec)
+        check("SH-M2 %s: the record names no command text and no dispatch prompt" % label, "SECRET" not in text and "codegraph explore" not in text, text)
+    # the cursor carries the route and the Counted subcommand of a cli opening, and the sticky mcp flag
     project = w.project()
     s = sid()
     folder = w.folder(s)
-    (folder / "turn.json").write_text(json.dumps({"ts": 1, "tool": "codegraph SECRETCMD-987", "summary": "SECRET-SUMMARY-654 rm -rf",
-                                                  "pid": 1, "route": "cli"}) + "\n", encoding="utf-8")
-    proc = w.run(project, s, closed, extra_payload={"prompt": "SECRET-PROMPT-321"})
-    rec = last_record(project)
-    text = json.dumps(rec)
-    check("SH-M4 the record names no marker tool, marker summary or prompt text, and still carries marker_route cli",
-          proc.returncode == 0 and rec.get("marker_route") == "cli" and "SECRET" not in text, repr(rec))
+    path = t / (sid() + ".jsonl")
+    write_lines(path, [human_line(1), bash_line("codegraph callers X")])
+    w.run(project, s, path)
+    cur = cursor_of(folder)
+    check("SH-M3 the cursor of a cli opening holds open_route cli, open_command callers, mcp_seen false",
+          cur.get("open_route") == "cli" and cur.get("open_command") == "callers" and cur.get("mcp_seen") is False, cur)
+    append_bytes(path, (use_line() + "\n" + human_line(2) + "\n").encode("utf-8"))
+    w.run(project, s, path)
+    cur = cursor_of(folder)
+    check("SH-M3 a later mcp use sets mcp_seen for good, and a new human prompt clears the route",
+          cur.get("mcp_seen") is True and cur.get("open_route") is None and cur.get("open_command") is None and cur.get("turn") == "closed", cur)
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -1118,7 +1146,7 @@ def main() -> int:
     w = World()
     try:
         for fn in (run_states, run_cursor, run_limits, run_inproc_states, run_classifier, run_log, run_two_writers, run_g2, run_g1,
-                   run_pruner, run_marker_route):
+                   run_pruner, run_turn_route):
             try:
                 fn(w)
             except Exception:  # noqa: BLE001

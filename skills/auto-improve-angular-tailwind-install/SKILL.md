@@ -113,7 +113,7 @@ $PY "$FI" addon --name angular-tailwind --project . --stylesheet <relative path>
 The answer carries `files` (each file with its kind, `document` or `helper`, and its action: `copy`, `present` or `keep-existing`),
 `profile` (the `review.documents` slot: `adds` the paths it would append, `already-listed` the paths it skips, `before` and `after`
 the slot text, and a `unified-diff`), `to-add` (settings rows; empty for this add-on), `notes`, `kill-switches` (empty),
-`disabled-hooks`, `target`, `plugin-root` and `plan-sha256`.
+`disabled-hooks`, `retire`, `target`, `plugin-root` and `plan-sha256`.
 **Keep `plan-sha256`.** The apply needs it as `--expect-sha256`. It covers the settings bytes, the profile bytes before and
 after, the bytes of each named stylesheet before and after, and every file the install would copy, so anything that moves between
 the preview and the write is refused as `changed-since-preview`.
@@ -166,12 +166,10 @@ one plain sentence, and stop. A refusal always means nothing was changed. The on
 - `profile-slot-missing`: the project has no `.claude/project-profile.md`, or the profile has no
   `review.documents` row. Nothing was written, not even the documents. Tell the user to run
   `/auto-improve-finish-install` first (it writes the profile), then run this skill again.
-- `disabled-hook-present`: the project still carries the retired advisor hook, as the file
-  `.claude/hooks/angular-tailwind-advisor.py` or `.claude/hooks/architecture-advisor.py`, or as a
-  row in `.claude/settings.json` or `.claude/settings.local.json` that names either file. Name what the
-  message names. Nothing was written. Tell the user to run `/auto-improve-angular-tailwind-uninstall`
-  first, which removes the row and then the file, then run this skill again. Do not delete the row
-  or the file yourself: a row left pointing at a missing script blocks every prompt.
+- `disabled-hook-present`: the project carries a row for the retired advisor in `.claude/settings.local.json` (this install does not write that layer), or an edited copy of the advisor together with a row that names it in `.claude/settings.json` (removing the row would switch off the user's edits). The advisor is `.claude/hooks/angular-tailwind-advisor.py`, or `.claude/hooks/architecture-advisor.py` under its former name. Name what the message names. Nothing was written. Tell the user to run `/auto-improve-angular-tailwind-uninstall` first, which removes the row and then the file (it keeps an edited file), then run this skill again. Do not delete the row or the file yourself: a row left pointing at a missing script blocks every prompt.
+- **A retired advisor in `.claude/settings.json` is not a refusal any more.** The install retires it in two steps (issue #262), exactly like the codegraph add-on's two old hooks:
+  - **Step A.** The preview's `retire` entry has `step` `A`. The run removes the advisor's `UserPromptSubmit` row (under either file name) and deletes no file. Say so, and say: **start a new session, then run this install again to delete the leftover file.** A session that is already open still holds the row, and a plain row (written before the Project hook launcher) that names a missing script exits 2 and blocks every prompt.
+  - **Step B.** A later run, when no row names the advisor, deletes the file if it is an unedited released copy. An edited copy is kept and listed. When `retire.confirm-new-session` is true, ask once, before you apply: "Have you started a new session since the last install run?" On a no, add `--keep-retired-files` to the preview and the apply, and tell the user to re-run after restarting.
 - `addon-file-differs`: one of the four documents already exists in the project and is not the
   plugin's copy. Name the file. The script will not overwrite it. The user compares it with the
   plugin's copy and renames or removes it by hand, then runs this skill again.
@@ -195,7 +193,7 @@ This install never removes anything. The removal is its own skill, `/auto-improv
 stylesheet snippet where it is, because the snippet lives in the project's own stylesheet; delete the block between the two marker
 comments by hand if you want it gone.
 It also cleans a project that installed the old advisor hook under either of its file names, which is
-what `disabled-hook-present` asks for.
+the route `disabled-hook-present` names for the cases the install cannot retire itself.
 
 ## Closing
 

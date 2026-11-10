@@ -303,6 +303,37 @@ the add-on registers no row on any event that runs per prompt, so no program sta
 rules. That is proven by the manifest checker (`test_plugin_manifests.py`) and by the install
 test (zero `UserPromptSubmit` rows written), not by a timing run.
 
+**Changed in 0.17.0 (the `codegraph` guard decides from the session transcript, issue #262):** the add-on used to run three
+hooks. The guard blocked source reads. The tracker wrote a marker file, `turn.json`, after each CodeGraph call. The reset hook
+deleted that marker at each prompt. The cut-over keeps one hook file and retires the other two. Five changes:
+
+- **The guard reads the transcript.** The transcript is the log file Claude Code writes for each session. A turn is the span
+  after the last human prompt. Three things open it, each counted when the main session issues the call, whether or not the call
+  succeeds: an `mcp__codegraph__*` tool use, a Bash call of a Counted `codegraph` command (the plain form of the 0.16.5
+  command-line route), and an `Agent` or `Task` tool use, which is a subagent dispatch. A new human prompt closes the turn. A
+  background task notification does not. A read that is not a clear open or closed answer (no transcript, an unreadable line, a
+  window with no prompt in it, a rewritten file) is let through with a logged reason, `fail-open:transcript-<cause>`.
+- **Two rows, one file.** The guard's file now has the `PreToolUse` row and a `UserPromptSubmit` row with the argument `notice`.
+  The prompt row prunes old session folders once per session and shows the connection notice. It never blocks a prompt.
+- **The tracker and the reset hook are disabled.** They still ship, under `disabled` in `addon.json`, with a note,
+  `.claude/addons/codegraph/DISABLED.md`. No install copies them or writes their rows.
+- **The retry escape is keyed to the prompt.** A retry ticket now matches only inside the prompt that issued it, so no hook has to
+  delete tickets at a prompt any more.
+- **The measurement log keeps writing.** Each guarded call appends one `enforced` record to
+  `.claude/logs/codegraph-shadow.jsonl`, up to 10 MB. `codegraph_shadow_report.py` has an `enforced` section with the share of
+  gated calls that failed open on the transcript, and says when the cap was reached. The log cannot tell a wrong block from a
+  right one: report a block you judge wrong. The rollback rule is in `.claude/addons/codegraph/DISABLED.md`.
+
+There is still no kill switch.
+
+**Upgrading takes two runs of `/auto-improve-codegraph-install`, with a new session between them.** The first run (step A) removes
+the tracker's and the reset hook's rows from `.claude/settings.json`, updates the guard and adds its prompt row. It deletes no
+file, because a session that is already open still holds the old rows, and a row that points at a missing script fails. The second
+run (step B) deletes the two leftover files when they are unedited released copies, and keeps an edited copy. The same two steps
+now apply to the `angular-tailwind` add-on's retired advisor, which the install used to refuse. A `settings.local.json` row for a
+retired hook is still refused as `disabled-hook-present`. A project with a Hook registration profile re-records it after step A,
+because the row count went from four to two.
+
 **Changed in 0.16.5 (the `codegraph` gate survives a dropped MCP connection, issue #295):** when Claude Code drops the
 CodeGraph MCP connection in the middle of a session (seen after `/clear`), the index and the server entry are still
 there, so the guard kept blocking and nothing said why. Five changes, all in the `codegraph` add-on:
@@ -624,7 +655,7 @@ default install runs none of them:
 | Add-on | Its hook files | What it does | Why it is not a default |
 |---|---|---|---|
 | `angular-tailwind` | no hook file is installed; four rule documents and a stylesheet snippet instead. The old `angular-tailwind-advisor.py` (formerly `architecture-advisor.py`) still ships but is disabled since 0.10.0 | copies the Angular, Material, Tailwind and UI-pattern rule documents into `.claude/references/angular-tailwind/` and lists them in `review.documents`; the guard's lines cite them by Rule ID | it only suits Angular plus Tailwind projects; `architecture-guard.py` still enforces at the write |
-| `codegraph` | `codegraph-first-guard.py`, `codegraph-turn-tracker.py`, `codegraph-turn-reset.py` | asks for a CodeGraph call first: blocks `Read` / `Grep` / `Glob` on source until a CodeGraph tool has run in the turn, but lets reads through (with one logged line) when CodeGraph is unavailable, and allows the identical retry of a blocked call once | three program starts: on every Read, Grep and Glob, on every prompt, and after every CodeGraph call; plus one blocked round trip per new source call while the gate is closed |
+| `codegraph` | `codegraph-first-guard.py` (two rows: the gate and a prompt row); `codegraph-turn-tracker.py` and `codegraph-turn-reset.py` ship but are disabled since 0.17.0 | asks for a CodeGraph call first: blocks `Read` / `Grep` / `Glob` on source until the session transcript shows a CodeGraph call in the turn, but lets reads through (with one logged line) when CodeGraph is unavailable or the transcript cannot be read, and allows the identical retry of a blocked call once | two program starts: on every Read, Grep and Glob, and on every prompt; plus one blocked round trip per new source call while the gate is closed |
 | `strict-shell-gate` | `bash-gate.py` | reads each shell command before it runs and blocks a write into a source file no approved contract covers | a program start on every shell command, and it misreads some commands (it read `--stat` as the file written in `sed -i` followed by `git diff --stat`) and cannot see what a program such as `python` or `node` writes; the Changed-file check, which stays on, catches those after the fact |
 
 **To install one in a project**, run its skill. Each one previews the files and the
@@ -675,8 +706,8 @@ The table describes rows in the earlier form, which name the file directly. A la
 | `bash-gate.py` cannot import its parser | the hook's own message, which names `_shell_write_targets.py` | remove the row with the Edit tool. `bash-gate.py` judges only Bash, and the concept gate allows `.claude/` files |
 | `bash-gate.py` is missing | Python's own error, exit 2, on every Bash call | the same Edit-tool route |
 | `codegraph-first-guard.py` is missing | Python's error on every Read, Grep and Glob, including the read of `settings.json` that Edit needs first | edit the row through the shell, or edit the file outside the session |
-| `codegraph-turn-reset.py` is missing | Python's error on `UserPromptSubmit`, so every prompt is blocked | edit `.claude/settings.json` outside the session, in an editor |
-| `codegraph-turn-tracker.py` is missing | an error after each CodeGraph call; the marker is never set, so reads stay blocked until the identical retry | as for a missing `codegraph-first-guard.py` |
+| `codegraph-turn-reset.py` is missing (a project still on 0.16.x, before step A of the 0.17.0 upgrade) | with a launcher row, a warning on `UserPromptSubmit`; with a plain row written before the launcher, Python's error, so every prompt is blocked | edit `.claude/settings.json` outside the session, in an editor, or run `/auto-improve-codegraph-install` in a new session |
+| `codegraph-turn-tracker.py` is missing (the same projects) | an error after each CodeGraph call; its marker is not read by a 0.17.0 guard, so nothing else changes | as for a missing `codegraph-first-guard.py` |
 
 A session with no `mcp__codegraph__*` tool is not a failure of the hook. Since 0.15.2 the guard
 lets the read through when it can prove CodeGraph is unavailable (no index, no configured server,
@@ -774,8 +805,8 @@ you wrote by hand or an older release wrote, and it still never removes or rewri
   reads. The cure is the message's advice: restart Claude Code from an existing checkout.
 - **R3, no fallback outside a worktree folder.** If the session's folder was not under
   `<main>/.claude/worktrees/`, there is nothing to fall back to, and the class rule applies.
-- **R4, a missing `codegraph-turn-tracker.py` only warns.** The CodeGraph gate then blocks every
-  source read by its own decision.
+- **R4, a missing `codegraph-first-guard.py` only warns on its prompt row.** The prompt row is a `warn`
+  launcher row, so a missing file prints the message and lets the prompt through. The `PreToolUse` row blocks.
 - **R5, a syntax error in the launcher text** would make every launcher row exit 1, because Python
   cannot catch it. The tests compile the text and compare the rows to it byte for byte.
 - **R6, a database guard missing in both places** blocks through the launcher with exit 2 on
@@ -1118,7 +1149,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 421 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 436 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 

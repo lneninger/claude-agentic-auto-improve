@@ -2,7 +2,8 @@
 """
 codegraph_shadow_report.py -- read-only report over the CodeGraph guard's measurement log.
 
-Contract: .claude/concepts/2026-11-05-codegraph-hooks-redesign.md, command "Report the shadow".
+Contract: .claude/concepts/2026-11-05-codegraph-hooks-redesign.md, command "Report the shadow", and
+.claude/concepts/2026-11-09-codegraph-hooks-cutover.md (the ``enforced`` outcome).
 
     py -3 .claude/scripts/codegraph_shadow_report.py [--project <dir>] [--json]
 
@@ -17,9 +18,18 @@ shape) are counted, never fatal. ``malformed`` includes ``torn`` (a line that st
 Pairing a block with its retry (Q5): the next later record with the same ``session``, ``fp`` and ``prompt_key`` whose live
 decision is the retry escape. One retry record pairs with one block. A ``prompt_key`` of ``none`` only matches ``none``.
 A shadow-more-closed row is also grouped by the record's ``marker_route`` (``mcp`` or ``cli``; ``none`` when the record has
-none, as an older record does); a ``cli`` group is a turn the command-line route opened, which the transcript rule does not
-see yet, so the text report labels it "explained (command-line route)".
+none, as an older record does); a ``cli`` group is a turn the command-line route opened, which the transcript rule did not
+see in the shadow era, so the text report labels it "explained (command-line route)".
 Percentiles are nearest-rank: the value at rank ceil(q * n) of the sorted values.
+
+TWO KINDS OF RECORD. A record written before the cut-over is a shadow record: its ``outcome`` is agree, shadow-more-open or
+shadow-more-closed, and it pairs the live decision with the shadow one. A record written after it has ``outcome`` ``enforced``:
+the guard decided from the transcript, so it carries no second decision and cannot tell a wrong block from a right one. The
+shadow sections count only shadow records. The ``enforced`` section counts only enforced records: how many, the reasons
+(main session and subagents apart), the share of gated calls that failed open on the transcript (the rollback number of the
+cut-over contract's Q4), the blocks and the blocks followed by an identical retry, the blocks per tool, the transcript states
+and the cost. A ``log-full`` line says when the 10 MB cap stopped the log: the report prints "measurement stopped at the 10 MB
+cap at <ts>" from the first such line.
 """
 
 from __future__ import annotations
@@ -30,13 +40,18 @@ import math
 import os
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 LOG_RELATIVE = Path(".claude") / "logs" / "codegraph-shadow.jsonl"
-OUTCOMES = ("agree", "shadow-more-open", "shadow-more-closed")
+OUTCOMES = ("agree", "shadow-more-open", "shadow-more-closed")  # the shadow-era outcomes
+ENFORCED = "enforced"  # the outcome of a record written after the cut-over
 RETRY_REASON = "retry-escape-used"
 ROUTES = ("mcp", "cli")
+#: Reasons that are not a decision about a source read: the gate had nothing to judge (no target, or only non-source targets).
+NOT_GATED_REASONS = ("no-target", "non-source-target")
+TRANSCRIPT_FAIL_OPEN_PREFIX = "fail-open:transcript-"
 NON_TRANSCRIPT_STATES = ("unknown:subagent", "unknown:no-transcript")  # no transcript was read: not the transcript path
 
 
@@ -80,25 +95,112 @@ def _parse(raw: bytes) -> tuple[str, dict | None]:
         return "malformed", None
     if obj.get("event") == "log-full":
         return "log-full", obj
-    if obj.get("outcome") in OUTCOMES and isinstance(obj.get("live_decision"), str):
+    if obj.get("outcome") in OUTCOMES + (ENFORCED,) and isinstance(obj.get("live_decision"), str):
         return "record", obj
     return "malformed", None
 
 
+def _blocks_and_retries(records: list[dict]) -> tuple[int, int, dict, dict]:
+    """(blocks, blocks followed by an identical retry, per-tool counts, the Q5 counts) over ``records``, in log order. A retry
+    pairs with the next earlier unpaired block of the same (session, fp, prompt_key); one retry record pairs with one block."""
+    blocks, retried_total = 0, 0
+    by_tool: dict[str, dict] = {}
+    q5 = {"blocks": 0, "retried": 0}
+    open_blocks: dict[tuple, list[tuple[str, bool]]] = {}  # (session, fp, prompt_key) -> unpaired blocks (tool, is Q5), in order
+    paired: list[tuple[str, bool]] = []
+    for r in records:
+        key = (_text(r.get("session")), _text(r.get("fp")), _text(r.get("prompt_key")))
+        if r["live_decision"] == "block":
+            tool = _text(r.get("tool"), "unknown")
+            is_q5 = tool == "Read" and r.get("live_reason") == "source-target"
+            blocks += 1
+            by_tool.setdefault(tool, {"blocks": 0, "retried": 0})["blocks"] += 1
+            if is_q5:
+                q5["blocks"] += 1
+            open_blocks.setdefault(key, []).append((tool, is_q5))
+        elif r.get("live_reason") == RETRY_REASON and open_blocks.get(key):
+            paired.append(open_blocks[key].pop(0))
+    for tool, is_q5 in paired:
+        retried_total += 1
+        by_tool[tool]["retried"] += 1
+        if is_q5:
+            q5["retried"] += 1
+    return blocks, retried_total, by_tool, q5
+
+
+def _with_rate(entry: dict) -> dict:
+    rate = round(entry["retried"] / entry["blocks"], 4) if entry["blocks"] else None
+    return {"blocks": entry["blocks"], "retried": entry["retried"], "retry_rate": rate}
+
+
+def _enforced_section(records: list[dict]) -> dict:
+    """The ``enforced`` section: only records written after the cut-over."""
+    reasons = {"main": Counter(), "agent": Counter()}
+    states: Counter = Counter()
+    routes: Counter = Counter()
+    ms: list[float] = []
+    sessions = set()
+    gated = transcript_fail_open = 0
+    for r in records:
+        sessions.add(_text(r.get("session")))
+        reason = _text(r.get("live_reason"))
+        reasons["agent" if r.get("agent") is True else "main"][reason] += 1
+        states[_text(r.get("transcript_turn"))] += 1
+        route = r.get("turn_route")
+        routes[route if route in ("mcp", "cli", "agent") else "none"] += 1
+        if reason not in NOT_GATED_REASONS:
+            gated += 1
+            if reason.startswith(TRANSCRIPT_FAIL_OPEN_PREFIX):
+                transcript_fail_open += 1
+        value = _number(r.get("shadow_ms"))
+        if value is not None:
+            ms.append(value)
+    blocks, retried, by_tool, _q5 = _blocks_and_retries(records)
+    return {
+        "records": len(records),
+        "sessions": len(sessions),
+        "reasons": {side: dict(c.most_common()) for side, c in reasons.items()},
+        "gated_calls": gated,
+        "fail_open_transcript": transcript_fail_open,
+        "fail_open_share": round(transcript_fail_open / gated, 4) if gated else None,
+        "blocks": blocks,
+        "blocks_retried": retried,
+        "blocks_by_tool": {tool: _with_rate(entry) for tool, entry in sorted(by_tool.items())},
+        "transcript_turn": dict(states.most_common()),
+        "turn_route": dict(routes.most_common()),
+        "shadow_ms": _summary(ms),
+    }
+
+
+def _iso(ts) -> str:
+    """A log-full line's ``ts`` (epoch seconds) as an ISO 8601 UTC time; the raw value when it is not a number."""
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (OverflowError, OSError, ValueError):
+            pass
+    return str(ts)
+
+
 def build_report(lines: Iterable[bytes]) -> dict:
-    records: list[dict] = []
+    all_records: list[dict] = []
     malformed = torn = log_full = 0
+    cap_ts = None
     for raw in lines:
         kind, obj = _parse(raw)
         if kind == "record":
-            records.append(obj)  # type: ignore[arg-type]
+            all_records.append(obj)  # type: ignore[arg-type]
         elif kind == "log-full":
             log_full += 1
+            if cap_ts is None and obj is not None:
+                cap_ts = obj.get("ts")
         elif kind == "torn":
             torn += 1
             malformed += 1
         elif kind == "malformed":
             malformed += 1
+    records = [r for r in all_records if r["outcome"] != ENFORCED]  # the shadow sections count shadow-era records only
+    enforced = [r for r in all_records if r["outcome"] == ENFORCED]
 
     outcomes = {name: 0 for name in OUTCOMES}
     more_closed: Counter = Counter()
@@ -128,34 +230,8 @@ def build_report(lines: Iterable[bytes]) -> dict:
             if _text(r.get("transcript_turn")) not in NON_TRANSCRIPT_STATES:
                 ms_transcript.append(ms)
 
-    blocks, retried_total, session_seen_blocks = 0, 0, 0
-    by_tool: dict[str, dict] = {}
-    q5 = {"blocks": 0, "retried": 0}
-    open_blocks: dict[tuple, list[tuple[str, bool]]] = {}  # (session, fp, prompt_key) -> unpaired blocks (tool, is Q5), in order
-    paired: list[tuple[str, bool]] = []
-    for r in records:
-        key = (_text(r.get("session")), _text(r.get("fp")), _text(r.get("prompt_key")))
-        if r["live_decision"] == "block":
-            tool = _text(r.get("tool"), "unknown")
-            is_q5 = tool == "Read" and r.get("live_reason") == "source-target"
-            blocks += 1
-            if r.get("session_seen") is True:
-                session_seen_blocks += 1
-            by_tool.setdefault(tool, {"blocks": 0, "retried": 0})["blocks"] += 1
-            if is_q5:
-                q5["blocks"] += 1
-            open_blocks.setdefault(key, []).append((tool, is_q5))
-        elif r.get("live_reason") == RETRY_REASON and open_blocks.get(key):
-            paired.append(open_blocks[key].pop(0))
-    for tool, is_q5 in paired:
-        retried_total += 1
-        by_tool[tool]["retried"] += 1
-        if is_q5:
-            q5["retried"] += 1
-
-    def with_rate(entry: dict) -> dict:
-        rate = round(entry["retried"] / entry["blocks"], 4) if entry["blocks"] else None
-        return {"blocks": entry["blocks"], "retried": entry["retried"], "retry_rate": rate}
+    blocks, retried_total, by_tool, q5 = _blocks_and_retries(records)
+    session_seen_blocks = sum(1 for r in records if r["live_decision"] == "block" and r.get("session_seen") is True)
 
     return {
         "lower_bound": True,
@@ -168,14 +244,16 @@ def build_report(lines: Iterable[bytes]) -> dict:
         "shadow_reasons": {side: dict(c.most_common()) for side, c in shadow_reasons.items()},
         "blocks": blocks,
         "blocks_retried": retried_total,
-        "blocks_by_tool": {tool: with_rate(entry) for tool, entry in sorted(by_tool.items())},
-        "q5_read_source": with_rate(q5),
+        "blocks_by_tool": {tool: _with_rate(entry) for tool, entry in sorted(by_tool.items())},
+        "q5_read_source": _with_rate(q5),
         "session_seen_blocks": session_seen_blocks,
         "skipped_long_line": skipped,
         "shadow_ms": {"all": _summary(ms_all), "transcript_path": _summary(ms_transcript)},
         "malformed": malformed,
         "torn": torn,
         "log_full": log_full,
+        "cap": {"stopped": log_full > 0, "ts": cap_ts},
+        "enforced": _enforced_section(enforced),
     }
 
 
@@ -193,7 +271,7 @@ def _fmt(value) -> str:
 def render_text(report: dict) -> str:
     out = [f"CodeGraph shadow report -- {report.get('log', '')}",
            "Every count below is a lower bound (appends are lock-free; a cold scan sees only 2 MB)."]
-    if report["records"] == 0:
+    if report["records"] == 0 and report["enforced"]["records"] == 0:
         out.append("no records in the log")
     out.append(f"records: {report['records']}   sessions: {report['sessions']}")
     out.append("outcomes: " + "   ".join(f"{name}: {report['outcomes'][name]}" for name in OUTCOMES))
@@ -220,6 +298,29 @@ def render_text(report: dict) -> str:
         s = report["shadow_ms"][key]
         out.append(f"shadow_ms ({label}): n {s['n']}, p50 {_fmt(s['p50'])}, p95 {_fmt(s['p95'])}")
     out.append(f"malformed lines: {report['malformed']} (torn: {report['torn']})   log-full lines: {report['log_full']}")
+    e = report["enforced"]
+    out.append("")
+    out.append("ENFORCED (records written after the cut-over; the guard decided from the transcript)")
+    out.append(f"enforced records: {e['records']}   sessions: {e['sessions']}")
+    for side in ("main", "agent"):
+        pairs = ", ".join(f"{reason}: {n}" for reason, n in e["reasons"][side].items()) or "none"
+        out.append(f"enforced reasons ({side}): {pairs}")
+    share = e["fail_open_share"]
+    out.append(f"gated calls: {e['gated_calls']}   failed open on the transcript (fail-open:transcript-*): "
+               f"{e['fail_open_transcript']}   share: " + ("n/a" if share is None else "%.1f%%" % (share * 100))
+               + " (the rollback rule of the cut-over contract is more than 10%)")
+    out.append(f"enforced blocks: {e['blocks']}   followed by an identical retry (same session, fp, prompt_key): {e['blocks_retried']}")
+    out.append("enforced blocks per tool:")
+    for tool, entry in e["blocks_by_tool"].items():
+        out.append(f"  {tool}: {entry['blocks']} blocks, {entry['retried']} retried, retry rate {_fmt(entry['retry_rate'])}")
+    if not e["blocks_by_tool"]:
+        out.append("  none")
+    out.append("transcript states: " + (", ".join(f"{k}: {n}" for k, n in e["transcript_turn"].items()) or "none"))
+    out.append("turn routes: " + (", ".join(f"{k}: {n}" for k, n in e["turn_route"].items()) or "none"))
+    out.append(f"enforced cost (ms): n {e['shadow_ms']['n']}, p50 {_fmt(e['shadow_ms']['p50'])}, p95 {_fmt(e['shadow_ms']['p95'])}")
+    out.append("a block the user judges wrong cannot be found here: an enforced record carries no second decision")
+    if report["cap"]["stopped"]:
+        out.append(f"measurement stopped at the 10 MB cap at {_iso(report['cap']['ts'])}")
     return "\n".join(out) + "\n"
 
 

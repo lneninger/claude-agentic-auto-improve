@@ -1,12 +1,12 @@
 ---
 name: auto-improve-codegraph-uninstall
-description: "Remove the codegraph add-on of the agentic-auto-improve plugin from this project: the three settings.json rows of the code-search-first guard, then its three hook files. Previews every row and file, asks for one confirmation, then writes: rows first with a backup, then the files. Keeps any hook file you edited, and keeps the shared helpers. The add-on has no kill switch, so this skill is the way out. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-codegraph-uninstall, 'remove the codegraph add-on', 'turn off the code-search-first guard', or 'uninstall the CodeGraph gate'. Never deletes a helper."
+description: "Remove the codegraph add-on of the agentic-auto-improve plugin from this project: the settings.json rows of the code-search-first guard (and of the retired tracker and reset hooks, when an older install left them), then the hook files. Previews every row and file, asks for one confirmation, then writes: rows first with a backup, then the files. Keeps any hook file you edited, and keeps the shared helpers. The add-on has no kill switch, so this skill is the way out. The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-codegraph-uninstall, 'remove the codegraph add-on', 'turn off the code-search-first guard', or 'uninstall the CodeGraph gate'. Never deletes a helper."
 user_invocable: true
 ---
 
 # /auto-improve-codegraph-uninstall — remove the codegraph add-on
 
-This skill takes the `codegraph` add-on out of a project: the four rows in `.claude/settings.json` (`PreToolUse` on `Read|Grep|Glob`, `UserPromptSubmit`, `PostToolUse` on the CodeGraph tools, and `PostToolUse` on `Bash` with `if: "Bash(codegraph *)"`) and the three hook files `codegraph-first-guard.py`, `codegraph-turn-reset.py` and `codegraph-turn-tracker.py` in `.claude/hooks/`.
+This skill takes the `codegraph` add-on out of a project. Since 0.17.0 the add-on is one hook file, `codegraph-first-guard.py`, with two rows in `.claude/settings.json` (`PreToolUse` on `Read|Grep|Glob`, and `UserPromptSubmit` with the argument `notice`). A project installed by an older release may still carry the two retired hooks too: `codegraph-turn-reset.py` and `codegraph-turn-tracker.py`, with their rows (`UserPromptSubmit`; `PostToolUse` on the CodeGraph tools; `PostToolUse` on `Bash` with `if: "Bash(codegraph *)"`). The removal takes out every row that names any of the three files, in whatever form, and the three files in `.claude/hooks/`. It is also the way out for a retired hook that the install refused to retire (`disabled-hook-present`: a row in `.claude/settings.local.json`, or an edited copy).
 
 This skill proposes first. It writes only after one yes, and it reads and touches only `agentic-auto-improve`.
 
@@ -24,9 +24,9 @@ What the script will not do:
 - It keeps a hook file that a `settings.local.json` or user settings row still names (`kept-referenced`).
 - It never deletes a helper. `_project_paths.py` and `_error_log.py` stay: other hooks use them.
 - It keeps the `mcp__codegraph__*` permission entry in `permissions.allow` and lists it under `kept`.
-- It does not delete the session folder `auto-improve-codegraph-<session id>` under the Per-user session parent (`%LOCALAPPDATA%\auto-improve-codegraph\` on Windows, `~/.cache/auto-improve-codegraph/` or `$XDG_CACHE_HOME/auto-improve-codegraph/` on POSIX): that is a leftover, and the reset hook prunes it. Folders `auto-improve-codegraph-*` left in the system temp folder by 0.15.2 are no longer read; delete them by hand if wanted (an older `.claude/.codegraph-used-this-turn` is a leftover of a turn the user may delete).
+- It does not delete the session folder `auto-improve-codegraph-<session id>` under the Per-user session parent (`%LOCALAPPDATA%\auto-improve-codegraph\` on Windows, `~/.cache/auto-improve-codegraph/` or `$XDG_CACHE_HOME/auto-improve-codegraph/` on POSIX): that is a leftover, and the guard's prompt row prunes it. Folders `auto-improve-codegraph-*` left in the system temp folder by 0.15.2 are no longer read; delete them by hand if wanted (an older `.claude/.codegraph-used-this-turn` is a leftover of a turn the user may delete).
 
-- It keeps the shadow log, `<project>/.claude/logs/codegraph-shadow.jsonl`, and everything else under `.claude/logs/`. The log is measurement data the report (`py -3 .claude/scripts/codegraph_shadow_report.py`) reads; the user deletes it by hand if they want it gone. Hook backups an upgrade took (`.claude/hooks/*.bak-*`) are kept too.
+- It keeps the measurement log, `<project>/.claude/logs/codegraph-shadow.jsonl`, and everything else under `.claude/logs/`. The log is measurement data the report (`py -3 .claude/scripts/codegraph_shadow_report.py`) reads; the user deletes it by hand if they want it gone. Hook backups an upgrade took (`.claude/hooks/*.bak-*`) are kept too.
 
 **Upgrade route.** An uninstall is not needed to upgrade: re-running `/auto-improve-codegraph-install` backs up and replaces an unedited older hook copy (a hash listed in the manifest's `released_sha256`). The route through this skill is for a hook file you edited, which the install refuses as `addon-file-differs`: run this skill (it keeps the edited file; rename or remove it by hand), run `/auto-improve-codegraph-install`, then start a new session.
 
@@ -79,7 +79,7 @@ $PY "$FIP" addon-remove --name codegraph --project . --json
 The answer carries:
 
 - `rows`: every `settings.json` row it would remove, with its `event`, `matcher`, `file` and the `command` as written. A row matches by the hook file name, under any event and in any form.
-- `files`: each hook file with its action: `delete`, `kept-differs`, `kept-referenced` or `absent`.
+- `files`: each hook file (the guard and any retired tracker or reset hook the project still has) with its action: `delete`, `kept-differs`, `kept-referenced` or `absent`.
 - `kept`: what it leaves, each with the reason: the two helpers, and every file it kept.
 - `kill-switches`: an empty list. The add-on has none.
 - `profile` (`null` for this add-on), `uninstall-skill`, `target`, `plugin-root` and `plan-sha256`.

@@ -23,8 +23,8 @@ Run `/design-first` on this stub once the parent ships: decide whether a second 
 
 - **Adjacent area:** none (`.claude/area-mapping.json` defines no areas)
 - **Files implicated:**
-  - `.claude/addons/codegraph/hooks/codegraph-turn-tracker.py`
-  - `.claude/addons/codegraph/hooks/codegraph-turn-reset.py`
+  - `.claude/addons/codegraph/hooks/codegraph-first-guard.py` (after the cut-over of `.claude/concepts/2026-11-09-codegraph-hooks-cutover.md`, the one-time `cli-fallback` record is written by the guard, not by the tracker)
+  - `.claude/addons/codegraph/hooks/codegraph-turn-tracker.py` and `codegraph-turn-reset.py` (retired by that cut-over; named here only for the shape before it)
 - **Mechanisms touched:**
   - #259 Session folder and the `logged-<reason>` rule
 - **Journal entries to re-read when promoting:**

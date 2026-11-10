@@ -86,8 +86,9 @@ only its summary.
 
 ## Retired gate (0.7.0)
 
-Three hooks used to turn the rule above into a block. The plugin retired them in 0.7.0 and now ships
-them again as the opt-in `codegraph` add-on (never registered by the plugin itself):
+Three hooks used to turn the rule above into a block. The plugin retired them in 0.7.0 and shipped
+them again as the opt-in `codegraph` add-on (never registered by the plugin itself); the tracker and the reset hook were retired
+a second time in 0.17.0, when the guard began to read the session transcript:
 
 | Retired hook | What it did |
 |---|---|
@@ -95,7 +96,8 @@ them again as the opt-in `codegraph` add-on (never registered by the plugin itse
 | CodeGraph turn tracker | Created the per-turn marker after a CodeGraph call. |
 | CodeGraph turn reset | Deleted the marker at every new prompt. |
 
-A project that wants the block back runs `/auto-improve-codegraph-install`; the README's "Retired hooks" section says how.
+A project that wants the block back runs `/auto-improve-codegraph-install`; the README's "Retired hooks" section says how. Since 0.17.0
+the add-on itself is one hook file; the tracker and the reset hook are disabled (see below).
 
 The plugin registers no hook that refreshes the index, and no part of it runs `codegraph mark-dirty`
 or `codegraph sync-if-dirty`. Keeping the index fresh belongs to the CodeGraph MCP server, whose
@@ -104,19 +106,24 @@ or `codegraph init -i`.
 
 ## When the `codegraph` add-on is installed
 
-A project that ran `/auto-improve-codegraph-install` has the block back, as three hooks that share
-one session folder, `<Per-user session parent>/auto-improve-codegraph-<session id>/`. The Per-user session
+A project that ran `/auto-improve-codegraph-install` has the block back, as one hook file with two rows,
+keeping its small state in one session folder, `<Per-user session parent>/auto-improve-codegraph-<session id>/`. The Per-user session
 parent is `%LOCALAPPDATA%\auto-improve-codegraph\` on Windows and `$XDG_CACHE_HOME/auto-improve-codegraph/`
-(else `~/.cache/auto-improve-codegraph/`, mode `0700`) on POSIX; the system temp folder is never used:
+(else `~/.cache/auto-improve-codegraph/`, mode `0700`) on POSIX; the system temp folder is never used.
+Since 0.17.0 the guard decides from the **session transcript** (the log file Claude Code writes for each session), not from a
+marker file:
 
-| Hook | Event | Effect |
+| Row | Event | Effect |
 |---|---|---|
-| `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the session's `turn.json` marker is missing, the target is a source path and CodeGraph is available. The message names both routes: a `mcp__codegraph__*` tool, or a copyable `codegraph explore "<term>"` in the Bash tool. |
-| `codegraph-turn-tracker.py` | PostToolUse on `mcp__codegraph__*`; and PostToolUse on `Bash` with `if: "Bash(codegraph *)"` (argument `cli`) | Writes the session's `turn.json` marker (route `mcp`, or `cli` for a successful Counted command such as `codegraph explore "Name"` run on its own), whatever the MCP tool is called. A failed call writes nothing. |
-| `codegraph-turn-reset.py` | UserPromptSubmit | Deletes the marker and the retry tickets, so every new user turn opens a fresh investigation budget. It also prunes old session folders in that parent, once per session, and prints the connection notice when the server is configured but no `codegraph serve --mcp` process belongs to this session. |
+| `codegraph-first-guard.py` | PreToolUse on `Read`/`Grep`/`Glob` | **Blocks with exit code 2** if the transcript shows no CodeGraph use since the last human prompt, the target is a source path and CodeGraph is available. The message names both routes: a `mcp__codegraph__*` tool, or a copyable `codegraph explore "<term>"` in the Bash tool. |
+| `codegraph-first-guard.py notice` | UserPromptSubmit | Prunes old session folders in that parent, once per session, and prints the connection notice when the server is configured but no `codegraph serve --mcp` process belongs to this session. It never blocks a prompt and deletes nothing of the gate's state. |
 
-The marker belongs to the session, not to a directory, so `cd` or `EnterWorktree` does not close the
-gate again.
+A turn is the span after the last human prompt. Three things open it, each counted when the main session issues the call,
+whether or not it succeeds: a `mcp__codegraph__*` tool use, a Counted `codegraph` command in the Bash tool run on its own (for
+example `codegraph explore "Name"`), and an `Agent` or `Task` tool use (a subagent dispatch). A new human prompt closes it; a
+background task notification does not. The gate follows the session's transcript, not a directory, so `cd` or `EnterWorktree`
+does not close it. The old tracker (`codegraph-turn-tracker.py`) and reset hook (`codegraph-turn-reset.py`) are **disabled**
+since 0.17.0: they ship, but no install copies them or writes their rows (`.claude/addons/codegraph/DISABLED.md`).
 
 **The installed guard fails open when CodeGraph is provably unavailable.** It lets the read through,
 prints `[codegraph-first-guard] allowed (fail-open:<reason>)` and logs one record per session per
@@ -124,38 +131,41 @@ reason. While the session folder cannot be used, these lines print on every call
 main checkout; CodeGraph's own per-user `~/.codegraph` has no `codegraph.db` and does not count),
 `index-other-tree` (a linked worktree without its own index, whose only index belongs to the main
 checkout, so its answers would be stale), `server-not-configured`, `server-disabled`, and `subagent`
-(the payload carries an `agent_id`). An unusable session folder blocks with `session-state-unusable` and offers no retry. A subagent
-shares its parent's session, so a CodeGraph call by either opens the gate for both until the next
-prompt.
+(the payload carries an `agent_id`). A read the guard cannot judge from the transcript is let through too, as
+`fail-open:transcript-<cause>` (no transcript, an unreadable line, a window with no prompt in it, a rewritten file, a spent time budget,
+an internal error). An unusable session folder blocks with `session-state-unusable` and offers no retry. A subagent's own
+calls are let through (its transcript is another file), and the main session's dispatch of the subagent opens the main session's
+turn, so a CodeGraph call by the subagent no longer needs to open anything for the parent.
 
 **The retry escape.** In any other session where no `mcp__codegraph__*` tool is available (a
 background session, say), repeat the blocked call once, exactly: it is allowed and logged as
-`retry-escape`. A different call is blocked again, and the next prompt clears the escape. Not after a
+`retry-escape`. A different call is blocked again, and the escape lasts only for the prompt that issued it (the ticket carries the
+prompt it belongs to). Not after a
 `session-state-unusable` block, which offers no retry. After a `retry-ticket-unwritten` block the retry was
 not recorded, so the repeat is blocked once more (as `source-target` or `ambiguous-target`) and the identical call after it is
 allowed. There is no bypass variable.
 
-**Shadow mode.** The installed guard also measures itself, enforcing nothing. On each call it reads the
-session transcript, recomputes the decision from the transcript alone, and appends one record to
+**The measurement log.** The guard also measures itself. On each call it appends one `enforced` record to
 `<project>/.claude/logs/codegraph-shadow.jsonl` (the project is `CLAUDE_PROJECT_DIR`; unset, nothing is
-written). Each record has classes, booleans and hash prefixes, never a path or prompt text, and an
-`outcome` of `agree`, `shadow-more-open` or `shadow-more-closed` against the live decision. Anything the
-shadow raises is swallowed, so the live outcome is unchanged. It needs no row beyond the guard's own.
+written), up to 10 MB. Each record has classes, booleans, the route that opened the turn and hash prefixes, never a path, a
+command or prompt text. Whatever the recording raises is swallowed, so the outcome is unchanged. Records written before 0.17.0
+(the shadow era) pair the live decision with a shadow one; the report keeps the two kinds apart.
 `py -3 .claude/scripts/codegraph_shadow_report.py [--project <dir>] [--json]` summarises the log
-read-only (exit 2 when the log is missing or unreadable; every count is a lower bound). The
-uninstall keeps the log. The data decides a later cut-over; nothing about the live guard changes now.
+read-only (exit 2 when the log is missing or unreadable; every count is a lower bound), gives the share of gated calls that
+failed open on the transcript, and says when the 10 MB cap was reached. The log cannot tell a wrong block from a right one:
+report a block you judge wrong. The uninstall keeps the log.
 
 **Upgrading.** Re-running `/auto-improve-codegraph-install` takes the new hook files: an unedited
 older copy (its line-ending-folded hash is in the add-on's `released_sha256`) is previewed as `update`,
 backed up as `<hook>.bak-<UTC stamp>` and replaced, inside the same plan hash. An edited copy is
 refused as `addon-file-differs`, naming the file and the route (uninstall, which keeps it, then
-install). The rows are the same three from 0.9.9 to 0.16.4 (the permission entry joined them in
-0.15.2); 0.16.5 adds a fourth, the tracker's Bash row, which the re-run adds as its one `to-add`. It takes effect in a new
-session. `addon --name codegraph --check` also names a hook that is an older release than the plugin's, a missing row, and
-a Bash row without its `if`.
+install). An install from before 0.17.0 also carries the retired tracker and reset hook: the first re-run (step A) removes their
+rows and keeps their files, and the next re-run after a new session (step B) deletes the unedited files. It takes effect in a new
+session. `addon --name codegraph --check` also names a hook that is an older release than the plugin's, and a missing row. The
+install skill has the table of what each install age holds.
 
 **Ways out.** Run `/auto-improve-codegraph-uninstall` and start a new session. To stop the block for
-good, that uninstall skill removes the three hooks' rows from the project's `settings.json`; only when
+good, that uninstall skill removes the hooks' rows from the project's `settings.json`; only when
 a hook cannot run does the user remove a row by hand (the README table "Ways out when a hook cannot
 run"). A stale index is fixed with `codegraph sync` or `codegraph init -i`. `addon --name codegraph
 --check` judges the permission entry. The README's "Retired hooks" section lists the add-ons and their
