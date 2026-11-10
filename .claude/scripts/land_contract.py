@@ -75,9 +75,9 @@ HALT_OUTCOMES: Tuple[str, ...] = (
     "environment-failure", "unresolvable-conflict", "regeneration-failed",
     "verification-not-ready", "push-rejected", "pr-mismatch", "pr-not-ready",
     "link-not-verified", "master-moved", "head-moved", "not-mergeable", "merge-refused",
-    "merge-unconfirmed", "version-raise-failed",
+    "merge-unconfirmed", "version-raise-failed", "protected-names-removed",
 )
-#: The closed Landing Outcome set: 3 successes and 26 halts.
+#: The closed Landing Outcome set: 3 successes and 27 halts.
 LANDING_OUTCOMES = frozenset(SUCCESS_OUTCOMES) | frozenset(HALT_OUTCOMES)
 #: The recording run's own outcomes (``--record-baseline``).
 BASELINE_OUTCOMES: Tuple[str, ...] = ("baseline-recorded", "landing-in-progress",
@@ -123,6 +123,8 @@ REMEDIES: Dict[str, str] = {
     "unresolvable-conflict": "merge the default branch into the parent branch by hand as a remedy sub-task",
     "regeneration-failed": "fix the regenerator named in the detail on the parent branch, then rerun",
     "version-raise-failed": "repair the manifests named in the detail on the parent branch, then rerun",
+    "protected-names-removed": "a protected database name may only be removed by a person: restore the names on "
+                               "the parent branch as a remedy sub-task, or let a person merge the removal by hand",
     "verification-not-ready": "fix the new failures named in the detail, or re-record the baseline",
     "push-rejected": "fetch, reconcile the parent branch with origin, then rerun",
     "pr-mismatch": "close or retarget the existing pull request for the parent branch",
@@ -1258,6 +1260,7 @@ GATE_ORDER: Tuple[Tuple[str, str], ...] = (
     ("p7_unresolvable_conflict", "unresolvable-conflict"),
     ("p7_environment_failure", "environment-failure"),
     ("p7_regeneration_failed", "regeneration-failed"),
+    ("p7_protected_names_removed", "protected-names-removed"),
     ("p7b_version_raise_failed", "version-raise-failed"),
     ("p8_verification_verdict", ""),
     ("p9_push_rejected", "push-rejected"),
@@ -1669,7 +1672,7 @@ def next_command_for_outcome(outcome: str, slug: str, **facts: Any) -> Dict[str,
                       "test, and re-record only if it does. " + reason)
         return {"commands": ["/task Re-record the failing-test baseline for %s" % suites, advance_line],
                 "repeat_after_rerecord": False, "outside_diff": outside, "reason": reason}
-    if outcome in ("blocked-verdict", "unresolvable-conflict", "regeneration-failed"):
+    if outcome in ("blocked-verdict", "unresolvable-conflict", "regeneration-failed", "protected-names-removed"):
         return {"commands": ["/design-first %s" % slug],
                 "reason": "the fix is a remedy sub-task on the parent branch: %s"
                           % (REMEDIES.get(outcome) or outcome)}
@@ -2321,6 +2324,8 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     phase("p7")
     contract_diff, merge_diff, resolved = _p7_merge(args, wt, default, mark_m, mark_p, config, logs,
                                                     parent, slug, facts, details, notes)
+    if not evaluate_gates(facts):  # the merge stands: judge the committed rules file at the merged head
+        _p7_protected_names(wt, mark_m, rev_parse(wt, "HEAD") or "HEAD", facts, details, notes)
     gate_check("P7")
 
     # The attribution sides, captured before P7b reassigns merge_diff: the default branch's own diff
@@ -2681,6 +2686,154 @@ def _p7_merge(args: Dict[str, Any], wt: Path, default: str, mark_m: str, mark_p:
             return contract_diff, staged, resolved
     head = rev_parse(wt, "HEAD")
     return contract_diff, diff_names(wt, mark_p, head), resolved
+
+
+#: The Protected-name check's own files, as paths in a plugin or a consuming repository. This script never
+#: imports the helper: it runs the command line as a child process (contract 2026-10-13, Commands).
+PN_SCRIPT_REL = ".claude/scripts/protected_names_check.py"
+PN_HELPER_REL = ".claude/hooks/_protected_names.py"
+PN_RULES_REL = ".claude/hooks/db-destructive-guard.rules.json"
+#: Verdict -> the exit code the command line gives it. The child's answer is a verdict only when its JSON
+#: names one of these AND its exit code is that verdict's code.
+PN_EXIT_CODES: Dict[str, int] = {"kept": 0, "first-install": 0, "names-removed": 10,
+                                 "working-malformed": 11, "reference-malformed": 11, "unverifiable": 12}
+PN_TIMEOUT_SECONDS = 30
+
+
+def _git_show_bytes(cwd: Any, ref: str, path: str) -> Optional[bytes]:
+    """The exact bytes of ``path`` at ``ref``, or None when git cannot read it."""
+    try:
+        proc = subprocess.run(["git", "show", "%s:%s" % (ref, path)], cwd=str(cwd), capture_output=True,
+                              timeout=60, stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _git_lists_path(cwd: Any, ref: str, path: str) -> Optional[bool]:
+    """True or False: whether the commit ``ref`` holds ``path``. None when git cannot list the commit."""
+    try:
+        proc = subprocess.run(["git", "ls-tree", "-z", "--full-tree", ref, "--", path], cwd=str(cwd),
+                              capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return bool(proc.stdout.strip(b"\0"))
+
+
+def _installed_plugin_checker() -> Optional[Path]:
+    """The INSTALLED plugin's ``protected_names_check.py``: ``CLAUDE_PLUGIN_ROOT``, then the newest plugin
+    cache folder of the Claude home. Never the copy this script lives in, and never the landing worktree's."""
+    roots: List[Path] = []
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "").strip()
+    if plugin_root:
+        roots.append(Path(plugin_root))
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    cache = (Path(cfg) if cfg else Path.home() / ".claude") / "plugins" / "cache"
+    versions: List[Tuple[Tuple[int, ...], Path]] = []
+    try:
+        for folder in cache.glob("*/agentic-auto-improve/*"):
+            if re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", folder.name):
+                versions.append((tuple(int(p) for p in folder.name.split(".")), folder))
+    except OSError:
+        pass
+    roots.extend(path for _version, path in sorted(versions, key=lambda item: item[0], reverse=True))
+    for root in roots:
+        script = root / PN_SCRIPT_REL
+        if script.is_file() and (root / PN_HELPER_REL).is_file():
+            return script
+    return None
+
+
+def _pn_read_result(rc: int, out: str, err: str) -> Dict[str, Any]:
+    """Read the child's answer as the Check protected names command says: a verdict only when standard output
+    is exactly one JSON object whose verdict is in the closed set and whose exit code is that verdict's code.
+    Anything else is ``unverifiable`` with a detail that keeps the exit code and the first lines of stderr."""
+    first_lines = " | ".join(ln.strip() for ln in err.strip().splitlines()[:3] if ln.strip())
+    try:
+        parsed = json.loads(out)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict) and parsed.get("verdict") in PN_EXIT_CODES \
+            and PN_EXIT_CODES[parsed["verdict"]] == rc:
+        return parsed
+    if isinstance(parsed, dict) and parsed.get("verdict") in PN_EXIT_CODES:
+        why = "its verdict %r disagrees with its exit code" % parsed.get("verdict")
+    elif isinstance(parsed, dict):
+        why = "its verdict %r is not in the closed set" % (parsed.get("verdict"),)
+    else:
+        why = "its standard output is not exactly one JSON object"
+    return {"verdict": "unverifiable",
+            "reason": "protected_names_check.py gave no verdict: %s (exit code %s)%s"
+                      % (why, rc, "; stderr: " + first_lines if first_lines else "")}
+
+
+def _p7_protected_names(wt: Path, mark_m: str, head: str, facts: Dict[str, Any],
+                        details: Dict[str, str], notes: List[str]) -> None:
+    """The Protected-name gate (contract 2026-10-13-database-guard-names-in-rules-file, Commands "Land a
+    contract"): compare the rules file at the MERGED HEAD with the one at ``mark_m``, both read with git and
+    never from the disk, using checker code the parent branch cannot edit: ``mark_m``'s own copy, written
+    into one new, empty temporary folder and run there as a child process (``-I -B``, 30 seconds). Only when
+    ``mark_m`` lacks the files does it run the installed plugin's copy; with neither the verdict is
+    ``unverifiable``. Sets ``p7_protected_names_removed`` on a removal or a malformed file, and the existing
+    ``p4_unverifiable`` fact (outcome ``unverifiable``) when no verdict can be read."""
+    def unverifiable(detail: str) -> None:
+        facts["p4_unverifiable"] = True  # the existing fact whose outcome is ``unverifiable``
+        details["unverifiable"] = detail
+
+    # No rules file at either commit: the check's own verdict would be ``first-install`` (the default branch
+    # holds none and the working side is absent), so there is nothing to compare and no checker to trust.
+    if _git_lists_path(wt, mark_m, PN_RULES_REL) is False and _git_lists_path(wt, head, PN_RULES_REL) is False:
+        notes.append("protected names: no database-guard rules file on the default branch or at the merged head")
+        return
+
+    script_text = _git_show_bytes(wt, mark_m, PN_SCRIPT_REL)
+    helper_text = _git_show_bytes(wt, mark_m, PN_HELPER_REL)
+    with tempfile.TemporaryDirectory(prefix="pn-gate-") as tmp:
+        if script_text is not None or helper_text is not None:
+            # mark_m's own copy: whatever it holds is written as it is. A script without its helper (or the
+            # reverse) is a broken checker; running it gives the child's own exit 1, which reads as unverifiable.
+            script = Path(tmp) / "protected_names_check.py"
+            if script_text is not None:
+                script.write_bytes(script_text)
+            else:
+                script.write_text("raise SystemExit('the default branch holds the helper but not the script')\n",
+                                  encoding="utf-8")
+            if helper_text is not None:
+                (Path(tmp) / "_protected_names.py").write_bytes(helper_text)
+        else:
+            script_found = _installed_plugin_checker()
+            if script_found is None:
+                unverifiable("the Protected-name check cannot run: the default branch (%s) lacks "
+                             "protected_names_check.py and _protected_names.py, and no installed plugin copy "
+                             "was found (CLAUDE_PLUGIN_ROOT, then the plugin cache folder)" % mark_m[:12])
+                return
+            script = script_found
+        cmd = [sys.executable, "-I", "-B", str(script), "--project", str(wt), "--working-ref", head,
+               "--default-ref", mark_m]
+        try:
+            proc = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=PN_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            unverifiable("protected_names_check.py ran past %d seconds (no verdict, no exit code)"
+                         % PN_TIMEOUT_SECONDS)
+            return
+        except OSError as exc:
+            unverifiable("protected_names_check.py could not start: %s" % exc)
+            return
+    result = _pn_read_result(proc.returncode, proc.stdout or "", proc.stderr or "")
+    verdict = result["verdict"]
+    if verdict == "unverifiable":
+        unverifiable("the Protected-name check is unverifiable: %s" % (result.get("reason") or "no reason given"))
+    elif verdict == "first-install":
+        notes.append("protected names: first-install (the default branch holds no rules file yet)")
+    elif verdict != "kept":
+        facts["p7_protected_names_removed"] = True
+        missing = result.get("missing") or []
+        details["protected-names-removed"] = "%s: %s" % (
+            verdict, ("missing from the merged head: " + ", ".join(repr(m) for m in missing)) if missing
+            else (result.get("reason") or "the rules file cannot be read"))
 
 
 def _p7b_version_raise(wt: Path, default: str) -> Optional[str]:

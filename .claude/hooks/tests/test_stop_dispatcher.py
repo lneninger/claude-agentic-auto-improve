@@ -10,7 +10,8 @@ The one Stop seam. It follows ``post-edit-dispatcher.py`` (one process, the memb
 after another through ``_inprocess_hook.run_script``, in the order of its ``CHECKS`` list), with two
 differences forced by the Stop event: it is not asynchronous, and it exits 2 when any member exits 2,
 writing every member's error text in member order. Any other member code is ignored (fail open), and its
-own failure exits 0. Its one member: ``../scripts/concept_changed_check.py`` (the Changed-file check).
+own failure exits 0. Its members: ``../scripts/concept_changed_check.py`` (the Changed-file check) and
+``protected-names-warning.py`` (#623 block 2, form B).
 
 WHAT IS PINNED
 --------------
@@ -35,7 +36,7 @@ the real ``stop-dispatcher.py`` and ``_inprocess_hook.py`` and stub files named 
 A stub records its name and process id in a trace file and then behaves as an environment variable tells it
 (exit code, error text, output text, or a raised exception).
 
-The real dispatcher has ONE member, so the rows about SEVERAL members (order, error texts in order, exit 2
+The real dispatcher's members are fixed by REAL_MEMBERS (two), so the rows about SEVERAL members (order, error texts in order, exit 2
 not stopping the next, exit 1, raise, a missing first or second member) run on a TEST COPY of the
 dispatcher whose ``CHECKS`` literal is rewritten to ``["first-stub.py", CONCEPT]``. The Workspace asserts
 that the rewrite happened, so a renamed constant fails loudly instead of silently testing one member. The
@@ -61,7 +62,10 @@ from pathlib import Path
 HOOKS_DIR = Path(__file__).resolve().parent.parent
 DISPATCHER = HOOKS_DIR / "stop-dispatcher.py"
 CONCEPT = "../scripts/concept_changed_check.py"
-FIRST = "first-stub.py"  # the stand-in first member of the test copy (the real list has one member)
+# NAMED EDIT (#623 block 2, form B): the protected-names warning is the real list's second member.
+WARNING = "protected-names-warning.py"
+REAL_MEMBERS = [CONCEPT, WARNING]  # the members of the REAL dispatcher
+FIRST = "first-stub.py"  # the stand-in first member of the test copy (the real list has two members)
 MEMBERS = [FIRST, CONCEPT]  # the members of the TEST COPY
 
 STUB_SOURCE = '''\
@@ -110,7 +114,7 @@ class Workspace:
             self.members = list(MEMBERS)
         else:
             shutil.copyfile(DISPATCHER, self.hooks / "stop-dispatcher.py")
-            self.members = [CONCEPT]
+            self.members = list(REAL_MEMBERS)
         if with_runner:
             shutil.copyfile(HOOKS_DIR / "_inprocess_hook.py", self.hooks / "_inprocess_hook.py")
         # Revision 8, I.5 (the one sanctioned fixture change): the error-log helper and its path helper sit
@@ -162,15 +166,16 @@ class StopDispatcherTests(unittest.TestCase):
         self.ws = Workspace()
         self.addCleanup(self.ws.close)
 
-    def test_the_checks_list_names_the_one_member(self):
+    def test_the_checks_list_names_the_two_members(self):
+        # NAMED EDIT (#623 block 2, form B): was "the one member"; the warning joins the Changed-file check.
         tree = ast.parse(DISPATCHER.read_text(encoding="utf-8"))
         checks = None
         for node in tree.body:
             if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "CHECKS" for t in node.targets):
                 checks = ast.literal_eval(node.value)
-        self.assertEqual(checks, [CONCEPT],
-                         msg="CHECKS (read as a literal, as the drift check reads it) must hold exactly one "
-                             "member, ../scripts/concept_changed_check.py")
+        self.assertEqual(checks, REAL_MEMBERS,
+                         msg="CHECKS (read as a literal, as the drift check reads it) must hold exactly two "
+                             "members, ../scripts/concept_changed_check.py then protected-names-warning.py")
 
     def test_the_test_copy_really_has_several_members(self):
         text = (self.ws.hooks / "stop-dispatcher.py").read_text(encoding="utf-8")
@@ -340,7 +345,7 @@ class MissingMemberTests(unittest.TestCase):
 
 
 class OneMemberTests(unittest.TestCase):
-    """The REAL dispatcher, unchanged, with its one member stubbed: the Changed-file check."""
+    """The REAL dispatcher, unchanged, with its two members stubbed: the Changed-file check and the warning."""
 
     def setUp(self) -> None:
         self.ws = Workspace(multi=False)
@@ -348,9 +353,9 @@ class OneMemberTests(unittest.TestCase):
 
     def test_a_silent_member_gives_exit_0_and_says_nothing(self):
         _pid, code, out, err = self.ws.run()
-        self.assertEqual([r["member"] for r in self.ws.trace_rows()], [CONCEPT],
-                         msg="the one member must run: " + err[:300])
-        self.assertEqual(code, 0, msg="a silent member gives exit 0: " + err[:300])
+        self.assertEqual([r["member"] for r in self.ws.trace_rows()], REAL_MEMBERS,
+                         msg="both real members must run, in order: " + err[:300])
+        self.assertEqual(code, 0, msg="silent members give exit 0: " + err[:300])
         self.assertEqual(out, "",
                          msg="nothing on standard output: the real CHECKS list must name no other member "
                              "(a member file that is absent from the folder would print a missing notice): "
@@ -363,7 +368,7 @@ class OneMemberTests(unittest.TestCase):
         _pid, code, _out, err = self.ws.run({CONCEPT: {"code": 2, "err": "CONCEPT-STOP-TEXT\n"}})
         self.assertEqual(code, 2, msg="the Changed-file check stopping the turn must stop the turn: " + err[:300])
         self.assertIn("CONCEPT-STOP-TEXT", err, msg="its text must reach the error stream")
-        self.assertNotIn("not run", err, msg="no missing-member notice trails the text: the list has one member")
+        self.assertNotIn("not run", err, msg="no missing-member notice trails the text: both members exist")
 
     def test_the_member_system_message_passes_through(self):
         message = json.dumps({"systemMessage": "NOTED-FILES-TEXT"})
@@ -391,6 +396,7 @@ class StubIdentityTests(unittest.TestCase):
             shutil.copyfile(HOOKS_DIR / name, hooks / name)
         (root / "scripts").mkdir(exist_ok=True)
         (hooks / CONCEPT).write_text(IDENTITY_STUB, encoding="utf-8")
+        (hooks / WARNING).write_text("import sys\nsys.stdin.read()\n", encoding="utf-8")  # a silent second member
         shutil.copyfile(DISPATCHER, hooks / "stop-dispatcher.py")
         return hooks
 

@@ -5,7 +5,9 @@
 
   "_template_note": "The placeholder values below are deliberately fictional. They are NOT a safe default: a consuming project that ships this file unedited protects two databases it does not have, which means the guard treats its real databases as unprotected only if they are named in the allow-list. Fill this in before relying on the guard.",
 
-  "_extension_seam": "Add a database name to protected_databases, or a path prefix to production_path_allowlist. Never widen the allow-list to a whole tree.",
+  "_extension_seam": "Add a database name to protected_databases, or a folder to production_path_allowlist. Never widen the allow-list to a whole tree.",
+
+  "_protected_databases_comment": "This file is the only list of protected database names; no copy of the guard names one. The list is append-only: a name is added, never removed or respelled (a respelling, an added space and a letter-case change all count as removing the old name). The names in a working copy must include every name this file holds at the tip of the project's default branch. Only a person removes a name, by changing only this file in its own pull request and merging it by hand.",
 
   "protected_databases": [
     "AcmeApp",
@@ -21,7 +23,7 @@
     "docs/"
   ],
 
-  "_production_path_allowlist_comment": "Path prefixes where protected-database connection strings legitimately appear in source: production application configuration, the persistence layer, the guard's own helper tooling, the Claude configuration tree and the documentation tree. Normalised to forward slashes and matched case-insensitively. The '.claude/' entry is deliberately broad: concept contracts, plans, templates, journal entries and hook code all need to name the protected databases verbatim.",
+  "_production_path_allowlist_comment": "Folders where protected-database connection strings legitimately appear in source: production application configuration, the persistence layer, the guard's own helper tooling, the Claude configuration tree and the documentation tree. Folder-name match: an entry of k folder names matches a file when they equal the first k folder names of the file's path, counted from the project root (the main checkout, after every leading worktree segment is removed), compared whole and without letter case, never as a substring. So 'src/' matches 'src/a/b.cs' but not 'tools/src/x.cs' or 'srcx/a.cs'. A path outside the project root, or holding a '..' folder, is never exempt. An entry with a drive letter or a '..' folder is skipped and named in the block banner. The '.claude/' entry is deliberately broad: concept contracts, plans, templates, journal entries and hook code all need to name the protected databases verbatim.",
 
   "_disposable_suffix_comment": "The disposable-database suffixes are NOT here. They are generic by construction and name no project, so they stay in the hook."
 }
