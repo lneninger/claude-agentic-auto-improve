@@ -135,8 +135,13 @@ class EvaluateTests(unittest.TestCase):
 # this file lives in is never touched.
 # ===========================================================================
 SCRIPT = SCRIPTS_DIR / "check_version_bump.py"
-_GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.test",
-                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.test", GIT_CONFIG_NOSYSTEM="1")
+# The fixtures must never reach THIS repository, even when the suite runs under a git hook (which exports
+# GIT_DIR and friends): those variables are removed, and git's upward search is capped above the temp root.
+_REPO_POINTING_KEYS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+_GIT_ENV = {k: v for k, v in os.environ.items() if k not in _REPO_POINTING_KEYS}
+_GIT_ENV.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.test",
+                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.test", GIT_CONFIG_NOSYSTEM="1",
+                GIT_CEILING_DIRECTORIES=str(Path(tempfile.gettempdir()).resolve().parent))
 
 
 def _git(cwd, *args, check=True):
@@ -585,6 +590,96 @@ class WorkflowTriggerTests(unittest.TestCase):
         permissions = data.get("permissions") or next((p for p in job_permissions if p), None)
         self.assertEqual(permissions, {"contents": "read"},
                          "the job gets no write access it does not use (permissions: contents: read)")
+
+
+class ParentModeFunctionTests(unittest.TestCase):
+    """Issue 240: the parent-mode predicate and the allowed-versions reader are shared functions (INV-O1 row
+    and main() both call them). A missing function is an assertion failure naming it, never an AttributeError."""
+
+    DEFAULT = "origin/master"
+    TASK = "task/demo/t1"
+
+    def need(self, name):
+        self.assertTrue(hasattr(cvb, name),
+                        "check_version_bump.%s does not exist yet: lift it out of main()'s inline parent branch" % name)
+        return getattr(cvb, name)
+
+    def test_a_task_head_into_a_non_default_base_is_parent_mode(self):
+        is_parent_mode = self.need("is_parent_mode")
+        self.assertIs(is_parent_mode(self.TASK, "origin/feature/p", self.DEFAULT), True,
+                      "task/<slug>/<id> into a base that is not origin/master is parent mode")
+
+    def test_a_task_head_into_the_default_base_is_not_parent_mode(self):
+        is_parent_mode = self.need("is_parent_mode")
+        self.assertIs(is_parent_mode(self.TASK, self.DEFAULT, self.DEFAULT), False,
+                      "a task head whose base IS the default ref keeps the default rules")
+
+    def test_a_task_head_with_an_absent_base_is_parent_mode(self):
+        is_parent_mode = self.need("is_parent_mode")
+        self.assertIs(is_parent_mode(self.TASK, None, self.DEFAULT), True,
+                      "an absent base counts as not-the-default (a local task head targets its parent branch)")
+
+    def test_a_non_task_head_is_never_parent_mode(self):
+        is_parent_mode = self.need("is_parent_mode")
+        for head in ("fix/demo", "task/demo"):
+            for base in ("origin/feature/p", self.DEFAULT, None):
+                with self.subTest(head=head, base=base):
+                    self.assertIs(is_parent_mode(head, base, self.DEFAULT), False,
+                                  "only a task/<slug>/<id> head can be in parent mode (head %r, base %r)" % (head, base))
+        self.assertIs(is_parent_mode("", None, self.DEFAULT), False, "an empty head ref is not parent mode")
+
+    def build_repo(self, tmp, parent_version=None):
+        """A throwaway repo: master at 1.2.3 (also origin/master); optionally origin/parent at parent_version."""
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        _git(repo, "checkout", "-q", "-b", "master")
+        for name, text in manifest_files("1.2.3").items():
+            target = repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+        if parent_version:
+            _git(repo, "checkout", "-q", "-b", "feature/p")
+            for name, text in manifest_files(parent_version).items():
+                (repo / name).write_text(text, encoding="utf-8")
+            _git(repo, "commit", "-q", "-am", "parent")
+            _git(repo, "update-ref", "refs/remotes/origin/feature/p", "HEAD")
+            _git(repo, "checkout", "-q", "-b", self.TASK)
+        return repo
+
+    def test_parent_allowed_versions_without_a_base_reads_only_the_merge_base_step(self):
+        reader = self.need("parent_allowed_versions")
+        tmp = tempfile.mkdtemp(prefix="pav-none-")
+        try:
+            repo = self.build_repo(tmp)
+            self.assertEqual(reader(None, self.DEFAULT, cwd=str(repo)), ["1.2.3"] * 5,
+                             "base None: only the five versions at merge-base(origin/master, HEAD), no base step")
+        finally:
+            force_rmtree(tmp)
+
+    def test_parent_allowed_versions_with_a_base_lists_the_base_then_the_merge_base(self):
+        reader = self.need("parent_allowed_versions")
+        tmp = tempfile.mkdtemp(prefix="pav-base-")
+        try:
+            repo = self.build_repo(tmp, parent_version="1.3.0")
+            self.assertEqual(reader("origin/feature/p", self.DEFAULT, cwd=str(repo)),
+                             ["1.3.0"] * 5 + ["1.2.3"] * 5,
+                             "the base's versions come first, then the merge-base's")
+        finally:
+            force_rmtree(tmp)
+
+    def test_parent_allowed_versions_raises_when_git_fails(self):
+        reader = self.need("parent_allowed_versions")
+        tmp = tempfile.mkdtemp(prefix="pav-fail-")
+        try:
+            with self.assertRaises(subprocess.CalledProcessError,
+                                   msg="a failed git call is raised, never returned as an empty list"):
+                reader(None, self.DEFAULT, cwd=tmp)  # not a repository
+        finally:
+            force_rmtree(tmp)
 
 
 if __name__ == "__main__":

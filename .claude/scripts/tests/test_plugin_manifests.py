@@ -51,7 +51,9 @@ THE INVARIANTS
          crash, an unregistered hook is a file nothing runs.
   INV-O1 (hook-server-modes contract, amendment 2026-10-09, sub-task 23; widened by the
          dedupe contract, Revision 3, block 16) hooks.json registers exactly the thirteen
-         entries of the contract's table, exec form; the version obeys the merge-base rule
+         entries of the contract's table, exec form; the version is judged parent-aware
+         (issue 240): a task/<slug>/<id> head into a parent branch keeps the version
+         (check_version_bump.py's parent rule), any other head obeys the merge-base rule
          with origin/master.
   INV-O2 (dedupe contract, Revision 3, block 16) the three add-ons under .claude/addons/ each
          have a manifest that parses, names files that exist, writes exec-form rows, names no
@@ -1463,7 +1465,7 @@ with tempfile.TemporaryDirectory(prefix="addon-controls-") as _ctl_name:
                                           af.KEY_DISABLED: [{af.DISABLED_HOOK: ANGULAR_DISABLED_HOOK,
                                                              af.DISABLED_FORMER: ANGULAR_FORMER_NAMES}]})))
 
-print("\nINV-O1  the version is bumped exactly when the tree differs from its merge base with origin/master")
+print("\nINV-O1  parent-aware: the version is bumped exactly when the tree differs from its merge base with origin/master (a sub-task head keeps it)")
 # Amended from sub-task 1's "every version declaration exceeds origin's version": a branch whose tree
 # equals its merge base (nothing changed) must equal the merge base's version, a branch whose tree differs
 # must exceed it. When git or origin/master cannot be read the check FAILS, naming the cause. It never skips:
@@ -1512,16 +1514,71 @@ def version_matches_tree(found: dict, base: tuple, tree_differs: bool) -> bool:
     return all(version_tuple(v) == base for v in found.values())
 
 
+import collections  # noqa: E402
+import os  # noqa: E402
+import check_version_bump as cvb  # noqa: E402  (.claude/scripts is on sys.path since line 484)
+
+DEFAULT_REF = "origin/master"  # I-7: the one default ref, passed to both shared functions
+
+CheckedBranch = collections.namedtuple("CheckedBranch", "ref source cause")
+Inv01Verdict = collections.namedtuple("Inv01Verdict", "ok rule label detail")
+
+
+def read_checked_branch(root: pathlib.Path, environ) -> CheckedBranch:
+    """The checked branch: GITHUB_HEAD_REF (trimmed, non-empty) wins, else git's current branch. Each failure
+    gives an empty ref and its own cause: (a) detached HEAD, (b) HEAD unreadable, (c) git could not run."""
+    from_env = (environ.get("GITHUB_HEAD_REF") or "").strip()
+    if from_env:
+        return CheckedBranch(from_env, "environment", "")
+    try:
+        branch = _git(root, "symbolic-ref", "--short", "HEAD")
+        if branch.returncode == 0 and branch.stdout.strip():
+            return CheckedBranch(branch.stdout.strip(), "git", "")
+        head = _git(root, "rev-parse", "--verify", "HEAD")
+        if head.returncode != 0:
+            return CheckedBranch("", "git", "git cannot read HEAD in %s: %s"
+                                 % (root, (head.stderr or head.stdout).strip()[:200]))
+        return CheckedBranch("", "git", "HEAD is detached and GITHUB_HEAD_REF is unset or empty")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return CheckedBranch("", "git", "git could not run: %s: %s" % (type(exc).__name__, exc))
+
+
+def inv_o1_verdict(root: pathlib.Path, environ, declared) -> Inv01Verdict:
+    """INV-O1 for one tree: parent rule (via check_version_bump) for a sub-task head, else the merge-base rule.
+    An unreadable branch, merge base or manifest is a FAIL naming the cause, never a skip."""
+    versions = list(declared.values()) if isinstance(declared, dict) else list(declared)
+    reading = read_checked_branch(root, environ)
+    if reading.cause:
+        return Inv01Verdict(False, "unreadable", "the checked branch cannot be read", reading.cause)
+    base_name = (environ.get("GITHUB_BASE_REF") or "").strip()
+    base_ref = "origin/" + base_name if base_name else None
+    if cvb.is_parent_mode(reading.ref, base_ref, DEFAULT_REF):
+        try:
+            allowed = cvb.parent_allowed_versions(base_ref, DEFAULT_REF, cwd=str(root))
+        except (subprocess.CalledProcessError, OSError, ValueError, KeyError) as exc:
+            return Inv01Verdict(False, "unreadable", "the parent versions cannot be read",
+                                "%s: %s" % (type(exc).__name__, exc))
+        code, message = cvb.evaluate_parent(versions, allowed)
+        return Inv01Verdict(code == 0, "parent", "the version obeys the parent rule for %s" % reading.ref, message)
+    base, differs, cause = read_merge_base_state(root)
+    if cause:
+        return Inv01Verdict(False, "unreadable", "the merge base with origin/master cannot be read", cause)
+    shown = ".".join(str(x) for x in base)
+    return Inv01Verdict(
+        version_matches_tree({str(i): v for i, v in enumerate(versions)}, base, differs), "merge-base",
+        "the version obeys the merge-base rule: tree %s the merge base (%s), so all five declarations %s it"
+        % ("differs from" if differs else "equals", shown, "exceed" if differs else "equal"),
+        "declared %r; merge-base version %s; tree differs: %s" % (versions, shown, differs))
+
+
+_verdict_live = inv_o1_verdict(ROOT, os.environ, declared_versions)
 _base, _differs, _cause = read_merge_base_state(ROOT)
+check(_verdict_live.label, _verdict_live.ok, _verdict_live.detail)
 if _cause:
     check("the merge base with origin/master can be read through git", False, _cause)
 else:
     _shown = ".".join(str(x) for x in _base)
     _bumped = ".".join(str(x) for x in _base[:-1] + (_base[-1] + 1,))
-    check("the version obeys the merge-base rule: tree %s the merge base (%s), so all five declarations %s it"
-          % ("differs from" if _differs else "equals", _shown, "exceed" if _differs else "equal"),
-          version_matches_tree(declared_versions, _base, _differs),
-          "declared %r; merge-base version %s; tree differs: %s" % (declared_versions, _shown, _differs))
     check("control: on a differing tree a declaration equal to the merge base's version is rejected",
           not version_matches_tree({"x#root": _shown}, _base, True))
     check("control: on a differing tree a declaration one patch above the merge base's is accepted",
@@ -1571,6 +1628,268 @@ with tempfile.TemporaryDirectory(prefix="mb-controls-") as _tmp_name:
     _v, _d, _c = read_merge_base_state(_not_repo)
     check("control: outside a repository the reader fails and names the cause",
           _v is None and bool(_c), "got %r" % ((_v, _d, _c),))
+
+# ---------------------------------------------------------------------------------------------------------
+# Issue 240: the INV-O1 row is parent-aware. The fixtures below build throwaway repositories and call
+# read_checked_branch(root, environ) and inv_o1_verdict(root, environ, declared) on them. Every fixture row
+# passes an explicit environ mapping, never os.environ (I-5), and every fixture git call runs with a
+# sanitised environment so a fixture can never reach this repository when the suite runs under a git hook.
+# ---------------------------------------------------------------------------------------------------------
+print("\nINV-O1  parent-aware: a sub-task head into a parent branch keeps the version, any other head follows the merge base")
+
+_GIT_REPO_KEYS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+_MISSING = "<missing attribute>"
+
+
+def _fixture_env(environ, ceiling: str) -> dict:
+    """A copy of ``environ`` without the variables that point git at a repository, with the ceiling set so
+    git's upward search can never leave the temp root. The input mapping is not modified."""
+    clean = {k: v for k, v in dict(environ).items() if k not in _GIT_REPO_KEYS}
+    clean["GIT_CEILING_DIRECTORIES"] = ceiling
+    return clean
+
+
+def _field(obj, name: str):
+    """A field of a returned record; a diagnostic marker when absent."""
+    return getattr(obj, name, _MISSING)
+
+
+def _call(fn, *args):
+    """(result, problem). A raised exception becomes a problem string, not a crash. The code under test
+    (which reads os.environ for its git children) runs with the sanitised fixture environment."""
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(_fixture_env(saved, str(_ptmp.parent)))
+    try:
+        return fn(*args), ""
+    except Exception as exc:  # noqa: BLE001 - a crash in the code under test must be a FAIL row, not an abort
+        return None, "%s raised %s: %s" % (fn.__name__, type(exc).__name__, exc)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+with tempfile.TemporaryDirectory(prefix="mb-controls-") as _ptmp_name:
+    _ptmp = pathlib.Path(_ptmp_name)
+
+    def _fgit(root: pathlib.Path, *args: str):
+        """The fixtures' git helper: same call as _git, but with the sanitised environment."""
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=60,
+                              env=_fixture_env(os.environ, str(_ptmp.parent)))
+
+    _poisoned = {k: "bogus-" + k for k in _GIT_REPO_KEYS}
+    _poisoned.update({"GIT_CEILING_DIRECTORIES": "bogus-ceiling", "KEEP_ME": "yes"})
+    _poisoned_before = dict(_poisoned)
+    _clean = _fixture_env(_poisoned, "C:/ceiling")
+    check("M1 the fixture env helper strips GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY/GIT_COMMON_DIR, "
+          "sets the ceiling, keeps the rest and leaves its input untouched",
+          not any(k in _clean for k in _GIT_REPO_KEYS) and _clean["GIT_CEILING_DIRECTORIES"] == "C:/ceiling"
+          and _clean.get("KEEP_ME") == "yes" and _poisoned == _poisoned_before,
+          "got %r" % (_clean,))
+
+    def _manifest_texts(version: str) -> dict:
+        plugin = json.dumps({"name": "x", "version": version}, indent=2) + "\n"
+        market = json.dumps({"name": "m", "version": version, "plugins": [{"name": "x", "version": version}]},
+                            indent=2) + "\n"
+        return {m: (market if m.endswith("marketplace.json") else plugin) for m in cvb.MANIFESTS}
+
+    def _write_version(repo: pathlib.Path, version: str) -> None:
+        for m, text in _manifest_texts(version).items():
+            target = repo / m
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+
+    def _make_parent_repo(name: str, version: str, with_origin_master: bool) -> pathlib.Path:
+        """A throwaway repo on master with EVERY cvb.MANIFESTS entry at ``version`` (the shared reader runs
+        git show for all of them), committed, optionally with refs/remotes/origin/master at HEAD."""
+        repo = _ptmp / name
+        repo.mkdir(parents=True)
+        for args in (("init", "-q"), ("checkout", "-q", "-b", "master"), ("config", "user.email", "t@example.invalid"),
+                     ("config", "user.name", "t"), ("config", "commit.gpgsign", "false")):
+            _fgit(repo, *args)
+        _write_version(repo, version)
+        for args in (("add", "-A"), ("commit", "-q", "-m", "base")):
+            _fgit(repo, *args)
+        if with_origin_master:
+            _fgit(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+        return repo
+
+    def _declared(repo: pathlib.Path) -> list:
+        """The versions of the fixture's working-tree manifests, read the way the live row reads the real tree."""
+        return cvb.versions_in({m: (repo / m).read_text(encoding="utf-8") for m in cvb.MANIFESTS})
+
+    def _change(repo: pathlib.Path, branch: str, version: str = None) -> None:
+        """Switch to ``branch`` (created from HEAD), commit a changed file and optionally a new version."""
+        _fgit(repo, "checkout", "-q", "-b", branch)
+        (repo / "changed.txt").write_text("changed", encoding="utf-8")
+        if version is not None:
+            _write_version(repo, version)
+        _fgit(repo, "add", "-A")
+        _fgit(repo, "commit", "-q", "-m", "change")
+
+    def _verdict(repo: pathlib.Path, environ: dict):
+        return _call(inv_o1_verdict, repo, environ, _declared(repo))
+
+    def _row(label: str, repo: pathlib.Path, environ: dict, ok: bool, rule: str, cause_has: tuple = ()) -> None:
+        result, problem = _verdict(repo, environ)
+        got = (_field(result, "ok"), _field(result, "rule")) if not problem else None
+        detail = problem or "got ok=%r rule=%r detail=%r; wanted ok=%r rule=%r" % (
+            got[0], got[1], _field(result, "detail"), ok, rule)
+        good = not problem and got == (ok, rule) and all(
+            s in str(_field(result, "detail")) for s in cause_has)
+        if not problem and got == (ok, rule) and cause_has and not good:
+            detail += "; detail must contain %r" % (cause_has,)
+        check(label, good, detail)
+
+    # F-1 (acceptance): task head, changed file, version kept == merge base's -> passes under the parent rule.
+    _f1 = _make_parent_repo("f1", "1.2.3", True)
+    _change(_f1, "task/demo/t1")
+    _row("F-1 a task/ head with a changed file and the version kept passes under the parent rule",
+         _f1, {}, True, "parent")
+
+    # F-2 (acceptance): fix/ head into the default branch, changed file, version kept -> merge-base rule fails.
+    _f2 = _make_parent_repo("f2", "1.2.3", True)
+    _change(_f2, "fix/demo")
+    _row("F-2 a fix/ head with a changed file and the version kept fails under the merge-base rule",
+         _f2, {}, False, "merge-base")
+
+    # F-2b: fix/ head into the default branch with the version raised one patch -> merge-base rule passes.
+    _f2b = _make_parent_repo("f2b", "1.2.3", True)
+    _change(_f2b, "fix/demo", "1.2.4")
+    _row("F-2b a fix/ head with a changed file and the version raised one patch (1.2.4) passes under the merge-base rule",
+         _f2b, {}, True, "merge-base")
+
+    # F-3: the same task head declaring a raise -> the parent rule refuses it.
+    _f3 = _make_parent_repo("f3", "1.2.3", True)
+    _change(_f3, "task/demo/t1", "1.2.4")
+    _row("F-3 a task/ head that raises the version (1.2.4) fails under the parent rule",
+         _f3, {}, False, "parent")
+
+    # F-4: detached HEAD, empty environment -> unreadable with the detached-HEAD cause (outcome a).
+    _f4 = _make_parent_repo("f4", "1.2.3", True)
+    _change(_f4, "task/demo/t1")
+    _fgit(_f4, "checkout", "-q", "--detach")
+    _row("F-4 a detached HEAD with an empty environment fails as unreadable and names the detached HEAD",
+         _f4, {}, False, "unreadable", ("detached", "GITHUB_HEAD_REF"))
+    _not_repo_p = _ptmp / "not-a-repo-p"
+    _not_repo_p.mkdir()
+    _row_result, _row_problem = _call(inv_o1_verdict, _not_repo_p, {}, ["1.2.3"] * 5)
+    _row_detail = str(_field(_row_result, "detail"))
+    check("F-4b a folder that is not a repository fails as unreadable with the cannot-read-HEAD cause, not the "
+          "detached-HEAD one",
+          not _row_problem and _field(_row_result, "ok") is False and _field(_row_result, "rule") == "unreadable"
+          and "cannot read HEAD" in _row_detail and "detached" not in _row_detail,
+          _row_problem or "got ok=%r rule=%r detail=%r" % (_field(_row_result, "ok"), _field(_row_result, "rule"),
+                                                           _row_detail))
+
+    # F-5: detached HEAD, branch and base from the environment; origin/parent declares 1.2.3.
+    _f5 = _make_parent_repo("f5", "1.2.3", True)
+    _fgit(_f5, "update-ref", "refs/remotes/origin/parent", "HEAD")
+    _change(_f5, "scratch")
+    _fgit(_f5, "checkout", "-q", "--detach")
+    _row("F-5 a detached HEAD with GITHUB_HEAD_REF=task/demo/t1 and GITHUB_BASE_REF=parent passes under the parent rule",
+         _f5, {"GITHUB_HEAD_REF": "task/demo/t1", "GITHUB_BASE_REF": "parent"}, True, "parent")
+    # F-5b: proves the reader's base-ref step runs: the parent declares 1.3.0 (merge base 1.2.3), head keeps 1.3.0.
+    _f5b = _make_parent_repo("f5b", "1.2.3", True)
+    _fgit(_f5b, "checkout", "-q", "-b", "parent")
+    _write_version(_f5b, "1.3.0")
+    _fgit(_f5b, "commit", "-q", "-am", "parent version")
+    _fgit(_f5b, "update-ref", "refs/remotes/origin/parent", "HEAD")
+    _fgit(_f5b, "checkout", "-q", "--detach")
+    (_f5b / "changed.txt").write_text("changed", encoding="utf-8")
+    _row("F-5b the base ref's version (1.3.0 at origin/parent) is allowed, so the base step of the reader runs",
+         _f5b, {"GITHUB_HEAD_REF": "task/demo/t1", "GITHUB_BASE_REF": "parent"}, True, "parent")
+
+    # F-6: task head into the default branch (GITHUB_BASE_REF=master) with the version kept -> merge-base rule fails.
+    _f6 = _make_parent_repo("f6", "1.2.3", True)
+    _change(_f6, "scratch")
+    _fgit(_f6, "checkout", "-q", "--detach")
+    _row("F-6 a task/ head into the default branch (GITHUB_BASE_REF=master) is not parent mode: the version must rise",
+         _f6, {"GITHUB_HEAD_REF": "task/demo/t1", "GITHUB_BASE_REF": "master"}, False, "merge-base")
+
+    # F-7: set-but-empty and whitespace-only values are treated as unset.
+    for _blank in ("", "   "):
+        _f7 = _make_parent_repo("f7-%d" % len(_blank), "1.2.3", True)
+        _change(_f7, "fix/demo")
+        _row("F-7 GITHUB_HEAD_REF/GITHUB_BASE_REF %r are unset: a fix/ branch gets the merge-base rule" % _blank,
+             _f7, {"GITHUB_HEAD_REF": _blank, "GITHUB_BASE_REF": _blank}, False, "merge-base")
+        _f7a = _make_parent_repo("f7a-%d" % len(_blank), "1.2.3", True)
+        _change(_f7a, "task/demo/t1")
+        _row("F-7 GITHUB_HEAD_REF/GITHUB_BASE_REF %r are unset: an attached task/ branch is parent mode against "
+             "origin/master (version kept)" % _blank,
+             _f7a, {"GITHUB_HEAD_REF": _blank, "GITHUB_BASE_REF": _blank}, True, "parent")
+        _row("F-7 GITHUB_BASE_REF %r alone is unset: an attached task/ branch is still parent mode" % _blank,
+             _f7a, {"GITHUB_BASE_REF": _blank}, True, "parent")
+        _f7d = _make_parent_repo("f7d-%d" % len(_blank), "1.2.3", True)
+        _change(_f7d, "task/demo/t1")
+        _fgit(_f7d, "checkout", "-q", "--detach")
+        _row("F-7 GITHUB_HEAD_REF/GITHUB_BASE_REF %r are unset: a detached HEAD is unreadable" % _blank,
+             _f7d, {"GITHUB_HEAD_REF": _blank, "GITHUB_BASE_REF": _blank}, False, "unreadable")
+
+    # F-8: origin/master absent. Parent mode (task/ head) fails through the shared reader's git read; the
+    # merge-base rule (fix/ head) fails naming origin/master. Neither skips.
+    _f8 = _make_parent_repo("f8", "1.2.3", False)
+    _change(_f8, "task/demo/t1")
+    _row("F-8 a task/ head with no origin/master fails as unreadable and names the failing git read",
+         _f8, {}, False, "unreadable", ("CalledProcessError",))
+    _f8b = _make_parent_repo("f8b", "1.2.3", False)
+    _change(_f8b, "fix/demo")
+    _row("F-8b a fix/ head with no origin/master fails as unreadable and names origin/master",
+         _f8b, {}, False, "unreadable", ("origin/master",))
+
+    # read_checked_branch: the Checked branch reading, three distinct failure causes.
+    _rb_env, _p = _call(read_checked_branch, _f1, {"GITHUB_HEAD_REF": "  task/x/y  "})
+    check("read_checked_branch: GITHUB_HEAD_REF, trimmed, wins with source 'environment'",
+          not _p and _field(_rb_env, "ref") == "task/x/y" and _field(_rb_env, "source") == "environment"
+          and _field(_rb_env, "cause") == "",
+          _p or "got ref=%r source=%r cause=%r" % tuple(_field(_rb_env, k) for k in ("ref", "source", "cause")))
+    _rb_git, _p = _call(read_checked_branch, _f1, {})
+    check("read_checked_branch: without the variable the current branch comes from git with source 'git'",
+          not _p and _field(_rb_git, "ref") == "task/demo/t1" and _field(_rb_git, "source") == "git"
+          and _field(_rb_git, "cause") == "",
+          _p or "got ref=%r source=%r cause=%r" % tuple(_field(_rb_git, k) for k in ("ref", "source", "cause")))
+    _rb_a, _pa = _call(read_checked_branch, _f4, {})
+    _rb_b, _pb = _call(read_checked_branch, _not_repo_p, {})
+    _orig_run = subprocess.run
+
+    def _no_git(*_a, **_k):
+        raise FileNotFoundError("git")
+
+    subprocess.run = _no_git
+    try:
+        _rb_c, _pc = _call(read_checked_branch, _f1, {})
+    finally:
+        subprocess.run = _orig_run
+    _ca, _cb, _cc = (str(_field(r, "cause")) for r in (_rb_a, _rb_b, _rb_c))
+    check("read_checked_branch cause (a): detached HEAD with GITHUB_HEAD_REF unset names the detached HEAD",
+          not _pa and _field(_rb_a, "ref") == "" and "detached" in _ca and "GITHUB_HEAD_REF" in _ca,
+          _pa or "got ref=%r cause=%r" % (_field(_rb_a, "ref"), _ca))
+    check("read_checked_branch cause (b): a folder that is not a repository says git cannot read HEAD, not detached",
+          not _pb and _field(_rb_b, "ref") == "" and "cannot read HEAD" in _cb and "detached" not in _cb,
+          _pb or "got ref=%r cause=%r" % (_field(_rb_b, "ref"), _cb))
+    check("read_checked_branch cause (c): git that cannot run says 'git could not run' with the exception type",
+          not _pc and _field(_rb_c, "ref") == "" and "git could not run" in _cc and "FileNotFoundError" in _cc,
+          _pc or "got ref=%r cause=%r" % (_field(_rb_c, "ref"), _cc))
+    check("read_checked_branch: the three failure causes are three different sentences",
+          not (_pa or _pb or _pc) and len({_ca, _cb, _cc}) == 3 and "" not in {_ca, _cb, _cc},
+          "causes were %r" % ((_ca, _cb, _cc),))
+
+    # M2 (I-1, I-2): the mode predicate and the allowed-version reader are imported, never respelled.
+    import inspect  # noqa: E402
+    _main_src = inspect.getsource(cvb.main)
+    _pm_start = _main_src.find("is_parent_mode(")
+    _pm_end = _main_src.find("evaluate_parent(", _pm_start)
+    _pm_branch = _main_src[_pm_start:_pm_end] if _pm_start != -1 and _pm_end != -1 else ""
+    _verdict_src = inspect.getsource(inv_o1_verdict)
+    check("M2 main() decides parent mode through is_parent_mode( and reads versions through parent_allowed_versions(, "
+          "without spelling TASK_HEAD.match in the parent-mode branch",
+          "is_parent_mode(" in _main_src and "parent_allowed_versions(" in _main_src and bool(_pm_branch)
+          and "TASK_HEAD" not in _pm_branch,
+          "parent-mode branch of main() was %r" % (_pm_branch,))
+    check("M2 inv_o1_verdict spells neither TASK_HEAD nor 'task/' (it asks cvb.is_parent_mode)",
+          "TASK_HEAD" not in _verdict_src and "task/" not in _verdict_src and "cvb.is_parent_mode(" in _verdict_src
+          and "cvb.parent_allowed_versions(" in _verdict_src,
+          "inv_o1_verdict source mentions a task-branch pattern or skips the shared functions")
 
 print("\n%s\n %d passed, %d failed\n%s"
       % ("-" * 60, _passes, len(_failures), "-" * 60))

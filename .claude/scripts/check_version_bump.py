@@ -126,8 +126,24 @@ def raise_manifests(wanted: str) -> bool:
     return changed
 
 
-def _git(*args: str) -> str:
-    return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
+def _git(*args: str, cwd: Optional[str] = None) -> str:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=True, cwd=cwd).stdout
+
+
+def is_parent_mode(head_ref: str, base_ref: Optional[str], default_ref: str) -> bool:
+    """True for a ``task/<slug>/<id>`` head whose base is not ``default_ref``; an absent base is not the default."""
+    return bool(head_ref) and bool(TASK_HEAD.match(head_ref)) and base_ref != default_ref
+
+
+def parent_allowed_versions(base_ref: Optional[str], default_ref: str, cwd: Optional[str] = None) -> List[str]:
+    """The versions at ``base_ref`` (skipped when None) then at merge-base(default_ref, HEAD); git failures raise."""
+    merge_base = _git("merge-base", default_ref, "HEAD", cwd=cwd).strip()
+    allowed: List[str] = []
+    for ref in (base_ref, merge_base):
+        if ref is None:
+            continue
+        allowed += versions_in({m: _git("show", "%s:%s" % (ref, m), cwd=cwd) for m in MANIFESTS})
+    return allowed
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -163,11 +179,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.head_ref and not TASK_HEAD.match(args.head_ref) and args.base != default_ref:
             print("VERSION BUMP: %s is not a task branch and its base is not %s; not checked" % (args.head_ref, default_ref))
             return 0
-        if args.head_ref and TASK_HEAD.match(args.head_ref) and args.base != default_ref:
-            merge_base = _git("merge-base", default_ref, "HEAD").strip()
-            allowed: List[str] = []
-            for ref in (args.base, merge_base):
-                allowed += versions_in({m: _git("show", "%s:%s" % (ref, m)) for m in MANIFESTS})
+        if is_parent_mode(args.head_ref, args.base, default_ref):
+            allowed = parent_allowed_versions(args.base, default_ref)
             head = {m: _git("show", "HEAD:" + m) for m in MANIFESTS}
             code, message = evaluate_parent(versions_in(head), allowed)
             print("VERSION BUMP: " + message)
