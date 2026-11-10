@@ -144,8 +144,12 @@ SCRIPT_ROOT = Path(fi.__file__).resolve().parents[2]
 # project-hook-launcher-missing (exit class 3: the hooks folder beside the scripts is the wrong release, an
 # environment problem the operator fixes by updating that folder). Reason: Revision 19, BE (gate 32 F1); block 57
 # adds the code. Until then assertRefused fails for it at the code, not here.
+# rule changed (#623 t1): the set gains guard-unreadable (exit class 3: the guard file the protect-databases
+# subcommand loads its disposable patterns from cannot be read, an environment problem). The other four new
+# refusal codes of that subcommand (rules-unreadable, name-invalid, name-is-disposable, narrowing-unconfirmed)
+# are correctable, exit class 2.
 ENVIRONMENT_CODES = {"project-unreadable", "template-missing", "hooks-json-missing",
-                     "project-hook-launcher-missing"}
+                     "project-hook-launcher-missing", "guard-unreadable"}
 
 EVIDENCE_REASONS = {"manifest", "folder-name", "config-entry", "file-exists", "git-remote", "agent-file"}
 
@@ -7679,6 +7683,424 @@ class TestCodegraphCutoverUpgrade(CutoverHarness):
                               capture_output=True, text=True, cwd=str(self.project),
                               env={k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")})
         self.assertEqual(proc.returncode, 0, msg="the leftover notice row runs the old guard, which exits 0: %r" % proc.stderr)
+
+
+# ======================================================================================
+# #623 t1 -- the protect-databases subcommand (contract 2026-10-13-database-guard-names-in-rules-file,
+# Commands "Protect databases", Revision 3 "narrowing"). RED: the subcommand does not exist yet.
+#
+# SHAPE ASSUMPTIONS, pinned here as this file's convention is (the implementer satisfies them). The command
+# line is the contract's: ``protect-databases --project <dir> [--name <db>]... [--json]`` and
+# ``--apply --expect-sha256 <plan hash> [--confirm-narrowing]``. Results travel as the JSON the other
+# subcommands print with --json:
+#   plan      {"status": "plan", "plan-sha256": hex, "narrows_write_protection": bool,
+#              "proposals": [{"name", "evidence": [{"path", "line"}], "already-protected": bool}],
+#              "excluded": [{"name", "reason"}]}      exit 0
+#   apply     {"status": "applied"} or {"status": "nothing-to-do"}                       exit 0
+#   refusal   {"status": "refused", "code", "message", "path"}; exit 2 (correctable) or 3 (environment)
+# The names printed after an apply (the rewritten server-trigger IN line and the install command) are looked
+# up in the printed text as a whole (standard output and the JSON), never under one key.
+# ======================================================================================
+GUARD_SOURCE = SCRIPT_ROOT / ".claude" / "hooks" / "db-destructive-guard.py"
+DG_RULES_REL = ".claude/hooks/db-destructive-guard.rules.json"
+DG_SQL_REL = "tools/db-protection/install-dev-db-protect-trigger.sql"
+DG_SQL_TEXT = ("-- the workstation-wide trigger. Install: sqlcmd -S \"(localdb)\\mssqllocaldb\" -E "
+               "-i install-dev-db-protect-trigger.sql\n"
+               "IF DB_NAME() IN (N'AcmeApp', N'AcmeApp_Testing') RAISERROR('protected', 16, 1);\n")
+NARROWING_FRAGMENTS = ("no list exists", "no longer stopped by this check")
+DISPOSABLE_NAME = "Shop_Test_0a1b2c3d4e5f"
+
+# Alpha and Zeta are deliberately NOT sorted; CRLF line endings and a four-space indent are the file's own.
+DG_RULES_CRLF = (
+    '{\r\n'
+    '    "_comment": "append-only; only a person removes a name",\r\n'
+    '    "protected_databases": [\r\n'
+    '        "Zeta",\r\n'
+    '        "Alpha"\r\n'
+    '    ],\r\n'
+    '    "production_path_allowlist": [\r\n'
+    '        "src/",\r\n'
+    '        ".claude/"\r\n'
+    '    ],\r\n'
+    '    "human_only_commands": [\r\n'
+    '        {"script": "tools/db-protection/update-dev-database.cmd"}\r\n'
+    '    ]\r\n'
+    '}\r\n'
+).encode("utf-8")
+
+
+class TestProtectDatabases(Base):
+    def setUp(self):
+        super().setUp()
+        self.install_text = None
+        self.assertTrue(GUARD_SOURCE.is_file(), msg="fixture: the real guard file must exist")
+        for hooks in (self.plugin / ".claude/hooks", self.project / ".claude/hooks"):
+            hooks.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(GUARD_SOURCE), str(hooks / "db-destructive-guard.py"))
+        # The plugin's template rules file carries comment keys (and fictional names); a NEW project file
+        # takes the comment keys and nothing else.
+        (self.plugin / DG_RULES_REL).write_text(json.dumps({
+            "_comment": "template comment", "_append_only": "names are only ever added",
+            "protected_databases": ["AcmeApp", "AcmeApp_Testing"],
+            "production_path_allowlist": [".claude/"], "human_only_commands": []}, indent=2), encoding="utf-8")
+        self.make_files({
+            "src/Api/appsettings.json":
+                '{\n  "ConnectionStrings": {\n    "Default": "Server=(localdb)\\\\mssqllocaldb;Database=Shop;Trusted_Connection=True;"\n  }\n}\n',
+            "src/Api/appsettings.Development.json":
+                '{\n  "Reports": "Server=.;Initial Catalog=ShopReports;Integrated Security=True"\n}\n',
+            "tests/appsettings.json": '{\n  "Db": "Server=.;Database=%s;"\n}\n' % DISPOSABLE_NAME,
+            DG_SQL_REL: DG_SQL_TEXT,
+        })
+        git(self.project, "init", "-q")
+        git(self.project, "add", "-A")
+        git(self.project, "commit", "-q", "-m", "fixture")
+        self.make_files({"scratch/untracked.json": '{"Db": "Server=.;Database=Untracked;"}\n'})  # never tracked
+
+    # -- helpers --------------------------------------------------------------------------------------
+    def rules(self):
+        return self.project / DG_RULES_REL
+
+    def put_rules(self, data):
+        self.rules().parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, dict):
+            data = json.dumps(data, indent=2).encode("utf-8")
+        self.rules().write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    def argv(self, names=(), apply=False, sha=None, confirm=False, project=None):
+        argv = ["protect-databases", "--project", str(project or self.project), "--json"]
+        for name in names:
+            argv += ["--name", name]
+        if apply:
+            argv.append("--apply")
+        if sha is not None:
+            argv += ["--expect-sha256", sha]
+        if confirm:
+            argv.append("--confirm-narrowing")
+        return argv
+
+    def preview(self, names=()):
+        rc, out, parsed = self.cli(self.argv(names))
+        self.assertEqual(rc, 0, msg="a preview exits 0. stdout=%r" % out[:400])
+        self.assertIsInstance(parsed, dict, msg="a preview prints one JSON object. stdout=%r" % out[:400])
+        self.assertEqual(parsed.get("status"), "plan", msg="a preview is a plan: %r" % (parsed,))
+        return parsed
+
+    def apply(self, names=(), confirm=False, sha=None):
+        sha = sha if sha is not None else self.need(self.preview(names), "plan-sha256", "the plan hash")
+        rc, out, parsed = self.cli(self.argv(names, apply=True, sha=sha, confirm=confirm))
+        self.install_text = out + "\n" + json.dumps(parsed)
+        return rc, out, parsed
+
+    def refused(self, names, code, why, confirm=False, sha=None, apply=False):
+        """Run the preview (or the apply) and require a refusal with ``code``; returns the result."""
+        if apply:
+            rc, out, parsed = self.apply(names, confirm=confirm, sha=sha)
+        else:
+            rc, out, parsed = self.cli(self.argv(names))
+        self.assertIsInstance(parsed, dict, msg="%s: a refusal prints one JSON object. stdout=%r" % (why, out[:400]))
+        self.assertRefused(parsed, code, why)
+        self.assertEqual(rc, 3 if code in ENVIRONMENT_CODES else 2, msg="%s: exit class" % why)
+        return parsed
+
+    # ---------------- preview ---------------------------------------------------------------------------
+    def test_a_preview_proposes_a_name_with_the_file_and_line_that_names_it(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        plan = self.preview()
+        by_name = {p.get("name"): p for p in self.need(plan, "proposals", "the proposals")}
+        self.assertIn("Shop", by_name, msg="Database= in a tracked config file is proposed: %r" % sorted(by_name))
+        self.assertIn("ShopReports", by_name, msg="Initial Catalog= is proposed too: %r" % sorted(by_name))
+        evidence = json.dumps(by_name["Shop"].get("evidence"))
+        self.assertIn("src/Api/appsettings.json", evidence.replace("\\\\", "/"), msg="the evidence names the file")
+        self.assertRegex(evidence, r"\b3\b", msg="and the line: the connection string is on line 3")
+
+    def test_a_preview_never_proposes_a_name_from_an_untracked_file(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        names = [p.get("name") for p in self.need(self.preview(), "proposals", "the proposals")]
+        self.assertNotIn("Untracked", names, msg="only tracked configuration files are evidence")
+
+    def test_a_preview_excludes_a_disposable_name_with_a_reason_and_never_proposes_it(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        plan = self.preview()
+        self.assertNotIn(DISPOSABLE_NAME, [p.get("name") for p in self.need(plan, "proposals", "the proposals")],
+                         msg="a disposable name is never proposed")
+        excluded = self.need(plan, "excluded", "the excluded names")
+        row = next((e for e in excluded if e.get("name") == DISPOSABLE_NAME), None)
+        self.assertIsNotNone(row, msg="it is listed as excluded: %r" % (excluded,))
+        self.assertTrue(str(row.get("reason", "")).strip(), msg="with the reason")
+
+    def test_a_preview_marks_a_name_that_is_already_protected_with_letter_case_folded(self):
+        self.put_rules({"protected_databases": ["SHOP"]})
+        by_name = {p.get("name"): p for p in self.need(self.preview(), "proposals", "the proposals")}
+        self.assertIs(by_name["Shop"].get("already-protected"), True, msg="SHOP protects Shop (case folded)")
+        self.assertIs(by_name["ShopReports"].get("already-protected"), False, msg="but not ShopReports")
+
+    def test_a_preview_writes_nothing(self):
+        self.put_rules(DG_RULES_CRLF)
+        before = snapshot(self.tmp)
+        self.preview(["Shop"])
+        self.assertTreeSame(before, "a preview changes no byte")
+
+    def test_the_plan_hash_covers_the_names_passed_at_preview_time(self):
+        self.put_rules(DG_RULES_CRLF)
+        a = self.need(self.preview(["Shop"]), "plan-sha256", "hash for Shop")
+        b = self.need(self.preview(["ShopReports"]), "plan-sha256", "hash for ShopReports")
+        self.assertNotEqual(a, b, msg="different confirmed names are a different plan")
+        self.assertEqual(a, self.need(self.preview(["Shop"]), "plan-sha256", "again"), msg="the same plan, the same hash")
+        self.refused(["Shop"], "changed-since-preview", "a hash from another name list", apply=True, sha=b)
+
+    # ---------------- apply: appends in place -------------------------------------------------------------
+    def test_an_apply_without_the_plan_hash_changes_nothing(self):
+        self.put_rules(DG_RULES_CRLF)
+        before = self.rules().read_bytes()
+        self.need(self.preview(["Shop"]), "plan-sha256", "control: the subcommand exists and previews")
+        rc, out, parsed = self.cli(self.argv(["Shop"], apply=True))
+        self.assertNotEqual(rc, 0, msg="an apply needs --expect-sha256. stdout=%r" % out[:300])
+        self.assertEqual(self.rules().read_bytes(), before, msg="and writes nothing")
+
+    def test_an_apply_appends_in_place_and_keeps_every_other_byte(self):
+        self.put_rules(DG_RULES_CRLF)
+        original = DG_RULES_CRLF
+        rc, out, parsed = self.apply(["Shop"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="stdout=%r" % out[:400])
+        new = self.rules().read_bytes()
+        key = original.index(b'"protected_databases"')
+        opening = original.index(b"[", key)
+        closing = original.index(b"]", opening)
+        prefix, suffix, old_inner = original[:opening + 1], original[closing:], original[opening + 1:closing]
+        self.assertTrue(new.startswith(prefix), msg="every byte before the array is unchanged")
+        self.assertTrue(new.endswith(suffix), msg="every byte after the array is unchanged (the other keys included)")
+        new_inner = new[len(prefix):len(new) - len(suffix)]
+        self.assertTrue(new_inner.startswith(old_inner.rstrip()),
+                        msg="the old entries keep their bytes and their order: %r" % new_inner)
+        self.assertIn(b'\r\n        "Shop"', new_inner, msg="the new entry is in the file's own indent and line ending")
+        self.assertEqual(new.count(b"\n"), new.count(b"\r\n"), msg="no bare line feed was introduced")
+        self.assertEqual(json.loads(new.decode("utf-8"))["protected_databases"], ["Zeta", "Alpha", "Shop"],
+                         msg="appended, never sorted")
+
+    def test_an_apply_never_reorders_or_removes(self):
+        self.put_rules(DG_RULES_CRLF)
+        self.apply(["Shop", "ShopReports"])
+        names = json.loads(self.rules().read_bytes().decode("utf-8"))["protected_databases"]
+        self.assertEqual(names, ["Zeta", "Alpha", "Shop", "ShopReports"], msg="old order kept, new names after it")
+
+    def test_an_apply_never_touches_the_allow_list_or_the_human_only_commands(self):
+        self.put_rules(DG_RULES_CRLF)
+        self.apply(["Shop"])
+        new = self.rules().read_bytes()
+        for key in (b'"production_path_allowlist"', b'"human_only_commands"', b'"_comment"'):
+            start = DG_RULES_CRLF.index(key)
+            end = DG_RULES_CRLF.index(b"]", start) + 1 if key != b'"_comment"' else DG_RULES_CRLF.index(b"\r\n", start)
+            self.assertIn(DG_RULES_CRLF[start:end], new, msg="the bytes of %s are unchanged" % key.decode())
+
+    def test_names_are_de_duplicated_with_letter_case_folded(self):
+        self.put_rules({"protected_databases": ["Shop"]})
+        before = self.rules().read_bytes()
+        rc, out, parsed = self.apply(["shop", "SHOP"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"),
+                         msg="Shop is already protected in another letter case: %r" % out[:300])
+        self.assertEqual(self.rules().read_bytes(), before, msg="nothing is written")
+
+    def test_two_spellings_of_one_new_name_add_one_entry(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        self.apply(["ShopReports", "shopreports"])
+        names = json.loads(self.rules().read_bytes().decode("utf-8"))["protected_databases"]
+        self.assertEqual([n.lower() for n in names], ["alpha", "shopreports"], msg="one entry for one database: %r" % names)
+
+    def test_no_testing_name_is_added_unless_it_is_passed(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        self.apply(["Shop"])
+        names = json.loads(self.rules().read_bytes().decode("utf-8"))["protected_databases"]
+        self.assertNotIn("Shop_Testing", names, msg="the subcommand never invents a companion name")
+        self.assertEqual(names, ["Alpha", "Shop"])
+
+    def test_an_absent_key_is_added_as_the_last_key(self):
+        original = b'{\n  "production_path_allowlist": ["src/"],\n  "human_only_commands": []\n}\n'
+        self.put_rules(original)
+        rc, out, parsed = self.apply(["Shop"], confirm=True)
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="stdout=%r" % out[:400])
+        new = self.rules().read_bytes().decode("utf-8")
+        self.assertEqual(list(json.loads(new)), ["production_path_allowlist", "human_only_commands", "protected_databases"],
+                         msg="the key is last, the others keep their order")
+        self.assertTrue(new.startswith('{\n  "production_path_allowlist": ["src/"],\n  "human_only_commands": []'),
+                        msg="the existing bytes are kept")
+
+    def test_a_new_file_gets_the_names_and_the_templates_comment_keys_and_nothing_else(self):
+        self.assertFalse(self.rules().exists(), msg="fixture: no rules file yet")
+        rc, out, parsed = self.apply(["Shop"], confirm=True)
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="stdout=%r" % out[:400])
+        data = json.loads(self.rules().read_bytes().decode("utf-8"))
+        self.assertEqual(sorted(data), ["_append_only", "_comment", "protected_databases"],
+                         msg="the names and the template's comment keys, no allow-list, no commands: %r" % sorted(data))
+        self.assertEqual(data["protected_databases"], ["Shop"], msg="the template's fictional names are not copied")
+
+    def test_an_apply_prints_the_trigger_line_and_install_command_and_writes_no_sql_file(self):
+        self.put_rules(DG_RULES_CRLF)
+        sql = self.project / DG_SQL_REL
+        before_sql = hashlib.sha256(sql.read_bytes()).hexdigest()
+        sql_files = sorted(p.name for p in self.project.rglob("*.sql"))
+        rc, out, parsed = self.apply(["Shop"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="stdout=%r" % out[:400])
+        text = self.install_text
+        self.assertRegex(text, r"IN\s*\(", msg="the server trigger's IN line is printed, rewritten")
+        for name in ("Zeta", "Alpha", "Shop"):
+            self.assertIn(name, text, msg="every protected name is in the printed IN line")
+        self.assertIn("sqlcmd", text, msg="and the install command")
+        self.assertEqual(hashlib.sha256(sql.read_bytes()).hexdigest(), before_sql, msg="the .sql file is never edited")
+        self.assertEqual(sorted(p.name for p in self.project.rglob("*.sql")), sql_files, msg="and none is created")
+
+    # ---------------- refusals ----------------------------------------------------------------------------
+    def test_rules_unreadable_for_text_that_is_not_json(self):
+        self.put_rules(b"{ not json")
+        self.refused(["Shop"], "rules-unreadable", "not JSON")
+
+    def test_rules_unreadable_for_a_duplicate_key(self):
+        self.put_rules(b'{"protected_databases": ["A"], "protected_databases": ["B"]}')
+        self.refused(["Shop"], "rules-unreadable", "a duplicate key")
+
+    def test_rules_unreadable_for_a_byte_order_mark(self):
+        self.put_rules(b"\xef\xbb\xbf" + json.dumps({"protected_databases": ["A"]}).encode("utf-8"))
+        self.refused(["Shop"], "rules-unreadable", "the guard's own loader cannot read a byte order mark")
+
+    def test_rules_unreadable_for_bytes_that_are_not_utf8(self):
+        self.put_rules(b'{"protected_databases": ["\xff"]}')
+        self.refused(["Shop"], "rules-unreadable", "not strict UTF-8")
+
+    def test_rules_unreadable_when_the_value_is_not_a_list_of_strings(self):
+        for body in (b'{"protected_databases": "Shop"}', b'{"protected_databases": ["A", 3]}', b'["A"]'):
+            self.put_rules(body)
+            before = self.rules().read_bytes()
+            self.refused(["Shop"], "rules-unreadable", "wrong shape: %r" % body)
+            self.assertEqual(self.rules().read_bytes(), before, msg="a person repairs it: nothing is written")
+
+    def test_a_name_that_is_not_a_plain_identifier_is_refused(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        for bad in ("", "x" * 129, "1Shop", "has space", "a-b", "a.b", "a;b", "a'b"):
+            self.refused([bad], "name-invalid", "name %r" % bad)
+
+    def test_a_disposable_name_can_never_be_protected(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        self.refused([DISPOSABLE_NAME], "name-is-disposable", "the guard's own disposable pattern matches it")
+        self.refused(["Shop_MigrationVerify_0a1b2c3d"], "name-is-disposable", "a second disposable suffix")
+
+    def test_an_apply_after_the_file_changed_is_refused_and_changes_nothing(self):
+        self.put_rules(DG_RULES_CRLF)
+        sha = self.need(self.preview(["Shop"]), "plan-sha256", "the hash")
+        self.put_rules({"protected_databases": ["Alpha", "Edited"]})
+        before = self.rules().read_bytes()
+        self.refused(["Shop"], "changed-since-preview", "the file changed after the preview", apply=True, sha=sha)
+        self.assertEqual(self.rules().read_bytes(), before, msg="nothing is written")
+
+    def test_a_write_that_fails_is_refused_and_leaves_the_file_and_the_folder_as_they_were(self):
+        self.put_rules(DG_RULES_CRLF)
+        sha = self.need(self.preview(["Shop"]), "plan-sha256", "the hash")
+        before = snapshot(self.project)
+        with mock.patch("os.replace", side_effect=OSError("denied")):
+            rc, out, parsed = self.cli(self.argv(["Shop"], apply=True, sha=sha))
+        self.assertIsInstance(parsed, dict, msg="stdout=%r" % out[:300])
+        self.assertRefused(parsed, "write-failed", "an operating-system error while writing")
+        self.assertTreeSame(before, "no byte and no temporary file is left behind", root=self.project)
+
+    def test_a_rules_file_that_is_a_symbolic_link_is_refused(self):
+        real = self.tmp / "elsewhere.json"
+        real.write_bytes(DG_RULES_CRLF)
+        self.rules().parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(str(real), str(self.rules()))
+        except (OSError, NotImplementedError):
+            self.skipTest("this account cannot create a symbolic link here")
+        sha = self.need(self.preview(["Shop"]), "plan-sha256", "the hash")
+        rc, out, parsed = self.cli(self.argv(["Shop"], apply=True, sha=sha))
+        self.assertRefused(parsed, "write-failed", "a symbolic-link rules file is never written through")
+        self.assertEqual(real.read_bytes(), DG_RULES_CRLF, msg="the link's target is untouched")
+
+    def test_the_plugins_own_checkout_is_refused(self):
+        checkout = self.tmp / "checkout"
+        (checkout / ".claude-plugin").mkdir(parents=True)
+        (checkout / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": fi.PLUGIN_NAME, "version": "1.0.0"}), encoding="utf-8")
+        rc, out, parsed = self.cli(self.argv(["Shop"], project=checkout))
+        self.assertRefused(parsed, "plugin-source-checkout", "the plugin's own checkout")
+        self.assertEqual(rc, 2)
+
+    def test_a_project_that_is_not_there_is_an_environment_refusal(self):
+        rc, out, parsed = self.cli(self.argv(["Shop"], project=self.tmp / "no-such-project"))
+        self.assertRefused(parsed, "project-unreadable", "no such folder")
+        self.assertEqual(rc, 3)
+
+    def test_a_guard_file_that_cannot_be_loaded_is_an_environment_refusal(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        for hooks in (self.plugin / ".claude/hooks", self.project / ".claude/hooks"):
+            (hooks / "db-destructive-guard.py").unlink()
+        rc, out, parsed = self.cli(self.argv(["Shop"]))
+        self.assertIsInstance(parsed, dict, msg="stdout=%r" % out[:300])
+        self.assertRefused(parsed, "guard-unreadable", "the disposable patterns come from the guard file")
+        self.assertEqual(rc, 3)
+
+    def test_the_new_refusal_codes_are_in_the_closed_set(self):
+        for code in ("rules-unreadable", "name-invalid", "name-is-disposable", "narrowing-unconfirmed", "guard-unreadable"):
+            self.assertIn(code, REFUSAL_CODES, msg="%s must be a refusal code" % code)
+
+    # ---------------- Revision 3: the narrowing on a first install -------------------------------------------
+    def test_with_no_rules_file_the_preview_says_it_narrows_write_protection(self):
+        plan = self.preview(["Shop"])
+        self.assertIs(plan.get("narrows_write_protection"), True, msg="no list today means every database is protected")
+        for fragment in NARROWING_FRAGMENTS:
+            self.assertIn(fragment, json.dumps(plan), msg="the plain sentence says: %r" % fragment)
+
+    def test_with_an_empty_list_the_preview_says_it_narrows_write_protection(self):
+        self.put_rules({"protected_databases": []})
+        plan = self.preview(["Shop"])
+        self.assertIs(plan.get("narrows_write_protection"), True)
+        for fragment in NARROWING_FRAGMENTS:
+            self.assertIn(fragment, json.dumps(plan))
+
+    def test_with_the_key_absent_the_preview_says_it_narrows_write_protection(self):
+        self.put_rules({"production_path_allowlist": ["src/"]})
+        self.assertIs(self.preview(["Shop"]).get("narrows_write_protection"), True)
+
+    def test_with_a_non_empty_list_the_flag_is_false_and_the_sentence_is_absent(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        plan = self.preview(["Shop"])
+        self.assertIs(plan.get("narrows_write_protection"), False, msg="adding a name never narrows")
+        for fragment in NARROWING_FRAGMENTS:
+            self.assertNotIn(fragment, json.dumps(plan), msg="the sentence is absent")
+
+    def test_an_apply_that_narrows_needs_the_confirmation_and_writes_nothing_without_it(self):
+        for setup in (None, {"protected_databases": []}):
+            if setup is not None:
+                self.put_rules(setup)
+            before = snapshot(self.project)
+            self.refused(["Shop"], "narrowing-unconfirmed", "no --confirm-narrowing", apply=True)
+            self.assertTreeSame(before, "nothing is written", root=self.project)
+
+    def test_an_apply_that_narrows_writes_once_the_confirmation_is_given(self):
+        rc, out, parsed = self.apply(["Shop"], confirm=True)
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="stdout=%r" % out[:400])
+        self.assertEqual(json.loads(self.rules().read_bytes().decode("utf-8"))["protected_databases"], ["Shop"])
+
+    def test_an_apply_that_does_not_narrow_needs_no_confirmation(self):
+        self.put_rules({"protected_databases": ["Alpha"]})
+        rc, out, parsed = self.apply(["Shop"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="stdout=%r" % out[:400])
+
+    # ---------------- the rules states now name the new skill ------------------------------------------------
+    def test_the_readiness_report_names_the_new_skill_while_the_rules_are_unset_or_template(self):
+        self.install_plugin()
+        rules = self.plugin / DG_RULES_REL
+        for label, content in (("template-placeholders", {"protected_databases": ["AcmeApp", "AcmeApp_Testing"]}),
+                               ("absent-fail-closed", {"protected_databases": []})):
+            rules.write_text(json.dumps(content), encoding="utf-8")
+            report = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
+            self.assertEqual(report.get("database-guard-rules"), label, msg="fixture sanity")
+            self.assertIn("auto-improve-database-guard-install", json.dumps(report),
+                          msg="%s: the report points at the skill that fixes it" % label)
+
+    def test_the_readiness_report_does_not_name_the_skill_when_the_rules_are_configured(self):
+        self.install_plugin()
+        (self.plugin / DG_RULES_REL).write_text(json.dumps({"protected_databases": ["RealDb"]}), encoding="utf-8")
+        report = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
+        self.assertNotIn("auto-improve-database-guard-install", json.dumps(report),
+                         msg="nothing to fix, nothing to recommend")
 
 
 if __name__ == "__main__":

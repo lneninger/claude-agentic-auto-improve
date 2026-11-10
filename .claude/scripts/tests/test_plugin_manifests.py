@@ -268,10 +268,14 @@ dispatched = set()
 for _d in (_dispatcher_file, _stop_dispatcher_file):
     if _d.is_file():
         dispatched |= dispatcher_names(_d.read_text(encoding="utf-8", errors="replace"))
-check("the two dispatchers' CHECKS lists name at least the five members the contract assigns them",
+# NAMED EDIT (#623 t1, form B of the contract's Extension Points): the sixth member is the Protected-name
+# warning, which the Stop dispatcher runs instead of hooks.json registering it (the documentation of an
+# asynchronous Stop hook's systemMessage was not available, so the TASK pins form B). Was "at least the five".
+check("the two dispatchers' CHECKS lists name at least the six members the contract assigns them "
+      "(#623: protected-names-warning.py joins the Stop dispatcher)  [RED until the hook is a member]",
       {"integration-check.py", "critic-verdict-tracker.py", "contract-status-watcher.py",
        "journal-post-approval-tracker.py",
-       "../scripts/concept_changed_check.py"} <= dispatched,
+       "../scripts/concept_changed_check.py", "protected-names-warning.py"} <= dispatched,
       "read %s" % sorted(dispatched))
 _cov = coverage_problems(on_disk, registered, dispatched, ROOT / ".claude" / "hooks")
 check("no hook file is left unregistered: each is in hooks.json or in a dispatcher's CHECKS list",
@@ -1890,6 +1894,60 @@ with tempfile.TemporaryDirectory(prefix="mb-controls-") as _ptmp_name:
           "TASK_HEAD" not in _verdict_src and "task/" not in _verdict_src and "cvb.is_parent_mode(" in _verdict_src
           and "cvb.parent_allowed_versions(" in _verdict_src,
           "inv_o1_verdict source mentions a task-branch pattern or skips the shared functions")
+
+print("\nINV-P623  the database-guard names move into the rules file (#623, sub-task 1: the pins this work adds)")
+# NAMED EDITS. Form B of the contract's Extension Points was pinned, so hooks.json gains NO entry: the total
+# stays thirteen (INV-O1 above holds unchanged) and the one count that moves is the number of hook files
+# (README and the manifest descriptions say "13 hooks"; test_repo_consistency.py measures the tree, so it turns
+# red on its own until those texts say 14). The new install skill is the other change.
+_pn_hook = ROOT / ".claude" / "hooks" / "protected-names-warning.py"
+check("hooks.json registers nothing for protected-names-warning.py (form B: the Stop dispatcher runs it)",
+      not [e for e, _m, h in registrations_of(loaded[".claude/hooks/hooks.json"])
+           if "protected-names-warning" in json.dumps(h)],
+      "hooks.json names the hook")
+check("hooks.json still registers exactly thirteen entries after this work (form B adds no entry)",
+      len(registrations_of(loaded[".claude/hooks/hooks.json"])) == 13,
+      "it registers %d" % len(registrations_of(loaded[".claude/hooks/hooks.json"])))
+check("protected-names-warning.py exists as a hook file  [RED until block 2]", _pn_hook.is_file(),
+      "missing: %s" % _pn_hook)
+check("the Protected-name check's two files exist: .claude/hooks/_protected_names.py and "
+      ".claude/scripts/protected_names_check.py  [RED until block 2]",
+      (ROOT / ".claude" / "hooks" / "_protected_names.py").is_file()
+      and (ROOT / ".claude" / "scripts" / "protected_names_check.py").is_file())
+
+_dg_skill = ROOT / "skills" / "auto-improve-database-guard-install" / "SKILL.md"
+_dg_front = read_frontmatter(_dg_skill) if _dg_skill.is_file() else {}
+check("skill auto-improve-database-guard-install exists, its frontmatter name equals its folder and it is "
+      "user-invocable  [RED until the skill ships]",
+      _dg_skill.is_file() and _dg_front.get("name") == "auto-improve-database-guard-install"
+      and _dg_front.get("user_invocable") == "true", "frontmatter %r" % (_dg_front,))
+check("its frontmatter description is non-empty", bool(_dg_front.get("description")),
+      "description=%r" % _dg_front.get("description"))
+_dg_text = _dg_skill.read_text(encoding="utf-8") if _dg_skill.is_file() else ""
+check("the skill runs the protect-databases subcommand", "protect-databases" in _dg_text)
+check("the skill tells the operator the plan hash an apply needs: it mentions plan-sha256 and --confirm-narrowing",
+      "plan-sha256" in _dg_text and "--confirm-narrowing" in _dg_text)
+
+
+def _subcommand_flags(parser: "argparse.ArgumentParser", name: str):
+    """The --long options of one subcommand of the finish-install parser; None when it has no such subcommand."""
+    for action in parser._actions:  # noqa: SLF001
+        if isinstance(action, argparse._SubParsersAction) and name in action.choices:  # noqa: SLF001
+            return parser_flags(action.choices[name])
+    return None
+
+
+_pd_flags = _subcommand_flags(finish_install.build_parser(), "protect-databases")
+check("the finish-install parser has a protect-databases subcommand with --project, --name, --json, --apply, "
+      "--expect-sha256 and --confirm-narrowing  [RED until block 3]",
+      _pd_flags is not None
+      and {"--project", "--name", "--json", "--apply", "--expect-sha256", "--confirm-narrowing"} <= _pd_flags,
+      "found %s" % (sorted(_pd_flags) if _pd_flags is not None else None))
+check("every --flag the database-guard install skill names exists in the finish-install parser  [RED until the skill ships]",
+      bool(_dg_text) and flags_named_by(_dg_text) <= script_flags,
+      "named by the skill but not accepted: %s" % sorted(flags_named_by(_dg_text) - script_flags))
+check("control: a skill that names a flag the parser lacks is reported",
+      flags_named_by("py x protect-databases --no-such-flag") - script_flags == {"--no-such-flag"})
 
 print("\n%s\n %d passed, %d failed\n%s"
       % ("-" * 60, _passes, len(_failures), "-" * 60))
