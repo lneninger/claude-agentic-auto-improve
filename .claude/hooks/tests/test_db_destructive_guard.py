@@ -142,6 +142,10 @@ class Case:
     rules_unreadable: bool = False
     # CLAUDE_PROJECT_DIR is not set at all (the guard reads no rules file).
     no_project_dir: bool = False
+    # Send these exact bytes on standard input instead of the JSON text of ``payload`` (the Guard error path
+    # rows of #623: a payload that is not JSON, a byte order mark, a byte that is not UTF-8, a right double
+    # quote sent as UTF-8 under a console code page that cannot decode it).
+    stdin_bytes: bytes | None = None
 
 
 CASES: list[Case] = [
@@ -387,7 +391,11 @@ CASES: list[Case] = [
         expect_rc=0,
     ),
     Case(
-        name="3c.12 Write to .claude/concepts/ with protected-DB + write keyword -> ALLOW (allow-list)",
+        # NAMED EDIT (#623 Open Question 1, accepted by the operator 2026-10-13): this path is in a personal
+        # Claude folder OUTSIDE the project root. The Folder-name match is anchored at the project root, so a
+        # note there that quotes a protected-database write is refused like any other file outside the project.
+        # Was "-> ALLOW (allow-list)" because the substring entry `.claude/` happened to match.
+        name="3c.12 Write to .claude/concepts/ OUTSIDE the project root with protected-DB + write keyword -> BLOCK (#623 Open Question 1: not anchored at the project)  [RED today]",
         payload={
             "tool_name": "Write",
             "tool_input": {
@@ -395,11 +403,12 @@ CASES: list[Case] = [
                 "content": (
                     'Documentation example: a connection string like '
                     f'`Database={_DB_PROT}` paired with `INSERT INTO Users` '
-                    'should be allowed in concept contracts.'
+                    'should be refused outside the project.'
                 ),
             },
         },
-        expect_rc=0,
+        expect_rc=2,
+        expect_stderr_contains="PROTECTED",
     ),
 
     # ---------------------------------------------------------------
@@ -938,6 +947,8 @@ _RESTORE_CMD = "tools/db-protection/restore-latest.cmd"
 _RECOVER_FLAG = "--recover-missing-dev-db"
 _BANNER_INTERNAL = "[db-destructive-guard] BLOCKED: internal error while reading the target of"
 _BANNER_INTERNAL_TAIL = "failing closed."
+# #623 Guard error path: the banner of the new fail-closed top-level handler and stdin branch.
+_BANNER_UNCHECKED = "the database guard failed with an internal error, so this command was not checked and is refused"
 
 
 def _sid() -> str:
@@ -1821,15 +1832,17 @@ CASES += [
                       _bash(f"{_RESTORE_CMD} {_RECOVER_FLAG}")),
     _blk_parser_fault("r4.8.10 parser fault, a human-only script name merely mentioned (the text holds it)",
                       _bash(f"cat {_UPD_CMD}")),
-    Case(name="r4.8.11 parser fault on text that holds none of the three triggers fails open  [passes today] -> ALLOW",
-         payload=_bash("dotnet build src/X.sln"), expect_rc=0, isolate=True,
-         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}),
-    Case(name="r4.8.12 parser fault on a plain git command fails open  [passes today] -> ALLOW",
-         payload=_bash("git status --short"), expect_rc=0, isolate=True,
-         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}),
-    Case(name="r4.8.13 parser fault on the harness run fails open  [passes today] -> ALLOW",
-         payload=_bash("py -3 tools/db-protection/tests/test_db_protection_scripts.py"), expect_rc=0, isolate=True,
-         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}),
+    # NAMED EDITS (#623 Guard error path): these three were ALLOW (the guard failed open on an error with nothing
+    # matched). An error with nothing matched now refuses the command, so each is BLOCK with the new banner.
+    Case(name="r4.8.11 parser fault on text that holds none of the three triggers is refused: an unchecked command is refused (#623 Guard error path)  [RED today] -> BLOCK",
+         payload=_bash("dotnet build src/X.sln"), expect_rc=2, isolate=True,
+         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}, expect_stderr_contains=_BANNER_UNCHECKED),
+    Case(name="r4.8.12 parser fault on a plain git command is refused: an unchecked command is refused (#623 Guard error path)  [RED today] -> BLOCK",
+         payload=_bash("git status --short"), expect_rc=2, isolate=True,
+         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}, expect_stderr_contains=_BANNER_UNCHECKED),
+    Case(name="r4.8.13 parser fault on the harness run is refused: an unchecked command is refused (#623 Guard error path)  [RED today] -> BLOCK",
+         payload=_bash("py -3 tools/db-protection/tests/test_db_protection_scripts.py"), expect_rc=2, isolate=True,
+         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}, expect_stderr_contains=_BANNER_UNCHECKED),
 
     # -----------------------------------------------------------------------------------------
     # Item 7a / 16 -- prose that only MENTIONS a guarded command must not block (descriptions, commit
@@ -2076,9 +2089,101 @@ CASES += [
            _write("d:/Dev/Foo/tools/other/fix.cmd",
                   f'sqlcmd -S "(localdb)\\m" -E -d {_DB_PROT} -Q "UPDATE Users SET Name = \'x\' WHERE Id = 1"'),
            env={"DB_GUARD_FAULT_INJECTION": "parser"}),
-    Case(name="r5.W1.3 control: with the switch set and no match at all the hook stays fail-open  [by-design green] -> ALLOW",
-         payload=_bash("git status --short"), expect_rc=0, isolate=True,
-         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}),
+    # NAMED EDIT (#623 Guard error path): was ALLOW, "the hook stays fail-open". An unchecked command is refused.
+    Case(name="r5.W1.3 with the switch set and no match at all the hook refuses the command: an unchecked command is refused (#623 Guard error path)  [RED today] -> BLOCK",
+         payload=_bash("git status --short"), expect_rc=2, isolate=True,
+         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}, expect_stderr_contains=_BANNER_UNCHECKED),
+]
+
+
+# ===========================================================================
+# #623 Guard error path (contract 2026-10-13-database-guard-names-in-rules-file, Data Shapes "Guard error path").
+#
+# Before: an unexpected error with nothing matched exited 0 (the guard failed open); input that is not JSON exited
+# 0; a payload the console code page could not decode exited 0 and was never checked.
+# After:  an unexpected error with nothing matched is REFUSED (exit 2, the banner below); text that is not JSON is
+# REFUSED; an empty payload still exits 0 (it carries no command); and a payload is NEVER refused for its
+# encoding: the guard reads the bytes, drops one leading UTF-8 byte order mark, decodes as UTF-8 and, on a decoding
+# failure, decodes again with replacement characters and CHECKS the result.
+# Every decoding row runs with PYTHONUTF8=0 and PYTHONIOENCODING=cp1252 in the child's environment, which is how
+# the registered `py -3` rows run on a Windows console.
+# ===========================================================================
+_CP1252_ENV = {"PYTHONUTF8": "0", "PYTHONIOENCODING": "cp1252"}
+_RQUOTE = "\u201d"  # RIGHT DOUBLE QUOTATION MARK: UTF-8 bytes E2 80 9D; byte 0x9D is undefined in cp1252
+_PROTECTED_WRITE_PATH = "d:/Dev/Foo/tests/SomeTest.cs"
+
+
+def _protected_write_json(note: str) -> dict:
+    """A Layer 3c payload (a protected database in a connection string beside a write keyword, written outside the
+    allow-list) with ``note`` placed in a comment line of the same content."""
+    return {
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": _PROTECTED_WRITE_PATH,
+            "content": (
+                f"// {note}\n"
+                f'const string cs = "Server=(localdb)\\m;Database={_DB_PROT};Trusted_Connection=True;";\n'
+                f'await conn.ExecuteAsync("{_INSERT} Users (Id, Name) VALUES (1, \'x\')");'
+            ),
+        },
+    }
+
+
+def _utf8_json(payload: dict) -> bytes:
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _with_ff_byte(payload: dict) -> bytes:
+    """The payload's JSON bytes with the marker ``@@FF@@`` replaced by the single byte 0xFF (not valid UTF-8)."""
+    return json.dumps(payload).encode("ascii").replace(b"@@FF@@", b"\xff")
+
+
+CASES += [
+    # ---- the Guard error path: an unexpected error with nothing matched, and text that is not JSON ----
+    Case(name="g623.1 injected parser fault on a plain git command is refused with the internal-error banner  [RED today] -> BLOCK",
+         payload=_bash("git log --oneline -5"), expect_rc=2, isolate=True,
+         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}, expect_stderr_contains=_BANNER_UNCHECKED),
+    Case(name="g623.2 the refusal names the log a person reads and says a person fixes the guard  [RED today] -> BLOCK",
+         payload=_bash("git status"), expect_rc=2, isolate=True,
+         env_extra={"DB_GUARD_FAULT_INJECTION": "parser"}, expect_stderr_contains="db-guard.log"),
+    Case(name="g623.3 text that is not JSON is refused with the internal-error banner  [RED today] -> BLOCK",
+         payload={}, stdin_bytes=b"this is not json at all", expect_rc=2, isolate=True,
+         expect_stderr_contains=_BANNER_UNCHECKED),
+    Case(name="g623.4 a truncated JSON object is refused with the internal-error banner  [RED today] -> BLOCK",
+         payload={}, stdin_bytes=b'{"tool_name": "Bash", "tool_input": {"command": "git status"', expect_rc=2,
+         isolate=True, expect_stderr_contains=_BANNER_UNCHECKED),
+    Case(name="g623.5 an empty payload still exits 0: it carries no command  [passes today by design] -> ALLOW",
+         payload={}, stdin_bytes=b"", expect_rc=0, isolate=True),
+    Case(name="g623.6 a payload of only white space still exits 0  [passes today by design] -> ALLOW",
+         payload={}, stdin_bytes=b"  \r\n  ", expect_rc=0, isolate=True),
+    Case(name="g623.7 an unrelated tool's well-formed payload still exits 0  [passes today by design] -> ALLOW",
+         payload={}, stdin_bytes=json.dumps({"tool_name": "Read", "tool_input": {"file_path": "x.txt"}}).encode("ascii"),
+         expect_rc=0, isolate=True),
+    Case(name="g623.8 control: a plain git command with no fault switch exits 0  [passes today by design] -> ALLOW",
+         payload=_bash("git status --short"), expect_rc=0, isolate=True),
+
+    # ---- Decoding (Revision 3): never refused for its encoding, always checked ----
+    Case(name="g623.9 a plain git command holding a right double quote sent as UTF-8 under cp1252 exits 0  [passes today: the decode error fails open] -> ALLOW",
+         payload={}, stdin_bytes=_utf8_json(_bash(f"git commit -m {_RQUOTE}fix{_RQUOTE}")), expect_rc=0, isolate=True,
+         env_extra=_CP1252_ENV),
+    Case(name="g623.10 the same quote beside a protected write exits 2 with the Layer 3c banner  [RED today: the decode error lets it through] -> BLOCK",
+         payload={}, stdin_bytes=_utf8_json(_protected_write_json(f"{_RQUOTE}note{_RQUOTE}")), expect_rc=2, isolate=True,
+         env_extra=_CP1252_ENV, expect_stderr_contains="PROTECTED"),
+    Case(name="g623.11 a JSON payload holding a 0xFF byte inside a string is decoded with replacement: a plain command exits 0  [passes today by design] -> ALLOW",
+         payload={}, stdin_bytes=_with_ff_byte(_bash("echo @@FF@@")), expect_rc=0, isolate=True,
+         env_extra=_CP1252_ENV),
+    Case(name="g623.12 a 0xFF byte beside a protected write is decoded with replacement and CHECKED: it exits 2  [passes today by design: cp1252 happens to read 0xFF as a letter, so it is checked already] -> BLOCK",
+         payload={}, stdin_bytes=_with_ff_byte(_protected_write_json("@@FF@@")), expect_rc=2, isolate=True,
+         env_extra=_CP1252_ENV, expect_stderr_contains="PROTECTED"),
+    Case(name="g623.13 a UTF-8 byte order mark before the JSON is accepted: a plain command exits 0  [passes today: the unparseable input fails open] -> ALLOW",
+         payload={}, stdin_bytes=b"\xef\xbb\xbf" + _utf8_json(_bash("git status")), expect_rc=0, isolate=True,
+         env_extra=_CP1252_ENV),
+    Case(name="g623.14 a byte order mark before a protected write is accepted AND checked: it exits 2  [RED today: the mark makes the JSON unparseable and fails open] -> BLOCK",
+         payload={}, stdin_bytes=b"\xef\xbb\xbf" + _utf8_json(_protected_write_json("note")), expect_rc=2, isolate=True,
+         env_extra=_CP1252_ENV, expect_stderr_contains="PROTECTED"),
+    Case(name="g623.15 control: the same protected write as plain ASCII JSON exits 2 under cp1252  [passes today by design] -> BLOCK",
+         payload=_protected_write_json("note"), expect_rc=2, isolate=True, env_extra=_CP1252_ENV,
+         expect_stderr_contains="PROTECTED"),
 ]
 
 
@@ -2195,14 +2300,26 @@ def run_case(case: Case, base_env: dict | None = None) -> tuple[bool, str]:
                 json.dumps(rules), encoding="utf-8")
 
         try:
-            proc = subprocess.run(
-                ["py", "-3", hook],
-                input=payload_json,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=10,
-            )
+            if case.stdin_bytes is not None:
+                raw_proc = subprocess.run(
+                    ["py", "-3", hook],
+                    input=case.stdin_bytes,
+                    capture_output=True,
+                    env=env,
+                    timeout=10,
+                )
+                proc = subprocess.CompletedProcess(raw_proc.args, raw_proc.returncode,
+                                                   raw_proc.stdout.decode("utf-8", errors="replace"),
+                                                   raw_proc.stderr.decode("utf-8", errors="replace"))
+            else:
+                proc = subprocess.run(
+                    ["py", "-3", hook],
+                    input=payload_json,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=10,
+                )
         except subprocess.TimeoutExpired:
             return False, "hook timed out"
         except FileNotFoundError as exc:

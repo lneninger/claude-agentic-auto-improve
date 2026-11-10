@@ -1107,6 +1107,9 @@ HALT_OUTCOMES = (
     "link-not-verified", "master-moved", "head-moved", "not-mergeable", "merge-refused",
     "merge-unconfirmed",
     "version-raise-failed",  # issue 113: P7b, the Landing version raise (26 halts)
+    # NAMED EDIT (#623 t1): the Protected-name gate inside P7. 27 halts and 30 outcomes. The TASK block says
+    # "(26 halts)", counted before issue 113 added version-raise-failed; the tree already holds 26.
+    "protected-names-removed",
 )
 
 
@@ -1129,6 +1132,8 @@ GATE_FACTS = (
     ("p7_unresolvable_conflict", "unresolvable-conflict"),
     ("p7_environment_failure", "environment-failure"),
     ("p7_regeneration_failed", "regeneration-failed"),
+    # NAMED EDIT (#623 t1): the Protected-name gate sits right after the regeneration gate, before P7b.
+    ("p7_protected_names_removed", "protected-names-removed"),
     ("p7b_version_raise_failed", "version-raise-failed"),
     ("p9_push_rejected", "push-rejected"),
     ("p10_pr_mismatch", "pr-mismatch"),
@@ -1155,7 +1160,7 @@ class TestLandingOutcomeSet(LandCase):
         outcomes = self.mod().__dict__.get("LANDING_OUTCOMES")
         self.assertIsNotNone(outcomes, "land_contract.LANDING_OUTCOMES (the closed set) must exist")
         self.assertEqual(set(outcomes), set(SUCCESS_OUTCOMES) | set(HALT_OUTCOMES),
-                         "the closed set holds exactly 3 successes and 26 halts")
+                         "the closed set holds exactly 3 successes and 27 halts (#623: protected-names-removed)")
 
 
 class TestEvaluateGates(LandCase):
@@ -4201,6 +4206,344 @@ class TestStageFailureAttributionReachesTheReport(StageCase):
         self.assertTrue(nc["repeat_after_rerecord"])
         self.assertEqual(nc["commands"], ["/design-first %s" % SLUG])
         self.assertNotIn(Q1_ADVICE, nc["reason"])
+
+
+# ===========================================================================
+# #623 t1 -- the Protected-name gate inside P7 (contract 2026-10-13-database-guard-names-in-rules-file:
+# Commands "Land a contract", Extension Points, Revisions 3 and 4). RED: the gate does not exist yet.
+#
+# The gate compares the rules file at the MERGED HEAD with the rules file at mark_m (origin/<default> as
+# fetched at P1), both read with git, never from the disk. The checker it runs is mark_m's own copy
+# (protected_names_check.py + _protected_names.py, written from ``git show <mark_m>:<path>`` into one new,
+# empty temporary folder and run there as a child process under ``py -3 -I -B``, 30-second limit), because a
+# parent branch must not be able to edit the code that judges it. Only when mark_m lacks the two files does it
+# use the INSTALLED plugin's copy (CLAUDE_PLUGIN_ROOT, then the newest plugin cache folder of the Claude home);
+# with neither, the verdict is unverifiable. The landing worktree's own tree is never a candidate.
+#
+# The verdict is read only from one JSON object on standard output whose verdict is in the closed set and whose
+# exit code is that verdict's code (0 kept / first-install, 10 names-removed, 11 either malformed, 12
+# unverifiable). Anything else (a crash, a traceback, exit 1 or 2, a disagreement, a timeout) is unverifiable,
+# never names-removed, and the halt detail keeps the exit code.
+#
+# Fixtures: the real checker files of this repository are committed to the fixture's default branch (they do
+# not exist yet, so each such row fails with an assertion naming the missing file), with a marker line appended
+# to the helper where a row needs proof of WHICH copy ran. Stub checkers stand in where a row needs a child
+# that misbehaves in a chosen way.
+# ===========================================================================
+PN_RULES = ".claude/hooks/db-destructive-guard.rules.json"
+PN_CHECK = ".claude/scripts/protected_names_check.py"
+PN_HELPER = ".claude/hooks/_protected_names.py"
+PN_NAMES = ["ScalpingMachine", "ScalpingMachine_Testing"]
+PN_KEPT = {"verdict": "kept", "missing": [], "working_ref": "w", "default_ref": "d", "fetched": False, "reason": ""}
+
+
+def pn_rules(names):
+    return json.dumps({"protected_databases": names}, indent=2) + "\n"
+
+
+def pn_marker(marker_file, text):
+    """A statement appended to a Python file that records ``text`` in ``marker_file`` when the file is run."""
+    return "\nopen(%r, 'a').write(%r)\n" % (str(marker_file), text + "\n")
+
+
+def pn_stub(verdict_json, exit_code, record=None, extra=""):
+    lines = ["import json, sys"]
+    if record is not None:
+        lines.append("json.dump(sys.argv, open(%r, 'w'))" % str(record))
+    if extra:
+        lines.append(extra)
+    lines.append("sys.stdout.write(json.dumps(%r) + '\\n')" % (verdict_json,))
+    lines.append("sys.exit(%d)" % exit_code)
+    return "\n".join(lines) + "\n"
+
+
+class TestProtectedNamesLandingSets(LandCase):
+
+    def test_protected_names_removed_is_a_landing_outcome_and_a_halt(self):
+        lc = self.mod()
+        self.assertIn("protected-names-removed", lc.LANDING_OUTCOMES, "the closed set holds it")
+        self.assertIn("protected-names-removed", lc.HALT_OUTCOMES, "and it is a halt")
+        self.assertEqual(len(lc.HALT_OUTCOMES), 27, "27 halts: the 26 already in the tree plus this one")
+        self.assertEqual(lc.exit_code_for("protected-names-removed"), lc.EXIT_HALT, "a halt exits 9")
+
+    def test_it_has_a_remedy_that_says_only_a_person_removes_a_protected_name(self):
+        remedy = str(getattr(self.mod(), "REMEDIES", {}).get("protected-names-removed") or "")
+        self.assertIn("a protected database name may only be removed by a person", remedy)
+        self.assertIn("restore the names on the parent branch as a remedy sub-task", remedy)
+        self.assertIn("let a person merge the removal by hand", remedy)
+
+    def test_the_gate_sits_right_after_the_regeneration_gate(self):
+        order = [key for key, _outcome in self.mod().GATE_ORDER]
+        self.assertIn("p7_protected_names_removed", order, "GATE_ORDER names the new fact")
+        self.assertEqual(order.index("p7_protected_names_removed"), order.index("p7_regeneration_failed") + 1,
+                         "right after p7_regeneration_failed")
+        self.assertLess(order.index("p7_protected_names_removed"), order.index("p7b_version_raise_failed"),
+                        "and before the version raise")
+
+    def test_the_gate_outcome_maps_from_its_fact(self):
+        self.assertIn(("p7_protected_names_removed", "protected-names-removed"), tuple(self.mod().GATE_ORDER))
+
+    def test_a_removed_name_wins_over_the_version_raise_failure_but_not_over_a_regeneration_failure(self):
+        facts = good_facts()
+        facts.update(p7_protected_names_removed=True, p7b_version_raise_failed=True)
+        self.assertEqual(self.fn("evaluate_gates")(facts), "protected-names-removed", "P7 before P7b")
+        facts = good_facts()
+        facts.update(p7_regeneration_failed=True, p7_protected_names_removed=True)
+        self.assertEqual(self.fn("evaluate_gates")(facts), "regeneration-failed", "regeneration first")
+
+    def test_the_next_command_is_design_first_with_the_slug(self):
+        nc = self.fn("next_command_for_outcome")("protected-names-removed", "demo-slug")
+        self.assertEqual(nc["commands"], ["/design-first demo-slug"],
+                         "a remedy sub-task on the parent branch, beside blocked-verdict")
+        self.assertTrue(nc["reason"], "with its reason")
+
+
+class PnLandingCase(StageCase):
+    """The stage world with the checker files committed to the default branch."""
+
+    def setUp(self):
+        super().setUp()
+        self.mdir = Path(self._tmp.name) / "markers"
+        self.mdir.mkdir()
+        self.empty_home = Path(self._tmp.name) / "empty-claude-home"
+        self.empty_home.mkdir()
+        env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.empty_home),
+                                           "CLAUDE_PLUGIN_ROOT": str(self.empty_home / "no-plugin-here")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def marker(self, name):
+        return self.mdir / name
+
+    def marked(self, name):
+        path = self.marker(name)
+        return path.read_text(encoding="utf-8").split() if path.exists() else []
+
+    def real_checker(self, marker=None, text="ran"):
+        claude = SCRIPTS_DIR.parent
+        sources = {PN_CHECK: SCRIPTS_DIR / "protected_names_check.py", PN_HELPER: claude / "hooks" / "_protected_names.py"}
+        files = {}
+        for rel, path in sources.items():
+            self.assertTrue(path.is_file(), "the plugin's %s must exist: the landing gate runs mark_m's copy of it" % rel)
+            files[rel] = path.read_text(encoding="utf-8")
+        if marker is not None:
+            files[PN_HELPER] += pn_marker(marker, text)
+        return files
+
+    def stub_checker(self, verdict_json=None, exit_code=0, record=None, extra="", script=None, helper="# helper\n"):
+        text = script if script is not None else pn_stub(verdict_json if verdict_json is not None else PN_KEPT,
+                                                         exit_code, record, extra)
+        return {PN_CHECK: text, PN_HELPER: helper}
+
+    def world(self, base, parent, subdir="", **kw):
+        files = {"src/feature.py": "x = 1\n"}
+        files.update(parent)
+        return self.stage(subdir=subdir, base_files=base, parent_files=files, **kw)
+
+    def assertHaltedAtP7(self, report, outcome, why):
+        self.assertOutcome(report, outcome, why)
+        self.assertEqual(report.get("gate"), "P7", "%s: the halt is at P7" % why)
+
+    def assertNothingPublished(self, st):
+        for edge in ("git_push", "gh_pr_create", "gh_pr_merge"):
+            self.assertEqual(st.count(edge), 0, "halted at P7, so %s never ran" % edge)
+
+
+class TestStageProtectedNames(PnLandingCase):
+
+    # -- the verdicts ---------------------------------------------------------------------------------------
+    def test_a_parent_branch_that_drops_a_name_halts_at_p7_and_merges_nothing(self):
+        base = dict(self.real_checker(), **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES[:1])})
+        report = st.run()
+        self.assertHaltedAtP7(report, "protected-names-removed", "the parent branch drops a protected name")
+        self.assertIn(PN_NAMES[1], str(report.get("detail")), "the detail names the missing string")
+        self.assertNothingPublished(st)
+        self.assertEqual(report["next_command"]["commands"], ["/design-first %s" % SLUG])
+        self.assertEqual(report["remedy"], self.mod().REMEDIES["protected-names-removed"], "the remedy travels")
+
+    def test_a_respelled_name_is_removed_too(self):
+        base = dict(self.real_checker(), **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules([PN_NAMES[0].lower(), PN_NAMES[1]])})
+        self.assertHaltedAtP7(st.run(), "protected-names-removed", "a letter-case change is a removal")
+
+    def test_a_malformed_rules_file_on_the_parent_branch_halts_the_same_way(self):
+        base = dict(self.real_checker(), **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: "{ not json"})
+        self.assertHaltedAtP7(st.run(), "protected-names-removed", "working-malformed is one of the three verdicts that halt")
+
+    def test_a_parent_branch_that_keeps_every_name_lands_and_the_default_branchs_copy_ran(self):
+        """POSITIVE CONTROL (Revision 4, row i): a child that always crashes must fail this row."""
+        marker = self.marker("mark_m")
+        base = dict(self.real_checker(marker, "mark_m"), **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES + ["Added_Later"])})
+        report = st.run()
+        self.assertOutcome(report, "landed", "every name kept: the landing passes P7 with no halt")
+        self.assertEqual(self.marked("mark_m"), ["mark_m"], "a marker proves mark_m's copy ran, once")
+
+    def test_first_install_passes(self):
+        base = self.real_checker()
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES)})
+        self.assertOutcome(st.run(), "landed", "no rules file at the default branch tip: first-install passes")
+
+    # -- the checker is the default branch's, never the branch's ---------------------------------------------
+    def test_a_branch_that_edits_its_own_checker_to_always_answer_kept_still_halts(self):
+        base = dict(self.real_checker(), **{PN_RULES: pn_rules(PN_NAMES)})
+        branch_marker = self.marker("branch")
+        branch_copy = {PN_CHECK: pn_stub(PN_KEPT, 0, extra="open(%r, 'a').write('branch\\n')" % str(branch_marker)),
+                       PN_HELPER: "# the branch's own helper\n" + pn_marker(branch_marker, "branch")}
+        parent = {PN_RULES: pn_rules(PN_NAMES[:1])}
+        parent.update(branch_copy)
+        st = self.world(base, parent)
+        self.assertHaltedAtP7(st.run(), "protected-names-removed",
+                              "the gate runs the default branch's copy, so editing the checker on the branch changes nothing")
+        self.assertEqual(self.marked("branch"), [], "the branch's copy never ran")
+
+    def test_with_no_copy_on_the_default_branch_the_installed_plugins_copy_runs(self):
+        plugin = Path(self._tmp.name) / "installed-plugin"
+        (plugin / ".claude-plugin").mkdir(parents=True)
+        (plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "agentic-auto-improve"}), encoding="utf-8")
+        write_files(plugin, self.real_checker(self.marker("installed"), "installed"))
+        base = {PN_RULES: pn_rules(PN_NAMES)}
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": str(plugin)}):
+            kept = self.world(base, {PN_RULES: pn_rules(PN_NAMES)}, subdir="kept").run()
+            self.assertOutcome(kept, "landed", "the installed copy judges the first landing")
+            self.assertEqual(self.marked("installed"), ["installed"], "and it is the one that ran")
+            removed = self.world(base, {PN_RULES: pn_rules(PN_NAMES[:1])}, subdir="removed")
+            self.assertHaltedAtP7(removed.run(), "protected-names-removed", "the installed copy also halts a removal")
+
+    def test_with_no_copy_anywhere_the_verdict_is_unverifiable(self):
+        base = {PN_RULES: pn_rules(PN_NAMES)}
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES[:1])})
+        report = st.run()
+        self.assertHaltedAtP7(report, "unverifiable", "no checker on the default branch and none installed")
+        self.assertNothingPublished(st)
+
+    # -- Revision 4 (ii): a child that cannot give a verdict is unverifiable, never names-removed -------------
+    def assertUnverifiable(self, base_checker, why, exit_code_in_detail=None):
+        base = dict(base_checker, **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES[:1])})
+        report = st.run()
+        self.assertHaltedAtP7(report, "unverifiable", why)
+        self.assertNotEqual(report["outcome"], "protected-names-removed", "%s: never read as a removal" % why)
+        self.assertNothingPublished(st)
+        if exit_code_in_detail is not None:
+            self.assertRegex(str(report.get("detail")), r"(?i)exit[^0-9]{0,20}%d(?!\d)" % exit_code_in_detail,
+                             "%s: the halt detail keeps the exit code" % why)
+        return report
+
+    def test_a_default_branch_that_holds_the_script_but_not_its_helper_is_unverifiable(self):
+        files = self.real_checker()
+        self.assertUnverifiable({PN_CHECK: files[PN_CHECK]}, "the helper is missing", exit_code_in_detail=1)
+
+    def test_a_helper_with_a_syntax_error_is_unverifiable(self):
+        files = self.real_checker()
+        self.assertUnverifiable({PN_CHECK: files[PN_CHECK], PN_HELPER: "def broken(:\n"}, "a syntax error", exit_code_in_detail=1)
+
+    def test_a_script_that_raises_is_unverifiable(self):
+        self.assertUnverifiable(self.stub_checker(script="raise RuntimeError('boom')\n"), "an uncaught exception",
+                                exit_code_in_detail=1)
+
+    def test_a_child_that_prints_names_removed_but_exits_one_is_unverifiable(self):
+        verdict = dict(PN_KEPT, verdict="names-removed", missing=[PN_NAMES[1]])
+        self.assertUnverifiable(self.stub_checker(verdict, exit_code=1), "valid JSON but the code of a crash",
+                                exit_code_in_detail=1)
+
+    def test_a_child_whose_exit_code_disagrees_with_its_verdict_is_unverifiable(self):
+        self.assertUnverifiable(self.stub_checker(dict(PN_KEPT), exit_code=10), "kept in the JSON, 10 in the code",
+                                exit_code_in_detail=10)
+
+    def test_a_child_that_prints_a_verdict_outside_the_closed_set_is_unverifiable(self):
+        self.assertUnverifiable(self.stub_checker(dict(PN_KEPT, verdict="template-checkout"), exit_code=0),
+                                "a verdict the contract does not know")
+
+    def test_a_child_that_prints_nothing_is_unverifiable(self):
+        self.assertUnverifiable(self.stub_checker(script="import sys\nsys.exit(0)\n"), "no JSON object at all")
+
+    def test_a_child_that_prints_two_objects_is_unverifiable(self):
+        text = "import json, sys\nprint(json.dumps(%r))\nprint(json.dumps(%r))\nsys.exit(0)\n" % (PN_KEPT, PN_KEPT)
+        self.assertUnverifiable(self.stub_checker(script=text), "exactly one JSON object is required")
+
+    def test_an_unreadable_default_branch_listing_is_unverifiable(self):
+        verdict = dict(PN_KEPT, verdict="unverifiable", reason="the listing of the default branch failed")
+        self.assertUnverifiable(self.stub_checker(verdict, exit_code=12), "the checker says it cannot read the listing")
+
+    def test_a_child_past_the_time_limit_is_unverifiable(self):
+        """Slow by design: the limit is 30 seconds, so this row takes about that long."""
+        report = self.assertUnverifiable(self.stub_checker(script="import time\ntime.sleep(120)\n"), "past the limit")
+        self.assertTrue(str(report.get("detail")).strip(), "the detail says what happened")
+
+    # -- Revision 4 (iii): the temporary folder is importable in the child, nothing else is -------------------
+    def test_a_planted_helper_on_pythonpath_never_runs_and_the_default_branchs_helper_does(self):
+        planted = Path(self._tmp.name) / "planted"
+        planted.mkdir()
+        (planted / "_protected_names.py").write_text(
+            "import json, sys\nopen(%r, 'a').write('planted\\n')\n" % str(self.marker("planted")), encoding="utf-8")
+        base = dict(self.real_checker(self.marker("mark_m"), "mark_m"), **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES)})
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(planted)}):
+            report = st.run()
+        self.assertOutcome(report, "landed", "the landing passes with the default branch's helper")
+        self.assertEqual(self.marked("mark_m"), ["mark_m"], "mark_m's marker appears")
+        self.assertEqual(self.marked("planted"), [], "the planted helper never ran: the child is isolated (-I -B)")
+
+    # -- Revision 4 (iv): offline, in a worktree of the fixture, reading only local refs -----------------------
+    def offline(self, st):
+        git(st.kit.main, "remote", "set-url", "origin", str(Path(self._tmp.name) / "gone-for-good.git"))
+        self.assertNotEqual(git(st.kit.main, "remote", "get-url", "origin"), str(st.kit.origin),
+                            "control: origin now points at a path that does not exist")
+
+    def git_calls(self, trace):
+        calls = []
+        if trace.exists():
+            for line in trace.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("event") == "start" and rec.get("argv"):
+                    calls.append([str(a) for a in rec["argv"]])
+        return calls
+
+    def run_offline(self, st):
+        trace = Path(self._tmp.name) / "git-trace.json"
+        self.offline(st)
+        with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(trace)}):
+            report = st.run()
+        return report, self.git_calls(trace)
+
+    def test_offline_the_gate_reads_locally_runs_no_fetch_and_passes_kept_names(self):
+        base = dict(self.real_checker(), **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES)})
+        report, calls = self.run_offline(st)
+        self.assertOutcome(report, "landed", "kept names pass with origin unreachable")
+        self.assertTrue(calls, "control: git processes were recorded during the landing")
+        self.assertEqual([c for c in calls if "fetch" in c[1:]], [], "no git fetch runs: the gate reads the merged head and mark_m locally")
+
+    def test_offline_the_gate_halts_a_removed_name(self):
+        base = dict(self.real_checker(), **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES[:1])})
+        report, calls = self.run_offline(st)
+        self.assertHaltedAtP7(report, "protected-names-removed", "a removal halts with origin unreachable")
+        self.assertEqual([c for c in calls if "fetch" in c[1:]], [], "and still no fetch")
+
+    def test_the_gate_passes_the_merged_head_and_mark_m_as_commits_and_never_fetches(self):
+        record = self.marker("argv.json")
+        base = dict(self.stub_checker(PN_KEPT, 0, record=record), **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES)})
+        report = st.run()
+        self.assertOutcome(report, "landed", "the stub says kept")
+        self.assertTrue(record.exists(), "the stub recorded its argument list")
+        argv = json.loads(record.read_text(encoding="utf-8"))
+        mark_m = git(st.kit.main, "rev-parse", "refs/remotes/origin/master")
+        merged_head = st.head()
+        self.assertIn("--working-ref", argv, "the working side is a commit, not the disk")
+        self.assertEqual(argv[argv.index("--working-ref") + 1], merged_head, "the merged head")
+        self.assertIn("--default-ref", argv, "the default side is a commit")
+        self.assertEqual(argv[argv.index("--default-ref") + 1], mark_m, "mark_m")
+        self.assertNotIn("--fetch", argv, "the landing gate never fetches")
+        self.assertIn("--project", argv, "the project is named")
+        self.assertEqual(norm(argv[argv.index("--project") + 1]), norm(st.worktree), "the landing worktree")
 
 
 if __name__ == "__main__":
