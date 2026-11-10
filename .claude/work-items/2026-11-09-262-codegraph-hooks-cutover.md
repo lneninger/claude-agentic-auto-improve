@@ -13,9 +13,9 @@ branch: feature/262-codegraph-hooks-cutover
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261109-infra-262-codegraph-hooks-cutover
 north_stars: none
 contract: .claude/concepts/2026-11-09-codegraph-hooks-cutover.md
-pr: UNKNOWN
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/340
+issue_link: closes
+status: shipped
 created: 2026-11-09
 ---
 
