@@ -15,9 +15,9 @@ north_stars: inherited from .claude/work-items/2026-11-09-262-codegraph-hooks-cu
 parent_issue: 262
 base: feature/262-codegraph-hooks-cutover
 contract: .claude/concepts/2026-11-09-codegraph-hooks-cutover.md
-pr: UNKNOWN
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/334
+issue_link: deferred
+status: shipped
 created: 2026-11-09
 ---
 
