@@ -599,6 +599,52 @@ contract's landing. The plugin now owns the checks. What it adds:
   Registration rule and Failure attribution. `MECHANISMS.md` gains Hook registration check and a
   correction line under Preview-hash apply. Existing entries are not edited.
 
+**Domain-split registries (issue #235).** A client split its registries into per-domain files, the
+plugin's tools never learned the split, writers kept appending to the flat files, and nothing
+noticed that the copies had diverged. The registries now have a numbered **registry layout**.
+Layout 1 is the flat form. Layout 2 is the split form: `MECHANISMS.md`, `VOCABULARY.md` and
+`JOURNAL.md` hold only the Universal tier and a fixed `## Project tier` pointer, they are marked
+`<!-- registry-layout: 2 -->` on line 1, and project content lives in domain files such as
+`.claude/registries/MECHANISMS/general.md`. `general.md` always exists, and every `.md` file in a
+registry's folder is read. What it adds:
+
+- **One reader.** `.claude/scripts/_registry_layout.py` owns the marker, the entry grammars, the
+  entry keys and the layout state (`current`, `pending`, `stale-sync`, `unknown`, `absent`). The
+  digest generator, the tracker hook and the other registry readers go through it and through
+  `registry_files()` in `_project_paths.py`, so a domain file is never missed.
+- **One write path.** `.claude/scripts/registry_append.py` appends an entry, a `Correction` line
+  or an `archived-title-only` mark. On layout 2 a project entry goes to a domain file and never
+  into a root. On layout 1 the writer keeps working: a project entry goes to a domain file
+  (`general.md` is created when missing), never into a root, and the writer prints an advisory
+  telling you to run the migration.
+- **A structure lint.** `validate_registries.py --check-structure [--strict]` applies rules R1 to
+  R6 and the advisory A1. Exit 1 is a finding; exit 0 with advisory lines is not. The digest
+  generator exits 1 on R1 and R2.
+- **A migration.** `.claude/scripts/registry_migrate.py` runs migration 0001 from layout 1 (or a
+  stale sync) to layout 2. It previews first, applies only against the previewed hash, and loses
+  and invents nothing. `--check` prints the layout state and is the gate a sync tool calls: exit
+  0 for `current` or `absent`, 6 for `pending` or `stale-sync`, 2 for `unknown`.
+- **Moved helpers.** `_plan_digest` and `_atomic_write` moved from
+  `auto_improve_finish_install.py` into `.claude/scripts/_preview_apply.py`, which also gains
+  `stage_and_replace`. The guarded plugin-root lookup moved into `.claude/scripts/_plugin_root.py`.
+  `auto_improve_finish_install.py` now imports `_preview_apply.py` and `_plugin_root.py`.
+
+**If you copy the scripts into your project, copy these new files with the updated scripts.** A
+copy of `auto_improve_finish_install.py` or `registry_migrate.py` without them fails on import.
+
+- `.claude/scripts/_registry_layout.py`
+- `.claude/scripts/_preview_apply.py`
+- `.claude/scripts/_plugin_root.py`
+- `.claude/scripts/registry_append.py`
+- `.claude/scripts/registry_migrate.py`
+- `.claude/scripts/registry_migrations/` (the whole folder)
+- `.claude/references/registry-layout.md`
+- `.claude/templates/registries/` (the three `general.md` skeletons, one per registry folder)
+
+To move a project onto layout 2, follow "Moving a project onto registry layout 2" below. This
+repository's own registries are on layout 2, and the registry entries for the new terms and
+mechanisms were appended with `registry_append.py --universal`. Existing entries are not edited.
+
 ### Retired hooks, and how to restore one
 
 Version 0.7.0 retired six hooks. Version 0.9.8 brought `plan-question-advisor.py` back as a
@@ -1283,9 +1329,12 @@ destructive-operation guards apply to those commands unchanged.
    sit at this repository's root because a plugin's components must, and they move into
    `.claude/` on the way into yours because that is where a project keeps them.
 
-2. **Copy the registries** and add your own `## Project: <name>` section below the
-   Universal tier in each. Everything below the first `## Project:` line stays yours and
-   is never synced.
+2. **Copy the registries.** They arrive in registry layout 2: the three root files hold the
+   Universal tier and a `## Project tier` pointer, and `.claude/templates/registries/`
+   holds the `general.md` skeleton for each registry folder. Put your own entries in
+   `.claude/registries/<REGISTRY>/<domain>.md` with `registry_append.py`. Everything in
+   those folders stays yours and is never synced. A project that still has `## Project:`
+   sections follows "Moving a project onto registry layout 2" below.
 
 3. **Fill in the four templates.** `area-mapping.json`, `work-item-conventions.json`,
    `project-profile.md` and `.project-tokens.json` ship with their schema and an empty
@@ -1480,10 +1529,11 @@ the rows you expect. Follow these steps in your project.
    changes a registration on purpose, run the two commands again in that same pull request. To
    exempt a row on purpose, add an exclusion with a reason to the file by hand. A re-record keeps it.
 
-2. **Vendor five files.** List these files in your `.claude/.sync-config.json`, so the sync tool
+2. **Vendor seven files.** List these files in your `.claude/.sync-config.json`, so the sync tool
    copies them into your `.claude/scripts/` folder: `check_hook_registrations.py`,
-   `auto_improve_finish_install.py`, `pr_merged.py`, `plugin_doctor.py` and
-   `check_version_bump.py`. The checker imports the other four. With only the checker present it
+   `auto_improve_finish_install.py`, `pr_merged.py`, `plugin_doctor.py`,
+   `check_version_bump.py`, `_preview_apply.py` and `_plugin_root.py`. The checker imports the
+   other six. With only the checker present it
    exits 2 with `checker-dependency-missing` and names the files. Vendoring is the only supported
    way, because the landing step must name the checker at a path inside your repository.
 
@@ -1508,6 +1558,98 @@ Why the step looks like this:
 
 When you adopt this, delete your own hook-registration tests and their baseline entries. The
 plugin's check replaces them.
+
+## Moving a project onto registry layout 2
+
+Do this in your project when `py -3 .claude/scripts/registry_migrate.py --check --project .`
+exits 6 (`pending` or `stale-sync`). Nothing forces it on you: until you do, writers keep
+working. `registry_append.py` puts a project entry into a domain file (it creates `general.md`
+when it is missing) and never into a root, and it prints an advisory that names the migration.
+Run the steps in order. Use the scripts you copied, with the new files listed in "Domain-split
+registries (issue #235)" above.
+
+1. **Commit your registry changes.** The migration refuses with `uncommitted-registry-changes`
+   when `.claude/registries/` has uncommitted changes, and with `not-a-git-tree` outside a
+   repository.
+
+   ```powershell
+   git add .claude/registries
+   git commit -m "chore: commit registries before migration 0001"
+   ```
+
+2. **Preview.** This writes nothing under `.claude/registries/`. It prints the plan hash and
+   writes a report folder under `.claude/cache/registry-migrations/`.
+
+   ```powershell
+   py -3 .claude/scripts/registry_migrate.py --dry-run --project .
+   ```
+
+3. **Read `registry-migration-report.md`** in that folder. Look at these parts:
+   - *Migration leftovers*: text that could not be read as an entry. It is copied verbatim into
+     a fenced block at the end of that registry's `general.md` and is never lost.
+   - *Plugin-owned token entries*: Universal entries owned by the plugin that name one of your
+     project tokens. They stay in place, because the next sync would restore them. The fix
+     belongs in the plugin's copy of the entry.
+   - *Unverified token entries*: entries the migration could not judge because it found no
+     installed plugin root. They stay where they are.
+   - *Universal candidates*: entries without a project token in a root that has no
+     `## Project: <name>` heading. They are reported and not moved. To move them, add a
+     `## Project: <name>` heading above them while still on layout 1, commit, and run the
+     preview again. That heading is the one hand edit this procedure allows.
+   - *Orphans*: entries without a body. Each comes with a ready-to-run
+     `registry_append.py --archive-title-only "<title>"` line.
+
+4. **Resolve any `conflicting-entry`.** It means two copies of one entry differ in a field. The
+   refusal names every location and each version's first line. On layout 1, keep one version,
+   rename one title, or fold one version into a `Correction` line; commit; run the preview again.
+
+5. **Apply**, with the hash the preview printed:
+
+   ```powershell
+   py -3 .claude/scripts/registry_migrate.py --apply --project . --expect-sha256 <plan hash>
+   ```
+
+   It refuses with `changed-since-preview` if anything changed since the preview. Every other
+   refusal also leaves the registry files byte-identical. The refusal codes are
+   `project-undetermined`, `not-a-git-tree`, `uncommitted-registry-changes`,
+   `conflicting-entry`, `unknown-layout`, `changed-since-preview`, `content-loss-detected`,
+   `symlink-target` and `write-failed`. Exit 3 is a refusal, and exit 2 is a bad argument, or
+   `plan-build-failed` (an exception while building the plan; the report is still written and
+   names the error).
+
+6. **Check the result.**
+
+   ```powershell
+   py -3 .claude/scripts/registry_migrate.py --check --project .
+   py -3 .claude/scripts/validate_registries.py --check-structure --project .
+   py -3 .claude/scripts/generate_registry_digest.py
+   ```
+
+   `--check` must exit 0 (`current`). `--check-structure` exits 0; advisory lines (for example
+   `advisory: R4` for a path that exists in no search root, or `advisory: leftover`) do not
+   fail it, and any other finding does. The digest generator exits 0.
+
+7. **Commit.** The backups of the replaced files sit under
+   `.claude/cache/registry-migrations/`, not in the registries.
+
+   ```powershell
+   git add .claude/registries
+   git commit -m "chore: move registries to layout 2"
+   ```
+
+8. **Recover or mark orphans.** For each bodiless entry, either restore its body from your own
+   backups or mark it with the line from the report:
+
+   ```powershell
+   py -3 .claude/scripts/registry_append.py --project . --registry journal --archive-title-only "<title>"
+   ```
+
+**Stale sync.** If a sync delivered the layout 2 root files over a project that still had
+`## Project:` sections, `--check` reports `stale-sync` and exits 6. The same steps repair it.
+Until the sync tool halts on exit 6 by itself, run `--check` before you sync. That is a
+follow-up for the sync tool, which lives outside this repository
+(`.claude/concepts/followups/2026-11-04-sync-tool-registry-layout-gate.followup.md`). The sync
+tool's file lists must also include the new modules.
 
 ## Documentation
 

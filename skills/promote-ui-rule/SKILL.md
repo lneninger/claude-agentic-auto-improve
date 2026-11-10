@@ -1,7 +1,7 @@
 ---
 name: promote-ui-rule
 description: |
-  Promote a recurring UI mistake from JOURNAL.md into an automated guard rule
+  Promote a recurring UI mistake from the journal (JOURNAL.md and JOURNAL/*.md) into an automated guard rule
   in architecture-guard.rules.json. The promotion is gated: requires 3+ journal
   entries tagged `ui-evolution + recurring-mistake` matching the same pattern.
   Use when: the user says `/promote-ui-rule`, "promote this UI rule", "the
@@ -17,7 +17,7 @@ The lifecycle is deliberately human-mediated — there are no silent rule rewrit
 
 ## Step 1: Scan the journal for promotion-eligible entries
 
-Read `.claude/registries/JOURNAL.md` and grep for entries that satisfy ALL of:
+Read `.claude/registries/JOURNAL.md` (the Universal root) and every `.claude/registries/JOURNAL/*.md` domain file, and grep for entries that satisfy ALL of:
 
 - `Tags:` line contains BOTH `ui-evolution` AND `recurring-mistake`
 - Lesson describes a check expressible as a regex (e.g. "use text-on-surface-variant not text-neutral-X" — a substring or class match)
@@ -85,7 +85,7 @@ Confirm:
 
 If any of those three checks fail, REVERT the JSON write and report the failure.
 
-## Step 5: Record the promotion in JOURNAL.md
+## Step 5: Record the promotion in the journal
 
 Use the `/journal-add` skill to append a single entry:
 

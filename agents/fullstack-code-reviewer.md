@@ -251,24 +251,52 @@ After the review passes, audit whether the implementation introduced anything ge
 
 A registry append is a shipped change: batch it into a change that already raises the plugin version, or raise at least a patch version (see CLAUDE.md, "Every change to shipped plugin files bumps the plugin version").
 
-**`.claude/registries/MECHANISMS.md` — append if:**
+**How to append (all three registries).** You write an entry with `registry_append.py`, never with `Edit` or by hand: the script chooses the file (a domain file, from the source contract's area, else `general.md`), rejects a duplicate or bodiless entry, and keeps the root files free of project content. You have no `Write` tool, so pass the entry on standard input. Find the script with the standard lookup block (pinned by `test_skill_script_lookup.py`), then run it; `--registry` is `mechanisms`, `vocabulary` or `journal`, and `--universal` is for a plugin-generic entry that belongs to every project, while `--domain <slug>` picks a domain file by hand:
+
+```bash
+RAP=
+S=.claude/scripts/registry_append.py
+if [ -f "$S" ]; then RAP=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then RAP=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  RAP=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$RAP" --project "$CLAUDE_PROJECT_DIR" --registry journal --from-file - <<'EOF'
+<the entry, in the shape given under the registry below>
+EOF
+```
+
+If `RAP` comes back empty, report that in your HANDOFF and name the entry you could not append. Show the printed `file:line` in your HANDOFF. What the exits mean: on a project not yet on registry layout 2 it appends to a domain file and prints an advisory line; that is success. Exit 2: fix the entry file and re-run. Exit 3: stop and show the message to the user.
+
+**`.claude/registries/MECHANISMS.md` (Universal root) and `MECHANISMS/*.md` (domain files) — append if:**
 
 - [ ] A new interface, base class, or pattern was introduced that is or will be used in more than one place
 - [ ] A new cross-cutting primitive was added (CSS utility, helper, value object, event shape) that future features should reuse
 - [ ] A new extension seam was opened (e.g. a new DI-registered pipeline step, a new hub contract, a new port)
 
-For each, append an entry under the correct section (Universal if cross-project, "Project: <name>" if codebase-specific) with format:
+For each, append an entry with `--registry mechanisms` (`--universal` if plugin-generic, otherwise the script files it under the domain of the source contract) in this format:
 
 ```
 - **Mechanism name** — one-line purpose. `path/to/file.ext`. Extend by: <clear instruction>.
 ```
 
-**`.claude/registries/VOCABULARY.md` — append if:**
+**`.claude/registries/VOCABULARY.md` (Universal root) and `VOCABULARY/*.md` (domain files) — append if:**
 
 - [ ] The implementation introduced a new domain term that will recur in future contracts
 - [ ] A term was clarified from ambiguous to precise during implementation
 
-For each, append a one-paragraph definition under the correct tier.
+For each, append a one-paragraph definition with `--registry vocabulary` (`--universal` if plugin-generic). A term clarified later gets a correction through `--correction-of "<title>"`, not a rewrite.
 
 **`.claude/registries/INTEGRATION.md` — update if:**
 
@@ -279,13 +307,13 @@ For each, append a one-paragraph definition under the correct tier.
 
 For each, update the relevant table (API Surface, SignalR Event Surface, or Named Integration Flows) to keep the map current.
 
-**`.claude/registries/JOURNAL.md` — append if:**
+**`.claude/registries/JOURNAL.md` (Universal root) and `JOURNAL/*.md` (domain files) — append if:**
 
 - [ ] The implementation justifiably diverged from the contract's `Data Shapes` / `Reused Mechanisms` / `Invariants` / `Extension Points`. A *justified* divergence means the contract was wrong — that's a contract defect worth carrying forward as a lesson.
 - [ ] A failure mode the contract did not anticipate (or anticipated weakly) materialised during implementation or testing.
 - [ ] An assumption listed as `ASSUMED` in `## Uncertain Assumptions` flipped to `FALSIFIED` (not `VERIFIED`) and the implementation had to route around it.
 
-For each, append an entry under the matching project section in `.claude/registries/JOURNAL.md` using this exact shape:
+For each, append an entry with `--registry journal` (the script files it under the domain file of the source contract's area, else `general.md`) using this exact shape:
 
 ```markdown
 ### YYYY-MM-DD — <short, scannable title>

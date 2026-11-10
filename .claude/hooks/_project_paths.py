@@ -119,6 +119,46 @@ def registry(name: str) -> Path:
     return candidates[0]
 
 
+#: The three registries that have a split (layout 2) form. ``INTEGRATION.md`` is outside the layout.
+LAYOUT_REGISTRY_STEMS = ("MECHANISMS", "VOCABULARY", "JOURNAL")
+
+
+def registry_files_in(registries_dir: Path, name: str, domains=None) -> list[Path]:
+    """The files of one registry inside ONE ``registries/`` folder.
+
+    The root file first, then ``<STEM>/general.md``, then the other ``<STEM>/*.md`` files
+    alphabetically. Only files that exist are returned. ``domains`` (domain names without
+    ``.md``) restricts the domain files to those names and always keeps ``general``. A
+    ``name`` outside the three layout registries (``INTEGRATION.md``) yields its root only.
+    Pure listing: no registry is parsed.
+    """
+    files: list[Path] = []
+    root_file = Path(registries_dir) / name
+    if root_file.is_file():
+        files.append(root_file)
+    stem = name[:-3] if name.endswith(".md") else name
+    if stem not in LAYOUT_REGISTRY_STEMS:
+        return files
+    folder = Path(registries_dir) / stem
+    try:
+        found = [p for p in folder.iterdir() if p.is_file() and p.suffix == ".md"]
+    except OSError:
+        return files
+    wanted = None if domains is None else {str(d) for d in domains} | {"general"}
+    found = [p for p in found if wanted is None or p.stem in wanted]
+    found.sort(key=lambda p: (p.stem != "general", p.stem.lower(), p.stem))
+    return files + found
+
+
+def registry_files(name: str, domains=None) -> list[Path]:
+    """Every file of one registry: the root file, then its domain files.
+
+    The domain files resolve from the SAME ``.claude`` root as the root file that
+    ``registry(name)`` selected -- never a union of roots (I-3). See ``registry_files_in``.
+    """
+    return registry_files_in(registry(name).parent, name, domains)
+
+
 def hook_file(name: str) -> Path:
     """Locate a sidecar file that lives next to the hooks (rules, exceptions).
 

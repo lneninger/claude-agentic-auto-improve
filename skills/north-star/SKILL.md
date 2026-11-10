@@ -103,10 +103,10 @@ Present the draft anti-patterns via `AskUserQuestion` and let the user refine.
 
 - **Why this matters**: one or two sentences. Concrete business value or UX improvement. NOT motivational filler.
 - **Related**:
-  - **Mechanisms**: cite slugs from `MECHANISMS.md` (project section) that this aspiration would extend or replace.
+  - **Mechanisms**: cite slugs from `MECHANISMS.md` or the `MECHANISMS/*.md` domain files that this aspiration would extend or replace.
   - **Areas**: cite slugs from `.claude/area-mapping.json` that are implicated.
   - **Adjacent north-stars**: other thoughts in the same project that cluster with this one (siblings, the WHAT/HOW split, the precondition relationship).
-  - **Lessons**: JOURNAL.md entries whose `Apply when:` pattern matches this aspiration's anti-patterns.
+  - **Lessons**: journal entries (`JOURNAL.md` or `JOURNAL/*.md`) whose `Apply when:` pattern matches this aspiration's anti-patterns.
 
 ## Step 6: Leave the Claude-maintained sections empty
 

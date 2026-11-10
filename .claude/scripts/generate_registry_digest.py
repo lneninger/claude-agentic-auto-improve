@@ -8,201 +8,108 @@ first is the reason the mechanism exists at all:
   1. The index is COMPLETE. Every entry in every registry appears, always.
      A digest that omits a title hides exactly the entry the Data-First
      protocol exists to surface, and the architect then writes a parallel
-     implementation of something that already existed.
+     implementation of something that already existed. Legacy entries
+     (a ``## YYYY-MM-DD`` heading, a dated journal bullet) are indexed too.
 
   2. Only bodies are elided. A reader who wants one takes the file and line
      reference and reads that entry alone.
 
+The files come from the resolver: each registry's root file, then its domain
+files (general first, the rest alphabetical), exactly as `registry_files`
+lists them. There is no hard-coded domain list. Every group carries its tier:
+``Universal``, ``project:<name>`` (layout 1) or ``domain:<slug>`` (layout 2).
+The digest records ``<!-- registry-sources-sha256: ... -->`` over every file it
+read, so `validate_registries.py --check-structure` (R6) can tell a stale digest.
+
 Run after editing any registry:
 
-    py -3 .claude/scripts/generate_registry_digest.py
+    py -3 .claude/scripts/generate_registry_digest.py [--project <root>]
 
-Exits non-zero if any emitted reference does not resolve, so a stale digest
-fails loudly rather than misdirecting a reader.
+Exits 1 when a reference does not resolve, or when the registries hold a
+body-less entry (R1) or a duplicate title (R2); the full index is written first
+either way, so a failed run still leaves a complete digest.
 """
 from __future__ import annotations
 
-import os
+import argparse
 import re
 import sys
+from pathlib import Path
 
-REG = '.claude/registries'
-OUT = '.claude/.scout-cache/registry-digest.md'
-DOMAINS = ['backend', 'frontend', 'data', 'trading', 'general']
+import _registry_layout as rl
+from _claude_paths import registry
 
-BULLET = re.compile(r'^- \*\*(.+?)\*\*')          # MECHANISMS / VOCABULARY
-DATED = re.compile(r'^#{2,3} (\d{4}-\d{2}-\d{2} .+)$')  # JOURNAL
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
+
 HEADING = re.compile(r'^(#{2,3}) (.+)$')          # INTEGRATION
 
-
-def read(path):
-    if not os.path.exists(path):
-        return []
-    with open(path, encoding='utf-8') as fh:
-        return fh.read().splitlines()
-
-
-def entries(path, pattern, group=1):
-    """Return (title, line_number) for every match, line numbers 1-based."""
-    out = []
-    for i, ln in enumerate(read(path), 1):
-        m = pattern.match(ln)
-        if m:
-            out.append((m.group(group).strip(), i))
-    return out
+# Public names that the memory adapter (memory_boundary.py) binds. They are re-exports of the adapters over the one
+# grammar in _registry_layout.py (Q21 (a)); this file keeps no registry reader of its own.
+entry_blocks = rl.entry_blocks
+journal_entries = rl.journal_entries
+BULLET = rl.BULLET
+SECTION_TITLES = {"MECHANISMS": "Mechanisms", "VOCABULARY": "Vocabulary", "JOURNAL": "Journal (lessons)"}
 
 
-HEADING_LINE = re.compile(r'^#{1,6}\s')            # any heading ends an entry
-SUB_BULLET = re.compile(r'^(\s+)[-*]\s')           # an indented bullet under an entry
-JOURNAL_HEADER = re.compile(r'^###\s+(\d{4}-\d{2}-\d{2})\s+(?:—|--|-)\s+(.+?)\s*$')
-TRIGGER_LINE = re.compile(r'^\s*-\s*\*\*Trigger:\*\*[ \t]*(.*?)\s*$')
-SOURCE_LINE = re.compile(r'^\s*-\s*\*\*Source contract:\*\*[ \t]*(.*?)\s*$')
-_UNSET_SOURCES = ('', 'none', 'n/a', 'na', 'unknown', 'tbd')
+def rel_of(file: str) -> str:
+    return file[len('.claude/'):] if file.startswith('.claude/') else file
 
 
-def _tier_of(line, tier):
-    """The tier a heading line switches to, or the current one unchanged."""
-    if line.startswith('## Universal'):
-        return 'Universal'
-    if line.startswith('## Project:'):
-        return 'Project'
-    return tier
+def alnum(text: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', text.lower())
 
 
-def _tier_name(tier, per_domain):
-    # An entry before any tier heading is filed as Project (what tier_split always did);
-    # a per-domain file holds only Project entries.
-    return 'Universal' if (tier == 'Universal' and not per_domain) else 'Project'
-
-
-def entry_blocks(text, pattern, per_domain=False):
-    """Every top-level entry of a registry TEXT, with its full shape.
-
-    One dict per line matching ``pattern`` (group 1 is the title): ``title``, ``line``
-    (1-based), ``tier`` (``Universal`` or ``Project``), ``text`` (the entry's own text, up to
-    its first indented sub-bullet) and ``subs`` (each indented sub-bullet as ``line`` and
-    ``text``, with any deeper continuation lines folded in). An entry ends at the next
-    top-level match, at a heading, or at a blank line followed by a non-indented line that is
-    not a top-level match (a note paragraph after the last bullet is not part of it). Takes
-    text, never a path, so a caller that already holds the text (a hook) passes it through.
-    """
-    lines = text.splitlines()
-    blocks, current, tier, sub_indent = [], None, None, None
-    after_blank = False
-    for i, ln in enumerate(lines, 1):
-        if ln.startswith('## '):
-            tier = _tier_of(ln, tier)
-        m = pattern.match(ln)
-        if m:
-            current = {'title': m.group(1).strip(), 'line': i, 'tier': _tier_name(tier, per_domain),
-                       'text': ln, 'subs': []}
-            blocks.append(current)
-            sub_indent = None
-            after_blank = False
-            continue
-        if HEADING_LINE.match(ln):
-            current = None
-            after_blank = False
-            continue
-        if current is None:
-            continue
-        if not ln.strip():
-            after_blank = True
-        else:
-            if after_blank and not ln[0].isspace():
-                current = None
-                after_blank = False
-                continue
-            after_blank = False
-        sub = SUB_BULLET.match(ln)
-        if sub and (sub_indent is None or len(sub.group(1)) <= sub_indent):
-            sub_indent = len(sub.group(1))
-            current['subs'].append({'line': i, 'text': ln.strip()})
-        elif current['subs']:
-            current['subs'][-1]['text'] += '\n' + ln.strip() if ln.strip() else ''
-        else:
-            current['text'] += '\n' + ln
-    for block in blocks:
-        block['text'] = block['text'].rstrip()
-    return blocks
-
-
-def _source_value(raw):
-    """A Source contract value: the rest of the line, backticks and padding trimmed; unset forms read empty."""
-    value = raw.strip().strip('`').strip()
-    if value.lower() in _UNSET_SOURCES or value.startswith('<'):
-        return ''
-    return value
-
-
-def journal_entries(text, per_domain=False):
-    """Every ``### YYYY-MM-DD — title`` entry of a journal TEXT.
-
-    One dict per entry: ``sig`` (sha1 of ``date|title``), ``date``, ``title``, ``line``,
-    ``tier`` (``## Universal`` / ``## Project:`` headings; Project before any heading or
-    when ``per_domain``), ``trigger`` (lower-cased), ``source`` (the Source contract value,
-    empty when unset) and ``text`` (the whole block, to the next entry or a ``##`` heading).
-    """
-    import hashlib
-    lines = text.splitlines()
-    heads, tier = [], None
-    for i, ln in enumerate(lines):
-        if ln.startswith('## '):
-            tier = _tier_of(ln, tier)
-        m = JOURNAL_HEADER.match(ln)
-        if m:
-            heads.append((i, m.group(1), m.group(2).strip(), _tier_name(tier, per_domain)))
-    entries = []
-    for n, (start, date, title, tier_name) in enumerate(heads):
-        end = heads[n + 1][0] if n + 1 < len(heads) else len(lines)
-        for j in range(start + 1, end):
-            if lines[j].startswith('## '):
-                end = j
-                break
-        block = lines[start:end]
-        trigger = source = ''
-        for ln in block[1:]:
-            tm = TRIGGER_LINE.match(ln)
-            if tm and not trigger:
-                trigger = tm.group(1).strip().lower()
-            sm = SOURCE_LINE.match(ln)
-            if sm and not source:
-                source = _source_value(sm.group(1))
-        entries.append({
-            'sig': hashlib.sha1(f'{date}|{title}'.encode('utf-8', errors='ignore')).hexdigest(),
-            'date': date, 'title': title, 'line': start + 1, 'tier': tier_name,
-            'trigger': trigger, 'source': source, 'text': '\n'.join(block),
-        })
-    return entries
-
-
-def tier_split(path, pattern):
-    """Split a two-tier registry into (universal, project) entry lists."""
-    uni, proj = [], []
-    for block in entry_blocks('\n'.join(read(path)), pattern):
-        (uni if block['tier'] == 'Universal' else proj).append((block['title'], block['line']))
-    return uni, proj
-
-
-def clean(title, limit=96):
-    t = re.sub(r'\s+', ' ', title).strip()
-    return t if len(t) <= limit else t[:limit - 1] + '…'
-
-
-def emit_group(out, label, path, items, refs):
+def emit_group(out: list, label: str, rel: str, items: list, refs: list) -> None:
     if not items:
         return
-    rel = path[len('.claude/'):]
     out.append(f'### {label} — `{rel}` ({len(items)} entries)')
     out.append('')
-    for title, line in items:
-        out.append(f'- {clean(title)} [{rel}:{line}]')
-        refs.append((path, line, title))
+    for title, line, source in items:
+        out.append(f'- {rl.clean_title(title)} [{rel}:{line}]')
+        refs.append((source, line, title))
     out.append('')
 
 
-def main():
-    out, refs = [], []
+def integration_headings(path: Path, display: str) -> list:
+    lines = rl.read_lines(path)
+    mask = rl.fence_mask(lines)
+    heads = []
+    for i, ln in enumerate(lines, 1):
+        if mask[i - 1]:
+            continue
+        m = HEADING.match(ln)
+        if m:
+            prefix = '' if len(m.group(1)) == 2 else '  '
+            heads.append((prefix + m.group(2), i, display))
+    return heads
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Generate the registry digest.")
+    parser.add_argument("--project", help="The project root (the folder holding .claude); default: the resolver")
+    args = parser.parse_args(argv)
+
+    if args.project:
+        base = Path(args.project).resolve()
+        if not base.is_dir():
+            print(f'[registry-digest] --project {args.project} is not a directory', file=sys.stderr)
+            return 2
+        reg_dir = base / '.claude' / 'registries'
+    else:
+        reg_dir = registry('MECHANISMS.md').parent
+        base = reg_dir.parent.parent
+    out_path = reg_dir.parent / rl.DIGEST_RELATIVE
+
+    files = rl.parsed_files(reg_dir, project_root=base)
+    entries = [e for pf in files for e in pf.entries]
+    lines_of = {pf.file: pf.lines for pf in files}
+
+    out: list = []
+    refs: list = []
     out += [
         '# Registry Digest',
         '',
@@ -215,75 +122,59 @@ def main():
         '**The index is never trimmed.** Every entry appears. Only bodies are elided — a digest',
         'that omitted a title would hide the very entry an architect needed to extend.',
         '',
+        rl.SOURCES_LINE.format(digest=rl.sources_sha256(reg_dir)),
+        '',
         '---',
         '',
     ]
 
-    # ---- MECHANISMS -------------------------------------------------------
-    out += ['## Mechanisms', '']
-    uni, proj = tier_split(f'{REG}/MECHANISMS.md', BULLET)
-    emit_group(out, 'Universal', f'{REG}/MECHANISMS.md', uni, refs)
-    if proj:
-        emit_group(out, 'Project (top level)', f'{REG}/MECHANISMS.md', proj, refs)
-    for d in DOMAINS:
-        p = f'{REG}/MECHANISMS/{d}.md'
-        emit_group(out, d.capitalize(), p, entries(p, BULLET), refs)
+    for index, name in enumerate(rl.REGISTRIES):
+        out += (['---', ''] if index else []) + [f'## {SECTION_TITLES[name]}', '']
+        for pf in (f for f in files if f.registry == name):
+            groups: dict = {}
+            for e in pf.entries:
+                groups.setdefault(rl.tier_label(e), []).append((rl.digest_title(e), e.line, pf.file))
+            for label, items in groups.items():
+                emit_group(out, label, rel_of(pf.file), items, refs)
 
-    # ---- VOCABULARY -------------------------------------------------------
-    out += ['---', '', '## Vocabulary', '']
-    uni, proj = tier_split(f'{REG}/VOCABULARY.md', BULLET)
-    emit_group(out, 'Universal', f'{REG}/VOCABULARY.md', uni, refs)
-    if proj:
-        emit_group(out, 'Project (top level)', f'{REG}/VOCABULARY.md', proj, refs)
-    for d in DOMAINS:
-        p = f'{REG}/VOCABULARY/{d}.md'
-        emit_group(out, d.capitalize(), p, entries(p, BULLET), refs)
-
-    # ---- JOURNAL ----------------------------------------------------------
-    out += ['---', '', '## Journal (lessons)', '']
-    p = f'{REG}/JOURNAL.md'
-    j = entries(p, DATED) or entries(p, BULLET)
-    emit_group(out, 'Universal', p, j, refs)
-    for d in DOMAINS:
-        p = f'{REG}/JOURNAL/{d}.md'
-        emit_group(out, d.capitalize(), p, entries(p, DATED), refs)
-
-    # ---- INTEGRATION ------------------------------------------------------
     out += ['---', '', '## Integration surfaces', '']
-    p = f'{REG}/INTEGRATION.md'
-    heads = []
-    for i, ln in enumerate(read(p), 1):
-        m = HEADING.match(ln)
-        if m:
-            prefix = '' if len(m.group(1)) == 2 else '  '
-            heads.append((prefix + m.group(2), i))
-    emit_group(out, 'Sections', p, heads, refs)
+    integration = reg_dir / 'INTEGRATION.md'
+    if integration.is_file():
+        display = rl.display_for(reg_dir, base)(integration)
+        heads = integration_headings(integration, display)
+        lines_of[display] = rl.read_lines(integration)
+        emit_group(out, 'Sections', rel_of(display), heads, refs)
 
     body = '\n'.join(out).rstrip() + '\n'
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, 'w', encoding='utf-8', newline='\n') as fh:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, 'w', encoding='utf-8', newline='\n') as fh:
         fh.write(body)
 
     # ---- verification -----------------------------------------------------
     bad = []
-    for path, line, title in refs:
-        lines = read(path)
-        if line < 1 or line > len(lines):
-            bad.append((path, line, title, '<out of range>'))
+    for source, line, title in refs:
+        src = lines_of.get(source, [])
+        if line < 1 or line > len(src):
+            bad.append((source, line, title, '<out of range>'))
             continue
-        key = re.sub(r'[^a-z0-9]', '', title.lower())[:12]
-        target = re.sub(r'[^a-z0-9]', '', lines[line - 1].lower())
-        if key and key not in target:
-            bad.append((path, line, title, lines[line - 1][:60]))
+        # Journal titles in the index start with the date; the source heading holds both.
+        key = alnum(title)[:12]
+        if key and key not in alnum(src[line - 1]):
+            bad.append((source, line, title, src[line - 1][:60]))
+
+    findings = rl.rule_r1(entries) + rl.rule_r2(entries)
 
     approx_tokens = len(body) // 4
-    print(f'wrote {OUT}')
-    print(f'  entries indexed : {len(refs)}')
+    print(f'wrote {out_path}')
+    print(f'  entries indexed : {len(entries)}')
     print(f'  characters      : {len(body)}  (~{approx_tokens} tokens)')
     print(f'  bad references  : {len(bad)}')
     for p, l, t, a in bad[:10]:
         print(f'    {p}:{l} expected "{t[:40]}" got "{a}"')
-    return 1 if bad else 0
+    print(f'  R1/R2 findings  : {len(findings)}')
+    for f in findings:
+        print(f'    finding: {f.rule} {f.file}:{f.line} {f.message}')
+    return 1 if (bad or findings) else 0
 
 
 if __name__ == '__main__':

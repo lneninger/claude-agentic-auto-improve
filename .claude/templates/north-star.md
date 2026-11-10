@@ -41,10 +41,10 @@ _Last updated: not yet reviewed_
 
 ## Related
 
-- **Mechanisms** (from MECHANISMS.md, project section): <slugs that would need to extend or be replaced>
+- **Mechanisms** (from MECHANISMS.md or the MECHANISMS/*.md domain files): <slugs that would need to extend or be replaced>
 - **Areas** (from `.claude/area-mapping.json`): <area slugs implicated>
 - **Adjacent north-stars**: <other thoughts in this same project that cluster with this one>
-- **Lessons** (from JOURNAL.md): <entries whose `Apply when:` matches this aspiration's anti-patterns>
+- **Lessons** (from JOURNAL.md or the JOURNAL/*.md domain files): <entries whose `Apply when:` matches this aspiration's anti-patterns>
 
 ---
 

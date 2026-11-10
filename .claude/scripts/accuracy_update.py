@@ -4,7 +4,8 @@ accuracy-skip system.
 
 Every bad-plan signal funnels through this script:
     - contract-rejection-detector hook  (Status: approved -> rejected)
-    - post-approval-journal-tracker hook (JOURNAL.md entry, Trigger: post-approval)
+    - post-approval-journal-tracker hook (any journal file, Trigger: post-approval), and
+      registry_append.py, both through process_journal_change()
     - fullstack-code-reviewer agent      (writes divergence to reviewer-verdicts.jsonl)
     - /critique-now skill                (forced BLOCKER on a skipped contract)
 
@@ -39,8 +40,10 @@ hooks that don't want to shell out per-area.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -59,7 +62,7 @@ from derive_area import derive_areas
 #
 # Do not restore the literal home-rooted form, even in a comment: the INV-1
 # guard in the test suite is a source-text scan and will flag it (#35).
-from _claude_paths import accuracy_state_path
+from _claude_paths import accuracy_state_path, checkout_equivalent_path, claude_roots, registry, registry_files
 
 # Passive error logging (fail-soft import) -- prefer the hooks logger, which
 # resolves to <project>/.claude/logs/ when CLAUDE_PROJECT_DIR is set (Claude
@@ -388,6 +391,234 @@ def record_from_contract(contract_path: str, verdict_or_source: str, is_failure:
         else:
             results[area] = record_clean(area, str(path))
     return {"path": str(path), "areas": areas, "results": results}
+
+
+# ---------------------------------------------------------------------------
+# Journal tracker (moved here from the journal-post-approval-tracker hook)
+# ---------------------------------------------------------------------------
+
+#: Both 'post-approval' (explicit manual entries) and 'post-impl' (reviewer-divergence entries) imply the
+#: contract was already approved when the issue surfaced -- the same accuracy signal.
+POST_APPROVAL_TOKENS = ("post-approval", "post-impl", "post-implementation")
+
+#: The reader of the journal grammar that seeded a file (I-14). Each ``seeded_files`` value records it; a file whose
+#: value holds no reader (or a lower one) is seeded again on its next read, with every signature marked seen.
+JOURNAL_READER = 2
+
+
+def journal_signature(date: str, title: str) -> str:
+    """The stable per-entry signature, unchanged since the tracker began: sha1(date|title) (I-14)."""
+    return hashlib.sha1(f"{date}|{title}".encode("utf-8", errors="ignore")).hexdigest()
+
+
+def parse_journal_entries(text: str) -> list[dict]:
+    """Every journal entry of ``text``: {sig, date, title, trigger, source_contract, body}.
+
+    The entries come from ``_registry_layout.parse_text`` (the sole owner of the journal grammar): entries only, never
+    legacy entries (I-8c) and never anything inside a fenced block (I-8). The module is imported here, not at the top
+    ("Import chain"): when it is missing, one stderr line names it and no entries are returned, so the hooks that
+    import this module keep working.
+    """
+    try:
+        import _registry_layout as rl  # lazy: the module-level imports of this file stay as they were
+    except ImportError as exc:
+        try:
+            sys.stderr.write("[accuracy_update] _registry_layout is unavailable (%s); no journal entries read\n" % exc)
+        except Exception:
+            pass
+        return []
+    entries: list[dict] = []
+    for entry in rl.parse_text(text, "JOURNAL").entries:
+        if entry.kind != "entry":
+            continue
+        title = entry.title.strip()
+        entries.append({
+            "sig": journal_signature(entry.date, title),
+            "date": entry.date,
+            "title": title,
+            "trigger": entry.fields.get("trigger", "").strip().lower(),
+            "source_contract": rl.source_value(entry.fields.get("source contract", "")),
+            "body": entry.text,
+        })
+    return entries
+
+
+
+def _seen_path() -> Path:
+    """The machine-wide seen cache, resolved at CALL time.
+
+    It lives in the state folder of the user's own Claude home, not in a project: one cache serves every
+    checkout and worktree (I-14). The resolver owns the name of that folder (INV-1: no script spells a
+    home-rooted ``.claude`` path itself), so it is taken from ``claude_roots()``, whose entry under the
+    user's home is the machine-wide root.
+    """
+    home = Path.home()
+    roots = claude_roots()
+    machine_root = next((r for r in roots if r.parent == home), roots[-1])
+    return machine_root / "state" / "journal-entries-seen.json"
+
+
+def _load_seen() -> dict:
+    sp = _seen_path()
+    if not sp.exists():
+        return {}
+    try:
+        data = json.loads(sp.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_seen(data: dict) -> None:
+    sp = _seen_path()
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    tmp = sp.with_suffix(sp.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.replace(tmp, sp)
+    except PermissionError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def journal_file_key(path: Path) -> str:
+    """The key a journal file is seeded under (I-14): its path as the main checkout would see it.
+
+    ``checkout_equivalent_path`` removes every ``.claude/worktrees/<name>/`` segment, so one file is one
+    key in every worktree of a checkout. Case-folded on Windows, where paths are case-insensitive.
+    """
+    try:
+        resolved = str(Path(path).resolve())
+    except OSError:
+        resolved = str(path)
+    key = checkout_equivalent_path(resolved)
+    return key.casefold() if os.name == "nt" else key
+
+
+def _resolve_contract_path(raw: str, journal_file: Path) -> Path | None:
+    """Source contract is often written as ``.claude/concepts/...``, ``~/.claude/concepts/...`` or absolute."""
+    if not raw or raw.upper() == "N/A":
+        return None
+    p = Path(raw).expanduser()
+    if p.exists():
+        return p
+    if not p.is_absolute():
+        for parent in Path(journal_file).resolve().parents:
+            if parent.name == ".claude":
+                candidate = parent.parent / p
+                if candidate.exists():
+                    return candidate
+                break
+    return None
+
+
+def _seeded_by_current_reader(value) -> bool:
+    """True when a ``seeded_files`` value records the current journal reader (a bare ``True`` records none)."""
+    return isinstance(value, dict) and isinstance(value.get("reader"), int) and value["reader"] >= JOURNAL_READER
+
+
+def process_journal_change(files, fresh=()) -> list[dict]:
+    """Fire the 'post-approval-journal' signal for journal entries that are new (Event "Journal entry appended").
+
+    ``files``  the journal files that changed (the root ``JOURNAL.md`` or any ``JOURNAL/<domain>.md``).
+    ``fresh``  signatures of entries a script has just written; they fire even in a file this machine never saw.
+
+    The machine-wide cache holds ``sigs`` (every signature seen) and ``seeded_files`` (the files whose
+    existing entries were taken as history), keyed by ``journal_file_key``. Every file of
+    ``registry_files("JOURNAL.md")`` that is not seeded is seeded first: its signatures are marked seen and
+    nothing fires. So does a file whose value records no reader, or an older one: it is seeded again once with
+    reader ``JOURNAL_READER`` (I-14 reader re-seed). A new signature in a seeded changed file fires, and so does a fresh one. An old cache
+    (``_initialized``, no ``seeded_files``) counts as having seeded the root ``JOURNAL.md`` key only.
+    Nothing fires retroactively or twice.
+
+    Accepted guard limit (Q17): a hand-written post-* entry in a journal file whose key the cache has never seen
+    does not fire -- the file is seeded instead. The script path (``fresh``) always fires.
+
+    Returns the list of fired entries ({title, contract, areas}).
+    """
+    # A degraded tracker seeds nothing (t11 W1): with no reader, "seen" would be recorded for entries never read.
+    try:
+        import _registry_layout  # noqa: F401  (only the import is checked here)
+    except ImportError as exc:
+        try:
+            sys.stderr.write("[accuracy_update] _registry_layout is unavailable (%s); journal tracker did nothing\n" % exc)
+        except Exception:
+            pass
+        log_event(hook="accuracy", event="journal-tracker-reader-missing", details={"error": str(exc)},
+                  log_name="accuracy")
+        return []
+
+    fresh_sigs = {str(s) for s in (fresh or ())}
+    changed: dict[str, Path] = {}
+    for f in files or ():
+        path = Path(f)
+        changed.setdefault(journal_file_key(path), path)
+
+    cache = _load_seen()
+    known: dict = dict(cache.get("sigs", {}) or {})
+    seeded: dict = dict(cache.get("seeded_files", {}) or {})
+    before = (dict(known), dict(seeded))
+    if cache.get("_initialized") is True and "seeded_files" not in cache:
+        try:
+            seeded[journal_file_key(registry("JOURNAL.md"))] = True
+        except Exception:
+            pass
+
+    ordered: dict[str, Path] = {}
+    try:
+        listed = list(registry_files("JOURNAL.md"))
+    except Exception:
+        listed = []
+    for path in listed:
+        ordered.setdefault(journal_file_key(path), Path(path))
+    for key, path in changed.items():
+        ordered.setdefault(key, path)
+
+    fired: list[dict] = []
+    for key, path in ordered.items():
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        entries = parse_journal_entries(text)
+        was_seeded = _seeded_by_current_reader(seeded.get(key))
+        is_changed = key in changed
+        candidates: list[dict] = []
+        for entry in entries:
+            if entry["sig"] in known:
+                continue
+            if (was_seeded and is_changed) or entry["sig"] in fresh_sigs:
+                candidates.append(entry)
+            known[entry["sig"]] = True
+        seeded[key] = {"reader": JOURNAL_READER}
+        if not was_seeded:
+            log_event(hook="accuracy", event="journal-tracker-seeded", file=str(path),
+                      details={"entries_seeded": len(entries) - len(candidates)}, log_name="accuracy")
+        for entry in candidates:
+            if not any(tok in entry["trigger"] for tok in POST_APPROVAL_TOKENS):
+                continue
+            cpath = _resolve_contract_path(entry["source_contract"], path)
+            if cpath is None:
+                log_event(hook="accuracy", event="journal-post-approval-no-contract", file=str(path),
+                          details={"entry_title": entry["title"], "raw_source": entry["source_contract"]})
+                continue
+            try:
+                areas = derive_areas(cpath)
+                for area in areas:
+                    record_failure(area, str(cpath), "post-approval-journal")
+                fired.append({"title": entry["title"], "contract": str(cpath), "areas": areas})
+            except Exception as exc:  # pragma: no cover
+                log_event(hook="accuracy", event="journal-tracker-error", file=str(path),
+                          details={"error": str(exc), "entry_title": entry["title"]})
+
+    if (known, seeded) != before or cache.get("_initialized") is not True:
+        _save_seen({"_initialized": True, "sigs": known, "seeded_files": seeded})
+    if fired:
+        log_event(hook="accuracy", event="journal-post-approval-fired", file=str(next(iter(changed.values()), "")),
+                  details={"count": len(fired), "fired": fired}, log_name="accuracy")
+    return fired
 
 
 # ---------------------------------------------------------------------------

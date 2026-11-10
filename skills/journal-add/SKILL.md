@@ -1,21 +1,23 @@
 ---
 name: journal-add
-description: "Append a lesson-learned entry to .claude/registries/JOURNAL.md. Use when: the user says /journal-add, 'log a lesson', 'add to the journal', 'record this for next time', or after a production incident / debugging session / contract review surfaces a non-obvious insight that future contracts should heed. The journal is read by data-architect (Step 1) and contract-critic on every run."
+description: "Append a lesson-learned entry to the journal (.claude/registries/JOURNAL.md root or a .claude/registries/JOURNAL/<domain>.md file) with registry_append.py. Use when: the user says /journal-add, 'log a lesson', 'add to the journal', 'record this for next time', or after a production incident / debugging session / contract review surfaces a non-obvious insight that future contracts should heed. The journal is read by data-architect (Step 1) and contract-critic on every run."
 user_invocable: true
 ---
 
 # /journal-add — Append Lesson to the Adaptive Engineering Journal
 
-When this skill is invoked, append one entry to `.claude/registries/JOURNAL.md` under the matching project section (or Universal tier if no project context applies).
+When this skill is invoked, append one entry to the journal with `registry_append.py`: to a domain file under `.claude/registries/JOURNAL/` (project lessons), or to the Universal tier of `.claude/registries/JOURNAL.md` with `--universal` (plugin-generic lessons, or no project context).
 
 The journal is the only feedback loop that carries lessons forward between concept contracts. `data-architect` reads it before drafting and `contract-critic` matches every entry's `Apply when:` pattern against new drafts. A well-written entry prevents the same defect from recurring.
 
-## Step 0: Read the file before editing
+## Step 0: Read the journal before appending
 
-Always `Read` `.claude/registries/JOURNAL.md` first. You need:
-1. The two-tier structure (Universal vs `## Project: <name>` sections).
-2. Confirmation that the project section exists under the matching name. If not, create it.
+Always `Read` `.claude/registries/JOURNAL.md` (the Universal root) and the domain files beside it, `.claude/registries/JOURNAL/*.md` (`general.md` always exists on registry layout 2), first. You need:
+1. The layout: the root holds only the Universal tier and a pointer; project lessons live in the domain files.
+2. The existing titles, so the new entry does not duplicate one (the script rejects a duplicate title across the root and every domain file).
 3. The exact entry shape documented in the header.
+
+On a project that has no `JOURNAL/` folder yet, read the root alone; the script still appends correctly (see Step 3).
 
 ## Step 1: Gather the entry fields
 
@@ -59,21 +61,44 @@ If no, skip this step. (The ui-ux-designer agent's Step 0 grep would still pick 
 
 **Optional Areas line.** For any entry (UI or not) whose `Source contract:` is `N/A` (manual entries), offer to append an `Areas:` line so the cross-area scanner can attribute the lesson to specific buckets. Use `AskUserQuestion` with the options drawn from `.claude/area-mapping.json` keys + `(universal — no Areas line)`. The user picks any subset; the Areas line gets the comma-separated slugs. Skip the prompt for non-manual triggers — those derive their area from the Source contract automatically.
 
-## Step 2: Detect the project section
+## Step 2: Choose the destination
 
-Determine the project from CWD:
+The destination is a flag of `registry_append.py`, never a hand edit:
 
-- If CWD is inside the repository, the section is `## Project: <project.name>`, taking `project.name` from the `.claude/project-profile.md` slot of that repository.
-- If the profile is absent, fall back to the last path component of the repo root.
-- If CWD is `~/.claude` or unrelated → use the `## Universal lessons` section instead.
-
-If the matching `## Project: <name>` section does not exist in JOURNAL.md, create it immediately above the closing of the file with this exact heading and a single-line placeholder comment matching the existing project sections.
+- A project lesson: pass nothing and the script files it in the domain file named after the `Source contract:`'s area when that file exists, else in `general.md`. To choose a domain yourself, pass `--domain <slug>` (a file that exists in `.claude/registries/JOURNAL/`); a new domain needs `--create-domain` as well.
+- A plugin-generic lesson that applies to every project, or no project context (CWD is `~/.claude` or unrelated): pass `--universal`, which appends to the end of the Universal tier of the root file.
 
 ## Step 3: Append the entry
 
-Use `Edit` with `old_string` = the placeholder comment for the target section (e.g. `<!-- empty on day 1 — populated as lessons are discovered -->` if it's still there) OR the trailing whitespace after the last existing entry in that section, and `new_string` = the placeholder/whitespace PLUS the newly-formatted entry below it. NEVER reorder existing entries. NEVER rewrite them.
+Write the entry to `.claude/cache/registry-appends/<slug>.md` with the `Write` tool (create the folder if missing; it is a cache folder, never committed). NEVER reorder or rewrite existing entries: the script only appends.
 
-The exact entry shape (already documented in the JOURNAL.md header):
+Find `registry_append.py` with the standard lookup block (pinned by `test_skill_script_lookup.py`), then run it with the project root:
+
+```bash
+RAP=
+S=.claude/scripts/registry_append.py
+if [ -f "$S" ]; then RAP=$S
+elif [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then RAP=$CLAUDE_PLUGIN_ROOT/$S
+else
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
+  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+    P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
+    [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
+  done)
+  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
+  RAP=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+    [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
+  done)
+fi
+py -3 "$RAP" --project "$CLAUDE_PROJECT_DIR" --registry journal --from-file .claude/cache/registry-appends/<slug>.md
+```
+
+If `RAP` comes back empty, stop and say so. Add `--universal` or `--domain <slug>` per Step 2. Show the printed `file:line`, then delete the entry file. What the exits mean: on a project not yet on registry layout 2 it appends to a domain file and prints an advisory line; that is success. Exit 2: fix the entry file and re-run. Exit 3: stop and show the message to the user.
+
+The entry file holds exactly this shape (already documented in the JOURNAL.md header):
 
 ```markdown
 ### YYYY-MM-DD — <Title from Step 1>
@@ -89,7 +114,7 @@ The date is today's date in `YYYY-MM-DD` format. If you don't know today's date 
 
 ## Step 4: Confirm the append to the user
 
-Show the appended entry verbatim and the destination section (Universal vs `Project: <name>`). One short sentence — no celebration prose.
+Show the appended entry verbatim and the destination the script printed (the Universal root or a domain file, with its line). One short sentence — no celebration prose.
 
 If this was triggered from `/design-first` Step 5 (the orchestrator confirming a contract-critic finding), the orchestrator already knows what to do next. Otherwise, mention that future `data-architect` and `contract-critic` runs will now read this entry on every invocation — no additional setup is required.
 
@@ -105,8 +130,8 @@ A registry append is a shipped change: batch it into a change that already raise
 
 ## What this skill does NOT do
 
-- Does NOT write to any file other than `.claude/registries/JOURNAL.md`.
-- Does NOT modify or reorder existing journal entries — append-only.
+- Does NOT write to any file other than the journal (`.claude/registries/JOURNAL.md` or a `.claude/registries/JOURNAL/*.md` file), and only through `registry_append.py`; its entry file under `.claude/cache/registry-appends/` is deleted after success.
+- Does NOT modify or reorder existing journal entries — append-only. A correction to an earlier entry is a `--correction-of "<title>"` line added by the script.
 - Does NOT validate the lesson content for quality — that's the human's call.
 - Does NOT trigger any agent or downstream workflow. The next time `data-architect` or `contract-critic` runs, they read the journal naturally.
 

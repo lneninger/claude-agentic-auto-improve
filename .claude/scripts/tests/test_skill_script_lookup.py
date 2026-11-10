@@ -56,6 +56,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 HOOKS_DIR = SCRIPTS_DIR.parent / "hooks"
 PLUGIN_ROOT = SCRIPTS_DIR.parent.parent
 SKILLS = PLUGIN_ROOT / "skills"
+AGENTS = PLUGIN_ROOT / "agents"
 PLUGIN_NAME = "agentic-auto-improve"
 KEY = PLUGIN_NAME + "@auto-improve"
 NEEDLE = "agentic-auto-improve/*/"
@@ -95,7 +96,9 @@ def find_bash() -> str | None:
 def snippets() -> list[dict]:
     """Every fenced bash block under skills/ that holds a plugin-cache search line, cut before the run line."""
     found = []
-    for path in sorted(SKILLS.rglob("*.md")):
+    # Agents carry the same block (domain-split registries contract, sub-task 7): a writer agent looks up
+    # registry_append.py through the plugin exactly as a skill does.
+    for path in sorted(SKILLS.rglob("*.md")) + sorted(AGENTS.glob("*.md")):
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         i = 0
         while i < len(lines):
@@ -532,6 +535,8 @@ class TestDesignFirstApprovalGateLookup(unittest.TestCase):
     REL = "skills/design-first/SKILL.md"
 
     def gate_snippets(self) -> list[dict]:
+        # The skill also carries the registry_append.py block (RAP, sub-task 7 of the domain-split registries
+        # contract); the approval gate is the pr_merged.py one.
         # The approval gate's block is the pr_merged.py one; Step 1.5 carries its own (TestDesignFirstMemoryLookup).
         return [s for s in snippets() if s["file"] == self.REL and s["script"] == "pr_merged.py"]
 
@@ -574,6 +579,40 @@ class TestDesignFirstApprovalGateLookup(unittest.TestCase):
         self.assertGreater(len(gate), 0, "the gate carries a PRM block")
         self.assertEqual(gate[0]["text"], standard[0]["text"],
                          "one snippet is shared by every copy: the gate must not carry a variant")
+
+
+class TestRegistryScriptLookupInAgentsAndSkills(unittest.TestCase):
+    """Domain-split registries contract, sub-task 7: the writers (skills AND agents) find registry_append.py, and
+    verify-before-done finds validate_registries.py, through the one standard block. The generic cases of
+    TestSkillScriptLookup run over these blocks too, because snippets() now scans agents/*.md as well."""
+
+    EXPECTED = {
+        "agents/fullstack-code-reviewer.md": "registry_append.py",
+        "skills/journal-add/SKILL.md": "registry_append.py",
+        "skills/design-first/SKILL.md": "registry_append.py",
+        "skills/verify-before-done/SKILL.md": "validate_registries.py",
+    }
+
+    def test_the_scan_reads_agents(self):
+        files = {s["file"] for s in snippets()}
+        self.assertTrue(any(f.startswith("agents/") for f in files),
+                        "snippets() must scan agents/*.md; found blocks only in %s" % sorted(files))
+
+    def test_each_writer_carries_the_block_for_its_script(self):
+        found = {(s["file"], s["script"]) for s in snippets()}
+        for rel, script in self.EXPECTED.items():
+            with self.subTest(file=rel):
+                self.assertIn((rel, script), found, "%s must carry the lookup block for %s" % (rel, script))
+
+    def test_the_registry_blocks_use_the_same_text_as_the_standard_one_but_for_the_script_and_variable(self):
+        standard = next(s for s in snippets() if s["var"] == "PRM" and s["file"] == "skills/advance/SKILL.md")
+        for s in snippets():
+            if s["script"] not in ("registry_append.py", "validate_registries.py"):
+                continue
+            with self.subTest(block="%s:%d" % (s["file"], s["start"])):
+                normalised = s["text"].replace(s["script"], "pr_merged.py").replace(s["var"], "PRM")
+                self.assertEqual(normalised, standard["text"],
+                                 "the registry lookup must be the standard block, with only the script and variable changed")
 
 
 class TestDesignFirstMemoryLookup(unittest.TestCase):
