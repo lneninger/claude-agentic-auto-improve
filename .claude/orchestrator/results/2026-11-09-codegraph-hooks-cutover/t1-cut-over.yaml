@@ -1,0 +1,20 @@
+status: completed
+commit: 81ee03d970fa753bce4a6f752fd0564e65b590e2
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/331
+merged_at: '2026-11-10T02:20:35Z'
+verified: github
+sub_issue_closed: closed
+hand_resolved:
+  files: []
+  merge_commits: 0
+  commits_inspected: 5
+  commits_unread: 0
+base_ref: feature/262-codegraph-hooks-cutover
+base_is_default: false
