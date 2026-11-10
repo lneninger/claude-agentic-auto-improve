@@ -25,16 +25,11 @@ SCRIPTS_DIR = HERE.parent
 REPO_ROOT = SCRIPTS_DIR.parent.parent
 FIXTURES = HERE / "fixtures" / "hook-registrations"
 CHECKER = SCRIPTS_DIR / "check_hook_registrations.py"
-FIVE_FILES = (
-    "check_hook_registrations.py",
-    "auto_improve_finish_install.py",
-    "pr_merged.py",
-    "plugin_doctor.py",
-    "check_version_bump.py",
-)
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 import check_hook_registrations as chk  # noqa: E402
+
+VENDORED_FILES = chk.VENDORED_FILES
 
 # A checkout may give a text fixture CRLF line endings (core.autocrlf); the recorder always writes LF.
 SETTINGS_BYTES = (FIXTURES / "settings.json").read_bytes().replace(b"\r\n", b"\n")
@@ -702,15 +697,29 @@ class RefusalTests(ProjectCase):
         self.assertIn("boom", out)
         self.assertNotIn("Traceback", out)
 
-    def test_dependency_import_failure_is_exit_2_naming_the_five_files(self):
+    def test_dependency_import_failure_is_exit_2_naming_every_vendored_file(self):
         self.put()
         with mock.patch.object(chk, "_IMPORT_FAILURE", ImportError("No module named 'pr_merged'", name="pr_merged")):
             code, out = run_main(["--project", str(self.root), "--json"])
         rep = json.loads(out)
         self.assertEqual((code, rep["refusal"]["code"]), (2, "checker-dependency-missing"))
         self.assertIn("pr_merged", rep["refusal"]["message"])
-        for name in FIVE_FILES:
+        for name in VENDORED_FILES:
             self.assertIn(name, rep["refusal"]["message"])
+
+    def test_the_vendored_file_list_is_exactly_the_seven_files_in_order(self):
+        self.assertEqual(
+            chk.VENDORED_FILES,
+            (
+                "check_hook_registrations.py",
+                "auto_improve_finish_install.py",
+                "pr_merged.py",
+                "plugin_doctor.py",
+                "check_version_bump.py",
+                "_preview_apply.py",
+                "_plugin_root.py",
+            ),
+        )
 
     def test_a_non_import_failure_while_importing_is_an_internal_error(self):
         self.put()
@@ -805,7 +814,7 @@ class ProcessTests(unittest.TestCase):
         rep = json.loads(done.stdout)
         self.assertEqual(rep["refusal"]["code"], "checker-dependency-missing")
         self.assertIn("auto_improve_finish_install", rep["refusal"]["message"])
-        for name in FIVE_FILES:
+        for name in VENDORED_FILES:
             self.assertIn(name, rep["refusal"]["message"])
         self.assertNotIn("Traceback", done.stderr)
 
@@ -827,7 +836,7 @@ class ProcessTests(unittest.TestCase):
             self.assertNotIn(other, before_flag, "nothing but `import sys` runs before the flag")
 
     def assert_tree_unchanged(self, *flags):
-        proj = self.stage(FIVE_FILES, name="proj" + "".join(flags))
+        proj = self.stage(VENDORED_FILES, name="proj" + "".join(flags))
         before = snapshot(proj)
         done = self.run_copy(proj, *flags)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -842,7 +851,7 @@ class ProcessTests(unittest.TestCase):
         self.assert_tree_unchanged()
 
     def test_the_vendored_copy_fails_the_same_way_as_the_repository_copy(self):
-        proj = self.stage(FIVE_FILES)
+        proj = self.stage(VENDORED_FILES)
         s = settings_dict()
         row_of(s, "edit-gate.py")["if"] = "changed"
         (proj / ".claude" / "settings.json").write_bytes(as_bytes(s))
