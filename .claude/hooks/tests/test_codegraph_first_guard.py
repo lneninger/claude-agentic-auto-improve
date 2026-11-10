@@ -24,14 +24,17 @@ WHAT THIS PINS DOWN
   R-*            each fail-open reason (no-index, server-not-configured, server-disabled, subagent,
                  index-other-tree) on Read/Grep/Glob x .cs/.ts, one log record per session per reason, and the
                  positive controls that keep the gate shut when an index and a server exist
-  E-*            the retry escape: single use, per call, per session, cleared by the next prompt
-  T-*            the tracker writes the session-keyed marker for explore / search / an unknown future tool name,
-                 the marker survives a directory change, the reset hook clears it
+  E-*            the retry escape: single use, per call, per session, keyed to its prompt (issue #262)
+  T-*            the Transcript turn state opens the gate for explore / search / an unknown future tool name and for a
+                 subagent dispatch, follows the transcript across a directory change, and closes at the next human prompt
+  CO-*, PR-*     the cut-over (issue #262): the three routes, the fail-open causes, tickets keyed to the prompt, the
+                 cli-fallback record, the Measurement record, late effects forced to raise, and the prompt row
   O-*            index ownership over real and fixture git layouts, in three helper modes (bound, missing, older)
   P-*            parity between the guard and the installer (server rule, index ownership)
   U-*            worktree_own_root unit rows
-  X-*            the session-folder pruner, through the before_remove seam (X-2b and X-4 bite without file-symlink rights);
-                 it lists the Per-user session parent only and never the system temp folder (issue #271, criterion 3)
+  X-*            the session-folder pruner (now in the guard, C-5), through the before_remove seam (X-2b and X-4 bite without
+                 file-symlink rights); it lists the Per-user session parent only and never the system temp folder (issue #271,
+                 criterion 3)
   Q-*  (#271)    a planted folder in the shared temp folder opens no gate; the Per-user session parent rule (pure table,
                  every OS) and its problems on disk; fail closed (session-state-unusable, check-failed, announce,
                  retry-ticket-unwritten, link swap); the Foreign marker; the banner by reason; hook parity; the Hop proof
@@ -44,6 +47,7 @@ WHAT THIS PINS DOWN
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import inspect
 import io
@@ -150,17 +154,26 @@ def describe(proc: subprocess.CompletedProcess) -> str:
     return "exit=%s stdout=%r stderr=%r" % (proc.returncode, proc.stdout[:200], proc.stderr[:600])
 
 
+#: The default ``transcript`` of ``run_hook``: a CLOSED transcript (a human prompt and nothing after it). Since the
+#: cut-over (issue #262) the guard decides from the transcript, so a row that expects a block must carry one (a payload
+#: with no ``transcript_path`` fails open). Pass a Path for another state, or None for a payload with no transcript_path.
+CLOSED = "closed"
+
+
 def run_hook(hook: Path, sb: af.Sandbox, project: Path, tool: str, tool_input: dict, session: str,
              cwd: Path | None = None, payload_extra: dict | None = None, extra_env: dict | None = None,
-             raw: str | None = None, event: str = "PreToolUse") -> subprocess.CompletedProcess:
+             raw: str | None = None, event: str = "PreToolUse", transcript=CLOSED,
+             argv: list | None = None) -> subprocess.CompletedProcess:
     """Run a hook as Claude Code does: JSON on stdin, the isolated environment, cwd = the payload cwd."""
     where = Path(cwd or project)
     where.mkdir(parents=True, exist_ok=True)
     payload = {"session_id": session, "cwd": str(where), "hook_event_name": event, "tool_name": tool,
                "tool_input": tool_input}
+    if event == "PreToolUse" and transcript is not None:
+        payload["transcript_path"] = str(af.closed_transcript(sb.root / "transcripts") if transcript is CLOSED else transcript)
     if payload_extra:
         payload.update(payload_extra)
-    return subprocess.run([sys.executable, "-B", str(hook)], input=raw if raw is not None else json.dumps(payload),
+    return subprocess.run([sys.executable, "-B", str(hook), *(argv or [])], input=raw if raw is not None else json.dumps(payload),
                           capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(where),
                           env=af.isolated_env(sb.home, sb.tmp, project, extra_env), timeout=60)
 
@@ -247,8 +260,11 @@ class World:
         self.sb = af.Sandbox("cghooks-")
         installed = {p.name: p for p in af.install(ADD_ON, self.sb.root / "installed")}
         self.guard = installed[HOOK_FILE]
-        self.tracker = installed[TRACKER_FILE]
-        self.reset = installed[RESET_FILE]
+        # The tracker and the reset hook are Disabled add-on hooks since the cut-over (issue #262): no install copies them. A
+        # row that still looks at one of them (a parity row, a byte-identity row) installs them through the fixture's disabled path.
+        disabled = {p.name: p for p in af.install_disabled(ADD_ON, self.sb.root / "installed")}
+        self.tracker = disabled[TRACKER_FILE]
+        self.reset = disabled[RESET_FILE]
         hooks_dir = self.guard.parent
         self.fallback = self.sb.root / "fallback" / HOOK_FILE
         self.stale = self.sb.root / "stale" / HOOK_FILE
@@ -354,7 +370,9 @@ def run_612() -> None:
             inside_src = str(project / "src" / "Thing.cs")
             check("#612-C control: a source file inside the project is still gated",
                   guard.classify_path(inside_src) == "source", repr(guard.classify_path(inside_src)))
-            decision, why = guard.decide("Read", {"file_path": inside_src})
+            closed_payload = {"session_id": sid(), "cwd": str(project),
+                              "transcript_path": str(af.closed_transcript(sb.root / "tr612"))}
+            decision, why = guard.decide("Read", {"file_path": inside_src}, closed_payload)
             check("#612-C control: a Read of a source file inside the project is blocked with no CodeGraph call",
                   decision == "block", f"{decision}: {why}")
             sibling_src = str(project / ".claude" / "worktrees" / "w2" / "src" / "Thing.cs")
@@ -602,18 +620,17 @@ def run_escape(w: World) -> None:
         cross = run_hook(w.guard, sb, project, "Read", read_cs(project), s2)
         check("E-5: a ticket issued in one session does not open another session: BLOCKED [control]",
               blocked(cross), describe(cross))
-        # the next prompt clears the tickets
+        # a ticket is keyed to its prompt (issue #262): the next prompt cannot use it, and its fresh block overwrites it
         s3 = sid()
-        run_hook(w.guard, sb, project, "Read", read_cs(project), s3)
-        reset = run_hook(w.reset, sb, project, "", {}, s3, event="UserPromptSubmit",
-                         payload_extra={"prompt": "next question"})
-        check("E-6: the reset hook exits 0", reset.returncode == 0, describe(reset))
-        after = run_hook(w.guard, sb, project, "Read", read_cs(project), s3)
-        check("E-6: after the next prompt the ticket is gone: the identical call is BLOCKED again", blocked(after),
-              describe(after))
+        run_hook(w.guard, sb, project, "Read", read_cs(project), s3, payload_extra={"prompt_id": "prompt-one"})
+        after = run_hook(w.guard, sb, project, "Read", read_cs(project), s3, payload_extra={"prompt_id": "prompt-two"})
+        check("E-6: a ticket does not survive into the next prompt: the identical call under another prompt_id is BLOCKED again",
+              blocked(after), describe(after))
         tickets = list(pfolder(sb, s3).glob("ticket-*")) if pfolder(sb, s3).is_dir() else []
-        check("E-6b: the reset hook deleted the session's tickets (only the fresh block's ticket may remain)",
-              len(tickets) <= 1, "tickets: %s" % [t.name for t in tickets])
+        check("E-6b: only the fresh block's ticket remains (it overwrote the stale one; no hook deletes tickets at a prompt)",
+              len(tickets) == 1, "tickets: %s" % [t.name for t in tickets])
+        retry = run_hook(w.guard, sb, project, "Read", read_cs(project), s3, payload_extra={"prompt_id": "prompt-two"})
+        check("E-6c: and the identical retry inside that second prompt is allowed", allowed(retry, "retry-escape-used"), describe(retry))
         # the ticket name carries a 64 hex call fingerprint
         s4 = sid()
         run_hook(w.guard, sb, project, "Read", read_cs(project), s4)
@@ -624,118 +641,88 @@ def run_escape(w: World) -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------
-# T-*: tracker, marker, reset
+# T-*: the Transcript turn state opens and closes the gate (the tracker, marker and reset hook are retired)
 # --------------------------------------------------------------------------------------------------------------
+def append_lines(path: Path, *lines: str) -> None:
+    """Append ``lines`` to a transcript: a session's transcript only grows."""
+    with open(path, "ab") as fh:
+        fh.write(("\n".join(lines) + "\n").encode("utf-8"))
+
+
 def run_marker(w: World) -> None:
     with af.Sandbox("cgt-") as sb:
-        project = project_of(sb, "trk")
+        H = af.t_human
         cases = [
-            ("codegraph_explore (with mcp_server in the payload)", "mcp__codegraph__codegraph_explore",
-             {"query": "how does X work"}, {"mcp_server": "codegraph"}),
-            ("codegraph_search", "mcp__codegraph__codegraph_search", {"query": "Thing"}, {}),
-            ("an unknown future tool name (codegraph_zz_future_tool)", "mcp__codegraph__codegraph_zz_future_tool",
-             {"anything": 1}, {}),
+            ("codegraph_explore", "mcp__codegraph__codegraph_explore"),
+            ("codegraph_search", "mcp__codegraph__codegraph_search"),
+            ("an unknown future tool name (codegraph_zz_future_tool)", "mcp__codegraph__codegraph_zz_future_tool"),
         ]
-        for number, (label, tool, tool_input, extra) in enumerate(cases):
+        for number, (label, tool) in enumerate(cases):
             project = project_of(sb, "trk-%d" % number)  # a fresh project per case: no leaked legacy sentinel
             session = sid()
-            before = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-            check(f"T-1 control [{label}]: blocked before the tracker ran", blocked(before), describe(before))
-            tracked = run_hook(w.tracker, sb, project, tool, tool_input, session, payload_extra=extra,
-                               event="PostToolUse")
-            check(f"T-1 [{label}]: the tracker exits 0", tracked.returncode == 0, describe(tracked))
-            marker = pfolder(sb, session) / "turn.json"
-            try:
-                body = json.loads(marker.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                body = None
-                reason = "no readable marker at %s (%s)" % (marker, exc)
-            else:
-                reason = ""
-            check(f"T-1 [{label}]: the tracker writes turn.json {{ts, tool, summary, pid, writer, session}} in the session's "
-                  "folder under the Per-user session parent",
-                  isinstance(body, dict) and {"ts", "tool", "summary", "pid", "writer", "session"} <= set(body)
-                  and body.get("tool") == tool, reason or repr(body))
-            check(f"T-1 [{label}]: and stamps it writer=codegraph-turn-tracker, session=<the Session key>",
-                  isinstance(body, dict) and body.get("writer") == "codegraph-turn-tracker"
-                  and body.get("session") == session, repr(body))
-            check(f"T-1 [{label}]: and writes NO legacy <cwd>/.claude/.codegraph-used-this-turn",
-                  not (project / ".claude" / ".codegraph-used-this-turn").exists(), "legacy sentinel exists")
-            after = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-            # The same Read was just blocked, so the retry ticket would also let it through: only the ABSENCE of an
-            # `allowed (` line proves that the marker (step 2) did it. A retry-escape-used allow always prints one.
-            check(f"T-1 [{label}]: the same Read is now allowed by the MARKER (no `allowed (` line: not the retry escape)",
-                  silent_allow(after), describe(after))
-            fresh = run_hook(w.guard, sb, project, "Read", read_cs(project), sid())
-            check(f"T-1 [{label}]: and a FRESH session with the same Read is still BLOCKED [control]", blocked(fresh),
+            transcript = fresh_transcript(sb, [H(1)])
+            before = cut(w, sb, project, None, session, path=transcript)
+            check(f"T-1 control [{label}]: blocked before the CodeGraph call", blocked(before), describe(before))
+            append_lines(transcript, af.t_mcp_use(tool), af.t_tool_result())
+            after = cut(w, sb, project, None, session, path=transcript)
+            # The blocked call above issued a retry ticket for this exact Read, so the retry escape would also let it through:
+            # only the ABSENCE of an `allowed (` line proves that the transcript did it.
+            check(f"T-1 [{label}]: after the tool use the same Read is allowed by the TRANSCRIPT (no `allowed (` line: not the "
+                  "retry escape)", silent_allow(after), describe(after))
+            folder = pfolder(sb, session)
+            check(f"T-1 [{label}]: and no turn.json, no mcp-seen and no legacy sentinel is written (the tracker is retired)",
+                  not (folder / "turn.json").exists() and not (folder / "mcp-seen").exists()
+                  and not (project / ".claude" / ".codegraph-used-this-turn").exists(), sorted(p.name for p in folder.iterdir()))
+            fresh = cut(w, sb, project, [H(1)])
+            check(f"T-1 [{label}]: and a FRESH session with its own closed transcript is still BLOCKED [control]", blocked(fresh),
                   describe(fresh))
 
-        # a tool that is not a CodeGraph tool writes nothing
+        project = project_of(sb, "trk-other")
+        # a tool that is not a CodeGraph tool opens nothing
         for tool in ("Bash", "mcp__other__codegraph_search"):
-            session = sid()
-            run_hook(w.tracker, sb, project, tool, {"command": "ls"}, session, event="PostToolUse")
-            check(f"T-2: {tool} writes no marker",
-                  not (pfolder(sb, session) / "turn.json").exists(), "marker exists")
+            line = af.t_assistant({"type": "tool_use", "id": "t", "name": tool, "input": {"command": "ls"}})
+            proc = cut(w, sb, project, [H(1), line])
+            check(f"T-2: {tool} does not open the gate", blocked(proc), describe(proc))
 
-        # the marker survives a directory change (cd / EnterWorktree)
+        # the gate follows the transcript across a directory change (cd / EnterWorktree)
         session = sid()
         here, there = project / "src", project / "elsewhere" / "deeper"
-        run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, session, cwd=here,
-                 event="PostToolUse")
-        moved = run_hook(w.guard, sb, project, "Read", read_cs(project), session, cwd=there)
-        check("T-3: a marker written with cwd=A allows a call made with cwd=B in the SAME session", allowed(moved),
-              describe(moved))
+        transcript = fresh_transcript(sb, [H(1), af.t_mcp_use("mcp__codegraph__codegraph_explore")])
+        run_hook(w.guard, sb, project, "Read", read_cs(project), session, cwd=here, transcript=transcript)
+        moved = run_hook(w.guard, sb, project, "Read", read_cs(project), session, cwd=there, transcript=transcript)
+        check("T-3: the same session's transcript opens the gate for a call made with another cwd", allowed(moved), describe(moved))
         other = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), cwd=there)
-        check("T-3: the marker is keyed to the session: ANOTHER session is BLOCKED [control]", blocked(other),
-              describe(other))
+        check("T-3: another session with its own closed transcript is BLOCKED [control]", blocked(other), describe(other))
 
-        # the reset hook clears marker, tickets and the legacy sentinel
+        # a new human prompt closes the gate again (no hook deletes anything)
         session = sid()
+        transcript = fresh_transcript(sb, [H(1), af.t_mcp_use(), af.t_tool_result()])
+        opened = cut(w, sb, project, None, session, path=transcript)
+        append_lines(transcript, H(2))
+        closed = cut(w, sb, project, None, session, path=transcript)
+        check("T-4: open, then a new human prompt: the guard blocks the same Read again",
+              silent_allow(opened) and blocked(closed), describe(opened) + " / " + describe(closed))
+
+        # the legacy sentinel no longer opens the gate (it is not even cleaned up any more)
         legacy = project / ".claude" / ".codegraph-used-this-turn"
         legacy.parent.mkdir(parents=True, exist_ok=True)
         legacy.write_text("legacy\n", encoding="utf-8")
-        run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_search", {"query": "q"}, session,
-                 event="PostToolUse")
-        run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "again"})
-        check("T-4: the reset hook deletes this session's turn.json",
-              not (pfolder(sb, session) / "turn.json").exists(), "turn.json still there")
-        check("T-4: and a legacy <cwd>/.claude/.codegraph-used-this-turn if present", not legacy.exists(),
-              "legacy sentinel still there")
-        closed = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("T-4: the guard blocks the same Read again", blocked(closed), describe(closed))
-
-        # the legacy sentinel no longer opens the gate (it is only cleaned up)
-        session = sid()
-        legacy.write_text("legacy\n", encoding="utf-8")
-        proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("T-5: a legacy <cwd>/.claude/.codegraph-used-this-turn does NOT open the gate: BLOCKED", blocked(proc),
-              describe(proc))
+        proc = cut(w, sb, project, [H(1)])
+        check("T-5: a legacy <cwd>/.claude/.codegraph-used-this-turn does NOT open the gate: BLOCKED", blocked(proc), describe(proc))
         legacy.unlink()
-        # a subagent shares the parent's folder: the parent's marker lets the subagent through
-        session = sid()
-        run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, session,
-                 event="PostToolUse")
-        sub = run_hook(w.guard, sb, project, "Read", read_cs(project), session,
-                       payload_extra={"agent_id": "a1", "agent_type": "general-purpose"})
-        check("T-6: a subagent payload carries the PARENT session_id: the parent's marker allows it (step 2, before the "
-              "agent_id escape of step 3: no `fail-open:subagent`)",
-              allowed(sub) and "fail-open:subagent" not in sub.stderr, describe(sub))
-        # T-7: the other direction, where the sharing matters: a SUBAGENT's tracker call (parent session_id plus
-        # agent_id) opens the gate for the PARENT, which has no agent_id escape of its own.
-        session = sid()
-        before = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("T-7 control: the parent's Read is blocked before any CodeGraph call", blocked(before), describe(before))
-        session = sid()
-        tracked = run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, session,
-                           payload_extra={"agent_id": "a1", "agent_type": "general-purpose"}, event="PostToolUse")
-        parent = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("T-7: a tracker call made by a subagent writes the marker in the parent's folder: the parent's plain "
-              "Read is allowed with no `allowed (` line", tracked.returncode == 0 and silent_allow(parent),
-              describe(tracked) + " / " + describe(parent))
-        stranger = run_hook(w.guard, sb, project, "Read", read_cs(project), sid())
-        check("T-7: and another session is still BLOCKED [control]", blocked(stranger), describe(stranger))
 
-        # the reset and tracker hook files never use is_junction / isjunction (Python 3.12+ only)
+        # a subagent's own call is allowed at step 3 (its transcript is another file and is never read)
+        sub = cut(w, sb, project, [H(1)], extra={"agent_id": "a1", "agent_type": "general-purpose"})
+        check("T-6: a subagent's own Read is allowed at step 3 (fail-open:subagent), not by the parent's transcript",
+              allowed(sub, "fail-open:subagent"), describe(sub))
+        # T-7: where it matters: the main session dispatched the subagent (C-7), so its own next Read is allowed
+        before = cut(w, sb, project, [H(1)])
+        check("T-7 control: the main session's Read is blocked before any dispatch", blocked(before), describe(before))
+        parent = cut(w, sb, project, [H(1), af.t_agent_use(), af.t_tool_result()])
+        check("T-7: an Agent dispatch in the current turn opens the gate for the main session: allowed, no `allowed (` line",
+              silent_allow(parent), describe(parent))
+
+        # the hook files never use is_junction / isjunction (Python 3.12+ only)
         for hook in (w.reset, w.tracker, w.guard):
             text = hook.read_text(encoding="utf-8")
             check(f"I-5 [control]: {hook.name} does not use is_junction / isjunction",
@@ -1385,7 +1372,9 @@ def run_review_round_two(w: World) -> None:
 # X-*: the temp folder pruner, through the before_remove seam
 # --------------------------------------------------------------------------------------------------------------
 def load_reset_module(sb: af.Sandbox, w: World):
-    spec = importlib.util.spec_from_file_location("codegraph_turn_reset_under_test", w.reset)
+    """The guard, loaded in-process: since the cut-over (issue #262, C-5) the pruner, the Connection probe and the notice live in
+    the guard's own file. The function keeps its old name so the rows that exercise them read as before."""
+    spec = importlib.util.spec_from_file_location("codegraph_guard_pruner_under_test", w.guard)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -1414,8 +1403,8 @@ def run_pruner(w: World) -> None:
                 mod = load_reset_module(sb, w)
                 prune = getattr(mod, "prune_session_folders", None)  # the contract's named seam: no reflection
                 if prune is None:
-                    check("X-0: the reset hook defines prune_session_folders(temp_root, before_remove=...)", False,
-                          "codegraph-turn-reset.py has no prune_session_folders")
+                    check("X-0: the guard defines prune_session_folders(root, before_remove=...)", False,
+                          "codegraph-first-guard.py has no prune_session_folders")
                     return
                 run_pruner_cases(sb, prune)
             finally:
@@ -1645,24 +1634,24 @@ def run_pruner_cases(sb: af.Sandbox, prune) -> None:
 
 
 def run_prune_once(w: World) -> None:
-    """The reset hook prunes the Per-user session parent (never the temp folder) once per session (Prune flag), as a hook
+    """The guard's prompt row prunes the Per-user session parent (never the temp folder) once per session (Prune flag), as a hook
     process, on the first prompt only."""
     with af.Sandbox("cgy-") as sb:
         project = project_of(sb, "prune")
         session = sid()
         first_old = old_session(af.session_parent(sb.home), "first-old")
-        done = run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "one"})
+        done = run_hook(w.guard, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "one"}, argv=["notice"])
         check("X-8: the first prompt of a session exits 0", done.returncode == 0, describe(done))
         check("X-8: the first prompt prunes an old, known-file session folder of another session",
               not first_old.exists(), "old folder still exists")
         check("X-8: and leaves a `pruned` flag in this session's folder",
               (pfolder(sb, session) / "pruned").exists(), "no pruned flag")
         second_old = old_session(af.session_parent(sb.home), "second-old")
-        run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "two"})
+        run_hook(w.guard, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "two"}, argv=["notice"])
         check("X-8: the second prompt of the SAME session does not prune again", second_old.is_dir(),
               "pruned a second time")
         third = sid()
-        run_hook(w.reset, sb, project, "", {}, third, event="UserPromptSubmit", payload_extra={"prompt": "three"})
+        run_hook(w.guard, sb, project, "", {}, third, event="UserPromptSubmit", payload_extra={"prompt": "three"}, argv=["notice"])
         check("X-8: another session prunes on its own first prompt", not second_old.exists(),
               "second old folder still exists")
 
@@ -1699,15 +1688,13 @@ def run_state(w: World) -> None:
         # S-3 a session id ending in '.' (Windows strips the dot) never shares a folder with the id without it
         base_id = sid()
         project = project_of(sb, "s3")
-        run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, base_id + ".",
-                 event="PostToolUse")
+        opened = fresh_transcript(sb, [af.t_human(1), af.t_mcp_use()])
+        run_hook(w.guard, sb, project, "Read", read_cs(project), base_id + ".", transcript=opened)
         other = run_hook(w.guard, sb, project, "Read", read_cs(project), base_id)
-        check("S-3: the marker of session 'X.' does not open the gate of session 'X' (no folder shared once Windows "
-              "strips the dot)", blocked(other), describe(other))
-        run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, base_id + "k",
-                 event="PostToolUse")
-        own = run_hook(w.guard, sb, project, "Read", read_cs(project), base_id + "k")
-        check("S-3 [control]: a plain session id keeps working: its own marker opens its own gate", silent_allow(own),
+        check("S-3: the state of session 'X.' (its cursor included) does not reach the gate of session 'X' (no folder shared once "
+              "Windows strips the dot)", blocked(other), describe(other))
+        own = run_hook(w.guard, sb, project, "Read", read_cs(project), base_id + "k", transcript=opened)
+        check("S-3 [control]: a plain session id keeps working: its own open transcript opens its own gate", silent_allow(own),
               describe(own))
 
 
@@ -1732,13 +1719,10 @@ def run_link_writes(w: World) -> None:
         check("L control: the guard writes availability.json and a ticket-<64 hex> into the Session folder",
               blocked(done) and (folder / "availability.json").is_file() and len(list(folder.glob("ticket-*"))) == 1,
               describe(done) + " / " + str(sorted(p.name for p in folder.glob("*"))))
-        session = sid()
-        run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, session,
-                 event="PostToolUse")
-        check("L control: the tracker writes turn.json", (pfolder(sb, session) / "turn.json").is_file(),
-              "no turn.json")
+        check("L control: the guard writes the Transcript cursor", (folder / "transcript-cursor.json").is_file(),
+              str(sorted(p.name for p in folder.glob("*"))))
         for kind_label, kind in kinds:
-            for state_name in ("availability.json", "ticket", "turn.json"):
+            for state_name in ("availability.json", "ticket", "transcript-cursor.json"):
                 session = sid()
                 folder = pfolder(sb, session, True)
                 folder.mkdir()
@@ -1750,11 +1734,7 @@ def run_link_writes(w: World) -> None:
                 if not af.make_file_link(folder / name, decoy, kind):
                     skip(label, "the OS refused to create the %s" % kind_label)
                     continue
-                if state_name == "turn.json":
-                    proc = run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, session,
-                                    event="PostToolUse")
-                else:
-                    proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
+                proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
                 after = decoy.read_text(encoding="utf-8", errors="replace")
                 check(f"{label}: the hook does not write through the link: the decoy file is unchanged",
                       after == decoy_text, "decoy now holds %r; %s" % (after[:120], describe(proc)))
@@ -1819,8 +1799,9 @@ PARITY_OWNS = [UNC_OWN, "//OWN-259.invalid/team/repo", "\\\\other-host-259.inval
 
 
 def run_hop_rows(mods, six=None) -> None:
-    """Item 11 (normalise, then check) and item 14 (the four copies of _hop_allowed agree; since issue #271 the SIX copies
-    of _remote_host and of _own_spellings agree: ``six`` = the four plus the codegraph tracker and reset hook)."""
+    """Item 11 (normalise, then check) and item 14 (the four copies of _hop_allowed agree; since issue #271 the copies of
+    _remote_host and of _own_spellings agree: ``six`` = the four plus the codegraph tracker and reset hook. Since issue #262 the
+    two disabled hooks are no longer active copies, so the caller passes the four only)."""
     six = six or mods
     for label, mod in mods:
         fn = getattr(mod, "_hop_allowed", None)
@@ -1834,7 +1815,7 @@ def run_hop_rows(mods, six=None) -> None:
                 got = "raised %r" % (exc,)
             check(f"W-11 [{label}] _hop_allowed({target!r}, own {own!r}) is {want}: {why}", got is want, "got %r" % (got,))
 
-    # item 14: one list of inputs through the copies (_remote_host: six, since issue #271)
+    # item 14: one list of inputs through the copies (_remote_host: six since issue #271, four since the cut-over of issue #262)
     for target in PARITY_TARGETS:
         answers = {}
         for label, mod in six:
@@ -1842,8 +1823,8 @@ def run_hop_rows(mods, six=None) -> None:
                 answers[label] = mod._remote_host(target)
             except Exception as exc:  # noqa: BLE001
                 answers[label] = "raised %r" % (exc,)
-        check(f"W-14 parity: the six copies of _remote_host (helper, guard, bridge, installer, tracker, reset) agree on {target!r}",
-              len(answers) == 6 and len({repr(v) for v in answers.values()}) == 1, repr(answers))
+        check(f"W-14 parity: the four copies of _remote_host (helper, guard, bridge, installer) agree on {target!r}",
+              len(answers) == 4 and len({repr(v) for v in answers.values()}) == 1, repr(answers))
     for own in PARITY_OWNS:
         differing = []
         for target in PARITY_TARGETS:
@@ -1892,9 +1873,9 @@ def run_hop_rows(mods, six=None) -> None:
                 answers[label] = repr(tuple(mod._own_spellings(path)))
             except Exception as exc:  # noqa: BLE001
                 answers[label] = "raised %r" % (exc,)
-        if len(set(answers.values())) != 1 or len(answers) != 6:
+        if len(set(answers.values())) != 1 or len(answers) != 4:
             differing.append((path, answers))
-    check(f"W-14 parity: the six copies of _own_spellings (helper, guard, bridge, installer, tracker, reset) agree on "
+    check(f"W-14 parity: the four copies of _own_spellings (helper, guard, bridge, installer) agree on "
           f"{len(spelling_inputs)} inputs", not differing, "differ on: %r" % (differing[:3],))
 
 
@@ -2128,9 +2109,7 @@ def run_review_round_three_hops(w: World) -> None:
         return
     fi = load_installer()
     mods = [("helper", pp), ("guard", guard_mod), ("bridge", bridge), ("installer", fi)]
-    tracker_mod = load_module(w.tracker, "codegraph_tracker_round_three")
-    reset_mod = load_module(w.reset, "codegraph_reset_round_three")
-    run_hop_rows(mods, mods + [("tracker", tracker_mod), ("reset", reset_mod)])
+    run_hop_rows(mods)  # the four active copies (helper, guard, bridge, installer): the disabled tracker and reset copies left the set
     copies = [("helper", getattr(pp, "worktree_own_root", None)),
               ("guard inline copy", getattr(guard_mod, "_inline_own_root", None)),
               ("bridge inline copy", getattr(bridge, "_inline_worktree_own_root", None))]
@@ -2262,7 +2241,8 @@ def run_older_helper_real(w: World) -> None:
                 with mock.patch.dict(os.environ, af.isolated_env(sb.home, sb.tmp, project), clear=True), watch_fake_host(touched):
                     os.chdir(str(project))
                     decision, reason = old_guard.decide("Read", {"file_path": str(project / "src" / "Thing.cs")},
-                                                        {"session_id": sid(), "cwd": str(project / "src")})
+                                                        {"session_id": sid(), "cwd": str(project / "src"),
+                                                         "transcript_path": str(af.closed_transcript(sb.root / "w13-tr"))})
             except Exception as exc:  # noqa: BLE001
                 decision, reason = "raised", repr(exc)
             finally:
@@ -2296,33 +2276,20 @@ def run_older_helper_real(w: World) -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------
-# W-14: the reset hook's ticket pattern has an escaped dot
+# W-14: the pruner's known-name pattern has an escaped dot (the guard's KNOWN_FILE_RE)
 # --------------------------------------------------------------------------------------------------------------
 def run_ticket_pattern(w: World) -> None:
-    with af.Sandbox("cgt-") as sb:
-        with mock.patch.dict(os.environ, af.isolated_env(sb.home, sb.tmp), clear=True):
-            saved = tempfile.tempdir
-            tempfile.tempdir = str(sb.tmp)
-            try:
-                mod = load_reset_module(sb, w)
-                folder = sb.tmp / (af.CODEGRAPH_SESSION_PREFIX + "w14")
-                folder.mkdir()
-                names = ("turn.json", "ticket-" + "b" * 64, ".tmp-0123456789abcdef", "xtmp-0123456789abcdef",
-                         "Ttmp-0123456789abcdef", "-tmp-0123456789abcdef", "availability.json")
-                for name in names:
-                    (folder / name).write_text("{}\n", encoding="utf-8")
-                mod._delete_marker_and_tickets(str(folder))
-                left = sorted(p.name for p in folder.iterdir())
-                check("W-14 control: the next prompt clears the marker, a real ticket and a real `.tmp-<16 hex>` sibling",
-                      "turn.json" not in left and ("ticket-" + "b" * 64) not in left and ".tmp-0123456789abcdef" not in left,
-                      "left: %s" % left)
-                check("W-14: a file named `xtmp-<16 hex>` is NOT treated as a ticket or temp file (the dot is escaped)",
-                      "xtmp-0123456789abcdef" in left, "deleted; left: %s" % left)
-                check("W-14: nor `Ttmp-<16 hex>` or `-tmp-<16 hex>`",
-                      "Ttmp-0123456789abcdef" in left and "-tmp-0123456789abcdef" in left, "left: %s" % left)
-                check("W-14 control: availability.json is not a ticket and stays", "availability.json" in left, "left: %s" % left)
-            finally:
-                tempfile.tempdir = saved
+    mod = load_module(w.guard, "codegraph_guard_known_names")
+    known = ("turn.json", "ticket-" + "b" * 64, ".tmp-0123456789abcdef", "availability.json", "mcp-seen", "pruned",
+             "transcript-cursor.json", "transcript-cursor.12345.tmp")
+    lookalikes = ("xtmp-0123456789abcdef", "Ttmp-0123456789abcdef", "-tmp-0123456789abcdef", "turnXjson", "ticket-" + "b" * 63,
+                  "transcript-cursor.abc.tmp", "transcript-cursorXjson")
+    check("W-14: every known session-folder name matches the pruner's pattern",
+          all(mod.KNOWN_FILE_RE.fullmatch(n) for n in known), [n for n in known if not mod.KNOWN_FILE_RE.fullmatch(n)])
+    check("W-14: no look-alike name matches (the dots are escaped), so a folder holding one is kept whole",
+          not any(mod.KNOWN_FILE_RE.fullmatch(n) for n in lookalikes), [n for n in lookalikes if mod.KNOWN_FILE_RE.fullmatch(n)])
+    check("W-14: the guard has no function that deletes a ticket or a marker at a prompt (no hook clears tickets any more)",
+          not hasattr(mod, "_delete_marker_and_tickets") and not hasattr(mod, "_delete_legacy_sentinels"))
 
 
 def run_review_round_three(w: World) -> None:
@@ -2362,7 +2329,7 @@ def names_problem(stderr: str, project: Path, token: str) -> bool:
 
 
 def run_inproc(mod, payload: dict, env: dict, lstat_for: Path | None = None, stat_over: dict | None = None,
-               no_access: tuple = (), fake_uid: int | None = None) -> tuple:
+               no_access: tuple = (), fake_uid: int | None = None, argv: list | None = None) -> tuple:
     """Run ``mod.main()`` in this process on ``payload`` with ``env`` as the whole environment; return (exit code, stderr).
     ``lstat_for``: os.lstat raises ValueError for that path and everything inside it, and delegates for any other path
     (the check-failed row: one path only, so no earlier step can answer first).
@@ -2419,6 +2386,7 @@ def run_inproc(mod, payload: dict, env: dict, lstat_for: Path | None = None, sta
     before = {d: real_log_size(d) for d in real_dirs}
     # tempfile.tempdir is pinned to the fixture TMP, so even a hook that still uses the temp folder cannot reach the REAL one
     with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+            mock.patch.object(sys, "argv", [getattr(mod, "__file__", "guard")] + list(argv or [])), \
             contextlib.redirect_stderr(err), mock.patch("os.lstat", fake_lstat), \
             mock.patch.object(tempfile, "tempdir", env.get("TMP")), \
             mock.patch.dict(log_globals if patched_log else {}, patched_log), \
@@ -2446,8 +2414,10 @@ def real_log_size(folder: Path) -> int:
 
 
 def guard_payload(project: Path, session: str, **extra) -> dict:
+    """A guard payload with a CLOSED transcript (the guard decides from the transcript: a payload with none fails open)."""
+    transcript = af.closed_transcript(Path(project).parent / "guard-payload-transcripts", "closed-%s.jsonl" % session)
     body = {"session_id": session, "cwd": str(project), "hook_event_name": "PreToolUse", "tool_name": "Read",
-            "tool_input": read_cs(project)}
+            "tool_input": read_cs(project), "transcript_path": str(transcript)}
     body.update(extra)
     return body
 
@@ -2472,17 +2442,18 @@ def run_planted_state(w: World) -> None:
               "removed)", planted.is_file() and planted_ticket.is_file(), "planted files changed")
         mine = sid()
         af.write_marker(af.session_parent(sb.home), mine)
-        ok = run_hook(w.guard, sb, project, "Read", read_cs(project), mine)
-        check("Q-2 [control]: the same marker under the Per-user session parent opens the gate (silent allow)",
-              silent_allow(ok), describe(ok))
+        still = run_hook(w.guard, sb, project, "Read", read_cs(project), mine)
+        check("Q-2 [control]: a turn.json under the Per-user session parent opens nothing either (the marker is retired): BLOCKED",
+              blocked(still), describe(still))
+        mine2 = sid()
+        ok = run_hook(w.guard, sb, project, "Read", read_cs(project), mine2, transcript=af.open_transcript(sb.root / "q2"))
+        check("Q-2 [control]: an open transcript opens the gate (silent allow)", silent_allow(ok), describe(ok))
         before = sorted(p.name for p in sb.tmp.iterdir())
         session = sid()
         run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, session,
-                 event="PostToolUse")
-        run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "next"})
+        run_hook(w.guard, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "next"}, argv=["notice"])
         after = sorted(p.name for p in sb.tmp.iterdir())
-        check("Q-2: no hook creates or removes anything in the system temp folder (guard, tracker, reset)",
+        check("Q-2: no hook creates or removes anything in the system temp folder (guard, prompt row)",
               before == after, "before %s / after %s" % (before, after))
         check("Q-2 [control]: the hooks did keep this session's state under the Per-user session parent",
               pfolder(sb, session).is_dir(), "no folder at %s" % pfolder(sb, session))
@@ -2499,8 +2470,8 @@ def run_parent_pruner(w: World) -> None:
         link = parent / (af.CODEGRAPH_SESSION_PREFIX + "linked")
         linked = af.make_dir_link(link, link_target)
         session = sid()
-        done = run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "one"})
-        check("Q-3: the reset hook exits 0 on a first prompt", done.returncode == 0, describe(done))
+        done = run_hook(w.guard, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "one"}, argv=["notice"])
+        check("Q-3: the prompt row exits 0 on a first prompt", done.returncode == 0, describe(done))
         check("Q-3 [control]: it prunes this user's own old known-file folder in the Per-user session parent",
               not own_old.exists(), "own old folder still exists")
         check("Q-3: an old known-file folder in the shared TEMP folder is left alone (the temp folder is never listed)",
@@ -2522,7 +2493,7 @@ def run_parent_pruner(w: World) -> None:
         mod = load_reset_module(sb, w)
         prune = getattr(mod, "prune_session_folders", None)
         if prune is None:
-            check("Q-3: the reset hook defines prune_session_folders", False, "not defined")
+            check("Q-3: the guard defines prune_session_folders", False, "not defined")
         else:
             temp_only = old_session(sb.tmp, "temp-only")
             prune(str(parent), before_remove=lambda p: None)
@@ -2535,11 +2506,11 @@ def run_parent_pruner(w: World) -> None:
             foreign = old_session(parent, "foreign-owner")
             for entry in [foreign] + list(foreign.iterdir()):
                 os.chown(str(entry), 12345, 12345)
-            run_hook(w.reset, sb, project, "", {}, sid(), event="UserPromptSubmit", payload_extra={"prompt": "two"})
+            run_hook(w.guard, sb, project, "", {}, sid(), event="UserPromptSubmit", payload_extra={"prompt": "two"}, argv=["notice"])
             check("Q-3: a folder owned by another user is kept", foreign.is_dir(), "foreign-owned folder was removed")
 
 
-# ---- criterion 4: the Foreign marker opens the gate and is logged once ----------------------------------------------
+# ---- criterion 4 (retired by issue #262): a leftover turn.json of ANY shape opens nothing and is never judged ---------------
 def run_foreign_marker(w: World) -> None:
     with af.Sandbox("cgq4-") as sb:
         parent = af.session_parent(sb.home)
@@ -2555,31 +2526,20 @@ def run_foreign_marker(w: World) -> None:
             folder.mkdir()
             (folder / "turn.json").write_text("{not json\n", encoding="utf-8")
 
-        cases = [("an unstamped (0.15.2 shape) marker", "missing-stamp", lambda s: af.write_marker(parent, s, stamped=False)),
-                 ("a marker stamped for another session", "other-session", other_session),
-                 ("an unreadable marker", "unreadable", unreadable)]
-        for number, (label, cause, setup) in enumerate(cases):
+        cases = [("an unstamped (0.15.2 shape) marker", lambda s: af.write_marker(parent, s, stamped=False)),
+                 ("a marker stamped for another session", other_session), ("an unreadable marker", unreadable),
+                 ("a stamped OWN marker", lambda s: af.write_marker(parent, s))]
+        for number, (label, setup) in enumerate(cases):
             project = project_of(sb, "fm-%d" % number)
             make_logs(project)
             session = sid()
             setup(session)
             first = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
             second = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-            check(f"Q-4 [{label}]: a Foreign marker still opens the gate on both calls", allowed(first) and allowed(second)
-                  and not blocked(first) and not blocked(second), describe(first) + " / " + describe(second))
-            records = events(project, "foreign-marker")
-            check(f"Q-4 [{label}]: exactly ONE foreign-marker record after two calls", len(records) == 1,
-                  "records: %r" % records)
-            check(f"Q-4 [{label}]: and the record names the cause {cause}", bool(records) and cause in json.dumps(records[0]),
-                  "records: %r" % records)
-        project = project_of(sb, "fm-own")
-        make_logs(project)
-        session = sid()
-        af.write_marker(parent, session)
-        own = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("Q-4 [control]: a stamped OWN marker opens the gate silently", silent_allow(own), describe(own))
-        check("Q-4 [control]: and logs no foreign-marker record", events(project, "foreign-marker") == [],
-              repr(events(project, "foreign-marker")))
+            check(f"Q-4 [{label}]: a leftover turn.json opens nothing: the first call BLOCKS and the identical retry is the escape",
+                  blocked(first) and allowed(second, "retry-escape-used"), describe(first) + " / " + describe(second))
+            check(f"Q-4 [{label}]: and no foreign-marker record or line exists any more", events(project, "foreign-marker") == []
+                  and "turn marker" not in first.stderr + second.stderr, repr(events(project, "foreign-marker")))
 
 
 # ---- the Parent base rule: a pure table over both OS branches, and parity of the three hooks -------------------------
@@ -2732,41 +2692,26 @@ def parity_differences(paths: list) -> list:
 
 
 def run_verdict_function_parity(w: World) -> None:
-    paths = [w.guard, w.tracker, w.reset]
-    differ = parity_differences(paths)
-    check("Q-parity: resolve_session_parent, _create_parent, session_folder_problem, _base_shown, session_parent_base, "
-          "_remote_host and _own_spellings are textually identical in the guard, the tracker and the reset hook",
-          differ == [], "differ or missing: %s" % differ)
-    check("Q-parity [round 3]: _is_link_stat (code, docstring excluded) and the constants _LOCAL_DEVICE_HOST_RE, PARENT_NAME, "
-          "_REPARSE_POINT and PARENT_PROBLEMS (round 4) are identical in the three hooks",
-          not [n for n in differ if n in SHARED_NODOC_FUNCTIONS + SHARED_CONSTANTS],
-          "differ or missing: %s" % differ)
-    # the row must BITE: a throwaway copy of the tracker with one check edited out is reported, then deleted with its sandbox
-    with af.Sandbox("cgqpar-") as sb:
-        mutations = {"resolve_session_parent": ('"open-mode"', '"open-modes"'),
-                     "session_folder_problem": ('"session-foreign-owner"', '"session-foreign"'),
-                     "_create_parent": ('"cannot-create"', '"cannot-created"'),
-                     "_is_link_stat": ("& _REPARSE_POINT", "& 0"),
-                     "_LOCAL_DEVICE_HOST_RE": ('r"\?[a-z]:"', 'r"\?[a-y]:"'),
-                     "PARENT_NAME": ('"auto-improve-codegraph"', '"auto-improve-codegraphs"'),
-                     "_REPARSE_POINT": ("0x400", "0x401"),
-                     "PARENT_PROBLEMS": ('"open-mode"', '"open-modes"')}
-        for fn_name, (old, new) in mutations.items():
-            text = w.tracker.read_text(encoding="utf-8")
-            body = function_source(w.tracker, fn_name) or constant_source(w.tracker, fn_name) or ""
-            if not body or old not in body:
-                check(f"Q-parity [mutation proof {fn_name}]: the mutation anchor exists in the tracker's copy", False,
-                      "anchor %r not found in %s" % (old, fn_name))
-                continue
-            copy = sb.root / ("mut-" + fn_name + ".py")
-            copy.write_text(text.replace(body, body.replace(old, new, 1), 1), encoding="utf-8")
-            found = parity_differences([w.guard, copy, w.reset])
-            check(f"Q-parity [mutation proof]: editing {fn_name} in one copy makes the parity row report it",
-                  fn_name in found, "reported: %s" % found)
+    """C-6: the Per-user session parent code has ONE active copy, in the guard. The disabled tracker and reset copies left the parity
+    set; they stay byte-identical to their last release (a released hash of their ``disabled`` entry), and the guard's block
+    still defines every function and constant the three hooks used to share."""
+    present = [n for n in SHARED_VERDICT_FUNCTIONS + SHARED_NODOC_FUNCTIONS if function_source(w.guard, n) is not None]
+    missing = [n for n in SHARED_VERDICT_FUNCTIONS + SHARED_NODOC_FUNCTIONS if n not in present]
+    check("Q-parity: the guard defines resolve_session_parent, _create_parent, session_folder_problem, _base_shown, "
+          "session_parent_base, _remote_host, _own_spellings and _is_link_stat", not missing, "missing in the guard: %s" % missing)
+    check("Q-parity: and the constants _LOCAL_DEVICE_HOST_RE, PARENT_NAME, _REPARSE_POINT and PARENT_PROBLEMS",
+          all(constant_source(w.guard, n) is not None for n in SHARED_CONSTANTS),
+          [n for n in SHARED_CONSTANTS if constant_source(w.guard, n) is None])
+    disabled = {e[af.DISABLED_HOOK]: e for e in af.disabled_entries(ADD_ON)}
+    for name, path in ((TRACKER_FILE, w.tracker), (RESET_FILE, w.reset)):
+        digest = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        check(f"Q-parity [{name}]: the disabled copy is byte-identical (folded) to a released copy, so no active edit ever reached it",
+              digest in disabled[name][af.DISABLED_HASHES], digest)
+    # (the parity set is the guard alone: a later edit to the guard's block is not held to the frozen copies)
 
 
 def run_parent_rule_table(w: World) -> None:
-    hooks = [("guard", w.guard), ("tracker", w.tracker), ("reset", w.reset)]
+    hooks = [("guard", w.guard)]  # the one active copy (C-6)
     answers: dict = {}
     decoy = {"LOCALAPPDATA": "C:\\decoy-from-os-environ", "XDG_CACHE_HOME": "/decoy-from-os-environ",
              "HOME": "/decoy-home-from-os-environ"}
@@ -2916,20 +2861,18 @@ def run_unusable_parent(w: World) -> None:
             if clean_above("Q-9 no-index", noidx):
                 check(f"Q-9 [{label}]: a project with no index is still let through (fail-open:no-index), with no log record",
                       allowed(free, "fail-open:no-index") and events(noidx, "fail-open") == [], describe(free))
-            # the tracker writes no marker and says so; the reset hook prunes nothing and still removes the legacy sentinel
-            tracked = run_hook(w.tracker, sb, project, "mcp__codegraph__codegraph_explore", {"query": "q"}, sid(),
-                               extra_env=extra, event="PostToolUse")
-            check(f"Q-9 [{label}]: the tracker exits 0, writes no marker and prints that the gate stays shut",
-                  tracked.returncode == 0 and "the gate stays shut" in tracked.stderr and problem in tracked.stderr
-                  and list(sb.root.rglob("turn.json")) == [], describe(tracked))
+            # the prompt row prunes nothing through the unusable parent, says why in one line (no claim about the gate), exits 0
+            # and leaves the legacy sentinel alone (nothing deletes it since the cut-over)
             legacy = project / ".claude" / ".codegraph-used-this-turn"
             legacy.parent.mkdir(parents=True, exist_ok=True)
             legacy.write_text("legacy\n", encoding="utf-8")
             bait = old_session(link_target, "bait") if link_target is not None else None
-            reset = run_hook(w.reset, sb, project, "", {}, sid(), extra_env=extra, event="UserPromptSubmit",
-                             payload_extra={"prompt": "next"})
-            check(f"Q-9 [{label}]: the reset hook exits 0, prints the same line, and removes the legacy sentinel",
-                  reset.returncode == 0 and "the gate stays shut" in reset.stderr and not legacy.exists(), describe(reset))
+            reset = run_hook(w.guard, sb, project, "", {}, sid(), extra_env=extra, event="UserPromptSubmit",
+                             payload_extra={"prompt": "next"}, argv=["notice"])
+            check(f"Q-9 [{label}]: the prompt row exits 0, prints the one line naming the problem, makes no 'gate stays shut' claim",
+                  reset.returncode == 0 and "cannot be used" in reset.stderr and ("(" + problem + ")") in reset.stderr
+                  and "gate stays shut" not in reset.stderr, describe(reset))
+            check(f"Q-9 [{label}]: and deletes no legacy sentinel", legacy.exists(), describe(reset))
             if bait is not None:
                 check(f"Q-9 [{label}]: and prunes nothing through the unusable parent", bait.is_dir()
                       and all((bait / n).exists() for n in KNOWN), "the folder behind the link was touched")
@@ -3033,18 +2976,14 @@ def run_check_failed(w: World) -> None:
               "ValueError" in err and names_problem(err, project, "check-failed"), err[-500:])
         check("Q-9f: and the block is logged with reason session-state-unusable",
               parent_problem_events(project, "session-state-unusable") != [], repr(events(project, "block")))
-        tracker_mod = load_module(w.tracker, "codegraph_tracker_checkfailed")
-        code, err = run_inproc(tracker_mod, {"session_id": sid(), "cwd": str(project), "tool_name":
-                               "mcp__codegraph__codegraph_explore", "tool_input": {"query": "q"}}, env, lstat_for=parent)
-        check("Q-9f: the tracker writes no marker (exit 0) and prints that the gate stays shut",
-              code == 0 and "the gate stays shut" in err and list(parent.rglob("turn.json")) == [old_in_parent / "turn.json"], "exit=%s %r" % (code, err))
         legacy = project / ".claude" / ".codegraph-used-this-turn"
         legacy.parent.mkdir(parents=True, exist_ok=True)
         legacy.write_text("legacy\n", encoding="utf-8")
-        reset_mod = load_module(w.reset, "codegraph_reset_checkfailed")
-        code, err = run_inproc(reset_mod, {"session_id": sid(), "cwd": str(project), "prompt": "next"}, env, lstat_for=parent)
-        check("Q-9f: the reset hook deletes and prunes nothing under the parent (exit 0), and removes the legacy sentinel",
-              code == 0 and old_in_parent.is_dir() and not legacy.exists(), "exit=%s old exists=%s legacy=%s %r"
+        notice_mod = load_module(w.guard, "codegraph_guard_notice_checkfailed")
+        code, err = run_inproc(notice_mod, {"session_id": sid(), "cwd": str(project), "prompt": "next"}, env, lstat_for=parent,
+                               argv=["notice"])
+        check("Q-9f: the prompt row prunes nothing under the parent (exit 0) and leaves the legacy sentinel alone",
+              code == 0 and old_in_parent.is_dir() and legacy.exists(), "exit=%s old exists=%s legacy=%s %r"
               % (code, old_in_parent.is_dir(), legacy.exists(), err))
         # control: the same wrapper with no index still lets the read through (step 4 runs), writing no log record
         noidx = project_of(sb, "cf-noidx", index=False)
@@ -3342,7 +3281,7 @@ def run_remote_before_realpath(w: World) -> None:
     answers: dict = {}
     z_text = lambda text: bool(re.match(r"^(?:[\\/]{2}[?.][\\/]+)?Z:", text, re.I)) or "??" in text  # noqa: E731
     any_text = lambda text: True  # noqa: E731
-    for name, path in (("guard", w.guard), ("tracker", w.tracker), ("reset", w.reset)):
+    for name, path in (("guard", w.guard),):
         fn = getattr(load_module(path, "codegraph_pre_" + name), "session_parent_base", None)
         if fn is None:
             check(f"Q-pre [{name}]: defines session_parent_base", False, "missing")
@@ -3562,12 +3501,7 @@ def run_verdict_matrix(w: World) -> None:
                   "exit=%s %r" % (code, err[-500:]))
             check(f"T-H1 [{label}]: and the log record's problem field is exactly {token}",
                   unusable_records(project) == [token], repr(events(project, "block")))
-            tracker_mod = load_module(w.tracker, "codegraph_tracker_matrix")
-            code, err = run_inproc(tracker_mod, {"session_id": session, "cwd": str(project), "tool_name":
-                                   "mcp__codegraph__codegraph_explore", "tool_input": {"query": "q"}}, env, stat_over=over,
-                                   no_access=denied, fake_uid=uid)
-            check(f"T-H1 [{label}]: the tracker writes no marker (exit 0) and prints that the gate stays shut",
-                  code == 0 and "the gate stays shut" in err and not (folder / "turn.json").exists(), "exit=%s %r" % (code, err))
+            check(f"T-H1 [{label}]: and no turn.json was written (nothing writes one any more)", not (folder / "turn.json").exists())
     # T-H2: the Session folder alone fails to be checked -> session-check-failed, distinct from the parent-level check-failed
     with af.Sandbox("cgqsf-") as sb:
         project = project_of(sb, "sf")
@@ -3622,18 +3556,17 @@ def run_base_boundaries(w: World) -> None:
               and stat_module.S_IMODE((base / "auto-improve-codegraph").stat().st_mode) == 0o700, "modes differ")
 
 
-# ---- review fix round T-L1: the Foreign marker's stderr line, and the flag only after the record ---------------------------
+# ---- review fix round T-L1 (kept for the cli-fallback record, C-4): the flag only after the record landed ------------------------------
 def run_foreign_marker_order(w: World) -> None:
     with af.Sandbox("cgqfo-") as sb:
         parent = af.session_parent(sb.home)
-        guard_mod = load_module(w.guard, "codegraph_first_guard_foreign_order")
-        line = "the gate opened from a turn marker this session's tracker did not write"
+        guard_mod = load_module(w.guard, "codegraph_first_guard_fallback_order")
         for label, returns, flag_expected in (("the record is written", True, True), ("the record could not be written", False, False)):
             project = project_of(sb, "fo-%s" % returns)
             make_logs(project)
             session = sid()
-            af.write_marker(parent, session, stamped=False)
-            flag = af.session_folder(parent, session) / "logged-foreign-marker"
+            transcript = fresh_transcript(sb, [af.t_human(1), af.t_bash_use("codegraph explore Thing")])
+            flag = af.session_folder(parent, session) / "logged-cli-fallback"
             seen: list = []
 
             def spy(**kwargs):
@@ -3641,19 +3574,20 @@ def run_foreign_marker_order(w: World) -> None:
                 return returns
             env = af.isolated_env(sb.home, sb.tmp, project)
             with mock.patch.object(guard_mod, "log_event", spy):
-                code, err = run_inproc(guard_mod, guard_payload(project, session), env)
-            check(f"T-L1 [{label}]: the gate opens (exit 0) and ONE stderr line says the marker was not written by this "
-                  "session's tracker, naming the cause", code == 0 and err.count(line) == 1 and "(missing-stamp)" in err,
-                  "exit=%s %r" % (code, err))
-            check(f"T-L1 [{label}]: the foreign-marker record is written while the flag does NOT exist yet",
-                  seen == [("foreign-marker", False)], repr(seen))
+                code, err = run_inproc(guard_mod, guard_payload(project, session, transcript_path=str(transcript)), env)
+            check(f"T-L1 [{label}]: the gate is open (exit 0) with no stderr line", code == 0 and "allowed (" not in err, "exit=%s %r" % (code, err))
+            check(f"T-L1 [{label}]: the cli-fallback record is written while the flag does NOT exist yet",
+                  seen == [("cli-fallback", False)], repr(seen))
             check(f"T-L1 [{label}]: and the flag exists afterwards only when the record did not fail", flag.exists() is flag_expected,
                   "flag exists=%s" % flag.exists())
             if flag_expected:
                 with mock.patch.object(guard_mod, "log_event", spy):
-                    code, err = run_inproc(guard_mod, guard_payload(project, session), env)
-                check("T-L1: the second call prints no foreign-marker line and writes no second record",
-                      code == 0 and line not in err and len(seen) == 1, "exit=%s %r seen=%r" % (code, err, seen))
+                    code, err = run_inproc(guard_mod, guard_payload(project, session, transcript_path=str(transcript)), env)
+                check("T-L1: the second call writes no second record", code == 0 and len(seen) == 1, "exit=%s %r seen=%r" % (code, err, seen))
+            else:
+                with mock.patch.object(guard_mod, "log_event", spy):
+                    run_inproc(guard_mod, guard_payload(project, session, transcript_path=str(transcript)), env)
+                check("T-L1: a record that failed is tried again on the next call", len(seen) == 2, repr(seen))
         check("T-L1 [isolation]: no in-process run wrote to the real errors.jsonl", INPROC_LEAKS == [], repr(INPROC_LEAKS))
 
 
@@ -3757,61 +3691,8 @@ MCP_EXPLORE = "mcp__codegraph__" + "codegraph_explore"
 SENTENCE = "A project instruction or a skill's explicit gate that forbids shell commands wins over this notice; follow that rule instead."
 
 
-def bash_ok(w: World, sb: af.Sandbox, project: Path, session: str, command: str, extra_input: dict | None = None,
-            response=None, extra_env: dict | None = None) -> subprocess.CompletedProcess:
-    tool_input = {"command": command, "description": "run it"}
-    if extra_input:
-        tool_input.update(extra_input)
-    return run_hook(w.tracker, sb, project, "Bash", tool_input, session, event="PostToolUse", extra_env=extra_env,
-                    payload_extra={"tool_response": dict(BASH_OK_RESPONSE) if response is None else response,
-                                   "tool_use_id": "toolu_01", "duration_ms": 12, "permission_mode": "auto",
-                                   "prompt_id": "p1"})
-
-
-def bash_failed(w: World, sb: af.Sandbox, project: Path, session: str, command: str) -> subprocess.CompletedProcess:
-    return run_hook(w.tracker, sb, project, "Bash", {"command": command, "description": "run it"}, session,
-                    event="PostToolUseFailure",
-                    payload_extra={"error": "Exit code 1\n✗ CodeGraph isn't available here", "is_interrupt": False,
-                                   "tool_use_id": "toolu_02", "duration_ms": 9, "permission_mode": "auto"})
-
-
-def mcp_ok(w: World, sb: af.Sandbox, project: Path, session: str) -> subprocess.CompletedProcess:
-    return run_hook(w.tracker, sb, project, MCP_EXPLORE, {"query": "foo"}, session, event="PostToolUse",
-                    payload_extra={"tool_response": [{"type": "text", "text": "**Exploration: foo**"}],
-                                   "tool_use_id": "toolu_03"})
-
-
-def mcp_errored(w: World, sb: af.Sandbox, project: Path, session: str) -> subprocess.CompletedProcess:
-    return run_hook(w.tracker, sb, project, MCP_EXPLORE, {}, session, event="PostToolUseFailure",
-                    payload_extra={"error": "Error: query must be a non-empty string", "is_interrupt": False,
-                                   "tool_use_id": "toolu_04"})
-
-
-def marker_of(sb: af.Sandbox, session: str):
-    try:
-        return json.loads((pfolder(sb, session) / "turn.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-def flag_exists(sb: af.Sandbox, session: str, name: str) -> bool:
-    return (pfolder(sb, session) / name).exists()
-
-
-def tracker_events(project: Path, event: str | None = None) -> list[dict]:
-    found = []
-    try:
-        lines = (project / ".claude" / "logs" / "errors.jsonl").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return found
-    for line in lines:
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if rec.get("hook") == "codegraph-turn-tracker" and (event is None or rec.get("event") == event):
-            found.append(rec)
-    return found
+# (the tracker-driven helpers bash_ok, bash_failed, mcp_ok, mcp_errored, marker_of, flag_exists and tracker_events were removed with the
+# tracker: the guard counts a CodeGraph call from the transcript, so a row writes transcript lines instead, see af.t_*)
 
 
 def shadow_records(project: Path) -> list[dict]:
@@ -3852,160 +3733,132 @@ NOT_COUNTED_FORMS = [
 
 
 def run_cli_route(w: World) -> None:
+    """The command-line route is counted from the transcript (C-1): the strict Counted test moved verbatim from the tracker."""
     with af.Sandbox("cg295c-") as sb:
         project = project_of(sb, "cli")
+        make_logs(project)
+        H = af.t_human
         for sub, command in COUNTED_FORMS:
             session = sid()
-            before = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-            tracked = bash_ok(w, sb, project, session, command)
-            body = marker_of(sb, session)
+            transcript = fresh_transcript(sb, [H(1)])
+            before = cut(w, sb, project, None, session, path=transcript)
             check(f"CLI-1 [{command}]: control: a source Read is blocked before the call", blocked(before), describe(before))
-            prefixed = bash_ok(w, sb, project, sid_prefixed := sid(), "FOO=1 " + command)
-            check(f"CLI-1 [{command}]: the same command behind a VAR=val prefix is NOT counted (the tracker's own token-0 test)",
-                  prefixed.returncode == 0 and marker_of(sb, sid_prefixed) is None, describe(prefixed))
-            check(f"CLI-1 [{command}]: the tracker exits 0 and writes a marker with route cli",
-                  tracked.returncode == 0 and isinstance(body, dict) and body.get("route") == "cli", repr(body) + describe(tracked))
-            check(f"CLI-1 [{command}]: tool is 'codegraph {sub}' and summary starts with the subcommand, neutralised",
-                  isinstance(body, dict) and body.get("tool") == "codegraph " + sub
-                  and isinstance(body.get("summary"), str) and body["summary"].startswith(sub)
-                  and re.fullmatch(r"[A-Za-z0-9_. \-]*", body["summary"]) is not None, repr(body))
-            after = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-            check(f"CLI-1 [{command}]: the same Read is now allowed by the MARKER (no `allowed (` line)",
+            prefixed = cut(w, sb, project, [H(1), af.t_bash_use("FOO=1 " + command)])
+            check(f"CLI-1 [{command}]: the same command behind a VAR=val prefix is NOT counted (the strict token-0 test)",
+                  blocked(prefixed), describe(prefixed))
+            append_lines(transcript, af.t_bash_use(command))
+            after = cut(w, sb, project, None, session, path=transcript)
+            check(f"CLI-1 [{command}]: after the Bash tool use the same Read is allowed by the TRANSCRIPT (no `allowed (` line)",
                   silent_allow(after), describe(after))
-            check(f"CLI-1 [{command}]: a successful CLI call does NOT set mcp-seen", not flag_exists(sb, session, "mcp-seen"))
+            recs = shadow_records(project)
+            rec = recs[-1] if recs else {}
+            check(f"CLI-1 [{command}]: the record names route cli", rec.get("turn_route") == "cli", repr(rec))
         for command in NOT_COUNTED_FORMS:
-            session = sid()
-            tracked = bash_ok(w, sb, project, session, command)
-            check(f"CLI-2 [{command!r}]: no marker (not a Counted command in the strict form)",
-                  tracked.returncode == 0 and marker_of(sb, session) is None, describe(tracked) + repr(marker_of(sb, session)))
-        session = sid()
-        tracked = bash_failed(w, sb, project, session, "codegraph explore Thing")
-        check("CLI-3: a PostToolUseFailure payload (L1 shape: error, no tool_response) never opens the gate",
-              tracked.returncode == 0 and marker_of(sb, session) is None, describe(tracked))
-        gate = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("CLI-3: and the Read stays BLOCKED", blocked(gate), describe(gate))
-        session = sid()
-        tracked = bash_ok(w, sb, project, session, "codegraph explore Thing", extra_input={"run_in_background": True})
-        check("CLI-4: a run_in_background call writes no marker", marker_of(sb, session) is None, describe(tracked))
-        session = sid()
-        interrupted = dict(BASH_OK_RESPONSE, interrupted=True)
-        tracked = bash_ok(w, sb, project, session, "codegraph explore Thing", response=interrupted)
-        check("CLI-4: an interrupted call writes no marker", marker_of(sb, session) is None, describe(tracked))
-        session = sid()
-        tracked = bash_ok(w, sb, project, session, "codegraph explore Thing", response="not an object")
-        check("CLI-4: a tool_response that is not an object writes no marker", marker_of(sb, session) is None,
-              describe(tracked))
-        # a subagent's call opens the gate for the parent (shared Session folder), CLI route too
-        session = sid()
-        run_hook(w.tracker, sb, project, "Bash", {"command": "codegraph explore Thing"}, session, event="PostToolUse",
-                 payload_extra={"tool_response": dict(BASH_OK_RESPONSE), "agent_id": "a1", "agent_type": "general-purpose"})
-        parent = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-        check("CLI-5: a subagent's counted CLI call opens the gate for the parent session", silent_allow(parent), describe(parent))
-        # no kill switch: the route works with every plausible switch set (R-4)
-        session = sid()
-        bash_ok(w, sb, project, session, "codegraph explore Thing",
-                extra_env={"CLAUDE_SKIP_CG": "1", "CODEGRAPH_OFF": "1", "CLAUDE_CODEGRAPH_ROUTE": "off"})
-        body = marker_of(sb, session)
-        check("CLI-6: no environment variable turns the command-line route off", isinstance(body, dict) and body.get("route") == "cli",
-              repr(body))
+            proc = cut(w, sb, project, [H(1), af.t_bash_use(command)])
+            check(f"CLI-2 [{command!r}]: leaves the turn closed (not a Counted command in the strict form)", blocked(proc), describe(proc))
+        proc = cut(w, sb, project, [H(1), af.t_bash_use("codegraph explore Thing"), af.t_assistant({"type": "text", "text": "it failed"})])
+        check("CLI-3: a Counted command counts when the main session ISSUES it, whether or not it succeeded (Q1: the transcript "
+              "holds the tool use, not its outcome)", silent_allow(proc), describe(proc))
+        proc = cut(w, sb, project, [H(1), af.t_bash_use("codegraph explore Thing", background=True)])
+        check("CLI-4: a run_in_background call leaves the turn closed", blocked(proc), describe(proc))
+        # a subagent's own Bash call is in another file: the main session's gate is opened by its dispatch (C-7), not by it
+        proc = cut(w, sb, project, [H(1), af.t_agent_use()])
+        check("CLI-5: a subagent dispatch opens the gate for the main session", silent_allow(proc), describe(proc))
+        # no kill switch: the route works, and the gate still closes, with every plausible switch set (R-4)
+        extra = {"CLAUDE_SKIP_CG": "1", "CODEGRAPH_OFF": "1", "CLAUDE_CODEGRAPH_ROUTE": "off"}
+        opened = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), extra_env=extra,
+                          transcript=fresh_transcript(sb, [H(1), af.t_bash_use("codegraph explore Thing")]))
+        closed = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), extra_env=extra)
+        check("CLI-6: no environment variable turns the command-line route or the gate off", silent_allow(opened) and blocked(closed),
+              describe(opened) + " / " + describe(closed))
 
 
 def run_marker_routes(w: World) -> None:
+    """The route of a turn: mcp beats cli beats agent, whatever the order (C-1)."""
     with af.Sandbox("cg295r-") as sb:
         project = project_of(sb, "routes")
+        make_logs(project)
+        H, B, M, A = af.t_human, af.t_bash_use, af.t_mcp_use, af.t_agent_use
         cases = [
-            ("cli then successful mcp -> mcp", [("cli",), ("mcp",)], "mcp", True),
-            ("mcp then cli -> mcp", [("mcp",), ("cli",)], "mcp", True),
-            ("cli alone -> cli", [("cli",)], "cli", False),
-            ("successful mcp alone -> mcp", [("mcp",)], "mcp", True),
+            ("cli then mcp -> mcp", [B("codegraph explore Thing"), M()], "mcp", True),
+            ("mcp then cli -> mcp", [M(), B("codegraph explore Thing")], "mcp", True),
+            ("cli alone -> cli", [B("codegraph explore Thing")], "cli", False),
+            ("mcp alone -> mcp", [M()], "mcp", True),
+            ("agent then cli -> cli", [A(), B("codegraph explore Thing")], "cli", False),
+            ("cli then agent -> cli", [B("codegraph explore Thing"), A()], "cli", False),
+            ("agent alone -> agent", [A()], "agent", False),
         ]
-        for label, steps, route, seen in cases:
+        for label, lines, route, seen in cases:
             session = sid()
-            for (step,) in steps:
-                if step == "cli":
-                    bash_ok(w, sb, project, session, "codegraph explore Thing")
-                elif step == "mcp":
-                    mcp_ok(w, sb, project, session)
-                else:
-                    mcp_errored(w, sb, project, session)
-            body = marker_of(sb, session)
-            check(f"RT-1 [{label}]: the marker's route is {route}", isinstance(body, dict) and body.get("route") == route, repr(body))
-            check(f"RT-1 [{label}]: mcp-seen exists exactly when a SUCCESSFUL mcp call ran ({seen})",
-                  flag_exists(sb, session, "mcp-seen") is seen)
-            gate = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-            check(f"RT-1 [{label}]: the gate is open (any route opens it; presence only)", silent_allow(gate), describe(gate))
-        # route values are only mcp and cli (an errored MCP call arrives as PostToolUseFailure and never reaches the tracker row)
-        routes = set()
-        for steps in ([("cli",)], [("mcp",)], [("cli",), ("mcp",)], [("mcp",), ("cli",)]):
-            session = sid()
-            for (step,) in steps:
-                bash_ok(w, sb, project, session, "codegraph explore Thing") if step == "cli" else mcp_ok(w, sb, project, session)
-            body = marker_of(sb, session)
-            routes.add(body.get("route") if isinstance(body, dict) else None)
-        check("RT-2: route values are only mcp and cli", routes == {"mcp", "cli"}, repr(routes))
-        # a PostToolUseFailure payload (MCP or Bash) never writes a marker and never sets mcp-seen
-        for label, fire in (("MCP", lambda s: mcp_errored(w, sb, project, s)),
-                            ("Bash codegraph", lambda s: bash_failed(w, sb, project, s, "codegraph explore Thing"))):
-            session = sid()
-            proc = fire(session)
-            check(f"RT-3 [{label}]: a PostToolUseFailure payload exits 0, writes no marker and sets no mcp-seen",
-                  proc.returncode == 0 and marker_of(sb, session) is None and not flag_exists(sb, session, "mcp-seen"), describe(proc))
-            gate = run_hook(w.guard, sb, project, "Read", read_cs(project), session)
-            check(f"RT-3 [{label}]: and the Read stays BLOCKED", blocked(gate), describe(gate))
+            proc = cut(w, sb, project, [H(1)] + lines, session)
+            rec = (shadow_records(project) or [{}])[-1]
+            cursor = json.loads((pfolder(sb, session) / "transcript-cursor.json").read_text(encoding="utf-8"))
+            check(f"RT-1 [{label}]: the record's route is {route}", rec.get("turn_route") == route, repr(rec))
+            check(f"RT-1 [{label}]: the cursor's mcp_seen is {seen} (sticky: set only by an mcp use)", cursor.get("mcp_seen") is seen,
+                  repr(cursor))
+            check(f"RT-1 [{label}]: the gate is open (any route opens it)", silent_allow(proc), describe(proc))
+        routes = {(shadow_records(project) or [{}])[-1].get("turn_route")}
+        check("RT-2: route values are only mcp, cli and agent", {r for c in cases for r in (c[2],)} == {"mcp", "cli", "agent"}, repr(routes))
+        # a tool_use of another tool, a failed text and a sidechain entry never set a route
+        proc = cut(w, sb, project, [H(1), json.dumps({"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t", "name": "mcp__codegraph__codegraph_explore", "input": {}}]}})])
+        check("RT-3: a sidechain CodeGraph tool use (another file's entries) opens nothing", blocked(proc), describe(proc))
 
 
 def run_cli_fallback_record(w: World) -> None:
+    """The cli-fallback record moved from the tracker into the guard (C-4): at the turn's first guarded call."""
     with af.Sandbox("cg295f-") as sb:
+        H, B, M = af.t_human, af.t_bash_use, af.t_mcp_use
+
         def fresh():
             project = project_of(sb, "r5-%s" % uuid.uuid4().hex[:6])
             make_logs(project)
             return project
 
         project, session = fresh(), sid()
-        bash_ok(w, sb, project, session, "codegraph explore Thing")
-        got = tracker_events(project, "cli-fallback")
-        check("R5-1: an accepted counted CLI call with no mcp-seen writes exactly ONE cli-fallback record",
-              len(got) == 1, repr(tracker_events(project)))
+        transcript = fresh_transcript(sb, [H(1), B("codegraph explore Thing")])
+        cut(w, sb, project, None, session, path=transcript)
+        got = events(project, "cli-fallback")
+        check("R5-1: an accepted counted CLI turn with no mcp use writes exactly ONE cli-fallback record at the first guarded call",
+              len(got) == 1, repr(events(project)))
         detail = got[0].get("details", {}) if got else {}
         check("R5-1: the record carries reason mcp-unavailable and the subcommand, nothing else of the command",
               detail.get("reason") == "mcp-unavailable" and detail.get("command") == "explore", repr(got))
-        check("R5-1: and the logged-cli-fallback flag exists after the record landed", flag_exists(sb, session, "logged-cli-fallback"))
-        bash_ok(w, sb, project, session, "codegraph callers Thing")
-        run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "again"})
-        bash_ok(w, sb, project, session, "codegraph impact Thing")
-        check("R5-2: a second CLI call, and a CLI call in a second turn, add no further record",
-              len(tracker_events(project, "cli-fallback")) == 1, repr(tracker_events(project)))
+        check("R5-1: and the logged-cli-fallback flag exists after the record landed", (pfolder(sb, session) / "logged-cli-fallback").exists())
+        cut(w, sb, project, None, session, path=transcript)
+        append_lines(transcript, H(2), B("codegraph impact Thing"))
+        cut(w, sb, project, None, session, path=transcript)
+        check("R5-2: a second guarded call, and a cli turn in a second prompt, add no further record",
+              len(events(project, "cli-fallback")) == 1, repr(events(project)))
 
         project, session = fresh(), sid()
-        mcp_ok(w, sb, project, session)
-        bash_ok(w, sb, project, session, "codegraph explore Thing")
-        check("R5-3: a successful MCP call before the CLI call: no record", len(tracker_events(project, "cli-fallback")) == 0,
-              repr(tracker_events(project)))
+        cut(w, sb, project, [H(1), M(), B("codegraph explore Thing")], session)
+        check("R5-3: an mcp use before the CLI call: no record", len(events(project, "cli-fallback")) == 0, repr(events(project)))
 
         project, session = fresh(), sid()
-        bash_failed(w, sb, project, session, "codegraph explore Thing")
-        bash_ok(w, sb, project, session, "codegraph status")
-        bash_ok(w, sb, project, session, "cd x && codegraph explore y")
-        check("R5-5: a failed, an uncounted and a compound call write no record", len(tracker_events(project, "cli-fallback")) == 0,
-              repr(tracker_events(project)))
+        cut(w, sb, project, [H(1), B("codegraph status"), B("cd x && codegraph explore y"), B("codegraph explore Thing", background=True)], session)
+        check("R5-5: an uncounted, a compound and a background call write no record", len(events(project, "cli-fallback")) == 0,
+              repr(events(project)))
+        cut(w, sb, project, [H(1), af.t_agent_use()], sid())
+        check("R5-5b: an agent route writes no record either", len(events(project, "cli-fallback")) == 0, repr(events(project)))
 
-        # log_event returns False (no logs folder): the flag is NOT set, and the next accepted call records
+        # log_event returns False (no logs folder): the flag is NOT set, and the next guarded call records
         project = project_of(sb, "r5-nolog")
         session = sid()
-        bash_ok(w, sb, project, session, "codegraph explore Thing")
+        transcript = fresh_transcript(sb, [H(1), B("codegraph explore Thing")])
+        cut(w, sb, project, None, session, path=transcript)
         check("R5-6: when nothing could be logged (no logs folder) no logged-cli-fallback flag is set",
-              not flag_exists(sb, session, "logged-cli-fallback"))
+              not (pfolder(sb, session) / "logged-cli-fallback").exists())
         make_logs(project)
-        bash_ok(w, sb, project, session, "codegraph explore Thing")
-        check("R5-6: and once the log can be written the next accepted call records exactly once",
-              len(tracker_events(project, "cli-fallback")) == 1 and flag_exists(sb, session, "logged-cli-fallback"),
-              repr(tracker_events(project)))
+        cut(w, sb, project, None, session, path=transcript)
+        check("R5-6: and once the log can be written the next guarded call records exactly once",
+              len(events(project, "cli-fallback")) == 1 and (pfolder(sb, session) / "logged-cli-fallback").exists(),
+              repr(events(project)))
 
         # the pruner knows mcp-seen and logged-cli-fallback
         reset = load_reset_module(sb, w)
         names = ("turn.json", "mcp-seen", "logged-cli-fallback", "pruned")
-        check("R5-7: KEY: mcp-seen is a known name of the reset hook's pruner",
-              reset.KNOWN_FILE_RE.fullmatch("mcp-seen") is not None)
+        check("R5-7: KEY: mcp-seen is a known name of the pruner", reset.KNOWN_FILE_RE.fullmatch("mcp-seen") is not None)
         check("R5-7: logged-cli-fallback is a known name", reset.KNOWN_FILE_RE.fullmatch("logged-cli-fallback") is not None)
         folder = old_session(af.session_parent(sb.home), "r5-old", files=names)
         removed = reset.prune_session_folders(af.session_parent(sb.home))
@@ -4013,30 +3866,30 @@ def run_cli_fallback_record(w: World) -> None:
               af.CODEGRAPH_SESSION_PREFIX + "r5-old" in removed and not folder.exists(), "removed %r; left %s" % (
                   removed, sorted(os.listdir(folder)) if folder.exists() else []))
         session = sid()
-        bash_ok(w, sb, project, session, "codegraph explore Thing")
-        mcp_ok(w, sb, project, session)
-        run_hook(w.reset, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "again"})
-        check("R5-8: the next prompt deletes turn.json but keeps mcp-seen (sticky for the session)",
-              marker_of(sb, session) is None and flag_exists(sb, session, "mcp-seen"))
+        project = fresh()
+        cut(w, sb, project, [H(1), M()], session)
+        run_hook(w.guard, sb, project, "", {}, session, event="UserPromptSubmit", payload_extra={"prompt": "again"}, argv=["notice"])
+        check("R5-8: the next prompt row deletes nothing of this session's state (no turn.json, mcp-seen or cursor is removed)",
+              (pfolder(sb, session) / "transcript-cursor.json").exists() and (pfolder(sb, session) / "pruned").exists())
 
 
 def run_cli_ac2(w: World) -> None:
     with af.Sandbox("cg295a-") as sb:
-        for label, extra in (("main session", {}), ("subagent (agent_id)", {"agent_id": "a1", "agent_type": "general-purpose"})):
-            project = project_of(sb, "ac2-%s" % label[:4])
-            make_logs(project)
-            session = sid()
-            bash_ok(w, sb, project, session, "codegraph explore Thing")
-            proc = run_hook(w.guard, sb, project, "Read", read_cs(project), session, payload_extra=extra)
-            recs = shadow_records(project)
-            check(f"AC2 [{label}]: no MCP call, index present, server configured, one counted CLI call: a source Read is allowed",
-                  allowed(proc) and "BLOCKED" not in proc.stderr, describe(proc))
-            check(f"AC2 [{label}]: with reason turn-marker-present (the Shadow record) and marker_route cli",
-                  bool(recs) and recs[-1].get("live_reason") == "turn-marker-present" and recs[-1].get("marker_route") == "cli",
-                  repr(recs[-1:]) + describe(proc))
-            stranger = run_hook(w.guard, sb, project, "Read", read_cs(project), sid(), payload_extra=extra)
-            if not extra:
-                check(f"AC2 [{label}]: another session is still BLOCKED [control]", blocked(stranger), describe(stranger))
+        project = project_of(sb, "ac2-main")
+        make_logs(project)
+        proc = cut(w, sb, project, [af.t_human(1), af.t_bash_use("codegraph explore Thing")])
+        recs = shadow_records(project)
+        check("AC2 [main session]: no MCP call, index present, server configured, one counted CLI call: a source Read is allowed",
+              allowed(proc) and "BLOCKED" not in proc.stderr, describe(proc))
+        check("AC2 [main session]: with reason transcript-open and turn_route cli (the Measurement record)",
+              bool(recs) and recs[-1].get("live_reason") == "transcript-open" and recs[-1].get("turn_route") == "cli",
+              repr(recs[-1:]) + describe(proc))
+        stranger = cut(w, sb, project, [af.t_human(1)])
+        check("AC2 [main session]: another session with a closed transcript is still BLOCKED [control]", blocked(stranger), describe(stranger))
+        sub = cut(w, sb, project, [af.t_human(1), af.t_bash_use("codegraph explore Thing")],
+                  extra={"agent_id": "a1", "agent_type": "general-purpose"})
+        check("AC2 [subagent (agent_id)]: a subagent's own Read is allowed at step 3 (its transcript is another file)",
+              allowed(sub, "fail-open:subagent"), describe(sub))
 
 
 def banner_term(stderr: str):
@@ -4131,8 +3984,8 @@ def run_probe_rows(w: World) -> None:
     with af.Sandbox("cg295p-") as sb:
         reset = load_reset_module(sb, w)
         probe = fn_of(reset, "connection_probe")
-        check("PR-0: the reset hook defines connection_probe(table, start_pid)", callable(probe),
-              "no module-level connection_probe in %s" % w.reset.name)
+        check("PR-0: the guard defines connection_probe(table, start_pid)", callable(probe),
+              "no module-level connection_probe in %s" % w.guard.name)
         if not callable(probe):
             return
         me = 5000
@@ -4221,13 +4074,14 @@ def bytecode_allowed():
 
 
 def load_fresh_hooks(sb: af.Sandbox, tag: str):
-    """A new installed copy of the three hooks (its own folder, no bytecode yet) and the reset module loaded from it
-    with bytecode writing OFF, so any __pycache__ later is the notice section's doing."""
+    """A new installed copy of the add-on's hooks (its own folder, no bytecode yet) and the guard module loaded from it
+    with bytecode writing OFF, so any __pycache__ later is the notice section's doing. (The notice moved from the reset hook
+    into the guard's file at the cut-over, so the variable keeps the name ``reset`` in the rows below.)"""
     paths = {p.name: p for p in af.install(ADD_ON, sb.root / ("inst-" + tag))}
     saved = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
     try:
-        reset = load_module(paths[RESET_FILE], "cg295_reset_" + tag)
+        reset = load_module(paths[HOOK_FILE], "cg295_guard_" + tag)
     finally:
         sys.dont_write_bytecode = saved
     return reset, paths
@@ -4257,9 +4111,11 @@ def call_notice(reset, payload: dict) -> tuple:
 
 
 def run_reset_main(reset, payload: dict) -> tuple:
+    """The guard's prompt row, in-process: ``main()`` with the argument ``notice`` (the row the install writes)."""
     out, err = io.StringIO(), io.StringIO()
     code = None
     with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
+            mock.patch.object(sys, "argv", [str(getattr(reset, "__file__", "guard")), "notice"]), \
             contextlib.redirect_stderr(err):
         try:
             reset.main()
@@ -4271,8 +4127,8 @@ def run_reset_main(reset, payload: dict) -> tuple:
 def run_notice_rows(w: World) -> None:
     with af.Sandbox("cg295n-") as sb:
         reset, paths = load_fresh_hooks(sb, "a")
-        check("NT-0: the reset hook defines notice_section(payload)", callable(fn_of(reset, "notice_section")),
-              "no module-level notice_section in " + RESET_FILE)
+        check("NT-0: the guard defines notice_section(payload)", callable(fn_of(reset, "notice_section")),
+              "no module-level notice_section in " + HOOK_FILE)
         project = project_of(sb, "nt-ok")
         me = os.getpid()
         chain, host_pid = host_chain(me, 4)
@@ -4354,21 +4210,8 @@ def run_notice_rows(w: World) -> None:
                     outcome, out = call_notice(reset, payload())
             check(f"NT-4: a table reader raising {type(exc).__name__}: silent:error, nothing printed",
                   outcome == "silent:error" and out == "", "%r %r" % (outcome, out))
-        lone = sb.root / "lone"
-        lone.mkdir()
-        shutil.copyfile(paths[RESET_FILE], lone / RESET_FILE)
-        saved = sys.dont_write_bytecode
-        sys.dont_write_bytecode = True
-        try:
-            lone_reset = load_module(lone / RESET_FILE, "cg295_reset_lone")
-        finally:
-            sys.dont_write_bytecode = saved
-        with notice_env(sb, project):
-            with table_reader(lone_reset, absent_table):
-                outcome, out = call_notice(lone_reset, payload())
-        check("NT-4: the sibling guard file missing: silent:import-failed, nothing printed",
-              outcome == "silent:import-failed" and out == "", "%r %r" % (outcome, out))
-        check("NT-4: the failed import left no __pycache__ beside the lone copy", not (lone / "__pycache__").exists())
+        check("NT-4: the notice calls the guard's own functions: no load by path and no import-failed outcome any more",
+              "_load_guard" not in w.guard.read_text(encoding="utf-8") and "silent:import-failed" not in w.guard.read_text(encoding="utf-8"))
         # no kill switch (R-4): every plausible switch set, the notice still shows
         with notice_env(sb, project, {"CLAUDE_SKIP_CG": "1", "CODEGRAPH_NOTICE": "off", "CLAUDE_CODEGRAPH_NOTICE": "0"}):
             with table_reader(reset, absent_table):
@@ -4379,8 +4222,8 @@ def run_notice_rows(w: World) -> None:
             with table_reader(reset, absent_table):
                 call_notice(reset, payload())
         check("NT-6: the notice section writes no bytecode (no __pycache__ in the hooks folder)",
-              not (paths[RESET_FILE].parent / "__pycache__").exists(),
-              "found %s" % sorted(p.name for p in (paths[RESET_FILE].parent / "__pycache__").glob("*")))
+              not (paths[HOOK_FILE].parent / "__pycache__").exists(),
+              "found %s" % sorted(p.name for p in (paths[HOOK_FILE].parent / "__pycache__").glob("*")))
 
 
 def run_notice_main_rows(w: World) -> None:
@@ -4406,18 +4249,18 @@ def run_notice_main_rows(w: World) -> None:
                 with table_reader(reset, **kwargs):
                     code, out, err = run_reset_main(reset, body(session))
             check(f"NM-1 [{label}]: main exits 0 with an empty stdout", code == 0 and out == "", "code=%r out=%r err=%r" % (code, out, err))
-            check(f"NM-1 [{label}]: and the marker and the ticket were still deleted",
-                  not (folder_of(session) / "turn.json").exists() and not (folder_of(session) / ticket).exists(),
+            check(f"NM-1 [{label}]: and the marker and the ticket were NOT deleted (the prompt row deletes neither)",
+                  (folder_of(session) / "turn.json").exists() and (folder_of(session) / ticket).exists(),
                   str(sorted(os.listdir(folder_of(session)))))
-            check(f"NM-1 [{label}]: and no __pycache__ appeared in the hooks folder", not (paths[RESET_FILE].parent / "__pycache__").exists())
+            check(f"NM-1 [{label}]: and no __pycache__ appeared in the hooks folder", not (paths[HOOK_FILE].parent / "__pycache__").exists())
         session = sid()
         seed(session)
         with notice_env(sb, project):
             with table_reader(reset, chain):
                 code, out, err = run_reset_main(reset, body(session))
-        check("NM-2: main with no session server prints ONE notice JSON object and exits 0; marker and ticket deleted",
+        check("NM-2: main with no session server prints ONE notice JSON object and exits 0; marker and ticket are left alone",
               code == 0 and out.strip().startswith("{") and out.count("\n") <= 1
-              and not (folder_of(session) / "turn.json").exists() and not (folder_of(session) / ticket).exists(),
+              and (folder_of(session) / "turn.json").exists() and (folder_of(session) / ticket).exists(),
               "code=%r out=%r err=%r" % (code, out, err))
         session = sid()
         with notice_env(sb, project):
@@ -4433,14 +4276,14 @@ def run_notice_main_rows(w: World) -> None:
             check(f"NM-4: main prints nothing when the section returns {outcome}", code == 0 and out == "", "code=%r out=%r" % (code, out))
         # a subprocess row with the real probe: only exit 0 and 'empty or one JSON object' can be asserted
         project2 = project_of(sb, "nm-sub")
-        proc = run_hook(w.reset, sb, project2, "", {}, sid(), event="UserPromptSubmit", payload_extra={"prompt": "hi"})
+        proc = run_hook(w.guard, sb, project2, "", {}, sid(), event="UserPromptSubmit", payload_extra={"prompt": "hi"}, argv=["notice"])
         ok = proc.returncode == 0
         if proc.stdout.strip():
             try:
                 ok = ok and isinstance(json.loads(proc.stdout), dict)
             except ValueError:
                 ok = False
-        check("NM-5: the reset hook as a process (real probe) exits 0 and prints nothing or one JSON object", ok, describe(proc))
+        check("NM-5: the prompt row as a process (real probe) exits 0 and prints nothing or one JSON object", ok, describe(proc))
 
 
 def run_server_starts_process(w: World) -> None:
@@ -4488,10 +4331,13 @@ def run_ac7_ac8(w: World) -> None:
     check("AC7: the tracker implements the route (it mentions the cli route and mcp-seen) - non-vacuity for the scan above",
           '"cli"' in texts[TRACKER_FILE] and "mcp-seen" in texts[TRACKER_FILE],
           "tracker text lacks the cli route / mcp-seen")
-    check("AC7: the reset hook implements the notice (notice_section) - non-vacuity", "notice_section" in texts[RESET_FILE])
+    check("AC7: the guard implements the notice (notice_section) and the Counted test (counted_subcommand) - non-vacuity",
+          "notice_section" in texts[HOOK_FILE] and "counted_subcommand" in texts[HOOK_FILE])
     manifest = af.manifest(ADD_ON, HOOK_FILE)
-    check("AC8: addon.json lists exactly the three hook files", sorted(manifest.get("hooks", [])) == sorted([HOOK_FILE, TRACKER_FILE, RESET_FILE]),
-          repr(manifest.get("hooks")))
+    check("AC8: addon.json lists exactly one hook (the guard); the tracker and the reset hook are disabled hooks",
+          manifest.get("hooks") == [HOOK_FILE]
+          and sorted(e.get("hook") for e in manifest.get("disabled", [])) == sorted([TRACKER_FILE, RESET_FILE]),
+          repr((manifest.get("hooks"), [e.get("hook") for e in manifest.get("disabled", [])])))
     writer = re.compile(r"(?:create_flag|os\.replace|write\w*|open|replace|touch|mkdir|rename|symlink|link)\s*\("
                         r"[^)\n]*(?:MARKER_NAME|MCP_SEEN_NAME|turn\.json|mcp-seen|MCP_SEEN|\btarget\b)")
 
@@ -4505,81 +4351,36 @@ def run_ac7_ac8(w: World) -> None:
           any("create_flag" in ln and "MCP_SEEN_NAME" in ln for ln in found), repr(found))
     for name in (HOOK_FILE, RESET_FILE):
         lines = writes(texts[name])
-        check(f"AC8 [{name}]: writes neither turn.json nor mcp-seen (only the tracker does; the reset hook may delete)",
+        check(f"AC8 [{name}]: writes neither turn.json nor mcp-seen (only the retired tracker did)",
               not lines, "\n".join(lines))
     check("AC8 [tracker]: the tracker is the writer of mcp-seen", "mcp-seen" in texts[TRACKER_FILE])
 
 
-# ---- review follow-ups (issue #295 code review) ----------------------------------------------------------------
-def tracker_raw(w: World, sb: af.Sandbox, project: Path, payload: dict, argv: tuple = ()) -> subprocess.CompletedProcess:
-    """The tracker as a process, with exactly the argv the manifest row gives it and an arbitrary payload."""
-    return subprocess.run([sys.executable, "-B", str(w.tracker), *argv], input=json.dumps(payload), capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", cwd=str(project), env=af.isolated_env(sb.home, sb.tmp, project), timeout=60)
-
-
+# ---- review follow-ups (issue #295 code review), kept for the guard's transcript rule (issue #262) ------------------------------------
 def run_review_followups(w: World) -> None:
     with af.Sandbox("cg295v-") as sb:
         project = project_of(sb, "rv")
         make_logs(project)
+        H = af.t_human
 
-        def base(session, tool, tool_input, **extra):
-            body = {"session_id": session, "cwd": str(project), "tool_name": tool, "tool_input": tool_input}
-            body.update(extra)
-            return body
+        def block_in(entry: dict) -> str:
+            return json.dumps(entry)
 
-        counted = {"command": "codegraph explore Thing"}
-        # (4) the tracker started with argv `cli`, as the manifest row does
-        session = sid()
-        proc = tracker_raw(w, sb, project, base(session, "Bash", counted, hook_event_name="PostToolUse",
-                                                tool_response=dict(BASH_OK_RESPONSE)), argv=("cli",))
-        body = marker_of(sb, session)
-        check("CLI-7: the tracker started with argv `cli` (the manifest's Bash row) writes the cli marker",
-              proc.returncode == 0 and isinstance(body, dict) and body.get("route") == "cli", describe(proc) + repr(body))
-        session = sid()
-        proc = tracker_raw(w, sb, project, base(session, "Bash", counted, hook_event_name="PostToolUseFailure", error="Exit code 1",
-                                                is_interrupt=False), argv=("cli",))
-        check("CLI-7: and with argv `cli` a PostToolUseFailure payload still writes nothing", proc.returncode == 0 and marker_of(sb, session) is None,
-              describe(proc))
-        # (6) a payload with no hook_event_name is read as a success
-        session = sid()
-        tracker_raw(w, sb, project, base(session, "Bash", counted, tool_response=dict(BASH_OK_RESPONSE)), argv=("cli",))
-        body = marker_of(sb, session)
-        check("TB-1: a Bash payload naming no event is treated as a success (marker route cli)",
-              isinstance(body, dict) and body.get("route") == "cli", repr(body))
-        session = sid()
-        tracker_raw(w, sb, project, base(session, "Bash", counted))
-        check("TB-1: but a Bash payload with no tool_response writes nothing", marker_of(sb, session) is None)
-        session = sid()
-        tracker_raw(w, sb, project, base(session, MCP_EXPLORE, {"query": "q"}, tool_response=[{"type": "text", "text": "x"}]))
-        check("TB-2: an MCP payload naming no event opens the gate and sets mcp-seen",
-              marker_of(sb, session) is not None and flag_exists(sb, session, "mcp-seen"))
-        # the dict-shaped error flag
+        # (4) the dict-shaped error flags of the old tracker do not matter: only the tool use is read
         for key in ("isError", "is_error"):
-            session = sid()
-            tracker_raw(w, sb, project, base(session, MCP_EXPLORE, {"query": "q"}, hook_event_name="PostToolUse", tool_response={key: True}))
-            check(f"TB-3: an MCP PostToolUse whose tool_response says {key}: true still opens the gate but sets no mcp-seen",
-                  marker_of(sb, session) is not None and not flag_exists(sb, session, "mcp-seen"))
-            session = sid()
-            tracker_raw(w, sb, project, base(session, "Bash", counted, hook_event_name="PostToolUse", tool_response=dict(BASH_OK_RESPONSE, **{key: True})),
-                        argv=("cli",))
-            check(f"TB-3: a Bash PostToolUse whose tool_response says {key}: true writes no marker", marker_of(sb, session) is None)
-
-        # (5) F3: when the marker write raises OSError, no cli-fallback record and no mcp-seen flag follow
-        for label, fire in (("cli", lambda s: bash_ok(w, sb, project, s, "codegraph explore Thing")),
-                            ("mcp", lambda s: mcp_ok(w, sb, project, s))):
-            session = sid()
-            folder = pfolder(sb, session, create=True)
-            folder.mkdir(parents=True)
-            (folder / "turn.json").mkdir()  # os.replace onto an existing directory raises OSError
-            before = len(tracker_events(project, "cli-fallback"))
-            proc = fire(session)
-            check(f"F3 [{label}]: a marker write that raises OSError still exits 0 and leaves the blocking directory alone",
-                  proc.returncode == 0 and (folder / "turn.json").is_dir(), describe(proc))
-            check(f"F3 [{label}]: and writes no cli-fallback record and no logged-cli-fallback flag",
-                  len(tracker_events(project, "cli-fallback")) == before and not flag_exists(sb, session, "logged-cli-fallback"),
-                  repr(tracker_events(project)))
-            check(f"F3 [{label}]: and no mcp-seen flag", not flag_exists(sb, session, "mcp-seen"))
-            check(f"F3 [{label}]: and no temp sibling is left behind", not [n for n in os.listdir(folder) if n.startswith(".tmp-")], str(sorted(os.listdir(folder))))
+            line = block_in({"type": "assistant", "isSidechain": False, "isError": True, "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t", "name": "mcp__codegraph__codegraph_explore", "input": {}, key: True}]}})
+            proc = cut(w, sb, project, [H(1), line])
+            check(f"TB-3: an MCP tool use carrying {key}: true still counts (a failed attempt counts, Q1)", silent_allow(proc), describe(proc))
+        # (5) a Bash tool use whose input is not an object, or whose command is not text, is not a Counted command
+        for label, tool_input in (("a list input", ["codegraph explore x"]), ("a numeric command", {"command": 5}), ("no command", {})):
+            line = af.t_assistant({"type": "tool_use", "id": "t", "name": "Bash", "input": tool_input})
+            proc = cut(w, sb, project, [H(1), line])
+            check(f"TB-4: a Bash tool use with {label} leaves the turn closed (and never raises)", blocked(proc), describe(proc))
+        # (6) an assistant entry with a non-list content, and a tool_use with no name, never open anything
+        proc = cut(w, sb, project, [H(1), json.dumps({"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": "x"}}),
+                                    af.t_assistant({"type": "tool_use", "id": "t", "input": {}})])
+        check("TB-5: an assistant entry with text content and a tool_use with no name open nothing", blocked(proc), describe(proc))
 
 
 def run_process_table_real(w: World) -> None:
@@ -4666,6 +4467,364 @@ def run_bench_rows(w: World) -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------
+# CO-*: the cut-over (issue #262). The guard decides from the Transcript turn state; the tracker's route, the pruning
+# and the Connection notice moved into the guard's file. Contract: .claude/concepts/2026-11-09-codegraph-hooks-cutover.md
+# --------------------------------------------------------------------------------------------------------------
+MEASUREMENT_KEYS = {"ts", "session", "agent", "tool", "target_class", "live_decision", "live_reason", "turn_marker",
+                    "turn_route", "transcript_turn", "session_seen", "shadow_decision", "shadow_reason", "outcome", "fp",
+                    "prompt_key", "shadow_ms", "bytes_read", "skipped_long_line"}
+
+
+def fresh_transcript(sb: af.Sandbox, lines: list) -> Path:
+    return af.write_transcript(sb.root / "tr" / (uuid.uuid4().hex + ".jsonl"), lines)
+
+
+def cut(w: World, sb: af.Sandbox, project: Path, lines: list | None, session: str | None = None, tool: str = "Read",
+        tool_input: dict | None = None, extra: dict | None = None, path: Path | None = None) -> subprocess.CompletedProcess:
+    """One guarded call whose transcript holds ``lines`` (None: the payload carries no transcript_path; ``path``: use that file)."""
+    transcript = None if (lines is None and path is None) else (path or fresh_transcript(sb, lines))
+    return run_hook(w.guard, sb, project, tool, tool_input if tool_input is not None else read_cs(project),
+                    session or sid(), payload_extra=extra, transcript=transcript)
+
+
+def one_line_notice(proc: subprocess.CompletedProcess, reason: str) -> bool:
+    return proc.returncode == 0 and proc.stderr.count("allowed (") == 1 and reason in proc.stderr
+
+
+def run_cutover_states(w: World) -> None:
+    with af.Sandbox("cgco-") as sb:
+        project = project_of(sb, "co")
+        make_logs(project)
+        H, M, B = af.t_human, af.t_mcp_use, af.t_bash_use
+        # open by the three routes, each counted when the main session issues the call
+        proc = cut(w, sb, project, [H(1), M(), af.t_tool_result()])
+        check("CO-1 open via mcp: a source Read is allowed with no stderr line (transcript-open)", silent_allow(proc), describe(proc))
+        rec = (shadow_records(project) or [{}])[-1]
+        check("CO-1 open via mcp: the Measurement record says enforced, transcript-open, route mcp",
+              rec.get("outcome") == "enforced" and rec.get("live_reason") == "transcript-open"
+              and rec.get("turn_route") == "mcp" and rec.get("transcript_turn") == "open", rec)
+        for command in ("codegraph explore Thing", 'codegraph query "a b"', "codegraph files src", "codegraph explore Thing 2>&1"):
+            proc = cut(w, sb, project, [H(1), B(command)])
+            check(f"CO-2 open via a Bash Counted command [{command}]: allowed, silent", silent_allow(proc), describe(proc))
+        rec = (shadow_records(project) or [{}])[-1]
+        check("CO-2 open via Bash: the record names route cli", rec.get("turn_route") == "cli", rec)
+        for command in ("codegraph explore X && ls", "codegraph explore X | head", "codegraph explore X; ls", "codegraph status",
+                        "codegraph init -i", "echo codegraph explore X", " codegraph explore X", "FOO=1 codegraph explore X",
+                        "codegraph explore $(whoami)", "npx codegraph explore X"):
+            proc = cut(w, sb, project, [H(1), B(command)])
+            check(f"CO-3 a non-Counted command [{command!r}] leaves the turn closed: BLOCKED", blocked(proc), describe(proc))
+        proc = cut(w, sb, project, [H(1), B("codegraph explore Thing", background=True)])
+        check("CO-3 a background run of a Counted command leaves the turn closed: BLOCKED", blocked(proc), describe(proc))
+        for name in ("Agent", "Task"):
+            proc = cut(w, sb, project, [H(1), af.t_agent_use(name), af.t_tool_result()])
+            check(f"CO-4 a {name} dispatch in the current turn opens it (C-7): allowed, silent", silent_allow(proc), describe(proc))
+        rec = (shadow_records(project) or [{}])[-1]
+        check("CO-4 the record names route agent", rec.get("turn_route") == "agent", rec)
+        proc = cut(w, sb, project, [H(1), af.t_agent_use(), H(2)])
+        check("CO-5 a dispatch BEFORE the last human prompt does not open the new turn: BLOCKED", blocked(proc), describe(proc))
+        proc = cut(w, sb, project, [H(1), M(), H(2), af.t_filler()])
+        check("CO-6 closed after a new human prompt: BLOCKED", blocked(proc), describe(proc))
+        proc = cut(w, sb, project, [H(1), M(), af.t_tool_result(), af.t_task_notification()])
+        check("CO-7 a background task notification does not close the turn: allowed", silent_allow(proc), describe(proc))
+        proc = cut(w, sb, project, [H(1), af.t_task_notification()])
+        check("CO-7 a task notification does not open a turn either: BLOCKED", blocked(proc), describe(proc))
+
+
+def run_cutover_unknown(w: World) -> None:
+    with af.Sandbox("cgcu-") as sb:
+        project = project_of(sb, "cu")
+        make_logs(project)
+        session = sid()
+        first = cut(w, sb, project, None, session)
+        second = cut(w, sb, project, None, session)
+        check("CO-8 no transcript_path: allowed with one stderr line fail-open:transcript-no-transcript, on each call",
+              one_line_notice(first, "fail-open:transcript-no-transcript")
+              and one_line_notice(second, "fail-open:transcript-no-transcript"), describe(first) + " / " + describe(second))
+        got = [r for r in events(project, "fail-open") if "no-transcript" in json.dumps(r)]
+        check("CO-8 ...and ONE log record per session per cause", len(got) == 1, repr(events(project, "fail-open")))
+        proc = cut(w, sb, project, None, None, path=sb.root / "tr" / "missing.jsonl")
+        check("CO-8 a missing transcript file: fail-open:transcript-no-transcript",
+              one_line_notice(proc, "fail-open:transcript-no-transcript"), describe(proc))
+        bad = sb.root / "tr" / "bad.jsonl"
+        bad.parent.mkdir(exist_ok=True)
+        bad.write_bytes(b'{"type": "user", broken\n' + af.t_human(1).encode() + b"\n")
+        proc = cut(w, sb, project, None, None, path=bad)
+        check("CO-8 an unparseable line: fail-open:transcript-parse-error", one_line_notice(proc, "fail-open:transcript-parse-error"),
+              describe(proc))
+        big = sb.root / "tr" / "big.jsonl"
+        big.write_bytes((af.t_filler(1000) + "\n").encode() * 2600)
+        proc = cut(w, sb, project, None, None, path=big)
+        check("CO-8 a window with no boundary: fail-open:transcript-window-exceeded",
+              one_line_notice(proc, "fail-open:transcript-window-exceeded"), describe(proc))
+        s2 = sid()
+        longer = fresh_transcript(sb, [af.t_human(1), af.t_filler(2000)])
+        cut(w, sb, project, None, s2, path=longer)
+        af.write_transcript(longer, [af.t_human(1)])
+        proc = cut(w, sb, project, None, s2, path=longer)
+        check("CO-8 a rewritten (shorter) transcript: fail-open:transcript-rewritten", one_line_notice(proc, "fail-open:transcript-rewritten"),
+              describe(proc))
+        # an allowlisted target with an unknown state prints nothing
+        proc = cut(w, sb, project, None, None, tool_input={"file_path": str(project / "docs" / "notes.md")})
+        check("CO-9 an allowlisted target with an unknown state prints nothing (exit 0, no stderr line)",
+              silent_allow(proc) and proc.stderr.strip() == "", describe(proc))
+        # a subagent: no transcript is read, the step-3 allow stands
+        proc = cut(w, sb, project, [af.t_human(1)], None, extra={"agent_id": "a1", "agent_type": "general-purpose"})
+        check("CO-9b a subagent call is allowed at step 3 (fail-open:subagent), not at the transcript step",
+              allowed(proc, "fail-open:subagent") and "transcript" not in proc.stderr, describe(proc))
+        # a planted turn.json no longer opens anything
+        s3 = sid()
+        af.write_marker(af.session_parent(sb.home), s3)
+        proc = cut(w, sb, project, [af.t_human(1)], s3)
+        check("CO-10 a turn.json in the Session folder opens nothing (the marker is neither read nor written): BLOCKED",
+              blocked(proc), describe(proc))
+
+
+def run_cutover_state_and_tickets(w: World) -> None:
+    with af.Sandbox("cgct-") as sb:
+        project = project_of(sb, "ct")
+        make_logs(project)
+        H = af.t_human
+        link_target = sb.root / "ct-target"
+        link_target.mkdir()
+        session = sid()
+        af.session_parent(sb.home)
+        link = pfolder(sb, session)
+        if af.make_dir_link(link, link_target):
+            proc = cut(w, sb, project, [H(1), af.t_mcp_use()], session)
+            check("CO-11 an unusable Session folder: no transcript is read, the call blocks session-state-unusable (as today)",
+                  blocked(proc) and "session-state-unusable" in proc.stderr, describe(proc))
+            rec = (shadow_records(project) or [{}])[-1]
+            check("CO-11 ...and the record shows nothing was read", rec.get("bytes_read") == 0 and rec.get("live_reason") == "session-state-unusable", rec)
+            check("CO-11 ...and nothing was written through the link", not any(link_target.iterdir()), [p.name for p in link_target.iterdir()])
+            try:
+                os.rmdir(str(link))
+            except OSError:
+                pass
+        else:
+            skip("CO-11 an unusable Session folder", "the OS refused to create a folder link")
+        # tickets are keyed to the prompt
+        t = fresh_transcript(sb, [H(1)])
+        s = sid()
+        first = cut(w, sb, project, None, s, path=t, extra={"prompt_id": "prompt-A"})
+        again = cut(w, sb, project, None, s, path=t, extra={"prompt_id": "prompt-A"})
+        check("CO-12 a block and its identical retry in the same prompt: the retry is allowed (retry-escape-used)",
+              blocked(first) and allowed(again, "retry-escape-used"), describe(first) + " / " + describe(again))
+        s = sid()
+        cut(w, sb, project, None, s, path=t, extra={"prompt_id": "prompt-A"})
+        other = cut(w, sb, project, None, s, path=t, extra={"prompt_id": "prompt-B"})
+        check("CO-12 a ticket from another prompt reads as absent: the identical call is BLOCKED again", blocked(other), describe(other))
+        s = sid()
+        cut(w, sb, project, None, s, path=t, extra={"prompt_id": "prompt-A"})
+        tickets = list(pfolder(sb, s).glob("ticket-*"))
+        body = json.loads(tickets[0].read_text(encoding="utf-8")) if tickets else {}
+        check("CO-12 the ticket body carries ts, tool, fingerprint and a 12-hex prompt_key",
+              {"ts", "tool", "fingerprint", "prompt_key"} <= set(body) and re.fullmatch(r"[0-9a-f]{12}", str(body.get("prompt_key"))) is not None, body)
+        if tickets:
+            tickets[0].write_text(json.dumps({"ts": 1, "tool": "Read", "fingerprint": body.get("fingerprint")}) + "\n", encoding="utf-8")
+        old = cut(w, sb, project, None, s, path=t, extra={"prompt_id": "prompt-A"})
+        check("CO-12 a ticket with no prompt_key reads as absent: BLOCKED, and the block overwrites it with a keyed one",
+              blocked(old) and tickets and "prompt_key" in tickets[0].read_text(encoding="utf-8"), describe(old))
+        s = sid()
+        cut(w, sb, project, None, s, path=t)
+        keyless = cut(w, sb, project, None, s, path=t)
+        check("CO-12 a host that sends no prompt_id: a ticket keyed 'none' may match", allowed(keyless, "retry-escape-used"), describe(keyless))
+
+
+def run_cutover_fallback_and_record(w: World) -> None:
+    with af.Sandbox("cgcf-") as sb:
+        project = project_of(sb, "cf")
+        make_logs(project)
+        H, M, B = af.t_human, af.t_mcp_use, af.t_bash_use
+        s = sid()
+        t = fresh_transcript(sb, [H(1), B("codegraph explore Thing")])
+        cut(w, sb, project, None, s, path=t)
+        cut(w, sb, project, None, s, path=t)
+        got = events(project, "cli-fallback")
+        check("CO-13 a cli-opened turn with no mcp use this session writes ONE cli-fallback record per session",
+              len(got) == 1 and got[0].get("details", {}).get("reason") == "mcp-unavailable"
+              and got[0].get("details", {}).get("command") == "explore", repr(got))
+        check("CO-13 ...and the logged-cli-fallback flag is set after the record landed",
+              (pfolder(sb, s) / "logged-cli-fallback").exists())
+        before = len(events(project, "cli-fallback"))
+        cut(w, sb, project, [H(1), M(), B("codegraph explore Thing")])
+        cut(w, sb, project, [H(1), af.t_agent_use()])
+        check("CO-13 no record when mcp was seen this session, and none for an agent route",
+              len(events(project, "cli-fallback")) == before, repr(events(project, "cli-fallback")))
+        s = sid()
+        t2 = fresh_transcript(sb, [H(1), M(), af.t_tool_result(), H(2), B("codegraph explore Thing")])
+        cut(w, sb, project, None, s, path=t2)
+        check("CO-13 mcp_seen is sticky across prompts: [prompt, mcp, prompt, bash] writes no record",
+              len(events(project, "cli-fallback")) == before, repr(events(project, "cli-fallback")))
+        # the Measurement record shape
+        cut(w, sb, project, [H(1)])
+        rec = (shadow_records(project) or [{}])[-1]
+        check("CO-14 the enforced Measurement record has exactly the contract's keys", set(rec) == MEASUREMENT_KEYS, sorted(set(rec) ^ MEASUREMENT_KEYS))
+        check("CO-14 outcome enforced, shadow_* equal live_*, turn_marker null, turn_route null on a closed turn",
+              rec.get("outcome") == "enforced" and rec.get("shadow_decision") == rec.get("live_decision")
+              and rec.get("shadow_reason") == rec.get("live_reason") and rec.get("turn_marker") is None
+              and rec.get("turn_route") is None and rec.get("live_decision") == "block", rec)
+        guard_text = w.guard.read_text(encoding="utf-8")
+        check("CO-15 the turn read is timed with time.perf_counter (time.monotonic ticks in 15.6 ms steps on Windows)",
+              "perf_counter" in guard_text and "monotonic" not in guard_text)
+        check("CO-16 the guard neither reads nor writes the Turn marker (no marker name, no Foreign marker code)",
+              "MARKER_NAME" not in guard_text and "note_foreign_marker" not in guard_text and "foreign-marker" not in guard_text)
+
+
+def run_cutover_late_effects(w: World) -> None:
+    with af.Sandbox("cgcl-") as sb:
+        project = project_of(sb, "cl")
+        make_logs(project)
+        env = af.isolated_env(sb.home, sb.tmp, project)
+
+        def once(patches: dict, lines: list) -> tuple:
+            mod = load_module(w.guard, "codegraph_first_guard_late_" + uuid.uuid4().hex[:8])
+            transcript = fresh_transcript(sb, lines)
+            payload = guard_payload(project, sid(), transcript_path=str(transcript), prompt_id="p")
+            with contextlib.ExitStack() as stack:
+                for name, value in patches.items():
+                    stack.enter_context(mock.patch.object(mod, name, value, create=True))
+                return run_inproc(mod, payload, env)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("forced")
+
+        def exits(*args, **kwargs):
+            raise SystemExit(9)
+
+        class Weird(BaseException):
+            pass
+
+        def weird(*args, **kwargs):
+            raise Weird()
+
+        for label, lines in (("a block", [af.t_human(1)]), ("an allow through the gate", [af.t_human(1), af.t_mcp_use()])):
+            base_code, base_err = once({}, lines)
+            for effect in ("_write_cursor", "_append_shadow_line"):
+                for fn in (boom, exits, weird):
+                    code, err = once({effect: fn}, lines)
+                    check(f"CO-17 {label}: {effect} forced to raise {fn.__name__} leaves exit code and stderr unchanged",
+                          code == base_code and err == base_err, "base (%s, %r) vs (%s, %r)" % (base_code, base_err[:120], code, err[:120]))
+        # log_event is the effect behind the fail-open and cli-fallback records
+        cli = [af.t_human(1), af.t_bash_use("codegraph explore Thing")]
+        base_code, base_err = once({}, cli)
+        for fn in (boom, exits, weird):
+            code, err = once({"log_event": fn}, cli)
+            check(f"CO-17 the cli-fallback record: log_event forced to raise {fn.__name__} leaves exit code and stderr unchanged",
+                  code == base_code and err == base_err, "base (%s, %r) vs (%s, %r)" % (base_code, base_err[:120], code, err[:120]))
+        # the fail-open record is an effect too: the stderr line is printed whatever the record raises
+        def once_missing(patches: dict) -> tuple:
+            mod = load_module(w.guard, "codegraph_first_guard_late_" + uuid.uuid4().hex[:8])
+            payload = guard_payload(project, sid(), transcript_path=str(sb.root / "tr" / "never-written.jsonl"), prompt_id="p")
+            with contextlib.ExitStack() as stack:
+                for name, value in patches.items():
+                    stack.enter_context(mock.patch.object(mod, name, value, create=True))
+                return run_inproc(mod, payload, env)
+
+        base_code, base_err = once_missing({})
+        check("CO-17 control: a missing transcript fails open with one stderr line", base_code == 0 and base_err.count("allowed (") == 1,
+              (base_code, base_err))
+        for fn in (boom, exits, weird):
+            code, err = once_missing({"log_event": fn})
+            check(f"CO-17 the fail-open record: log_event forced to raise {fn.__name__} leaves exit code and stderr unchanged",
+                  code == base_code and err == base_err, "base (%s, %r) vs (%s, %r)" % (base_code, base_err[:120], code, err[:120]))
+        # an exception inside the read is the cause 'error': fail open, one stderr line
+        mod = load_module(w.guard, "codegraph_first_guard_readerr")
+        payload = guard_payload(project, sid(), transcript_path=str(fresh_transcript(sb, [af.t_human(1)])))
+        with mock.patch.object(mod, "read_transcript", boom):
+            code, err = run_inproc(mod, payload, env)
+        check("CO-18 an exception inside the transcript read allows with fail-open:transcript-error (one stderr line)",
+              code == 0 and "fail-open:transcript-error" in err and err.count("allowed (") == 1, (code, err))
+        # a read that runs out of its time budget is the cause time-exceeded
+        mod = load_module(w.guard, "codegraph_first_guard_budget")
+        payload = guard_payload(project, sid(), transcript_path=str(fresh_transcript(sb, [af.t_human(1)])))
+        with mock.patch.object(mod, "TRANSCRIPT_TIME_BUDGET_S", -1.0, create=True):
+            code, err = run_inproc(mod, payload, env)
+        check("CO-18 a read past its time budget allows with fail-open:transcript-time-exceeded",
+              code == 0 and "fail-open:transcript-time-exceeded" in err, (code, err))
+
+
+def run_prompt_row(w: World) -> None:
+    with af.Sandbox("cgpr-") as sb:
+        project = project_of(sb, "pr", server=False)
+        make_logs(project)
+
+        def notice(session: str, argv=("notice",), env_extra=None, dont_bytecode=True, hook: Path | None = None):
+            payload = {"session_id": session, "cwd": str(project), "hook_event_name": "UserPromptSubmit", "prompt": "hello"}
+            env = af.isolated_env(sb.home, sb.tmp, project, env_extra)
+            if not dont_bytecode:
+                env.pop("PYTHONDONTWRITEBYTECODE", None)
+            return subprocess.run([sys.executable] + (["-B"] if dont_bytecode else []) + [str(hook or w.guard), *argv],
+                                  input=json.dumps(payload), capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", cwd=str(project), env=env, timeout=60)
+
+        parent = af.session_parent(sb.home)
+        s = sid()
+        stale = old_session(parent, "auto-improve-codegraph-oldsession1")
+        proc = notice(s)
+        check("PRW-1 the guard's prompt row exits 0 and prints nothing when nothing needs saying", proc.returncode == 0 and proc.stdout.strip() == "", describe(proc))
+        check("PRW-1 it prunes an old session folder on the first prompt of a session", not stale.exists(), "still there: %s" % stale)
+        check("PRW-1 and sets the pruned flag in this session's folder", (pfolder(sb, s) / "pruned").exists())
+        stale2 = old_session(parent, "auto-improve-codegraph-oldsession2")
+        notice(s)
+        check("PRW-2 it prunes ONCE per session: a second old folder survives the second prompt", stale2.exists(), "pruned again")
+        # none of the old reset hook's deletions
+        s2 = sid()
+        folder = pfolder(sb, s2, True)
+        folder.mkdir(exist_ok=True)
+        ticket = folder / ("ticket-" + "a" * 64)
+        ticket.write_text("{}\n", encoding="utf-8")
+        legacy = project / ".claude" / ".codegraph-used-this-turn"
+        legacy.write_text("legacy\n", encoding="utf-8")
+        marker = af.write_marker(parent, s2)
+        proc = notice(s2)
+        check("PRW-3 it deletes no ticket, no turn.json and no legacy sentinel", proc.returncode == 0 and ticket.exists() and marker.exists() and legacy.exists(),
+              describe(proc))
+        # no bytecode
+        hooks_copy = sb.root / "pycache-check" / ".claude" / "hooks"
+        hooks_copy.mkdir(parents=True)
+        for name in (HOOK_FILE, "_error_log.py", "_project_paths.py"):
+            shutil.copyfile(w.guard.parent / name, hooks_copy / name)
+        proc = notice(sid(), dont_bytecode=False, hook=hooks_copy / HOOK_FILE)
+        check("PRW-4 the prompt row writes no __pycache__ (neither beside the hook nor beside its helpers)",
+              proc.returncode == 0 and not list(hooks_copy.rglob("__pycache__")), describe(proc) + str(list(hooks_copy.rglob("__pycache__"))))
+        # an unusable folder: one line, no 'gate stays shut', exit 0
+        s3 = sid()
+        target = sb.root / "pr-target"
+        target.mkdir()
+        link = pfolder(sb, s3)
+        if af.make_dir_link(link, target):
+            stale3 = old_session(parent, "auto-improve-codegraph-oldsession3")
+            proc = notice(s3)
+            check("PRW-5 an unusable Session folder: exit 0, one line saying why, no 'gate stays shut' claim, nothing pruned",
+                  proc.returncode == 0 and "cannot be used" in proc.stderr and "gate stays shut" not in proc.stderr and stale3.exists(), describe(proc))
+            try:
+                os.rmdir(str(link))
+            except OSError:
+                pass
+        # whatever it raises, SystemExit included, ends in exit 0
+        mod = load_module(w.guard, "codegraph_first_guard_notice_raise")
+        env = af.isolated_env(sb.home, sb.tmp, project)
+        for target_name in ("notice_section", "prune_session_folders", "_first_prompt_of_session"):
+            for exc in (RuntimeError("x"), SystemExit(5)):
+                def raiser(*a, _e=exc, **k):
+                    raise _e
+                code = None
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "argv", [str(w.guard), "notice"]), \
+                        mock.patch.object(sys, "stdin", io.StringIO(json.dumps({"session_id": sid(), "cwd": str(project)}))), \
+                        mock.patch.object(mod, target_name, raiser, create=True), contextlib.redirect_stderr(io.StringIO()), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        mod.main()
+                    except SystemExit as stop:
+                        code = stop.code if stop.code is not None else 0
+                check(f"PRW-6 the prompt row exits 0 when {target_name} raises {type(exc).__name__}", code == 0, code)
+        # the old reset hook is not a hook any more
+        check("PRW-7 the manifest registers the guard's prompt row (UserPromptSubmit, args [notice]) and no reset or tracker row",
+              {(r["event"], r["hook"], tuple(r.get("args", []))) for r in af.registrations(ADD_ON)}
+              == {("PreToolUse", HOOK_FILE, ()), ("UserPromptSubmit", HOOK_FILE, ("notice",))}, af.registrations(ADD_ON))
+
+
 def guarded(name: str, fn, *args) -> None:
     """One section: a crash inside it is ONE failing check naming the section, and the runner goes on."""
     try:
@@ -4685,6 +4844,12 @@ def run() -> None:
         return
     try:
         guarded("K-4", run_k4, world)
+        guarded("CO-states", run_cutover_states, world)
+        guarded("CO-unknown", run_cutover_unknown, world)
+        guarded("CO-tickets", run_cutover_state_and_tickets, world)
+        guarded("CO-record", run_cutover_fallback_and_record, world)
+        guarded("CO-late", run_cutover_late_effects, world)
+        guarded("PR", run_prompt_row, world)
         guarded("#612", run_612)
         guarded("R", run_reasons, world)
         guarded("E", run_escape, world)
@@ -4702,7 +4867,7 @@ def run() -> None:
         guarded("L", run_link_writes, world)
         guarded("Q-plant", run_planted_state, world)
         guarded("Q-prune", run_parent_pruner, world)
-        guarded("Q-foreign", run_foreign_marker, world)
+        guarded("Q-leftover-marker", run_foreign_marker, world)
         guarded("Q-rule", run_parent_rule_table, world)
         guarded("Q-unusable", run_unusable_parent, world)
         guarded("Q-nonsource", run_unusable_nonsource, world)
@@ -4718,7 +4883,7 @@ def run() -> None:
         guarded("R3-nonstring", run_block_non_string_fields, world)
         guarded("R2-matrix", run_verdict_matrix, world)
         guarded("R2-boundary", run_base_boundaries, world)
-        guarded("R2-foreign", run_foreign_marker_order, world)
+        guarded("R2-fallback-order", run_foreign_marker_order, world)
         guarded("R2-ambiguous", run_ambiguous_after_unwritten, world)
         guarded("R2-bridge", run_bridge_without_own_root, world)
         guarded("R2-snapshot", run_real_parent_snapshot_selfcheck, world)

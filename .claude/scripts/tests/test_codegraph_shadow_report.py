@@ -368,5 +368,125 @@ class MarkerRouteGroupingTests(unittest.TestCase):
         self.assertEqual(self.rep["outcomes"], {"agree": 1, "shadow-more-open": 0, "shadow-more-closed": 4})
 
 
+def enforced(**over) -> dict:
+    """An enforced Measurement record (issue #262): outcome enforced, shadow_* equal live_*, turn_marker null, turn_route set."""
+    base = {
+        "ts": 1, "session": "e1", "agent": False, "tool": "Read", "target_class": "source",
+        "live_decision": "block", "live_reason": "source-target", "turn_marker": None, "turn_route": None,
+        "transcript_turn": "closed", "session_seen": False,
+        "shadow_decision": "block", "shadow_reason": "source-target", "outcome": "enforced",
+        "fp": "f0", "prompt_key": "p0", "shadow_ms": 2.0, "bytes_read": 0, "skipped_long_line": 0,
+    }
+    base.update(over)
+    return base
+
+
+class EnforcedSectionTests(unittest.TestCase):
+    """The enforced outcome and its own section (cut-over contract, command "Report (extended)"). Numbers worked out by hand:
+
+    E1 block Read/source-target (e1, f1, p1), E2 its retry, E3 block Grep/ambiguous-target (e1, f2, p2) with no retry,
+    E4 open via mcp, E5 open via cli, E6 fail-open:transcript-no-transcript, E7 fail-open:transcript-parse-error,
+    E8 a subagent (agent true, fail-open:subagent), E9 no-target (not gated), E10 non-source-target (not gated).
+    Gated calls are every record whose reason is not no-target or non-source-target: E1..E8 = 8. Failed open on the
+    transcript: E6 and E7 = 2 of 8 = 0.25. Blocks 2 (Read, Grep), retried 1 (E1 by E2). Cost: 2 4 6 8 10 12 14 16 18 20.
+    """
+
+    RECORDS = [
+        enforced(fp="f1", prompt_key="p1", shadow_ms=2.0),                                                  # E1
+        enforced(fp="f1", prompt_key="p1", live_decision="allow", live_reason="retry-escape-used",
+                 shadow_decision="allow", shadow_reason="retry-escape-used", shadow_ms=4.0),               # E2
+        enforced(tool="Grep", fp="f2", prompt_key="p2", live_reason="ambiguous-target", shadow_reason="ambiguous-target",
+                 shadow_ms=6.0),                                                                           # E3
+        enforced(live_decision="allow", live_reason="transcript-open", shadow_decision="allow",
+                 shadow_reason="transcript-open", transcript_turn="open", turn_route="mcp", shadow_ms=8.0),  # E4
+        enforced(live_decision="allow", live_reason="transcript-open", shadow_decision="allow",
+                 shadow_reason="transcript-open", transcript_turn="open", turn_route="cli", shadow_ms=10.0),  # E5
+        enforced(live_decision="allow", live_reason="fail-open:transcript-no-transcript", shadow_decision="allow",
+                 shadow_reason="fail-open:transcript-no-transcript", transcript_turn="unknown:no-transcript",
+                 shadow_ms=12.0),                                                                          # E6
+        enforced(live_decision="allow", live_reason="fail-open:transcript-parse-error", shadow_decision="allow",
+                 shadow_reason="fail-open:transcript-parse-error", transcript_turn="unknown:parse-error",
+                 shadow_ms=14.0),                                                                          # E7
+        enforced(agent=True, live_decision="allow", live_reason="fail-open:subagent", shadow_decision="allow",
+                 shadow_reason="fail-open:subagent", transcript_turn="unknown:subagent", shadow_ms=16.0),  # E8
+        enforced(live_decision="allow", live_reason="no-target", shadow_decision="allow", shadow_reason="no-target",
+                 shadow_ms=18.0),                                                                          # E9
+        enforced(live_decision="allow", live_reason="non-source-target", shadow_decision="allow",
+                 shadow_reason="non-source-target", shadow_ms=20.0),                                       # E10
+    ]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.rep = report.build_report([json.dumps(r).encode("utf-8") for r in cls.RECORDS])
+        cls.e = cls.rep["enforced"]
+
+    def test_enforced_joins_the_outcome_set_and_a_record_with_it_is_not_malformed(self) -> None:
+        self.assertEqual(self.rep["malformed"], 0)
+        self.assertEqual(self.e["records"], 10)
+        self.assertEqual(self.e["sessions"], 1)
+
+    def test_the_shadow_sections_ignore_enforced_records(self) -> None:
+        self.assertEqual(self.rep["records"], 0)
+        self.assertEqual(self.rep["outcomes"], {"agree": 0, "shadow-more-open": 0, "shadow-more-closed": 0})
+        self.assertEqual((self.rep["blocks"], self.rep["blocks_retried"]), (0, 0))
+        self.assertEqual(self.rep["shadow_ms"]["all"]["n"], 0)
+
+    def test_adding_enforced_records_to_a_shadow_log_changes_no_shadow_number(self) -> None:
+        shadow_only = report.build_report(fixture_bytes().split(b"\n"))
+        mixed = report.build_report(fixture_bytes().split(b"\n") + [json.dumps(r).encode("utf-8") for r in self.RECORDS])
+        for key in ("records", "sessions", "outcomes", "more_closed", "live_reasons", "shadow_reasons", "blocks",
+                    "blocks_retried", "blocks_by_tool", "q5_read_source", "session_seen_blocks", "skipped_long_line", "shadow_ms"):
+            self.assertEqual(mixed[key], shadow_only[key], key)
+        self.assertEqual(mixed["enforced"]["records"], 10)
+
+    def test_reasons_are_split_by_agent(self) -> None:
+        self.assertEqual(self.e["reasons"]["agent"], {"fail-open:subagent": 1})
+        self.assertEqual(self.e["reasons"]["main"]["transcript-open"], 2)
+        self.assertNotIn("fail-open:subagent", self.e["reasons"]["main"])
+
+    def test_the_fail_open_share_is_transcript_fail_opens_over_gated_calls(self) -> None:
+        self.assertEqual((self.e["gated_calls"], self.e["fail_open_transcript"], self.e["fail_open_share"]), (8, 2, 0.25))
+        self.assertIsNone(report.build_report([])["enforced"]["fail_open_share"])
+
+    def test_blocks_and_their_identical_retries(self) -> None:
+        self.assertEqual((self.e["blocks"], self.e["blocks_retried"]), (2, 1))
+        self.assertEqual(self.e["blocks_by_tool"]["Read"], {"blocks": 1, "retried": 1, "retry_rate": 1.0})
+        self.assertEqual(self.e["blocks_by_tool"]["Grep"], {"blocks": 1, "retried": 0, "retry_rate": 0.0})
+
+    def test_transcript_states_and_routes(self) -> None:
+        self.assertEqual(self.e["transcript_turn"]["open"], 2)
+        self.assertEqual(self.e["transcript_turn"]["unknown:no-transcript"], 1)
+        self.assertEqual(self.e["turn_route"]["mcp"], 1)
+        self.assertEqual(self.e["turn_route"]["cli"], 1)
+
+    def test_cost_percentiles_are_nearest_rank(self) -> None:
+        self.assertEqual(self.e["shadow_ms"], {"n": 10, "p50": 10.0, "p95": 20.0})
+
+    def test_the_cap_line_comes_from_a_log_full_line(self) -> None:
+        lines = [json.dumps(r).encode("utf-8") for r in self.RECORDS] + [b'{"event":"log-full","ts":1700000000}']
+        rep = report.build_report(lines)
+        self.assertEqual(rep["cap"], {"stopped": True, "ts": 1700000000})
+        text = report.render_text(dict(rep, log="x"))
+        self.assertIn("measurement stopped at the 10 MB cap at 2023-11-14T22:13:20Z", text)
+        self.assertNotIn("measurement stopped", report.render_text(dict(self.rep, log="x")))
+
+    def test_the_text_report_has_the_enforced_section_and_the_share(self) -> None:
+        text = report.render_text(dict(self.rep, log="x"))
+        self.assertIn("ENFORCED", text)
+        self.assertIn("share: 25.0%", text)
+        self.assertIn("enforced records: 10", text)
+        self.assertNotIn("no records in the log", text)
+
+    def test_an_enforced_only_log_through_the_command_line_keeps_exit_code_0(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_project(Path(tmp), b"\n".join(json.dumps(r).encode("utf-8") for r in self.RECORDS) + b"\n")
+            code, out, err = run_main(["--project", str(project)])
+            self.assertEqual((code, err), (0, ""))
+            self.assertIn("enforced records: 10", out)
+            code, out, _err = run_main(["--project", str(project), "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["enforced"]["blocks"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

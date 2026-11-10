@@ -60,8 +60,12 @@ manifest's registration rows into the project's settings.json as Project hook la
 preview, plan hash, backup and atomic writer as ``hooks``. It never removes a row or a file and never overwrites a
 file that differs. When the hooks folder beside these scripts has no usable ``_project_paths.py`` (the launcher is
 unavailable), both ``hooks`` and an ``addon`` install that writes a row refuse as ``project-hook-launcher-missing``
-(exit 3) in the preview and in the apply, and write nothing. A hook the manifest lists under ``disabled`` is never copied and never registered; a
-project that still carries one (under its current or a former name) is refused as ``disabled-hook-present``.
+(exit 3) in the preview and in the apply, and write nothing. A hook the manifest lists under ``disabled`` is never copied and never
+registered. A project that still carries one (under its current or a former name) has it RETIRED in two steps (issue #262,
+C-8). Step A, the first run that finds a row naming it in the project's settings.json, removes the row (whether or not the file
+exists) and deletes no file. Step B, a later run with no project or local row naming it, deletes an unedited released copy and
+keeps an edited one under ``kept``. A row in settings.local.json, or step A while an edited copy of that hook is present, is
+refused as ``disabled-hook-present`` (nothing written). A row in the user layer is not read.
 
 An add-on manifest may also carry two optional keys (issue #259). ``permissions_allow`` lists the entries the install
 adds to the project's ``permissions.allow`` (a text splice inside the same plan hash; an entry already listed adds
@@ -1688,7 +1692,8 @@ def _splice_rows(text: str, settings: Any, to_add: List[_Registration], platform
 
 
 def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Registration],
-                        allow: Sequence[str] = ()) -> Tuple[Optional[Result], Dict[str, Any]]:
+                        allow: Sequence[str] = (), retire: Optional[Set[str]] = None
+                        ) -> Tuple[Optional[Result], Dict[str, Any]]:
     """The one settings.json merge both the vendored hooks step and an add-on install use.
 
     Reads the project's settings.json strictly, finds which of ``regs`` no layer registers yet, and builds
@@ -1710,6 +1715,10 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
     ``allow`` lists permission entries the install wants in the project's ``permissions.allow``. Those the project
     layer lists already add nothing; the rest are spliced in with the rows (same preview, same plan hash, same
     bytes-outside-the-insertion guarantee). The edit carries ``allow-add`` and ``allow-listed``.
+
+    ``retire`` (lowercase hook file names, issue #262 step A) takes every row of the project's settings.json that names one
+    of them out FIRST, with the removal's own row splice, and the new rows are then inserted into the result: one preview, one
+    plan hash, one backup. The edit carries ``retired-rows`` (what was taken out).
     """
     if regs and _launcher_api() is None:
         return _launcher_missing_refusal(project), {}
@@ -1761,6 +1770,22 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
     indent_match = re.search(r"\n([ \t]+)\S", text)
     indent = indent_match.group(1) if indent_match else "  "
     new_text = ""
+    retired_rows: List[Dict[str, Any]] = []
+    work_text, work_settings = text, settings
+    if retire and old_bytes is not None:
+        retired_rows = _rows_to_remove(settings, retire)
+        if retired_rows:
+            try:
+                work_text = _splice_rows_out(text, settings, retire)
+                work_settings = json.loads(work_text, object_pairs_hook=_strict_pairs)
+            except _SpliceRefused as exc:
+                return refusal("unexpected-settings-shape",
+                               "settings.json: the retired hook's rows could not be taken out of %s (%s), so nothing was "
+                               "written. Remove the rows by hand" % (exc.container, exc.why), target), {}
+            except (ValueError, IndexError, AttributeError, TypeError, RecursionError) as exc:
+                return refusal("unexpected-settings-shape",
+                               "settings.json: the text around the retired hook's rows could not be read safely (%s), so "
+                               "nothing was written. Remove the rows by hand" % exc, target), {}
     if (to_add or allow_add) and old_bytes is None:
         # No file yet: nothing to keep, so the new file is rendered whole.
         new_settings = settings
@@ -1776,7 +1801,7 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
         new_text = json.dumps(new_settings, indent=indent, ensure_ascii=False).replace("\n", newline) + newline
     elif to_add or allow_add:
         try:
-            new_text = _splice_rows(text, settings, to_add, platform, indent, newline, allow_add)
+            new_text = _splice_rows(work_text, work_settings, to_add, platform, indent, newline, allow_add)
         except _SpliceRefused as exc:
             return refusal("unexpected-settings-shape",
                            "settings.json: the row for %s could not be inserted into %s (%s), so nothing was "
@@ -1786,12 +1811,14 @@ def _plan_settings_edit(project: Path, platform: str, home: Path, regs: List[_Re
             return refusal("unexpected-settings-shape",
                            "settings.json: the text around the insertion point could not be read safely (%s), "
                            "so nothing was written. Add the rows by hand" % exc, target), {}
+    if retired_rows and not (to_add or allow_add):
+        new_text = work_text  # step A alone: only the retired rows go
     bom = b"\xef\xbb\xbf" if old_bytes is not None and old_bytes.startswith(b"\xef\xbb\xbf") else b""
     diff = "".join(difflib.unified_diff(text.splitlines(keepends=True), new_text.splitlines(keepends=True),
-                                        fromfile=str(target), tofile=str(target))) if (to_add or allow_add) else ""
+                                        fromfile=str(target), tofile=str(target))) if (to_add or allow_add or retired_rows) else ""
     return None, {"target": target, "old-bytes": old_bytes, "new-bytes": bom + new_text.encode("utf-8"),
                   "to-add": to_add, "present": present, "notes": notes, "disabled": disabled, "diff": diff,
-                  "allow-add": allow_add, "allow-listed": allow_listed}
+                  "allow-add": allow_add, "allow-listed": allow_listed, "retired-rows": retired_rows}
 
 
 def _plan_vendored(project: Path, platform: str, home: Path, plugin_root: Optional[Path],
@@ -2114,11 +2141,13 @@ def _disabled_entries_problem(path: Path, folder: Path, disabled: Any, hooks: Li
         if not (isinstance(former, list) and all(_plain_name(f) and str(f).endswith(".py") for f in former)):
             return _addon_manifest_problem(path, "former_names of %s must be a list of .py file names" % hook)
         row = entry.get("registration")
-        if not (isinstance(row, dict) and isinstance(row.get("event"), str) and row["event"]
-                and isinstance(row.get("args", []), list) and all(isinstance(a, str) for a in row.get("args", []))
-                and isinstance(row.get("matcher", ""), str)):
+        rows = row if isinstance(row, list) and row else [row]  # one row object, or a non-empty list of them (issue #262)
+        if not all(isinstance(r, dict) and isinstance(r.get("event"), str) and r["event"]
+                   and isinstance(r.get("args", []), list) and all(isinstance(a, str) for a in r.get("args", []))
+                   and isinstance(r.get("matcher", ""), str)
+                   and ("if" not in r or (isinstance(r["if"], str) and r["if"].strip())) for r in rows):
             return _addon_manifest_problem(path, "the registration of disabled hook %s needs an event, an optional "
-                                                 "matcher and args" % hook)
+                                                 "matcher and args (one row, or a list of rows)" % hook)
         note = entry.get("note")
         if not (_plain_name(note) and str(note).endswith(".md") and (folder / note).is_file()):
             return _addon_manifest_problem(path, "the note of disabled hook %s must be a .md file in the add-on "
@@ -2255,9 +2284,13 @@ def _document_path(addon: str, document: str) -> str:
 
 
 def _disabled_hook_refusal(project: Path, home: Path, name: str, manifest: Dict[str, Any]) -> Optional[Result]:
-    """``disabled-hook-present`` when the project carries a disabled hook: its file in .claude/hooks/, or a row
-    in the project's settings.json or settings.local.json, under the hook's current or any former name (I-5).
-    Reads only; the message names the uninstall skill."""
+    """The one-shot refusal the install gave a project that carried a disabled hook, before the two-step retirement (issue #262).
+
+    ``disabled-hook-present`` when the project carries a disabled hook: its file in .claude/hooks/, or a row in the project's
+    settings.json or settings.local.json, under the hook's current or any former name (I-5). Reads only. **The install no longer
+    calls it**: ``_plan_retire`` retires such a hook in two steps and refuses only the two cases C-8 names. It stays as the
+    reference reading that ``plugin_doctor.py --drift`` is held in parity with (``test_plugin_doctor.py`` pins the two readers
+    against each other), so a change to what counts as "the project carries a retired hook" is made here and there together."""
     entries = [e for e in manifest.get("disabled", []) if isinstance(e, dict)]
     if not entries:
         return None
@@ -2283,6 +2316,86 @@ def _disabled_hook_refusal(project: Path, home: Path, name: str, manifest: Dict[
         "this project still carries the retired %s hook (%s), which the %s add-on no longer installs, so "
         "nothing was written. Run /auto-improve-%s-uninstall first, then run this install again"
         % (entries[0]["hook"], "; ".join(found), name, name), first or project)
+
+
+RETIRE_STEP_A_NOTE = (
+    "Step A of retiring a disabled hook: its row is removed from settings.json and its file stays where it is, because a "
+    "session that is already open still holds the row and a missing script would make that row fail. Start a new session, "
+    "then run this install again to delete the leftover files.")
+RETIRE_STEP_B_NOTE = (
+    "Step B of retiring a disabled hook: no row names it any more, so an unedited released copy is deleted now. An edited "
+    "copy is kept. Run this step only after a new session has started since the install run that removed the row.")
+
+
+def _retire_file_ops(project: Path, folder: Path, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The retired hook files the project holds, under the hook's current or any former name (case blind): ``delete`` when the
+    folded hash is the plugin's copy or a released hash of that entry, else ``kept-differs`` (an edited copy, a link, an unreadable
+    file). Reads only. Each op carries the entry's current hook name, so a row and a file can be paired."""
+    ops: List[Dict[str, Any]] = []
+    hooks_dir = project / ".claude" / "hooks"
+    for entry in entries:
+        copy_hash = _folded_sha256(folder / "hooks" / entry["hook"])
+        allowed = set(entry["released_sha256"]) | ({copy_hash} if copy_hash else set())
+        wanted = {n.lower() for n in [entry["hook"]] + list(entry.get("former_names", []))}
+        try:
+            present = sorted(p for p in hooks_dir.iterdir() if p.name.lower() in wanted)
+        except OSError:
+            present = []
+        for candidate in present:
+            action, digest = _classify_file(candidate, allowed)
+            if action == "absent":
+                continue
+            ops.append({"hook": entry["hook"], "path": ".claude/hooks/" + candidate.name, "kind": "disabled-hook",
+                        "action": action, "dest": candidate, "sha256": digest})
+    return ops
+
+
+def _plan_retire(project: Path, home: Path, name: str, folder: Path, manifest: Dict[str, Any]
+                 ) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """Retire every Disabled add-on hook the project carries, in TWO STEPS (issue #262, C-8). Reads only.
+
+    Refused as ``disabled-hook-present`` (nothing written): a row in settings.local.json (the install does not write that layer),
+    and step A while an edited copy of a hook whose row it would remove is present (removing the row would switch off the user's
+    own edits). A user-layer row is not read.
+
+    Step A: some row of the project's settings.json names a disabled hook (by current or former name). Every such row goes,
+    whether or not the file exists, and NO file is deleted in this run. Step B: no project or local row names any disabled hook.
+    Each unedited released copy is deleted; an edited copy is kept and listed. Step B never refuses. With nothing present the
+    step is None. Returns (refusal, {}) or (None, retire plan)."""
+    entries = [e for e in manifest.get("disabled", []) if isinstance(e, dict)]
+    empty: Dict[str, Any] = {"step": None, "names": set(), "ops": [], "delete": [], "kept": []}
+    if not entries:
+        return None, empty
+    names = {n.lower(): e for e in entries for n in [e["hook"]] + list(e.get("former_names", []))}
+    existing, _disabled, problem = _existing_registrations(project, home)
+    if problem:
+        return problem, {}
+    uninstall = "/auto-improve-%s-uninstall" % name
+    for row in existing:
+        if row["layer"] == "local" and str(row["file"]).lower() in names:
+            return refusal(
+                "disabled-hook-present",
+                "this project carries a %s row for the retired %s hook in .claude/settings.local.json, which the %s add-on no "
+                "longer installs and which this install does not write, so nothing was written. Run %s first, then run this "
+                "install again" % (row["event"], names[str(row["file"]).lower()]["hook"], name, uninstall),
+                project / ".claude" / "settings.local.json"), {}
+    project_rows = [row for row in existing if row["layer"] == "project" and str(row["file"]).lower() in names]
+    ops = _retire_file_ops(project, folder, entries)
+    if project_rows:
+        with_row = {names[str(row["file"]).lower()]["hook"] for row in project_rows}
+        for op in ops:
+            if op["action"] == "kept-differs" and op["hook"] in with_row:
+                return refusal(
+                    "disabled-hook-present",
+                    "this project carries an edited copy of the retired %s hook (%s) and a row that names it. Removing the "
+                    "row would switch off your edits, so nothing was written. Run %s first (it keeps an edited file), then "
+                    "run this install again" % (op["hook"], op["path"], uninstall), op["dest"]), {}
+        return None, {"step": "A", "names": set(names), "ops": [], "delete": [], "kept": [], "note": RETIRE_STEP_A_NOTE}
+    deletions = [op for op in ops if op["action"] == "delete"]
+    kept = [{"path": op["path"], "reason": KEPT_REASONS["kept-differs"]} for op in ops if op["action"] == "kept-differs"]
+    if not ops:
+        return None, empty
+    return None, {"step": "B", "names": set(), "ops": ops, "delete": deletions, "kept": kept, "note": RETIRE_STEP_B_NOTE}
 
 
 def _addon_file_ops(project: Path, root: Path, folder: Path, manifest: Dict[str, Any]
@@ -2853,8 +2966,11 @@ def _resolve_addon(project: Path, name: str, claude_home: Optional[Path], plugin
 
 def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[Path],
                 plugin_root: Optional[Path], provider: str = "claude",
-                stylesheets: Sequence[str] = ()) -> Tuple[Result, Dict[str, Any]]:
-    """The AddonPlan (or a refusal) plus the bytes the apply needs. Writes nothing."""
+                stylesheets: Sequence[str] = (), keep_retired: bool = False) -> Tuple[Result, Dict[str, Any]]:
+    """The AddonPlan (or a refusal) plus the bytes the apply needs. Writes nothing.
+
+    ``keep_retired`` leaves step B's deletions out of the plan (the user could not confirm that a new session has started since
+    the run that removed the rows, issue #262 Q7): the rest of the plan is unchanged and the leftover files stay."""
     problem, found = _resolve_addon(project, name, claude_home, plugin_root, provider, "install")
     if problem:
         return problem, {}
@@ -2870,9 +2986,12 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
                 "again." % (state["why"], name), project / ".mcp.json"), {}
         if state["note"]:
             approval_notes.append(state["note"])
-    problem = _disabled_hook_refusal(project, home, name, manifest)
+    problem, retire = _plan_retire(project, home, name, folder, manifest)
     if problem:
         return problem, {}
+    if keep_retired and retire["step"] == "B":
+        retire = dict(retire, ops=[], delete=[], kept=[],
+                      note="Step B was left out on request: the retired files stay until a later run, after a new session.")
     grants = _permission_grants(manifest)
     if grants:
         problem, layers = _load_layers(project, home)
@@ -2895,13 +3014,15 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
                           "py", r["hook"], "command",
                           tuple((k, r[k]) for k in ADDON_ROW_KEYS if k in r))
             for r in manifest["registrations"]]
-    problem, edit = _plan_settings_edit(project, platform, home, regs, grants)
+    problem, edit = _plan_settings_edit(project, platform, home, regs, grants, retire["names"] or None)
     if problem:
         return problem, {}
     # An update also binds the bytes it will replace, so a file that changed after the preview changes the hash.
-    ops_digest = "\n".join("%s|%s|%s%s" % (o["action"], o["path"], o["sha256"],
-                                          "|" + o["have-sha256"] if "have-sha256" in o else "")
-                           for o in ops).encode("utf-8")
+    ops_digest = "\n".join(["%s|%s|%s%s" % (o["action"], o["path"], o["sha256"],
+                                           "|" + o["have-sha256"] if "have-sha256" in o else "")
+                            for o in ops]
+                           + ["retire-%s|%s|%s|%s" % (retire["step"], o["action"], o["path"], o["sha256"])
+                              for o in retire["ops"]]).encode("utf-8")
     old_bytes, new_bytes, to_add = edit["old-bytes"], edit["new-bytes"], edit["to-add"]
     index_notes = (_codegraph_index_notes(project)
                    if any(isinstance(n, dict) and n.get("name") == "codegraph" for n in manifest["prerequisites"])
@@ -2933,7 +3054,12 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
             for o in ops if o["action"] == "update"],
         "kill-switches": [k for k in manifest.get("kill_switches", []) if isinstance(k, str)],
         "new-session-note": NEW_SESSION_NOTE,
+        "retire": {"step": retire["step"], "rows": [r["registration-key"] for r in edit["retired-rows"]],
+                   "delete": [o["path"] for o in retire["delete"]], "kept": list(retire["kept"]),
+                   "note": retire.get("note"), "confirm-new-session": retire["step"] == "B" and bool(retire["delete"])},
     }
+    if retire["step"] is not None:
+        plan["notes"] = list(plan["notes"]) + [retire["note"]]
     if grants:
         plan["permissions-allow"] = {"add": list(edit["allow-add"]), "already-listed": list(edit["allow-listed"])}
         granted = sorted({_grant_server(g, {n["name"] for n in manifest["prerequisites"]}) or "" for g in grants} - {""})
@@ -2941,7 +3067,8 @@ def _plan_addon(project: Path, name: str, platform: str, claude_home: Optional[P
             "the permission entry covers every current and future tool of a server named %s, and it is written to "
             "the committed settings file %s" % (server, edit["target"].name) for server in granted]
     return plan, {"old-bytes": old_bytes, "new-bytes": new_bytes, "to-add": to_add,
-                  "settings-changes": bool(to_add or edit["allow-add"]), "ops": ops,
+                  "settings-changes": bool(to_add or edit["allow-add"] or edit["retired-rows"]), "ops": ops,
+                  "retire": retire, "retired-rows": edit["retired-rows"],
                   "profile": profile, "stylesheet-writes": sheets["writes"]}
 
 
@@ -2953,13 +3080,14 @@ def plan_addon(
     plugin_root: Optional[Path] = None,
     provider: str = "claude",
     stylesheets: Sequence[str] = (),
+    keep_retired: bool = False,
 ) -> Dict[str, Any]:
     """Preview installing one add-on (AddonPlan) or return a Refusal. Writes nothing.
 
     ``stylesheets`` names the global stylesheets (relative to the project) that get the add-on's snippet; with
     none, the plan only lists the candidates."""
     plan, _payload = _plan_addon(Path(project), name, platform or sys.platform, claude_home, plugin_root,
-                                 provider, stylesheets)
+                                 provider, stylesheets, keep_retired)
     return plan
 
 
@@ -2972,6 +3100,7 @@ def apply_addon(
     plugin_root: Optional[Path] = None,
     provider: str = "claude",
     stylesheets: Sequence[str] = (),
+    keep_retired: bool = False,
 ) -> Dict[str, Any]:
     """Install one add-on: copy its missing files, register its documents, append its snippet, merge its rows.
 
@@ -2983,7 +3112,7 @@ def apply_addon(
     """
     project = Path(project)
     platform = platform or sys.platform
-    plan, payload = _plan_addon(project, name, platform, claude_home, plugin_root, provider, stylesheets)
+    plan, payload = _plan_addon(project, name, platform, claude_home, plugin_root, provider, stylesheets, keep_retired)
     if _is_refusal(plan):
         return plan
     target = Path(plan["target"])
@@ -2997,9 +3126,12 @@ def apply_addon(
     profile_changes = bool(profile["adds"])
     sheet_writes = payload["stylesheet-writes"]
     settings_changes = payload["settings-changes"]
-    if not copies and not updates and not settings_changes and not profile_changes and not sheet_writes:
-        return {"status": "nothing-to-do", "target": str(target), "add-on": name}
-    destinations = [posixpath.dirname(op["path"]) for op in copies + updates]
+    retire_deletions = payload["retire"]["delete"]
+    retire_kept = payload["retire"]["kept"]
+    if (not copies and not updates and not settings_changes and not profile_changes and not sheet_writes
+            and not retire_deletions):
+        return {"status": "nothing-to-do", "target": str(target), "add-on": name, "kept": retire_kept}
+    destinations = [posixpath.dirname(op["path"]) for op in copies + updates + retire_deletions]
     destinations += [posixpath.dirname(write["path"]) for write in sheet_writes]
     linked = _linked_folder_refusal(project, list(dict.fromkeys(list(WRITE_FOLDERS) + destinations)), target)
     if linked:
@@ -3060,7 +3192,11 @@ def apply_addon(
     result: Dict[str, Any] = {"status": "applied", "target": str(target), "add-on": name,
                               "copied": copied, "updated": updated, "file-backups": file_backups,
                               "added": len(payload["to-add"]), "backup": None,
-                              "registered": [], "new-session-note": NEW_SESSION_NOTE}
+                              "registered": [], "new-session-note": NEW_SESSION_NOTE,
+                              "retired-rows": [r["registration-key"] for r in payload["retired-rows"]],
+                              "deleted": [], "kept": retire_kept}
+    if payload["retire"]["step"] == "A":
+        result["new-session-note"] = NEW_SESSION_NOTE + " " + RETIRE_STEP_A_NOTE
     if profile_changes:
         # The documents are on disk, so the profile never lists a file that is not there. The slot was
         # re-read with the plan above; a change since then is refused, as for settings.json.
@@ -3093,7 +3229,7 @@ def apply_addon(
         written.append(write["path"])
     result["stylesheets"] = written
     if not settings_changes:
-        return result
+        return _delete_retired(result, retire_deletions)
     old_bytes = payload["old-bytes"]
     backup: Optional[Path] = None
     try:
@@ -3114,6 +3250,18 @@ def apply_addon(
     result.update({"backup": str(backup) if backup else None,
                    "rollback": ("copy %s over %s" % (backup, target)) if backup else "delete %s" % target,
                    "gitignore-hint": ".claude/settings.json.bak-*"})
+    return _delete_retired(result, retire_deletions)
+
+
+def _delete_retired(result: Dict[str, Any], deletions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Step B's deletions, run LAST (the rows were taken out first, or by an earlier run: no file goes while a row names it, I-7).
+    The plan hash bound every file's bytes, so each one is still the released copy the preview showed."""
+    for op in deletions:
+        error = _remove_file(op["dest"])
+        if error:
+            return refusal("write-failed", "%s could not be deleted: %s (deleted so far: %s)"
+                           % (op["path"], error, ", ".join(result["deleted"]) or "none"), op["dest"])
+        result["deleted"].append(op["path"])
     return result
 
 
@@ -3785,6 +3933,9 @@ def build_parser() -> argparse.ArgumentParser:
     addon.add_argument("--check", action="store_true",
                        help="read-only: judge the settings layers against the add-on's permission entry "
                             "(exit 0 clean, 1 findings, 2 could not check)")
+    addon.add_argument("--keep-retired-files", action="store_true",
+                       help="leave step B of a disabled hook's retirement out: the leftover files are not deleted in this run "
+                            "(pass it to the preview and to the apply alike)")
 
     remove = sub.add_parser("addon-remove", parents=[common], help="remove one opt-in add-on")
     remove.add_argument("--name", required=True, help="the add-on to remove (a folder under .claude/addons/)")
@@ -3874,10 +4025,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = check_addon(project, args.name, home, provider=args.provider)
         elif args.apply:
             result = apply_addon(project, args.name, args.expect_sha256 or "", args.platform, home,
-                                 provider=args.provider, stylesheets=args.stylesheet)
+                                 provider=args.provider, stylesheets=args.stylesheet,
+                                 keep_retired=args.keep_retired_files)
         else:
             result = plan_addon(project, args.name, args.platform, home, provider=args.provider,
-                                stylesheets=args.stylesheet)
+                                stylesheets=args.stylesheet, keep_retired=args.keep_retired_files)
     elif args.command == "record-registrations":
         if args.apply:
             result = apply_hook_registration_profile(project, args.expect_sha256 or "")

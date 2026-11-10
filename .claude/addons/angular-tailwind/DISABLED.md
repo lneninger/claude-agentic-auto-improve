@@ -39,4 +39,9 @@ Projects that want it then run the install skill again; they start a new session
 
 ## To remove it from a project that has it
 
-Run `/auto-improve-angular-tailwind-uninstall`. Until it has run, the install refuses with `disabled-hook-present`.
+Re-run `/auto-improve-angular-tailwind-install`. Since 0.17.0 the install retires the advisor in two steps, so that a session that is already open never finds a missing script:
+
+1. **Step A** (the first run) removes the advisor's row from `.claude/settings.json`, under the current name or the former one, whether or not the file exists. It deletes no file. A plain row written before the Project hook launcher would exit 2 on a missing script and block every prompt, and Claude Code reads the rows once, when a session starts. Start a new session afterwards.
+2. **Step B** (the next run) deletes the file when it is an unedited released copy, and keeps an edited copy, which it lists. Step B never refuses.
+
+The install still refuses with `disabled-hook-present` (nothing written) when a row for the advisor is in `.claude/settings.local.json`, or when step A finds an edited copy of the advisor next to a row that names it. In those cases run `/auto-improve-angular-tailwind-uninstall`: it removes the row and then the file, and keeps an edited file.

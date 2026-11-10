@@ -55,6 +55,7 @@ Exit code:
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
@@ -79,6 +80,14 @@ import _project_paths as pp  # noqa: E402
 # The shared add-on finder and installer (vendored identically in the plugin and in a consuming repository).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _addon_fixture as af  # noqa: E402
+
+# The codegraph guard decides from the session transcript since the cut-over (issue #262): a payload with no transcript_path
+# fails open. Every codegraph payload below therefore carries a CLOSED transcript (a human prompt and nothing after it) unless a
+# row asks for another state. One shared file: a session's transcript is one file, and a call that names another file under the
+# same session key reads as a rewritten transcript and fails open.
+_TRANSCRIPT_DIR = Path(tempfile.mkdtemp(prefix="wpg-transcripts-"))
+atexit.register(shutil.rmtree, str(_TRANSCRIPT_DIR), True)
+CLOSED_TRANSCRIPT = af.closed_transcript(_TRANSCRIPT_DIR)
 
 # The shared "Files to touch" parser -- imported ONLY so this suite can
 # assert its own fixture contracts actually parse (see
@@ -923,12 +932,13 @@ def bash_append_payload(target: str) -> dict:
     return {"tool_name": "Bash", "tool_input": {"command": f'echo "worktree guard probe" >> {target}'}}
 
 
-def read_payload(file_path: str) -> dict:
-    return {"tool_name": "Read", "tool_input": {"file_path": file_path}}
+def read_payload(file_path: str, transcript: Optional[Path] = None) -> dict:
+    return {"tool_name": "Read", "tool_input": {"file_path": file_path},
+            "transcript_path": str(transcript or CLOSED_TRANSCRIPT)}
 
 
 def grep_path_payload(path: str, pattern: str = "TODO") -> dict:
-    return {"tool_name": "Grep", "tool_input": {"path": path, "pattern": pattern}}
+    return {"tool_name": "Grep", "tool_input": {"path": path, "pattern": pattern}, "transcript_path": str(CLOSED_TRANSCRIPT)}
 
 
 # ===========================================================================
@@ -1174,10 +1184,10 @@ def run_bash_gate_cases(tree: dict) -> None:
 # ===========================================================================
 # codegraph-first-guard (C1-C12)
 # ===========================================================================
-# Issues #259 and #271: the Turn marker is turn.json in the SESSION's folder under the Per-user session parent
-# (<LOCALAPPDATA>\auto-improve-codegraph\ or <XDG_CACHE_HOME>/auto-improve-codegraph/, here inside the fixture home
-# tree["cghome"]), never the system temp folder and not <cwd>/.claude/.codegraph-used-this-turn. Each case that needs a
-# marker names its own session_id and writes/removes the marker for that session only.
+# Issue #262 (the cut-over): the gate is open when the SESSION TRANSCRIPT shows a CodeGraph use after the last human prompt.
+# A case that needs an open gate names its own session_id and its own transcript file: the setup writes it (a human prompt and
+# an mcp__codegraph__* tool use), and pre_sibling appends a new human prompt, which closes the turn again (so the sibling, the
+# same session and the same file, blocks). A turn.json in the Session folder and a legacy sentinel open nothing any more.
 def _with_sid(payload: dict, session_id: str) -> dict:
     return dict(payload, session_id=session_id)
 
@@ -1186,8 +1196,17 @@ def _write_marker(tree: dict, session_id: str) -> None:
     af.write_marker(af.session_parent(tree["cghome"]), session_id)
 
 
-def _remove_marker(tree: dict, session_id: str) -> None:
-    af.remove_marker(af.session_parent(tree["cghome"]), session_id)
+def _open_turn(name: str) -> Path:
+    """A transcript with a CodeGraph use after the last human prompt, at a path of its own."""
+    path = _TRANSCRIPT_DIR / (name + ".jsonl")
+    af.write_transcript(path, [af.t_human(1), af.t_mcp_use(), af.t_tool_result()])
+    return path
+
+
+def _close_turn(path: Path) -> None:
+    """A new human prompt: the turn is closed again."""
+    with open(path, "ab") as fh:
+        fh.write((af.t_human(2) + "\n").encode("utf-8"))
 
 
 def _legacy_sentinel(directory: Path) -> Path:
@@ -1259,33 +1278,35 @@ def run_codegraph_guard_cases(tree: dict) -> None:
         cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
     ))
 
-    # C5 b: Read worktree src, a marker in THIS session's folder -> ALLOW (the sibling shares the session; the marker
-    # is removed before it, so the sibling blocks)
+    # C5 b: Read worktree src, an open turn in THIS session's transcript -> ALLOW (the sibling shares the session and the
+    # transcript; a new human prompt is appended before it, so the sibling blocks)
     t = tok()
     sib_t = tok()
     sid5 = _new_sid()
+    t5 = _TRANSCRIPT_DIR / "c5.jsonl"
     cases.append(GateCase(
         id="C5", guard_key="codegraph-first-guard", hook_path=hook,
-        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs")), sid5),
-        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")), sid5),
+        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs"), t5), sid5),
+        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), t5), sid5),
         cwd=wt, env=base_env(wt), expect="allow", fails_today=True,
-        setup=lambda: _write_marker(tree, sid5),
-        pre_sibling=lambda: _remove_marker(tree, sid5),
+        setup=lambda: _open_turn("c5"),
+        pre_sibling=lambda: _close_turn(t5),
     ))
 
     c_hook = make_situation_c_copy(repo, "codegraph-first-guard.py")
 
-    # C6 c, cwd = worktree root: Read worktree src, a marker in this session's folder -> ALLOW
+    # C6 c, cwd = worktree root: Read worktree src, an open turn in this session's transcript -> ALLOW
     t = tok()
     sib_t = tok()
     sid6 = _new_sid()
+    t6 = _TRANSCRIPT_DIR / "c6.jsonl"
     cases.append(GateCase(
         id="C6", guard_key="codegraph-first-guard", hook_path=c_hook,
-        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs")), sid6),
-        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")), sid6),
+        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs"), t6), sid6),
+        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), t6), sid6),
         cwd=wt, env=base_env(repo), expect="allow", fails_today=True,
-        setup=lambda: _write_marker(tree, sid6),
-        pre_sibling=lambda: _remove_marker(tree, sid6),
+        setup=lambda: _open_turn("c6"),
+        pre_sibling=lambda: _close_turn(t6),
     ))
 
     # C7 c, cwd = worktree root: Read worktree src, no marker anywhere -> BLOCK
@@ -1296,9 +1317,9 @@ def run_codegraph_guard_cases(tree: dict) -> None:
         cwd=wt, env=base_env(repo), expect="block", fails_today=True,
     ))
 
-    # C8 c, cwd = worktree root (RESTATED): the marker exists ONLY in ANOTHER session's folder, and a legacy
-    # <cwd>/.claude/.codegraph-used-this-turn file sits in the worktree AND in the repo -> BLOCK. The marker is
-    # keyed to the session, and the legacy file no longer opens anything.
+    # C8 c, cwd = worktree root (RESTATED): a turn.json exists in ANOTHER session's folder, and a legacy
+    # <cwd>/.claude/.codegraph-used-this-turn file sits in the worktree AND in the repo, and this session's transcript is
+    # closed -> BLOCK. Neither the marker nor the legacy file opens anything any more.
     t = tok()
     sid8, other8 = _new_sid(), _new_sid()
     cases.append(GateCase(
@@ -1330,29 +1351,27 @@ def run_codegraph_guard_cases(tree: dict) -> None:
         cwd=repo, env=base_env(repo), expect="allow", fails_today=False,
     ))
 
-    # C11 c: the marker survives a directory change. The tracker runs with cwd = the main checkout, the guard is then
-    # called with cwd = the worktree and the SAME session_id -> ALLOW (cd / EnterWorktree does not close the gate).
+    # C11 c: the gate survives a directory change. The session's transcript holds the CodeGraph use; the guard is called
+    # with cwd = the worktree and the SAME session_id -> ALLOW (cd / EnterWorktree does not close the gate).
     t = tok()
     sib_t = tok()
     sid11 = _new_sid()
-    tracker = c_hook.parent / "codegraph-turn-tracker.py"
-    tracker_payload = {"session_id": sid11, "tool_name": "mcp__codegraph__" + "codegraph_explore",
-                       "tool_input": {"query": "survives a directory change"}, "hook_event_name": "PostToolUse"}
+    t11 = _TRANSCRIPT_DIR / "c11.jsonl"
     cases.append(GateCase(
         id="C11", guard_key="codegraph-first-guard", hook_path=c_hook,
-        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs")), sid11),
-        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs")), sid11),
+        payload=_with_sid(read_payload(fs(wt / "src" / f"Probe_{t}.cs"), t11), sid11),
+        sibling_payload=_with_sid(read_payload(fs(repo / "src" / f"ProbeSibling_{sib_t}.cs"), t11), sid11),
         cwd=wt, env=base_env(repo), expect="allow", fails_today=True,
-        setup=lambda: run_hook(tracker, tracker_payload, repo, base_env(repo)),
-        pre_sibling=lambda: _remove_marker(tree, sid11),
+        setup=lambda: _open_turn("c11"),
+        pre_sibling=lambda: _close_turn(t11),
     ))
 
     try:
         for c in cases:
             run_gate_case(c)
     finally:
-        # Today's tracker writes the legacy <cwd>/.claude/.codegraph-used-this-turn (C11 runs it with cwd = repo), and a
-        # leftover one would open every LATER cwd=repo row for the wrong reason. Removed whatever the outcome.
+        # C8 plants a legacy <cwd>/.claude/.codegraph-used-this-turn: it opens nothing, but a leftover one is still removed
+        # whatever the outcome, so every later row starts from the same tree.
         for folder in (repo, wt, tree["wt2"]):
             _remove_legacy_sentinel(folder)
 
