@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-11-09
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-11-10, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/331, https://github.com/lneninger/claude-agentic-auto-improve/pull/334, https://github.com/lneninger/claude-agentic-auto-improve/pull/340; 3 checklist items from review reports, 0 with no structured evidence; not performed (disclosed on #262): New vocabulary terms promoted to `VOCABULARY.md`; owner confirmed resolved: none
 **Work Item Brief:** .claude/work-items/2026-11-09-262-codegraph-hooks-cutover.md
 **Tracking issue:** #262
 **Budget:** 12,000 tokens
@@ -558,11 +559,11 @@ PRIOR_FINDINGS:
 
 `pr_merged.py` fills this list when the contract's work is merged and nothing is pending. Do not tick lines by hand.
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [x] Implementation matches Data Shapes exactly — evidence: .claude/reviews/2026-11-09-codegraph-hooks-cutover/t2-fail-open-review-fullstack-code-reviewer.md
+- [x] Reused Mechanisms are actually reused (no parallel implementations introduced) — evidence: .claude/reviews/2026-11-09-codegraph-hooks-cutover/t2-fail-open-review-fullstack-code-reviewer.md
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — not applicable (.claude/reviews/2026-11-09-codegraph-hooks-cutover/t2-fail-open-review-fullstack-code-reviewer.md)
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — not performed (disclosed on #262)
+- [x] Integration surfaces reflected on both backend and frontend sides — evidence: .claude/reviews/2026-11-09-codegraph-hooks-cutover/t2-fail-open-review-fullstack-code-reviewer.md
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — not applicable (.claude/reviews/2026-11-09-codegraph-hooks-cutover/t2-fail-open-review-fullstack-code-reviewer.md)
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — not applicable (.claude/reviews/2026-11-09-codegraph-hooks-cutover/t2-fail-open-review-fullstack-code-reviewer.md)
+- [x] `Status` flipped to `implemented`

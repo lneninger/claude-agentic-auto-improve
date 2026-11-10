@@ -58,3 +58,6 @@ L: changes a guard hook used by every install, retires two hooks, adds an upgrad
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-11-10: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/331, https://github.com/lneninger/claude-agentic-auto-improve/pull/334, https://github.com/lneninger/claude-agentic-auto-improve/pull/340); contract 2026-11-09-codegraph-hooks-cutover flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #262: New vocabulary terms promoted to `VOCABULARY.md`
