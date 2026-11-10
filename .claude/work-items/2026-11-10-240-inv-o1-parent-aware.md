@@ -13,9 +13,9 @@ branch: fix/240-inv-o1-parent-aware
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261110-chore-240-inv-o1-parent-branch
 north_stars: none
 contract: .claude/concepts/2026-11-10-inv-o1-parent-aware.md
-pr: UNKNOWN
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/344
 partial: true
-issue_link: unknown
+issue_link: unresolved
 status: verifying
 created: 2026-11-10
 ---
@@ -58,3 +58,6 @@ M — touches the version rule's test and the shared parent-mode reader in `chec
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-11-10: pull request #344 opened as a draft. Closing-link check returned `unexpected-closing-ref`: the brief is partial (issue #240 item 1 stays open, so the body says `Refs #240`), but GitHub reports #240 as a closing reference. Cause: the branch was created with `gh issue develop`, which registers it as the issue's linked branch, so merging would close #240. Status stays `verifying` until the link is removed or the owner accepts the close.
