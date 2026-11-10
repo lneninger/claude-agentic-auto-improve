@@ -15,8 +15,8 @@ north_stars: none
 contract: .claude/concepts/2026-11-10-inv-o1-parent-aware.md
 pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/344
 partial: true
-issue_link: unresolved
-status: verifying
+issue_link: refs
+status: shipped
 created: 2026-11-10
 ---
 
@@ -60,4 +60,5 @@ M — touches the version rule's test and the shared parent-mode reader in `chec
 non-trivial → /design-first
 
 ## Run log
-- 2026-11-10: pull request #344 opened as a draft. Closing-link check returned `unexpected-closing-ref`: the brief is partial (issue #240 item 1 stays open, so the body says `Refs #240`), but GitHub reports #240 as a closing reference. Cause: the branch was created with `gh issue develop`, which registers it as the issue's linked branch, so merging would close #240. Status stays `verifying` until the link is removed or the owner accepts the close.
+- 2026-11-10: pull request #344 opened as a draft. Closing-link check returned `unexpected-closing-ref`: the brief is partial (issue #240 item 1 stays open, so the body says `Refs #240`), but GitHub reports #240 as a closing reference. Cause: the branch was created with `gh issue develop`, which registers it as the issue's linked branch, so merging would close #240. Status stayed `verifying` until the link was removed.
+- 2026-11-10: the API cannot disconnect a pull request from an issue (the link had become a connected event; `deleteLinkedBranch` had no identifier to act on), so the owner removed #240 from the pull request's Development panel on GitHub. The closing-link check was re-run and returned `exempt-partial` (`issue_link: refs`); status set to `shipped`.
