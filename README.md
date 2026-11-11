@@ -1665,6 +1665,22 @@ follow-up for the sync tool, which lives outside this repository
 (`.claude/concepts/followups/2026-11-04-sync-tool-registry-layout-gate.followup.md`). The sync
 tool's file lists must also include the new modules.
 
+## Useful plugins
+
+Other Claude Code plugins that work well beside this one. None is required. Each row gives
+what the plugin does, where its documentation lives, and how much it matters for a project
+that uses this plugin's delivery chain.
+
+Importance levels: **High** means install it early, because the problem it solves shows up
+quickly. **Medium** means it helps in common situations. **Low** means it is nice to have.
+
+| Plugin | What it does | Documentation | Importance |
+|---|---|---|---|
+| `mgorkemuz/claude-code-shepherd` | Tracks the background processes Claude Code's Bash tool starts (for example `npm run dev` or `vitest --watch`), and lets you stash, kill or restore them. It cleans up orphaned processes left by a crashed session on the next launch, so they stop holding ports and memory. Requires `jq`; macOS and Linux only. | [github.com/mgorkemuz/claude-code-shepherd](https://github.com/mgorkemuz/claude-code-shepherd) | Medium. High if you run several parallel sessions or worktrees, because each one can leave dev servers behind. |
+
+Install it with `/plugin marketplace add mgorkemuz/claude-code-shepherd`, then
+`/plugin install shepherd@shepherd`.
+
 ## Documentation
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — sync workflow, the project-name check, conflict
