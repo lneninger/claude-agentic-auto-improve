@@ -13,10 +13,10 @@ branch: fix/51-doctor-scaffold-parentlink
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261111-infra-51-doctor-scaffold-parentlink
 north_stars: none
 contract: none
-pr: none
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/352
 partial: true
-issue_link: unknown
-status: verifying
+issue_link: refs
+status: shipped
 created: 2026-11-11
 ---
 
