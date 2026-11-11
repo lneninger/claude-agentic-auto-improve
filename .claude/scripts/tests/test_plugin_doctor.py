@@ -9,6 +9,7 @@ Run: py -3 .claude/scripts/tests/test_plugin_doctor.py
 
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import verify_parent_link  # noqa: E402
 from plugin_doctor import (  # noqa: E402
     REQUIREMENTS,
     Requirement,
@@ -193,6 +195,101 @@ class TestScaffolds(DoctorCase):
                 self.assertIsNotNone(scaffold_for(r.path),
                                      f"{r.path} is scaffolded but has no content defined")
 
+    # ---- work-item-conventions scaffold must carry what shipped scripts read ----
+    CONV = ".claude/work-item-conventions.json"
+    EFFORT_TAGS = {"FEATURE", "BUG", "IMPROVEMENT", "REFACTOR", "PERF",
+                   "SECURITY", "DOCS", "CHORE", "SPIKE"}
+
+    def _plugin_conventions(self) -> dict:
+        path = Path(__file__).resolve().parents[2] / "work-item-conventions.json"
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+
+    def _scaffold_conventions(self) -> dict:
+        return json.loads(scaffold_for(self.CONV))
+
+    def _scaffold_file(self) -> Path:
+        """The scaffold's own output, written into a temp project (cleaned by DoctorCase)."""
+        target = self.project / self.CONV
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(scaffold_for(self.CONV), encoding="utf-8")
+        return target
+
+    def test_scaffold_parent_link_has_the_plugins_keys(self):
+        plugin = self._plugin_conventions()["issueLink"]["parentLink"]
+        parent_link = self._scaffold_conventions().get("issueLink", {}).get("parentLink")
+        self.assertIsInstance(parent_link, dict,
+                              "scaffold issueLink.parentLink must exist as an object")
+        real = lambda d: {k for k in d if not k.startswith("$")}  # noqa: E731
+        self.assertEqual(real(parent_link), real(plugin),
+                         "scaffold parentLink must hold the same keys as the plugin's own file")
+        self.assertEqual(parent_link.get("verdicts"), plugin["verdicts"],
+                         "scaffold parentLink.verdicts must equal the plugin's verdict list")
+
+    def test_scaffold_effort_types_match_the_plugins_tags(self):
+        plugin_tags = {e["tag"] for e in self._plugin_conventions()["issueTitle"]["effortTypes"]}
+        scaffold_tags = {e.get("tag") for e in
+                         self._scaffold_conventions().get("issueTitle", {}).get("effortTypes", [])}
+        self.assertEqual(scaffold_tags, plugin_tags,
+                         "scaffold issueTitle.effortTypes must hold the plugin's effort tags")
+
+    def test_compose_subissue_title_composes_against_the_scaffold(self):
+        conv = self._scaffold_file()
+        script = Path(__file__).resolve().parents[1] / "compose_subissue_title.py"
+        proc = subprocess.run(
+            [sys.executable, str(script), "--type", "CHORE", "--parent", "51", "--subtask", "1",
+             "--title", "Add the thing", "--conventions", str(conv), "--json"],
+            capture_output=True, text=True, check=False, timeout=60)
+        try:
+            result = json.loads(proc.stdout)
+        except ValueError:
+            self.fail(f"no JSON from compose_subissue_title.py: {proc.stdout!r} {proc.stderr!r}")
+        self.assertEqual(result.get("verdict"), "composed",
+                         f"the scaffold must compose a title, got {result}")
+        title = json.dumps(result)
+        self.assertIn("[CHORE]", title)
+        self.assertIn("P:#51", title)
+        self.assertIn("ST:1", title)
+        self.assertEqual(proc.returncode, 0)
+
+    def test_verify_parent_link_loads_the_scaffolds_parent_link_block(self):
+        conv = self._scaffold_file()
+        block, cause = verify_parent_link.read_conventions(conv)
+        self.assertIsNone(cause,
+                          "verify_parent_link must load the scaffold without conventions-missing")
+        self.assertIsInstance(block, dict)
+        self.assertIn("readCommand", block)
+        self.assertEqual(block["maxRepairAttempts"], 1,
+                         "maxRepairAttempts is read from the outer issueLink block")
+        self.assertEqual(block["verdicts"],
+                         self._plugin_conventions()["issueLink"]["parentLink"]["verdicts"])
+
+    #: Paths the shipped scripts read (verify_issue_link, verify_parent_link,
+    #: compose_subissue_title, merge_direction, land_contract). Each must exist in the scaffold.
+    REQUIRED_PATHS = (
+        "issueTitle", "issueTitle.pattern", "issueTitle.effortTypes",
+        "issueTitle.subIssue", "issueTitle.subIssue.format",
+        "issueLink", "issueLink.closingKeyword", "issueLink.referenceKeyword",
+        "issueLink.absentIdTokens", "issueLink.unresolvedIdTokens", "issueLink.verdicts",
+        "issueLink.requireRecordedOffer", "issueLink.offerOutcomeField",
+        "issueLink.offerOutcomes", "issueLink.offerReasonField", "issueLink.offerReasons",
+        "issueLink.maxRepairAttempts", "issueLink.parentLink",
+        "issueLink.parentLink.createFlag", "issueLink.parentLink.editFlag",
+        "issueLink.parentLink.readCommand", "issueLink.parentLink.parentListCommand",
+        "issueLink.parentLink.verdicts",
+    )
+
+    def test_scaffold_holds_every_block_path_the_shipped_scripts_read(self):
+        node_root = self._scaffold_conventions()
+        missing = []
+        for dotted in self.REQUIRED_PATHS:
+            node = node_root
+            for part in dotted.split("."):
+                if not isinstance(node, dict) or part not in node:
+                    missing.append(dotted)
+                    break
+                node = node[part]
+        self.assertEqual(missing, [],
+                         "scaffold lacks paths the shipped scripts read: %s" % missing)
 
 
 class TestTheRealPluginTree(unittest.TestCase):
