@@ -11,8 +11,10 @@ branch. The logic lives in ``../hooks/_protected_names.py``; read its docstring 
   --working-ref  a commit whose COMMITTED rules file is the working side (read with git, never the disk);
                  ``disk`` (the default) reads the working copy.
   --default-ref  a commit for the default-branch side; by default the detected ``origin/<default>``.
-  --fetch        first run ``git fetch --quiet origin <default>`` (20-second limit). Refused together with
-                 ``--default-ref``. If the fetch fails the local ref is used and ``fetched`` is false.
+  --fetch        first run an explicit-destination ``git fetch`` of the default branch and compare the ref with
+                 ``git ls-remote`` (20 seconds each). Refused together with ``--default-ref``. If the fetch
+                 fails, or leaves the ref different from what the remote advertises, the local ref is used
+                 and ``fetched`` is false.
 
 THE RESULT
 ----------
@@ -24,21 +26,30 @@ Exit codes: 0 ``kept`` or ``first-install``; 10 ``names-removed``; 11 ``working-
 exception or an import failure) or exit 2 (a usage error). A catch-all prints an ``unverifiable`` result
 and exits 12.
 
-SELF-CONTAINED: standard library only; the first statements put this file's folder, then a sibling
-``hooks`` folder when one exists, at the front of ``sys.path``, so it runs the same in the plugin layout,
-in a consuming repository's layout and in one temporary folder holding both files, also under ``-I``.
+SELF-CONTAINED: standard library only. It imports every standard-library module first, then puts this file's
+folder at the front of ``sys.path`` and appends a sibling ``hooks`` folder at the END, only when its own
+folder holds no ``_protected_names.py``; so it runs the same in the plugin layout, in a consuming
+repository's layout and in one folder holding both files, also under ``-I``.
 """
+# Every standard-library module this file or its helper uses is imported BEFORE sys.path is edited, so no
+# file beside or above this one can stand in for one of them (contract 2026-10-13, Commands, Import order).
+import argparse
+import json
 import os
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
+from pathlib import Path  # noqa: F401 -- imported for the helper
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-_SIBLING_HOOKS = os.path.join(os.path.dirname(_HERE), "hooks")
-if os.path.isdir(_SIBLING_HOOKS):
-    sys.path.insert(0, _SIBLING_HOOKS)
-
-import argparse  # noqa: E402
-import json  # noqa: E402
+# A sibling ``../hooks`` folder is a fallback, appended LAST and only when this folder holds no helper.
+if not os.path.isfile(os.path.join(_HERE, "_protected_names.py")):
+    _SIBLING_HOOKS = os.path.join(os.path.dirname(_HERE), "hooks")
+    if os.path.isdir(_SIBLING_HOOKS):
+        sys.path.append(_SIBLING_HOOKS)
 
 # An import failure (a missing or broken helper) is an uncaught exception: Python's own exit 1, never a verdict.
 import _protected_names  # noqa: E402

@@ -263,14 +263,14 @@ If `VAL` comes back empty, say the lint could not run (the plugin's script was n
 
 The database guard protects the names listed in the project's `.claude/hooks/db-destructive-guard.rules.json`. That file is an ordinary file, so this step checks the OUTCOME: this tree's list must still hold every name the same file holds at the tip of the default branch (a removed, respelled or space-padded name all fail). Only a person shortens the list, by merging a pull request by hand.
 
-Run the **installed plugin's** `protected_names_check.py`, never the copy in the project: a branch that edits the checker must not be the one that judges it. The lookup therefore has no project branch (`CLAUDE_PLUGIN_ROOT`, then what Claude Code recorded for the plugin, then the newest cache folder), and the check runs with `--fetch`, so the default branch is read fresh when the network allows:
+Run the **installed plugin's** `protected_names_check.py`, never the copy in the project: a branch that edits the checker must not be the one that judges it. The lookup therefore has no project branch (`CLAUDE_PLUGIN_ROOT`, then the install folder Claude Code recorded for the plugin; never a `plugins/cache` folder picked by version number or modification time, which can hold an unreviewed version). The project is the tree being verified: `git rev-parse --show-toplevel` of the current folder, and `$CLAUDE_PROJECT_DIR` only when git cannot answer; when neither answers the checker is not started. The check runs with `--fetch`, so the default branch is read fresh when the network allows:
 
 ```bash
 PNC=
 S=.claude/scripts/protected_names_check.py
 if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then PNC=$CLAUDE_PLUGIN_ROOT/$S
 else
-  # What Claude Code recorded for this plugin (this project's entry, then the user entry), then the newest cache folder by version number.
+  # What Claude Code recorded for this plugin (this project's entry, then the user entry): its installPath, and no other cache folder.
   CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
   ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
   REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
@@ -278,15 +278,21 @@ else
     P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
     [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
   done)
-  NEWEST=$(ls -d "$CFG"/plugins/cache/*/agentic-auto-improve/*/ 2>/dev/null | sed -n 's|^\(.*/\([0-9][0-9.]*\)/\)$|\2 \1|p' | sort -rV | cut -d' ' -f2-)
-  PNC=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | { cat; printf '%s\n' "$NEWEST"; } | while IFS= read -r D; do
+  PNC=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | while IFS= read -r D; do
     [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
   done)
 fi
-py -3 "$PNC" --fetch --project "$CLAUDE_PROJECT_DIR"   # macOS and Linux: python3
+# The tree being verified: what git reports for the current folder, else the launch folder.
+PROJ=$(git rev-parse --show-toplevel 2>/dev/null)
+[ -n "$PROJ" ] || PROJ=$CLAUDE_PROJECT_DIR
+if [ -n "$PROJ" ] && [ -n "$PNC" ]; then
+  py -3 "$PNC" --fetch --project "$PROJ"   # macOS and Linux: python3
+else
+  echo "Step 5.7 NOT RUN: project='$PROJ' checker='$PNC'"
+fi
 ```
 
-Standard output is one JSON object (`verdict`, `missing`, `working_ref`, `default_ref`, `fetched`, `reason`); the human text is on standard error. If `PNC` is empty, report Step 5.7 as `NOT RUN` (the plugin's script was not found) and never as passed. Otherwise read the result: it counts only when standard output is exactly one JSON object whose `verdict` agrees with the exit code. Anything else (no JSON, a traceback, exit 1 or 2, a code that disagrees with the verdict) is `unverifiable`, never `names-removed`. Then:
+Standard output is one JSON object (`verdict`, `missing`, `working_ref`, `default_ref`, `fetched`, `reason`); the human text is on standard error. If `PNC` is empty, report Step 5.7 as `NOT RUN` (the plugin's script was not found), and if `PROJ` is empty report it as `NOT RUN` (no project could be found); the checker was not started in either case, and the step is never reported as passed. Otherwise read the result: it counts only when standard output is exactly one JSON object whose `verdict` agrees with the exit code. Anything else (no JSON, a traceback, exit 1 or 2, a code that disagrees with the verdict) is `unverifiable`, never `names-removed`. Then:
 
 - **0:** `kept` or `first-install`. The step passes. When `fetched` is `false`, say so in one sentence: the local default-branch ref was compared, not a fresh one.
 - **10:** `names-removed`. **NOT-READY.** Show the `missing` strings and say: only a person removes a protected database name; restore them, or change only the rules file in its own pull request and merge it by hand. Do not go on to Step 6.
