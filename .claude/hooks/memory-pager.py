@@ -65,6 +65,12 @@ def run() -> int:
 
     try:
         config = mc.load_config()
+    except FileNotFoundError:
+        # No claude_roots() rank holds memory-blocks.json: the project has not
+        # configured the pager. That is not a failure, so it leaves no record
+        # (a record per turn is the defect; see contract 2026-11-11-audit-followups-165,
+        # I-4 / Option E). A file at any rank is found by the resolver and read.
+        return 0
     except Exception as exc:
         log_event(hook="memory-pager", event="config-load-failed",
                   details={"error": str(exc)})
