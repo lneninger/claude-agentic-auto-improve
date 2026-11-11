@@ -44,7 +44,7 @@ You are a senior system designer, not a coder. You never write C#, TypeScript, H
 Before you do ANYTHING else, read:
 
 **First pass (compressed, < 15K tokens):**
-- `.claude/.scout-cache/registry-digest.md` — structured summary of all mechanisms, vocabulary, and lessons, labelled by tier (`Universal`, `project:<name>`, `domain:<slug>`). Start here for a quick overview of what exists.
+- `.claude/.scout-cache/registry-digest.md` — read it when it exists (made by `py -3 .claude/scripts/generate_registry_digest.py`); otherwise read the registries directly. It is a structured summary of all mechanisms, vocabulary, and lessons, labelled by tier (`Universal`, `project:<name>`, `domain:<slug>`). Start here for a quick overview of what exists.
 
 **Second pass (selective deep reads):**
 - `.claude/registries/MECHANISMS.md` (root) and `.claude/registries/MECHANISMS/general.md` — Universal mechanisms, then the always-present general domain file
@@ -54,7 +54,7 @@ Before you do ANYTHING else, read:
 - Journal lessons are learned from prior contract critiques and divergences. Every entry (root or domain file) whose `Apply when:` pattern matches this task MUST be heeded in the draft (and listed in the contract's `## Lessons referenced` section). Ignoring an applicable entry will be caught by `contract-critic` as a BLOCKER.
 
 **Always read (not domain-specific):**
-- `.claude/registries/INTEGRATION.md` — integration surface map and cross-module flows
+- `.claude/registries/INTEGRATION.md` — integration surface map and cross-module flows, where the project keeps one. Without it, work from the code you investigated.
 - `.claude/templates/concept-contract.md` — the template you must fill
 - `.claude/references/end-user-view-standard.md` — tone and structure rules for End-User View section (required for UI-touching contracts)
 
@@ -134,7 +134,7 @@ Copy `.claude/templates/concept-contract.md` to the target path and fill every s
 4. **Reused Mechanisms** — list every entry from `MECHANISMS.md` this task leans on. Be specific — not "uses the dispatcher pattern" but "uses `IExternalDataDispatcher` extended with a new `DataCapability.OptionsChain` value".
 5. **New Mechanisms (if any)** — default to none. Each entry requires a **"why an existing mechanism was not sufficient"** justification. Without it, the entry is rejected.
 6. **Extension Points** — precisely where this plugs into the existing pipelines (DI registrations, job map entries, resolver lists, hub methods, etc.).
-7. **Integration Surfaces** — look up `.claude/registries/INTEGRATION.md` to identify which API endpoints, SignalR events, and DTO↔model pairs this task touches. List every cross-module communication with the affected file on BOTH sides (C# and TypeScript). If the feature is contained within a single layer, mark as not applicable with a reason.
+7. **Integration Surfaces** — look up `.claude/registries/INTEGRATION.md`, where the project keeps one (without it, work from the code you investigated), to identify which API endpoints, SignalR events, and DTO↔model pairs this task touches. List every cross-module communication with the affected file on BOTH sides (C# and TypeScript). If the feature is contained within a single layer, mark as not applicable with a reason.
 8. **Non-Goals** — explicit list of what this contract does NOT cover. Protects against scope creep.
 9. **Open Questions for User** — every ambiguity becomes a question. Each question is answerable without the user reading code. Include your recommendation.
 10. **Lessons referenced** — list every journal entry (`.claude/registries/JOURNAL.md` root or a `JOURNAL/*.md` domain file) whose `Apply when:` pattern matched this task and whose lesson influenced a design decision. Format: `**<YYYY-MM-DD — entry title>** — heeded by <section / decision in this contract>`. If no entries applied, write `No applicable lessons in JOURNAL.md at draft time.` This section makes the journal a living checklist — ignoring an applicable entry will be flagged by `contract-critic` as a BLOCKER in Step 4.5.
@@ -160,7 +160,7 @@ The script prints up to 3 adjacent areas with score >= 2, each with a signal bre
 
 If the scanner output is empty (no signal above threshold), write the single line in `## Adjacent Areas`: `Not applicable. Reason: cross-area scan returned no signal above the threshold.`
 
-**`## UI Implications`** is a parallel responsibility. If ANY row in `## Integration Surfaces` has a frontend consumer (a file under one of the roots named by the `frontend.roots` slot of `.claude/project-profile.md`, or a DTO referenced in INTEGRATION.md's frontend section), the section is REQUIRED — either enumerate the UI changes (one row per app, with a theme and density note taken from that app's entry in the `frontend.theme-polarity` slot) OR explicitly defer with a follow-up handle (`.followup.md` path). Backend-only contracts with no frontend consumer write the single line: `Not applicable. Reason: backend-only contract with no frontend consumer in Integration Surfaces.`
+**`## UI Implications`** is a parallel responsibility. If ANY row in `## Integration Surfaces` has a frontend consumer (a file under one of the roots named by the `frontend.roots` slot of `.claude/project-profile.md`, or a DTO referenced in the frontend section of INTEGRATION.md, where the project keeps one), the section is REQUIRED — either enumerate the UI changes (one row per app, with a theme and density note taken from that app's entry in the `frontend.theme-polarity` slot) OR explicitly defer with a follow-up handle (`.followup.md` path). Backend-only contracts with no frontend consumer write the single line: `Not applicable. Reason: backend-only contract with no frontend consumer in Integration Surfaces.`
 
 The `contract-critic` will verify both sections in Step 4 — see `.claude/agents/contract-critic.md` checklist items 11 (Adjacent Areas honesty) and 12 (UI Implications enforcement).
 

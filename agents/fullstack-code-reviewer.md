@@ -340,9 +340,9 @@ Path must be the absolute contract path (matches what `derive_area.py` consumes)
 
 **Integration consistency check:**
 
-- [ ] If a backend DTO was modified, does the paired TypeScript model (per INTEGRATION.md) match?
+- [ ] If a backend DTO was modified, does the paired TypeScript model (per INTEGRATION.md, where the project keeps one) match?
 - [ ] If a SignalR event payload changed, does the frontend handler still parse it correctly?
-- [ ] If a new endpoint was created, is it listed in INTEGRATION.md with the consuming app noted?
+- [ ] If a new endpoint was created, is it listed in INTEGRATION.md (where the project keeps one) with the consuming app noted?
 
 Flag mismatches as **[CRITICAL]** — DTO/model drift causes silent runtime failures.
 
