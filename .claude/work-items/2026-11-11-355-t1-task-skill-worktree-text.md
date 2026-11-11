@@ -15,9 +15,9 @@ north_stars: inherited from .claude/work-items/2026-11-11-165-audit-followups.md
 parent_issue: 165
 base: feature/165-audit-followups
 contract: .claude/concepts/2026-11-11-audit-followups-165.md
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/365
+issue_link: deferred
+status: shipped
 created: 2026-11-11
 ---
 
