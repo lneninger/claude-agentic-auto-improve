@@ -2,4 +2,5 @@
 - [Mutation scratch environment](reference_mutation_scratch_env.md) — scratch must live under .claude/scratch; TEMP and bash scripts are blocked
 - [Swap tests vs abort-on-failure deleters](swap-tests-vs-abort-on-failure.md) — first-processed file must exist at swap target, else re-check is untested
 - [Genericity scans miss one-token hits](genericity-scan-single-token-hits.md) — manifest owner is one word; "has a space" filters and two-word controls miss it
+- [JSON-only CLI tests miss text renderer](json-only-cli-tests-miss-text-renderer.md) — check SKILL.md lines for a missing --json; probe _render_text per status
 - [Verdict levels and no CI](verdict-levels-and-no-ci.md) — fence each verdict level separately; no CI, so POSIX/root rows never run here

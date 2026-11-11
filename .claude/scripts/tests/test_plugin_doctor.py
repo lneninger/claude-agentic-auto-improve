@@ -402,19 +402,21 @@ class TestFinishInstallSkillIsNamed(DoctorCase):
                      ".claude/work-item-conventions.json"):
             self.assertIn(path, text, "NEEDS YOU must still be printed for %s" % path)
 
-    def test_the_needs_you_line_does_not_name_the_skill(self):
-        # The line is shared by three files and the skill fills only one of them, so
-        # repointing it would send the operator to a command that cannot help with the
-        # other two. A guard against a later repoint.
+    def test_the_needs_you_line_names_the_skill(self):
+        # Contract 2026-11-11-finish-install-step3-proposals, decision 6 reverses the old rule: the skill now
+        # proposes every file this line covers (profile, area map, conventions, token list), so every
+        # NEEDS YOU line must name it.
         out = _run_doctor_fix(self.project, self.plugin)
-        offenders = [l for l in _lines_starting(out, "NEEDS YOU") if SKILL in l]
-        self.assertEqual(offenders, [],
-                         "NEEDS YOU is shared by three files and must not name %s" % SKILL)
+        lines = _lines_starting(out, "NEEDS YOU")
+        self.assertTrue(lines, "fixture: the doctor prints NEEDS YOU lines")
+        unnamed = [l for l in lines if SKILL not in l]
+        self.assertEqual(unnamed, [],
+                         "NEEDS YOU is covered by %s and must name it" % SKILL)
 
-    def test_the_needs_you_guard_would_catch_a_repointed_line(self):
-        repointed = "  NEEDS YOU      .claude/area-mapping.json  - run /auto-improve-finish-install"
-        offenders = [l for l in _lines_starting(repointed, "NEEDS YOU") if SKILL in l]
-        self.assertEqual(len(offenders), 1, "positive control: the guard must detect a repointed line")
+    def test_the_needs_you_guard_would_catch_a_line_that_does_not_name_the_skill(self):
+        stale = "  NEEDS YOU      .claude/area-mapping.json  - it describes your repository; nothing can guess it"
+        unnamed = [l for l in _lines_starting(stale, "NEEDS YOU") if SKILL not in l]
+        self.assertEqual(len(unnamed), 1, "positive control: the guard must detect a line that does not name the skill")
 
 
 # ==========================================================================
@@ -2808,6 +2810,104 @@ class TestRegistryLayoutReport(DoctorCase):
         self.assertIn("_registry_layout", text)
         self.assertIn("missing  .claude/concepts", text)  # the other checks still ran
         self.assertIn("body-less journal entries: unknown", text)
+
+
+# ==========================================================================
+# Contract 2026-11-11-finish-install-step3-proposals, decision 6 (issue #21): the doctor scaffolds
+# .claude/.project-tokens.json as an authored scaffold, and the NEEDS YOU line for the files
+# /auto-improve-finish-install now proposes names that skill. RED: the doctor has no token entry yet.
+#
+# NOTE FOR THE IMPLEMENTER: TestFinishInstallSkillIsNamed.test_the_needs_you_line_does_not_name_the_skill
+# (and its positive control) pin the OLD behaviour that the contract reverses ("The NEEDS YOU line now names
+# /auto-improve-finish-install"). That one existing test must be amended in GREEN; this suite does not edit it.
+# ==========================================================================
+TOKENS_REL = ".claude/.project-tokens.json"
+
+
+class TestProjectTokensScaffold(DoctorCase):
+    def _requirement(self):
+        found = [r for r in REQUIREMENTS if r.path == TOKENS_REL]
+        self.assertEqual(len(found), 1,
+                         "the doctor must declare exactly one requirement for %s; found %d" % (TOKENS_REL, len(found)))
+        return found[0]
+
+    def _shipped_template(self) -> dict:
+        path = Path(__file__).resolve().parents[2] / ".project-tokens.json"
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+
+    def test_the_token_list_is_a_scaffold_requirement_marked_authored(self):
+        req = self._requirement()
+        self.assertEqual(req.kind, "scaffold", "the doctor creates the file with stub content")
+        self.assertTrue(req.authored, "its content describes the project, so it is an authored file")
+
+    def test_the_authored_requirements_are_exactly_the_four_files_the_operator_must_author(self):
+        authored = sorted(r.path for r in REQUIREMENTS if r.authored)
+        self.assertEqual(authored, sorted([".claude/project-profile.md", ".claude/area-mapping.json",
+                                           ".claude/work-item-conventions.json", TOKENS_REL]),
+                         "a fifth or a missing authored=True requirement changes the NEEDS YOU list")
+
+    def test_the_scaffold_has_content_and_it_is_strict_json(self):
+        text = scaffold_for(TOKENS_REL)
+        self.assertIsNotNone(text, "%s is scaffolded but has no content defined" % TOKENS_REL)
+        data = json.loads(text)
+        self.assertIsInstance(data, dict)
+
+    def test_the_scaffold_holds_the_same_keys_as_the_shipped_template(self):
+        text = scaffold_for(TOKENS_REL)
+        self.assertIsNotNone(text, "no scaffold content for %s" % TOKENS_REL)
+        self.assertEqual(set(json.loads(text)), set(self._shipped_template()),
+                         "parity: the doctor's scaffold must carry the shipped template's keys")
+
+    def test_the_scaffold_starts_with_an_empty_token_and_allowed_list(self):
+        text = scaffold_for(TOKENS_REL)
+        self.assertIsNotNone(text, "no scaffold content for %s" % TOKENS_REL)
+        data = json.loads(text)
+        self.assertEqual(data.get("tokens"), [], "an unauthored token list is exactly []")
+        self.assertEqual(data.get("allowed"), [], "allowed starts empty")
+
+    def test_fix_creates_the_token_file_and_reports_it_as_needing_the_operator(self):
+        report = apply_fixes(self.project, check(self.project), self.plugin)
+        target = self.project / TOKENS_REL
+        self.assertTrue(target.is_file(), "--fix must create %s in a project that has none" % TOKENS_REL)
+        self.assertIn(TOKENS_REL, report["created"])
+        self.assertIn(TOKENS_REL, report["needs_authoring"],
+                      "a scaffolded token list is not authored yet")
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")).get("tokens"), [])
+
+    def test_fix_never_overwrites_an_existing_token_file(self):
+        self._requirement()  # the doctor must know the file, or "never overwrites" proves nothing
+        target = self.project / TOKENS_REL
+        target.parent.mkdir(parents=True, exist_ok=True)
+        mine = '{"tokens": ["Zorbex"], "allowed": [], "project": "mine"}\n'
+        target.write_text(mine, encoding="utf-8")
+        apply_fixes(self.project, check(self.project), self.plugin)
+        self.assertEqual(target.read_text(encoding="utf-8"), mine,
+                         "the doctor never edits an existing file (the tested rule the contract keeps)")
+
+    def test_a_present_token_file_is_not_reported_missing(self):
+        self.assertIn(TOKENS_REL, [r.path for r in check(self.project)],
+                      "control: an absent token file is reported missing once the doctor knows it")
+        target = self.project / TOKENS_REL
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('{"tokens": []}\n', encoding="utf-8")
+        self.assertNotIn(TOKENS_REL, [r.path for r in check(self.project)])
+
+    def test_the_needs_you_line_names_the_skill_for_every_file_it_proposes(self):
+        out = _run_doctor_fix(self.project, self.plugin)
+        lines = _lines_starting(out, "NEEDS YOU")
+        for path in (".claude/area-mapping.json", ".claude/work-item-conventions.json", TOKENS_REL):
+            mine = [l for l in lines if path in l]
+            self.assertEqual(len(mine), 1,
+                             "exactly one NEEDS YOU line for %s; got %r" % (path, lines))
+            self.assertIn(SKILL, mine[0],
+                          "the skill now proposes %s, so the line that asks the operator to author it must name it" % path)
+
+    def test_the_real_doctor_scaffold_never_names_a_project_of_its_own(self):
+        text = scaffold_for(TOKENS_REL)
+        self.assertIsNotNone(text, "no scaffold content for %s" % TOKENS_REL)
+        data = json.loads(text)
+        self.assertEqual(data.get("project", ""), "",
+                         "the scaffold must not carry a project name; the plugin has none to give")
 
 
 if __name__ == "__main__":
