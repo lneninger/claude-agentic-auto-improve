@@ -661,5 +661,117 @@ class TestCodegraphFreshnessTexts(unittest.TestCase):
         self.assertIn("codegraph explore", text, "the decision table names the bare command-line form")
 
 
+# --- (6) the template's "Chat Tool Impact" section names no consuming project's artefact -------------------------
+# Contract .claude/concepts/2026-11-11-audit-followups-165.md (V4, V19, invariant I-7). The section used to name one
+# project's files, phase, adapter id, agents, slash command, route, contract slug and memory note. Seven rules pin it;
+# each has a made-up control proving it fires.
+CHAT_TOOL_HEADING = "## Chat Tool Impact"
+_SOURCE_FILE_RE = re.compile(r"\b[\w.\-]+\.(?:cs|ts|py|java)\b")
+_PHASE_LABEL_RE = re.compile(r"\bPhase\s+[A-Za-z]\d\b")
+_HEX_ID_RE = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{6,}\b")
+_BACKTICK_NAME_RE = re.compile(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`")
+_SLASH_COMMAND_RE = re.compile(r"(?<![\w/.\-<>])/([a-z][a-z0-9\-]*)(?![\w/\-])")
+_HTTP_ROUTE_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+/api/")
+_DATED_SLUG_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9\-]*")
+_FEEDBACK_NOTE_RE = re.compile(r"\bfeedback_[\w\-]*\.md\b")
+
+
+def chat_tool_section(text: str) -> str:
+    """The text from the `## Chat Tool Impact` heading to the next `---` rule or `## ` heading ('' if absent)."""
+    m = re.search(r"(?m)^## Chat Tool Impact\b.*$", text)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    stop = re.search(r"(?m)^(?:---\s*|## .*)$", rest)
+    return text[m.start():m.end() + (stop.start() if stop else len(rest))]
+
+
+def skill_names() -> set[str]:
+    return {p.name for p in SKILLS.iterdir() if p.is_dir()}
+
+
+def chat_tool_violations(section: str, agents: set[str], skills: set[str]) -> dict[int, list[str]]:
+    """Rule number -> offending matches in ``section`` (only rules that fire appear)."""
+    found: dict[int, list[str]] = {}
+
+    def add(rule: int, items: list[str]) -> None:
+        if items:
+            found.setdefault(rule, []).extend(items)
+
+    add(1, [m.group(0) for m in _SOURCE_FILE_RE.finditer(section)])
+    add(2, [m.group(0) for m in _PHASE_LABEL_RE.finditer(section)])
+    add(3, [m.group(0) for m in _HEX_ID_RE.finditer(section)])
+    add(4, [m.group(1) for m in _BACKTICK_NAME_RE.finditer(section) if m.group(1) not in agents])
+    add(5, ["/" + m.group(1) for m in _SLASH_COMMAND_RE.finditer(section) if m.group(1) not in skills])
+    add(6, [m.group(0) for m in _HTTP_ROUTE_RE.finditer(section)])
+    add(7, [m.group(0) for m in _DATED_SLUG_RE.finditer(section)] + [m.group(0) for m in _FEEDBACK_NOTE_RE.finditer(section)])
+    return found
+
+
+class TestChatToolImpactSectionIsGeneric(unittest.TestCase):
+    AGENTS_SET = {"contract-critic", "data-architect"}
+    SKILLS_SET = {"design-first", "flow"}
+
+    def fires(self, text: str) -> set[int]:
+        return set(chat_tool_violations(text, self.AGENTS_SET, self.SKILLS_SET))
+
+    def test_control_rule_1_a_source_file_name_fires(self):
+        for name in ("FooTools.cs", "foo.ts", "frob_runner.py", "FrobService.java"):
+            self.assertIn(1, self.fires("declare it in " + name), name)
+        self.assertNotIn(1, self.fires("the project's chat-tool definition file"))
+
+    def test_control_rule_2_a_phase_label_fires(self):
+        self.assertIn(2, self.fires("Phase Z9 Frob Learner added a route"))
+        self.assertNotIn(2, self.fires("a later phase of the project"))
+
+    def test_control_rule_3_a_hex_id_fires(self):
+        self.assertIn(3, self.fires("adapter 1a2b3c4d was archived"))
+        self.assertNotIn(3, self.fires("a decade of facade work"))
+
+    def test_control_rule_4_an_agent_shaped_name_outside_the_plugin_fires(self):
+        self.assertIn(4, self.fires("the `frob-reviewer` audited it"))
+        self.assertNotIn(4, self.fires("the `contract-critic` checks it"))
+        self.assertNotIn(4, self.fires("the project's model-training agent"))
+
+    def test_control_rule_5_a_slash_command_that_is_not_a_skill_fires(self):
+        self.assertIn(5, self.fires("the next /retrain-frob cycle"))
+        self.assertNotIn(5, self.fires("the next /design-first cycle"))
+        self.assertNotIn(5, self.fires("UI-only/admin-only and the rest/docs lists in .claude/hooks/x.json"))
+
+    def test_control_rule_6_an_http_verb_and_api_route_fires(self):
+        self.assertIn(6, self.fires("POST /api/frobs/{id}/start"))
+        self.assertIn(6, self.fires("DELETE /api/x"))
+        self.assertNotIn(6, self.fires("a REST endpoint or SignalR event"))
+
+    def test_control_rule_7_a_dated_contract_slug_and_a_feedback_note_fire(self):
+        self.assertIn(7, self.fires("a mini-phase (2026-01-02-frob-chat-tools)"))
+        self.assertIn(7, self.fires("see feedback_frob_rule.md for the rules"))
+        self.assertNotIn(7, self.fires("name the follow-up contract; dated YYYY-MM-DD-slug"))
+
+    def test_control_section_extraction_stops_at_the_next_rule_or_heading(self):
+        text = "## Chat Tool Impact (x)\nbody FooTools.cs\n\n---\n\n## Next\nBar.cs\n"
+        self.assertIn("FooTools.cs", chat_tool_section(text))
+        self.assertNotIn("Bar.cs", chat_tool_section(text))
+        self.assertEqual(chat_tool_section("no heading"), "")
+
+    def test_the_template_section_names_no_consuming_projects_artefact(self):
+        template = (TEMPLATES / "concept-contract.md").read_text(encoding="utf-8")
+        section = chat_tool_section(template)
+        self.assertTrue(section.strip(), "the scan must read the Chat Tool Impact section of the template")
+        agents, skills = plugin_agent_names(), skill_names()
+        self.assertGreater(len(agents), 0)
+        self.assertGreater(len(skills), 0)
+        self.assertEqual(chat_tool_violations(section, agents, skills), {},
+                         "the section must name no source file, Phase label, hex id, non-plugin agent, non-skill "
+                         "slash command, HTTP /api/ route, dated contract slug or feedback note")
+
+    def test_the_template_section_keeps_the_heading_and_the_three_sanctioned_answers(self):
+        section = chat_tool_section((TEMPLATES / "concept-contract.md").read_text(encoding="utf-8"))
+        self.assertTrue(section.startswith(CHAT_TOOL_HEADING))
+        self.assertIn("Yes —", section)
+        self.assertIn("No —", section)
+        self.assertIn("Deferred", section)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
