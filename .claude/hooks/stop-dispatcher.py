@@ -56,6 +56,12 @@ CHECKS = [
     "protected-names-warning.py",
 ]
 
+#: What is left unchecked when a member is missing, keyed by its CHECKS string (never by position).
+MISSING_EFFECT = {
+    "../scripts/concept_changed_check.py": "Files a shell command wrote were not checked against a contract.",
+    "protected-names-warning.py": "The protected-names warning did not run.",
+}
+
 #: The exit code that stops the turn.
 STOP_EXIT = 2
 
@@ -169,9 +175,13 @@ def main() -> int:
     notice = ""
     marker = Path(tempfile.gettempdir()) / (MISSING_MARKER_PREFIX + session)
     if missing and not marker.exists():
-        notice = ("Stop check not run: %s %s missing, so it did not run. Files a shell command wrote "
-                  "were not checked against a contract." % (", ".join(missing),
-                                                           "is" if len(missing) == 1 else "are"))
+        notice = "Stop check not run: %s %s missing, so it did not run." % (
+            ", ".join(missing), "is" if len(missing) == 1 else "are")
+        # Say only what was skipped: each sentence is tied to the member whose absence causes it.
+        for name in missing:
+            effect = MISSING_EFFECT.get(name)
+            if effect:
+                notice += " " + effect
         if not stop:
             spoken.append(json.dumps({"systemMessage": notice}).encode("utf-8"))
 
