@@ -1,5 +1,6 @@
 # Follow-up — Review leftovers from the memory client and cloud engineering contract
 
+**Superseded by:** `.claude/concepts/2026-11-11-audit-followups-165.md`
 **Parent contract:** `.claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md`
 **Derived from:** the t16 re-review and the t10 documentation review, findings that Revision 8 did not take on
 **Date:** 2026-11-03

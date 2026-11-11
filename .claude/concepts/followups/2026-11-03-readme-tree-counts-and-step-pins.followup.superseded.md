@@ -1,5 +1,6 @@
 # Follow-up — Pin the README folder-tree counts in the repository consistency suite
 
+**Superseded by:** `.claude/concepts/2026-11-11-audit-followups-165.md`
 **Parent contract:** `.claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md`
 **Derived from:** review finding, not an Adjacent Areas scan: the t18 review's W1 and the reviewer's F2 (Revision 9, Open Question 30)
 **Date:** 2026-11-03
