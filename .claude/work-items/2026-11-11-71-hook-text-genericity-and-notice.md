@@ -13,9 +13,9 @@ branch: feature/71-hook-text-genericity-and-notice
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261111-infra-71-hook-text-genericity-and-notice
 north_stars: none
 contract: none
-pr: none
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/350
+issue_link: closes
+status: shipped
 created: 2026-11-11
 ---
 
