@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-11-11
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-11-11, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/373; 0 checklist items from review reports, 3 with no structured evidence; not performed (disclosed on #21): Implementation matches Data Shapes exactly | Integration surfaces reflected on both backend and frontend sides | `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced | No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface); owner confirmed resolved: none
 **Work Item Brief:** .claude/work-items/2026-11-11-21-finish-install-step3-proposals.md
 **Tracking issue:** #21
 **Budget:** 12,000 tokens
@@ -499,11 +500,11 @@ There is one mergeable block, because the script, the doctor, the skill and the 
 
 ## Review checklist (filled in after implementation)
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [ ] Implementation matches Data Shapes exactly — not performed (disclosed on #21)
+- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced) — no structured evidence
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — no structured evidence
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — no structured evidence
+- [ ] Integration surfaces reflected on both backend and frontend sides — not performed (disclosed on #21)
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — not performed (disclosed on #21)
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — not performed (disclosed on #21)
+- [x] `Status` flipped to `implemented`
