@@ -333,6 +333,15 @@ class MissingMemberTests(unittest.TestCase):
         self.assertNotIn(self.second, out2 + err2,
                          msg="the marker was spent when the notice was written: no second notice")
 
+    def test_a_missing_member_with_no_listed_effect_adds_no_sentence(self):
+        # FIRST is a stand-in absent from MISSING_EFFECT: the notice is the first sentence alone.
+        (self.ws.hooks / self.first).unlink()
+        _pid, code, out, err = self.ws.run()
+        self.assertEqual(code, 0, msg=err[:300])
+        notices = system_messages(out)
+        self.assertEqual(notices, ["Stop check not run: %s is missing, so it did not run." % self.first],
+                         msg="a member with no entry in MISSING_EFFECT adds no effect sentence: " + repr(notices))
+
     def test_with_the_first_member_missing_the_second_still_runs_and_its_exit_2_still_stops_the_turn(self):
         # Paired control, not a broken-rule target (round nine): it goes red if the check stops the loop at a
         # missing member, but not when the check is removed.
@@ -342,6 +351,70 @@ class MissingMemberTests(unittest.TestCase):
                          msg="a missing first member must not stop the later member from running: " + err[:300])
         self.assertEqual(code, 2, msg="the second member's exit 2 still stops the turn: " + err[:300])
         self.assertIn("CONCEPT-STOP-TEXT", err, msg="its error text reaches stderr")
+
+
+class MissingMemberNoticeAccuracyTests(unittest.TestCase):
+    """The notice names only what was not checked (issue 71). The rows run the REAL dispatcher, unchanged,
+    with its two real members stubbed, and remove one or both stub files."""
+
+    SHELL_SENTENCE = "Files a shell command wrote were not checked against a contract."
+    WARNING_SENTENCE = "The protected-names warning did not run."
+
+    def setUp(self) -> None:
+        self.ws = Workspace(multi=False)
+        self.addCleanup(self.ws.close)
+
+    def _notice(self, *missing: str) -> str:
+        for name in missing:
+            (self.ws.hooks / name).unlink()
+        _pid, code, out, err = self.ws.run()
+        self.assertEqual(code, 0, msg="a missing member still fails open: " + err[:300])
+        notices = system_messages(out)
+        self.assertEqual(len(notices), 1, msg="exactly one notice on the first run: " + repr(out))
+        return notices[0]
+
+    HEAD_ONE = "Stop check not run: %s is missing, so it did not run."
+    # cause -> (members removed, the one full expected notice)
+    CAUSES = {
+        "concept-missing": ((CONCEPT,), HEAD_ONE % CONCEPT + " " + SHELL_SENTENCE),
+        "warning-missing": ((WARNING,), HEAD_ONE % WARNING + " " + WARNING_SENTENCE),
+        "both-missing": ((CONCEPT, WARNING),
+                         "Stop check not run: %s, %s are missing, so it did not run. %s %s"
+                         % (CONCEPT, WARNING, SHELL_SENTENCE, WARNING_SENTENCE)),
+    }
+
+    def test_each_cause_gets_exactly_its_own_notice(self):
+        for cause, (removed, expected) in self.CAUSES.items():
+            with self.subTest(cause=cause):
+                ws = Workspace(multi=False)
+                self.addCleanup(ws.close)
+                for name in removed:
+                    (ws.hooks / name).unlink()
+                _pid, code, out, err = ws.run()
+                self.assertEqual(code, 0, msg="a missing member still fails open: " + err[:300])
+                self.assertEqual(system_messages(out), [expected],
+                                 msg="%s: exactly one notice, with exactly this text: %r" % (cause, out))
+
+    def test_a_missing_names_warning_run_twice_in_one_session_notices_once(self):
+        first = self._notice(WARNING)
+        self.assertIn(self.WARNING_SENTENCE, first, msg="the first run carries the warning sentence: " + repr(first))
+        _pid, code2, out2, err2 = self.ws.run()
+        self.assertEqual(code2, 0, msg=err2[:300])
+        self.assertEqual(system_messages(out2), [], msg="the second run in the same session prints no notice")
+        self.assertNotIn("did not run", out2 + err2, msg="and nothing else on either stream repeats the sentence")
+
+    def test_a_missing_names_warning_on_the_stop_path_puts_its_sentence_on_stderr(self):
+        (self.ws.hooks / WARNING).unlink()
+        text = "CONCEPT-STOP-TEXT\n"
+        _pid, code, out, err = self.ws.run({CONCEPT: {"code": 2, "err": text}})
+        self.assertEqual(code, 2, msg="the Changed-file check still stops the turn: " + err[:300])
+        err_n = err.replace("\r\n", "\n")
+        self.assertTrue(err_n.startswith(text), msg="the member's own text comes first: " + repr(err[:200]))
+        trailing = err_n[len(text):].strip()
+        self.assertIn(self.WARNING_SENTENCE, trailing, msg="the trailing line carries the exact warning sentence")
+        self.assertNotIn("shell command wrote", trailing,
+                         msg="the changed-file check ran, so no shell-write sentence: " + repr(trailing))
+        self.assertEqual(system_messages(out), [], msg="on exit 2 the notice goes to stderr, not stdout")
 
 
 class OneMemberTests(unittest.TestCase):

@@ -29,6 +29,7 @@ read from its own manifest, and the matching code through made-up words.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -2026,6 +2027,203 @@ def case_genericity_project_token_list_positive_control_and_real_files():
 
 
 # --------------------------------------------------------------------------
+# genericity of hook text: what every hook prints into a consuming project
+# --------------------------------------------------------------------------
+
+# Aliased imports (import re as r, from re import compile) only cause extra scanning (false positives), never misses.
+REGEX_CALLS = {"compile", "search", "match", "finditer", "findall", "sub", "fullmatch", "split"}
+
+
+def _fold_str(node):
+    """The string a chain of string constants joined by + stands for, or None when any part is not a constant."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _fold_str(node.left), _fold_str(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def hook_user_facing_strings(source: str) -> list:
+    """Every string a hook source holds, except module, class and function docstrings and the PATTERN argument of
+    a regex call (positional args[0] or the pattern= keyword; every other argument is scanned). Nothing is filtered
+    by the look of the string: a one-word handle or a path with no space counts. Bytes literals are decoded.
+    Besides each raw constant, three folded forms are scanned: a chain of string constants joined by + as one
+    string, each f-string as its literal parts joined by "", and the left operand of a "..." % x. The regex
+    exclusion is by call site, never by string shape."""
+    tree = ast.parse(source)
+    skip = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                skip.add(id(body[0].value))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in REGEX_CALLS and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id == "re":
+            patterns = list(node.args[:1]) + [k.value for k in node.keywords if k.arg == "pattern"]
+            for arg in patterns:
+                for part in ast.walk(arg):  # a pattern built by concatenation inside the call is still the pattern
+                    skip.add(id(part))
+    found = []
+    for node in ast.walk(tree):
+        if id(node) in skip:
+            continue
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str):
+                found.append(node.value)
+            elif isinstance(node.value, bytes):
+                found.append(node.value.decode("utf-8", errors="replace"))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            folded = _fold_str(node)
+            if folded is not None:
+                found.append(folded)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod) and not isinstance(node.left, ast.Constant):
+            folded = _fold_str(node.left)
+            if folded is not None:
+                found.append(folded)
+        elif isinstance(node, ast.JoinedStr):
+            found.append("".join(v.value for v in node.values
+                                 if isinstance(v, ast.Constant) and isinstance(v.value, str)))
+    return found
+
+
+def scan_hook_folder(hooks_dir: Path, words, visited=None) -> dict:
+    """{hook file name: [hits]} for every top-level .py file of the folder; only files with a hit appear.
+    When ``visited`` is a list, the name of every file the scan opened is appended to it."""
+    result = {}
+    for f in sorted(hooks_dir.glob("*.py")):
+        if visited is not None:
+            visited.append(f.name)
+        text = "\n".join(hook_user_facing_strings(f.read_text(encoding="utf-8")))
+        hits = scan_structural(text) + scan_words(text, words)
+        if hits:
+            result[f.name] = hits
+    return result
+
+
+def case_genericity_hook_text_positive_control_and_real_hooks():
+    tmp = Path(tempfile.mkdtemp(prefix="wa-hooktext-"))
+    try:
+        fake = tmp / "plugin.json"
+        fake.write_text(json.dumps({"author": {"name": "Zzmadeup Quillfeather"},
+                                    "repository": "https://github.com/zzmadeupowner/repo"}), encoding="utf-8")
+        names = manifest_names(fake)
+        check(names == ["Zzmadeup Quillfeather", "zzmadeupowner"], "the fake manifest must yield both planted names; got %r" % names)
+        # POSITIVE CONTROLS: one planted file each, one assertion each, made-up words only.
+        plants = {
+            "one-word owner handle": ('OWNER = "zzmadeupowner"\n', "zzmadeupowner"),
+            "space-free path": ('P = "Q:/zzmadeup/x"\n', "drive-letter path"),
+            "f-string without a literal space": ('import sys\nP = f"Q:/zzmadeup/{sys.argv}"\n', "drive-letter path"),
+            "bytes literal": ('B = b"Q:/zzmadeup/x"\n', "drive-letter path"),
+            "spaced two-word author": ('print("Rule written by Zzmadeup Quillfeather for you")\n', "Zzmadeup Quillfeather"),
+            "project token": ('T = "zzmarshlantern"\n', "zzmarshlantern"),
+        }
+        for label, (code, expected) in plants.items():
+            d = tmp / ("plant-" + label.replace(" ", "-"))
+            d.mkdir()
+            (d / "zz_plant_hook.py").write_text(code, encoding="utf-8")
+            got = scan_hook_folder(d, names + ["zzmarshlantern"])
+            check(got.get("zz_plant_hook.py") is not None and expected in got["zz_plant_hook.py"],
+                  "POSITIVE CONTROL (%s): the planted hook must be flagged with %r; got %r" % (label, expected, got))
+        # The project token list is read from a file, like the other genericity cases.
+        toks_file = tmp / ".project-tokens.json"
+        toks_file.write_text(json.dumps({"tokens": ["zzmarshlantern"]}), encoding="utf-8")
+        d = tmp / "plant-token-file"
+        d.mkdir()
+        (d / "zz_plant_hook.py").write_text('T = "zzmarshlantern"\n', encoding="utf-8")
+        check(scan_hook_folder(d, project_tokens(toks_file)) == {"zz_plant_hook.py": ["zzmarshlantern"]},
+              "POSITIVE CONTROL (token file): a planted project token in hook text must be caught")
+        # Docstrings are not scanned.
+        d = tmp / "plant-docstring-only"
+        d.mkdir()
+        (d / "zz_plant_hook.py").write_text('"""Q:/zzmadeup/x by Zzmadeup Quillfeather zzmadeupowner."""\n', encoding="utf-8")
+        check(scan_hook_folder(d, names) == {}, "NEGATIVE CONTROL: a docstring alone must not trip the scan")
+        # NEGATIVE CONTROL: a docstring and a regex argument only.
+        ok = tmp / "ok"
+        ok.mkdir()
+        (ok / "zz_ok_hook.py").write_text(
+            '"""Docstring about Q:/zzmadeup/x and Zzmadeup Quillfeather."""\n'
+            'import re\n'
+            'RX = re.compile("^(?:[a-z]:)?/users/[^/]+")\n'
+            'def run():\n'
+            '    """Another docstring by Zzmadeup Quillfeather."""\n'
+            '    return RX\n',
+            encoding="utf-8")
+        check(scan_hook_folder(ok, names) == {}, "NEGATIVE CONTROL: a docstring and a re.compile argument must produce no hit")
+        cat = tmp / "ok-concat"
+        cat.mkdir()
+        (cat / "zz_ok_hook.py").write_text(
+            'import re\nTAIL = "x"\nRX = re.compile("^(?:[a-z]:)?/users/[^/]+" + TAIL)\n', encoding="utf-8")
+        check(scan_hook_folder(cat, names) == {}, "NEGATIVE CONTROL: a pattern concatenated inside a re.compile call must produce no hit")
+        # W1: only the pattern argument is exempt; another argument of the same call is scanned.
+        d = tmp / "plant-re-sub-replacement"
+        d.mkdir()
+        (d / "zz_plant_hook.py").write_text('import re\ns = "t"\nre.sub(r"x", "Ask zzmadeupowner first", s)\n', encoding="utf-8")
+        check("zzmadeupowner" in scan_hook_folder(d, names).get("zz_plant_hook.py", []),
+              "POSITIVE CONTROL: the replacement argument of re.sub is user-facing text and must be flagged")
+        d = tmp / "plant-re-sub-keyword"
+        d.mkdir()
+        (d / "zz_plant_hook.py").write_text('import re\ns = "t"\nre.sub(pattern=r"x", repl="Ask zzmadeupowner first", string=s)\n', encoding="utf-8")
+        check("zzmadeupowner" in scan_hook_folder(d, names).get("zz_plant_hook.py", []),
+              "POSITIVE CONTROL: a keyword argument other than pattern= is flagged")
+        # W2: folded strings.
+        d = tmp / "plant-folded-author"
+        d.mkdir()
+        (d / "zz_plant_hook.py").write_text('MSG = "Zzmadeup " + "Quillfeather"\n', encoding="utf-8")
+        check("Zzmadeup Quillfeather" in scan_hook_folder(d, names).get("zz_plant_hook.py", []),
+              "POSITIVE CONTROL: a two-word author split across a + chain is flagged")
+        d = tmp / "plant-folded-path"
+        d.mkdir()
+        (d / "zz_plant_hook.py").write_text('P = "Q:" + "/zzmadeup"\n', encoding="utf-8")
+        check("drive-letter path" in scan_hook_folder(d, names).get("zz_plant_hook.py", []),
+              "POSITIVE CONTROL: a drive-letter path split across a + chain is flagged")
+        # The same pattern outside a regex call site is caught (the exclusion is by call site, not by shape).
+        d = tmp / "plant-pattern-outside-regex"
+        d.mkdir()
+        (d / "zz_plant_hook.py").write_text('RX = "^(?:[a-z]:)?/users/[^/]+"\n', encoding="utf-8")
+        check("zz_plant_hook.py" in scan_hook_folder(d, names),
+              "POSITIVE CONTROL: the regex exclusion is by call site; the same string assigned to a name is flagged")
+        # REGRESSION CONTROL: planted hooks, one sorting first and one last, inside a copy of the real folder.
+        copy = tmp / "hooks-copy"
+        copy.mkdir()
+        real_files = sorted(HOOKS_DIR.glob("*.py"))
+        for f in real_files:
+            shutil.copyfile(f, copy / f.name)
+        (copy / "aa_planted_hook.py").write_text('import sys\nsys.stderr.write("Ask zzmadeupowner first")\n', encoding="utf-8")
+        (copy / "zz_planted_hook.py").write_text(
+            'import sys\nsys.stderr.write("Please ask Zzmadeup Quillfeather before you continue")\n', encoding="utf-8")
+        seen = []
+        planted = scan_hook_folder(copy, names, seen)
+        check(sorted(planted) == ["aa_planted_hook.py", "zz_planted_hook.py"],
+              "REGRESSION CONTROL: only the two planted hooks (first and last in order), inside a copy of the real folder, must be flagged; got %r" % planted)
+        check(len(seen) == len(real_files) + 2,
+              "REGRESSION CONTROL: the scan must visit every file of the copy; visited %d of %d" % (len(seen), len(real_files) + 2))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # THE REAL HOOKS.
+    manifest = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
+    check(manifest.is_file(), "the plugin manifest must exist at %s" % manifest)
+    real_names = manifest_names(manifest)
+    check(len(real_names) >= 1, "the manifest must yield at least the author name or the repository owner")
+    real_tokens = project_tokens(PLUGIN_ROOT / ".claude" / ".project-tokens.json")
+    hook_files = sorted(HOOKS_DIR.glob("*.py"))
+    check(len(hook_files) >= 5, "the folder must hold hook sources to scan; found %d" % len(hook_files))
+    total = sum(len(hook_user_facing_strings(f.read_text(encoding="utf-8"))) for f in hook_files)
+    check(total >= 20, "the extractor must find a non-trivial number of strings in the real hooks (vacuous pass guard); found %d" % total)
+    dispatcher_strings = hook_user_facing_strings((HOOKS_DIR / "stop-dispatcher.py").read_text(encoding="utf-8"))
+    check(any("Stop check not run" in t for t in dispatcher_strings),
+          "ANCHOR: the strings extracted from stop-dispatcher.py must include the notice text 'Stop check not run'")
+    visited = []
+    hits = scan_hook_folder(HOOKS_DIR, real_names + real_tokens, visited)
+    check(visited == [f.name for f in hook_files],
+          "the scan must visit every *.py of the real hooks folder (%d); visited %d" % (len(hook_files), len(visited)))
+    check(hits == {}, "INV-11: a hook prints machine-specific text or a person or owner name into every consuming project: %r" % hits)
+
+
+# --------------------------------------------------------------------------
 # runner
 # --------------------------------------------------------------------------
 
@@ -2132,6 +2330,7 @@ def build_cases():
     add("genericity: structural patterns", case_genericity_structural_patterns_positive_control_and_real_files)
     add("genericity: author and owner from the manifest", case_genericity_author_and_owner_from_the_manifest_positive_control_and_real_files)
     add("genericity: the project's own token list", case_genericity_project_token_list_positive_control_and_real_files)
+    add("genericity: every hook's user-facing text", case_genericity_hook_text_positive_control_and_real_hooks)
     return cases
 
 
