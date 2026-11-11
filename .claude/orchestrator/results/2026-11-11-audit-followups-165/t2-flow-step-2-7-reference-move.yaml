@@ -1,0 +1,20 @@
+status: completed
+commit: 2cdc9bed175b2a66ecf9aa61578a1d9d96030e3d
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/367
+merged_at: '2026-11-11T22:58:56Z'
+verified: github
+sub_issue_closed: closed
+hand_resolved:
+  files: []
+  merge_commits: 0
+  commits_inspected: 2
+  commits_unread: 0
+base_ref: feature/165-audit-followups
+base_is_default: false
