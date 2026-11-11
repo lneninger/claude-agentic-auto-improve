@@ -2700,26 +2700,141 @@ PN_EXIT_CODES: Dict[str, int] = {"kept": 0, "first-install": 0, "names-removed":
 PN_TIMEOUT_SECONDS = 30
 
 
-def _git_show_bytes(cwd: Any, ref: str, path: str) -> Optional[bytes]:
-    """The exact bytes of ``path`` at ``ref``, or None when git cannot read it."""
-    try:
-        proc = subprocess.run(["git", "show", "%s:%s" % (ref, path)], cwd=str(cwd), capture_output=True,
-                              timeout=60, stdin=subprocess.DEVNULL)
-    except (subprocess.TimeoutExpired, OSError):
+#: Git isolation (contract 2026-10-13, Commands). The environment rule and the program rule exist in
+#: ``_protected_names.py`` and, because this script never imports that helper, here as a local copy; a test
+#: holds the two equal. Everything the gate runs through git (and its child) uses them.
+PN_COPIED_ENV = ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
+PN_GIT_SETTINGS = ("core.fsmonitor=false", "core.untrackedCache=false", "index.sparse=false",
+                   "core.quotePath=false", "core.longpaths=true")
+#: The git program, environment and tree under check of the run in progress (set by ``_p7_protected_names``).
+_PN_RUN: Optional[Dict[str, Any]] = None
+
+
+def _pn_norm(path: Any) -> str:
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def _pn_inside(folder: str, root: str) -> bool:
+    return folder == root or folder.startswith(root.rstrip("\\/") + os.sep)
+
+
+def resolve_git(path_value: Optional[str], excluded_roots: Optional[Sequence[Any]]) -> Optional[str]:
+    """The absolute path of the git program to run, or None: the first ``git.exe`` (``git`` elsewhere) in the
+    ``PATH`` entries, in order, skipping an empty, relative or ``.`` entry, the current folder and any entry
+    inside an excluded root. Local copy of ``_protected_names.resolve_git``."""
+    name = "git.exe" if os.name == "nt" else "git"
+    roots = [_pn_norm(root) for root in (excluded_roots or []) if root]
+    here = _pn_norm(os.getcwd())
+    for entry in (path_value or "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or entry == "." or not os.path.isabs(entry):
+            continue
+        folder = _pn_norm(entry)
+        if folder == here or any(_pn_inside(folder, root) for root in roots):
+            continue
+        candidate = os.path.join(entry, name)
+        if os.path.isfile(candidate) and (os.name == "nt" or os.access(candidate, os.X_OK)):
+            return os.path.abspath(candidate)
+    return None
+
+
+def git_environment(private_dir: Any, git_program: Any) -> Dict[str, str]:
+    """The environment of every git process of the gate and of its child, built from nothing: four variables
+    copied from the caller, ``PATH`` (the git program's folder plus ``%SYSTEMROOT%\\System32``), the private
+    folder for ``TEMP``, ``TMP``, ``TMPDIR``, ``HOME`` and ``USERPROFILE``, and five fixed git variables.
+    Nothing else. Local copy of ``_protected_names.git_environment``."""
+    caller = os.environ
+    env: Dict[str, str] = {}
+    for key in PN_COPIED_ENV:
+        if key in caller:
+            env[key] = caller[key]
+    folders = [os.path.dirname(str(git_program))]
+    if "SYSTEMROOT" in caller:
+        folders.append(os.path.join(caller["SYSTEMROOT"], "System32"))
+    elif os.name != "nt":
+        folders.extend(["/usr/bin", "/bin"])
+    env["PATH"] = os.pathsep.join(folders)
+    for key in ("TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE"):
+        env[key] = str(private_dir)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
+def _pn_git(cwd: Any, args: Sequence[str]) -> Optional[Any]:
+    """One isolated read-only git call in ``cwd`` (``--no-replace-objects`` first, then the settings, the
+    exact-path ``safe.directory``, the arguments). None when it cannot start or runs past 60 seconds."""
+    run = _PN_RUN
+    if run is None:
         return None
-    return proc.stdout if proc.returncode == 0 else None
+    command = [run["git"], "--no-replace-objects"]
+    for setting in PN_GIT_SETTINGS:
+        command += ["-c", setting]
+    command += ["-c", "safe.directory=" + os.path.realpath(str(cwd)).replace("\\", "/")] + list(args)
+    try:
+        return subprocess.run(command, cwd=str(cwd), capture_output=True, timeout=60, env=run["env"],
+                              stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+
+
+def _git_show_bytes(cwd: Any, ref: str, path: str) -> Optional[bytes]:
+    """The exact bytes of ``path`` at ``ref`` (``git cat-file blob``, no text conversion), or None when git
+    cannot read it. The blob is named by its object id, taken from the same whole-tree listing the checker
+    reads, so no argument of a git process ends in the checker's file name."""
+    listing = _pn_git(cwd, ["ls-tree", "-r", "-z", "--full-tree", ref])
+    if listing is None or listing.returncode != 0:
+        return None
+    wanted = path.encode("utf-8")
+    for entry in listing.stdout.split(b"\0"):
+        meta, _tab, raw = entry.partition(b"\t")
+        fields = meta.split()
+        if raw == wanted and len(fields) == 3 and fields[1] == b"blob":
+            proc = _pn_git(cwd, ["cat-file", "blob", fields[2].decode("ascii")])
+            return proc.stdout if proc is not None and proc.returncode == 0 else None
+    return None
+
+
+#: An 8.3 short-name shape, and the characters a full case mapping misses (see ``_protected_names``).
+_PN_SHORT_NAME_RE = re.compile(r"^([^.~]*~[0-9]+)(\.[^.]{0,3})?$")
+_PN_EXPLICIT_FAMILY = {"İ": "i", "ı": "i", "ſ": "s", "K": "k"}
+
+
+def _pn_letters_match(a: str, b: str) -> bool:
+    if a == b or a.casefold() == b.casefold() or a.upper() == b.upper() or a.lower() == b.lower():
+        return True
+    return ((a in _PN_EXPLICIT_FAMILY and b.lower() == _PN_EXPLICIT_FAMILY[a])
+            or (b in _PN_EXPLICIT_FAMILY and a.lower() == _PN_EXPLICIT_FAMILY[b]))
+
+
+def _pn_component_matches(candidate: str, wanted: str) -> bool:
+    short = _PN_SHORT_NAME_RE.match(candidate)
+    if short and len(short.group(1)) <= 8:
+        return True
+    cut = candidate.find(":")
+    folded = (candidate[:cut] if cut >= 0 else candidate).rstrip(". ")
+    return len(folded) == len(wanted) and all(_pn_letters_match(a, b) for a, b in zip(folded, wanted))
 
 
 def _git_lists_path(cwd: Any, ref: str, path: str) -> Optional[bool]:
-    """True or False: whether the commit ``ref`` holds ``path``. None when git cannot list the commit."""
-    try:
-        proc = subprocess.run(["git", "ls-tree", "-z", "--full-tree", ref, "--", path], cwd=str(cwd),
-                              capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
-    except (subprocess.TimeoutExpired, OSError):
+    """True or False: whether the commit ``ref`` holds ``path`` OR a rules-path alias of it (the whole tree is
+    listed once, with no pathspec). None when git cannot list the commit."""
+    proc = _pn_git(cwd, ["ls-tree", "-r", "-z", "--full-tree", ref])
+    if proc is None or proc.returncode != 0:
         return None
-    if proc.returncode != 0:
-        return None
-    return bool(proc.stdout.strip(b"\0"))
+    wanted = path.split("/")
+    for entry in proc.stdout.split(b"\0"):
+        if not entry:
+            continue
+        listed = entry.partition(b"\t")[2].decode("utf-8", errors="replace")
+        parts = listed.split("/")
+        if listed == path or (len(parts) == len(wanted)
+                              and all(_pn_component_matches(p, w) for p, w in zip(parts, wanted))):
+            return True
+    return False
 
 
 def _installed_plugin_checker() -> Optional[Path]:
@@ -2782,46 +2897,71 @@ def _p7_protected_names(wt: Path, mark_m: str, head: str, facts: Dict[str, Any],
         facts["p4_unverifiable"] = True  # the existing fact whose outcome is ``unverifiable``
         details["unverifiable"] = detail
 
-    # No rules file at either commit: the check's own verdict would be ``first-install`` (the default branch
-    # holds none and the working side is absent), so there is nothing to compare and no checker to trust.
-    if _git_lists_path(wt, mark_m, PN_RULES_REL) is False and _git_lists_path(wt, head, PN_RULES_REL) is False:
-        notes.append("protected names: no database-guard rules file on the default branch or at the merged head")
+    global _PN_RUN
+    git_program = resolve_git(os.environ.get("PATH", ""), [str(wt)])
+    if git_program is None:
+        unverifiable("the Protected-name check cannot run: no git program was found on PATH outside the landing "
+                     "worktree")
         return
+    previous_run = _PN_RUN
+    try:
+        with tempfile.TemporaryDirectory(prefix="pn-gate-") as tmp:
+            # The gate's private folder: the checker's own files in the plugin layout, and the private folder
+            # every git process and the child get as TEMP, TMP, TMPDIR, HOME and USERPROFILE.
+            private = Path(tmp) / "private"
+            private.mkdir()
+            env = git_environment(private, git_program)
+            _PN_RUN = {"git": git_program, "env": env}
 
-    script_text = _git_show_bytes(wt, mark_m, PN_SCRIPT_REL)
-    helper_text = _git_show_bytes(wt, mark_m, PN_HELPER_REL)
-    with tempfile.TemporaryDirectory(prefix="pn-gate-") as tmp:
-        if script_text is not None or helper_text is not None:
-            # mark_m's own copy: whatever it holds is written as it is. A script without its helper (or the
-            # reverse) is a broken checker; running it gives the child's own exit 1, which reads as unverifiable.
-            script = Path(tmp) / "protected_names_check.py"
-            if script_text is not None:
-                script.write_bytes(script_text)
-            else:
-                script.write_text("raise SystemExit('the default branch holds the helper but not the script')\n",
-                                  encoding="utf-8")
-            if helper_text is not None:
-                (Path(tmp) / "_protected_names.py").write_bytes(helper_text)
-        else:
-            script_found = _installed_plugin_checker()
-            if script_found is None:
-                unverifiable("the Protected-name check cannot run: the default branch (%s) lacks "
-                             "protected_names_check.py and _protected_names.py, and no installed plugin copy "
-                             "was found (CLAUDE_PLUGIN_ROOT, then the plugin cache folder)" % mark_m[:12])
+            # No rules file (nor an alias of its path) at either commit: the check's own verdict would be
+            # ``first-install``, so there is nothing to compare and no checker to trust.
+            if _git_lists_path(wt, mark_m, PN_RULES_REL) is False and _git_lists_path(wt, head, PN_RULES_REL) is False:
+                notes.append("protected names: no database-guard rules file on the default branch or at the "
+                             "merged head")
                 return
-            script = script_found
-        cmd = [sys.executable, "-I", "-B", str(script), "--project", str(wt), "--working-ref", head,
-               "--default-ref", mark_m]
-        try:
-            proc = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=PN_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL)
-        except subprocess.TimeoutExpired:
-            unverifiable("protected_names_check.py ran past %d seconds (no verdict, no exit code)"
-                         % PN_TIMEOUT_SECONDS)
-            return
-        except OSError as exc:
-            unverifiable("protected_names_check.py could not start: %s" % exc)
-            return
+
+            script_text = _git_show_bytes(wt, mark_m, PN_SCRIPT_REL)
+            helper_text = _git_show_bytes(wt, mark_m, PN_HELPER_REL)
+            if script_text is not None or helper_text is not None:
+                # mark_m's own copy: whatever it holds is written as it is, as <tmp>/.claude/scripts/ and
+                # <tmp>/.claude/hooks/, so the script's ``../hooks`` is this private folder's and nothing
+                # else. A script without its helper (or the reverse) is a broken checker; running it gives the
+                # child's own exit 1, which reads as unverifiable.
+                scripts_dir = Path(tmp) / ".claude" / "scripts"
+                hooks_dir = Path(tmp) / ".claude" / "hooks"
+                scripts_dir.mkdir(parents=True)
+                hooks_dir.mkdir(parents=True)
+                script = scripts_dir / "protected_names_check.py"
+                if script_text is not None:
+                    script.write_bytes(script_text)
+                else:
+                    script.write_text("raise SystemExit('the default branch holds the helper but not the "
+                                      "script')\n", encoding="utf-8")
+                if helper_text is not None:
+                    (hooks_dir / "_protected_names.py").write_bytes(helper_text)
+            else:
+                script_found = _installed_plugin_checker()
+                if script_found is None:
+                    unverifiable("the Protected-name check cannot run: the default branch (%s) lacks "
+                                 "protected_names_check.py and _protected_names.py, and no installed plugin "
+                                 "copy was found (CLAUDE_PLUGIN_ROOT, then the plugin cache folder)" % mark_m[:12])
+                    return
+                script = script_found
+            cmd = [sys.executable, "-I", "-B", str(script), "--project", str(wt), "--working-ref", head,
+                   "--default-ref", mark_m]
+            try:
+                proc = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
+                                      errors="replace", timeout=PN_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,
+                                      env=env)
+            except subprocess.TimeoutExpired:
+                unverifiable("protected_names_check.py ran past %d seconds (no verdict, no exit code)"
+                             % PN_TIMEOUT_SECONDS)
+                return
+            except OSError as exc:
+                unverifiable("protected_names_check.py could not start: %s" % exc)
+                return
+    finally:
+        _PN_RUN = previous_run
     result = _pn_read_result(proc.returncode, proc.stdout or "", proc.stderr or "")
     verdict = result["verdict"]
     if verdict == "unverifiable":
