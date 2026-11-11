@@ -48,6 +48,7 @@ import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,7 +58,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from test_protected_names import RULES_REL, _GIT_ENV, _rm_tree, git, make_world, rules_bytes  # noqa: E402
+from test_protected_names import (RULES_REL, _GIT_ENV, _rm_tree, git, make_git_shim, make_world,  # noqa: E402
+                                  read_shim_log, rules_bytes)
 
 CLAUDE_DIR = HERE.parents[1]
 PLUGIN_ROOT = CLAUDE_DIR.parent
@@ -101,6 +103,8 @@ class WarningCase(unittest.TestCase):
             env[key] = str(self.state)
         env["CLAUDE_CONFIG_DIR"] = str(self.state)
         env["GIT_TRACE2_EVENT"] = str(self.trace)
+        if getattr(self, "shim_on", False):
+            env["PATH"] = str(self.shim_dir) + os.pathsep + os.environ.get("PATH", "")
         env.pop("CLAUDE_PROJECT_DIR", None)
         if project is not None:
             env["CLAUDE_PROJECT_DIR"] = str(project)
@@ -127,8 +131,17 @@ class WarningCase(unittest.TestCase):
         return self.run_script(HOOK, {"session_id": session, "cwd": str(cwd), "hook_event_name": "Stop"},
                                project=project, extra=extra)
 
+    def use_shim(self):
+        """NAMED EDIT (#623 t14): recorder moved off GIT_TRACE2_EVENT because remedy invariant C2 removes that
+        variable from every git call. A rule that calls this records through a recording git shim instead."""
+        self.shim_dir, self.shim_log = self.root / "shim-bin", self.root / "git-shim.log"
+        make_git_shim(self.shim_dir, self.shim_log)
+        self.shim_on = True
+
     def git_calls(self):
         """The argument lists of every git process recorded since the last ``reset_trace``."""
+        if getattr(self, "shim_on", False):
+            return [["git"] + r["args"] for r in read_shim_log(self.shim_log)]
         if not self.trace.exists():
             return []
         calls = []
@@ -142,6 +155,10 @@ class WarningCase(unittest.TestCase):
         return calls
 
     def reset_trace(self):
+        if getattr(self, "shim_on", False):
+            if self.shim_log.exists():
+                self.shim_log.unlink()
+            return
         if self.trace.exists():
             self.trace.unlink()
 
@@ -248,6 +265,7 @@ class HookBehaviourTests(WarningCase):
         self.assertEqual(message.count(A[1]), 1, "one tree reached by two routes is one report")
 
     def test_it_never_runs_git_fetch(self):
+        self.use_shim()  # recorder moved off GIT_TRACE2_EVENT because remedy invariant C2 removes that variable from every git call (#623 t14)
         tree = self.narrowed()
         self.reset_trace()
         self.say("s" + uuid.uuid4().hex, tree, tree)
@@ -256,6 +274,7 @@ class HookBehaviourTests(WarningCase):
         self.assertEqual([c for c in calls if "fetch" in c[1:]], [], "a Stop hook never touches the network")
 
     def test_it_never_runs_git_fetch_when_the_ref_cannot_be_read(self):
+        self.use_shim()  # recorder moved off GIT_TRACE2_EVENT because remedy invariant C2 removes that variable from every git call (#623 t14)
         tree = self.tree("tree-noref", A, A[:1], ref=None)
         self.reset_trace()
         rc, obj, out, err = self.stop("s" + uuid.uuid4().hex, tree, project=tree)
@@ -301,6 +320,7 @@ class HookBehaviourTests(WarningCase):
 
     # -- form (B): no git call when nothing changed ------------------------------------------------------
     def test_no_git_call_runs_when_nothing_changed_since_its_last_run_in_the_session(self):
+        self.use_shim()  # recorder moved off GIT_TRACE2_EVENT because remedy invariant C2 removes that variable from every git call (#623 t14)
         tree = self.narrowed()
         sid = "s" + uuid.uuid4().hex
         self.reset_trace()
@@ -311,6 +331,7 @@ class HookBehaviourTests(WarningCase):
         self.assertEqual(self.git_calls(), [], "form (B) fast path: nothing changed, so not one git process")
 
     def test_a_changed_rules_file_ends_the_fast_path(self):
+        self.use_shim()  # recorder moved off GIT_TRACE2_EVENT because remedy invariant C2 removes that variable from every git call (#623 t14)
         tree = self.narrowed(default=A + ["Alpha_Three"], working=A[:1])
         sid = "s" + uuid.uuid4().hex
         self.say(sid, tree, tree)
@@ -320,6 +341,7 @@ class HookBehaviourTests(WarningCase):
         self.assertTrue(self.git_calls(), "the file's size changed, so the hook looks again")
 
     def test_a_moved_default_branch_ref_ends_the_fast_path(self):
+        self.use_shim()  # recorder moved off GIT_TRACE2_EVENT because remedy invariant C2 removes that variable from every git call (#623 t14)
         tree = self.narrowed()
         sid = "s" + uuid.uuid4().hex
         self.say(sid, tree, tree)
@@ -494,6 +516,168 @@ class SkillTests(WarningCase):
                 "Exit 0 passes; 10 and 11 are NOT-READY; 12 is a disclosed item. "
                 "If this branch changes the check's own code, say so.\n")
         self.assertEqual(skill_problems(text), [], "the control's own text must pass: " + "; ".join(skill_problems(text)))
+
+
+# =====================================================================================================
+# REVISION 5 REMEDY (block 14, RED): R5-B2-5 (the hook under a replace ref) and R5-W3-1, R5-W3-2 (what
+# Step 5.7 of the skill runs, and on which tree). Gate 3's finding B2 and warning W3; invariant C4.
+#
+# The Step 5.7 rows RUN the skill's own bash block, not a text pattern: the block is read from the skill,
+# executed by a bash, and the ``py`` it ends in is a recording shell script first on PATH, so what the
+# block would have started is what the row reads. Every folder is test-owned and removed afterwards.
+# =====================================================================================================
+def git_bash():
+    """A bash that can run the skill's block: Git's own on Windows (never the WSL launcher in System32)."""
+    found = shutil.which("git")
+    if found:
+        for parent in Path(found).resolve().parents:
+            candidate = parent / "bin" / "bash.exe"
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which("bash") if os.name != "nt" else None
+
+
+def step_bash_block():
+    """The first bash block of Step 5.7 (the lookup and the call), or None."""
+    section = skill_section(SKILL.read_text(encoding="utf-8")) if SKILL.is_file() else None
+    match = re.search(r"```bash\n(.*?)```", section or "", re.S)
+    return match.group(1) if match else None
+
+
+def posix_norm(path):
+    text = str(path).replace("\\", "/").rstrip("/").lower()
+    return re.sub(r"^/([a-z])/", r"\1:/", text)
+
+
+class ReplaceRefHookTests(WarningCase):
+
+    def test_R5_B2_5_the_hook_under_a_replace_ref_on_the_default_branchs_rules_blob_still_emits_its_one_system_message(self):
+        tree = self.narrowed()
+        control = self.say("s" + uuid.uuid4().hex, tree, tree)
+        self.assertIn(A[1], control, "control: before the replace ref the hook speaks")
+        default_blob = git(tree, "rev-parse", "refs/remotes/origin/master:" + RULES_REL)
+        narrowed_blob = git(tree, "hash-object", "-w", str(tree / RULES_REL))
+        self.assertNotEqual(default_blob, narrowed_blob, "control: the two blobs differ")
+        git(tree, "replace", default_blob, narrowed_blob)
+        rc, obj, out, err = self.stop("s" + uuid.uuid4().hex, tree, project=tree)
+        self.assertEqual(rc, 0, "exit 0 on every path. stderr=%r" % err[:300])
+        self.assertIsNotNone(obj, "a replace ref must not silence the warning: one JSON object with a systemMessage. "
+                                  "stdout=%r stderr=%r" % (out[:200], err[:300]))
+        self.assertIn(A[1], str(obj.get("systemMessage")), "the message still names the missing string")
+        self.assertEqual(out.strip().count("\n"), 0, "and it is one message, not several")
+
+
+class StepBlockCase(WarningCase):
+    """Runs Step 5.7's bash block with a recording ``py`` and returns the arguments that ``py`` received."""
+
+    def setUp(self):
+        super().setUp()
+        self.bash = git_bash()
+        if self.bash is None:
+            self.skipTest("no bash that can run the skill's block (Git's bash.exe) was found")
+        self.block = step_bash_block()
+        self.assertIsNotNone(self.block, "Step 5.7 must hold a bash block (the lookup and the call)")
+        self.shim = self.root / "py-shim"
+        self.shim.mkdir()
+        self.rec = self.root / "py-args.txt"
+        (self.shim / "py").write_text("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"$REC_LOG\"\nexit 0\n",
+                                      encoding="utf-8", newline="\n")
+        self.cfg = self.root / "claude-config"
+        self.cfg.mkdir()
+        self.launch = self.root / "launch-tree"
+        self.launch.mkdir()
+
+    def plugin_with_checker(self, folder):
+        script = Path(folder) / ".claude" / "scripts" / "protected_names_check.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("# a checker\n", encoding="utf-8")
+        return script
+
+    def run_block(self, cwd, plugin_root=None, project_dir=None):
+        env = {"PATH": str(self.shim) + os.pathsep + os.environ.get("PATH", ""), "REC_LOG": str(self.rec),
+               "HOME": str(self.state), "TEMP": str(self.state), "TMP": str(self.state),
+               "CLAUDE_CONFIG_DIR": str(self.cfg)}
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC"):
+            if key in os.environ:
+                env[key] = os.environ[key]
+        if plugin_root is not None:
+            env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+        if project_dir is not None:
+            env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+        proc = subprocess.run([self.bash, "-c", self.block], cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120)
+        args = self.rec.read_text(encoding="utf-8").splitlines() if self.rec.exists() else []
+        return args, proc
+
+    def project_arg(self, args, proc):
+        self.assertIn("--project", args, "the step starts the checker with --project. args=%r stderr=%r" % (args, proc.stderr[-300:]))
+        return args[args.index("--project") + 1]
+
+    def script_arg(self, args):
+        self.assertIn("-3", args, "the step runs py -3 <checker>. args=%r" % args)
+        return args[args.index("-3") + 1]
+
+
+class StepFiveSevenProjectTests(StepBlockCase):
+
+    def test_R5_W3_1_the_project_is_the_tree_git_reports_not_the_launch_tree(self):
+        tree = self.tree("tree-w3", A, A)
+        cwd = tree / "sub" / "deeper"
+        cwd.mkdir(parents=True)
+        plugin = self.root / "plugin"
+        self.plugin_with_checker(plugin)
+        args, proc = self.run_block(cwd, plugin_root=plugin, project_dir=self.launch)
+        self.assertEqual(posix_norm(self.script_arg(args)), posix_norm(plugin / ".claude" / "scripts" / "protected_names_check.py"),
+                         "control: the checker is the one in CLAUDE_PLUGIN_ROOT")
+        want = git(cwd, "rev-parse", "--show-toplevel")
+        self.assertEqual(posix_norm(self.project_arg(args, proc)), posix_norm(want),
+                         "--project is `git rev-parse --show-toplevel` of the current folder (%s), never "
+                         "$CLAUDE_PROJECT_DIR (%s) while git can answer" % (want, self.launch))
+
+    def test_R5_W3_1_when_git_cannot_answer_claude_project_dir_is_the_fallback(self):
+        plugin = self.root / "plugin"
+        self.plugin_with_checker(plugin)
+        args, proc = self.run_block(self.neutral, plugin_root=plugin, project_dir=self.launch)
+        self.assertEqual(posix_norm(self.project_arg(args, proc)), posix_norm(self.launch),
+                         "git cannot answer in a folder that is no repository: $CLAUDE_PROJECT_DIR is used")
+
+    def test_R5_W3_1_control_the_recording_py_sees_the_flags_the_block_passes(self):
+        plugin = self.root / "plugin"
+        self.plugin_with_checker(plugin)
+        args, proc = self.run_block(self.neutral, plugin_root=plugin, project_dir=self.launch)
+        self.assertIn("--fetch", args, "control: the shim recorded the real invocation (%r)" % args)
+
+
+class StepFiveSevenCheckerLookupTests(StepBlockCase):
+
+    def _install_record(self, install_path, scope="user"):
+        record = {"version": 2, "plugins": {"agentic-auto-improve@auto-improve": [
+            {"scope": scope, "installPath": str(install_path), "version": "0.16.5"}]}}
+        (self.cfg / "plugins").mkdir(exist_ok=True)
+        (self.cfg / "plugins" / "installed_plugins.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+    def _caches(self):
+        reviewed = self.cfg / "plugins" / "cache" / "auto-improve" / "agentic-auto-improve" / "0.16.5"
+        newer = self.cfg / "plugins" / "cache" / "auto-improve" / "agentic-auto-improve" / "0.18.4"
+        self.plugin_with_checker(reviewed)
+        self.plugin_with_checker(newer)  # written last: the newest modification time as well as the highest version
+        return reviewed, newer
+
+    def test_R5_W3_2_without_claude_plugin_root_the_checker_is_the_installed_plugins_install_path(self):
+        reviewed, newer = self._caches()
+        self._install_record(reviewed)
+        tree = self.tree("tree-w3", A, A)
+        args, proc = self.run_block(tree, project_dir=tree)
+        self.assertEqual(posix_norm(self.script_arg(args)), posix_norm(reviewed / ".claude" / "scripts" / "protected_names_check.py"),
+                         "the installPath of the user-scope entry, never the higher-numbered or newer cache folder (%s)" % newer)
+
+    def test_R5_W3_2_a_newer_unreviewed_cache_folder_is_never_a_fallback(self):
+        reviewed, newer = self._caches()
+        self._install_record(self.cfg / "plugins" / "cache" / "auto-improve" / "agentic-auto-improve" / "0.0.0-not-installed")
+        tree = self.tree("tree-w3", A, A)
+        args, proc = self.run_block(tree, project_dir=tree)
+        text = "\n".join(posix_norm(a) for a in args)
+        self.assertNotIn("0.18.4", text, "the unreviewed newest cache folder must not be run (args=%r)" % args)
+        self.assertNotIn("0.16.5", text, "nor any cache folder the install record does not name (args=%r)" % args)
 
 
 if __name__ == "__main__":
