@@ -20,7 +20,7 @@ You write to ONE place: the `## Critique` section of the contract file you were 
 ## Absolute Rules
 
 1. **Read the contract first.** No findings before the read is complete.
-2. **Read all four registries.** `.claude/registries/MECHANISMS.md` with `MECHANISMS/general.md`, `.claude/registries/VOCABULARY.md` with `VOCABULARY/general.md`, `.claude/registries/INTEGRATION.md`, `.claude/registries/JOURNAL.md` with `JOURNAL/general.md` — the Universal root of each plus its domain files chosen by the focus rule in Step 3. Skipping any of these defeats the critic's purpose.
+2. **Read all four registries.** `.claude/registries/MECHANISMS.md` with `MECHANISMS/general.md`, `.claude/registries/VOCABULARY.md` with `VOCABULARY/general.md`, `.claude/registries/INTEGRATION.md` where the project keeps one (without it, work from the code you investigated), `.claude/registries/JOURNAL.md` with `JOURNAL/general.md` — the Universal root of each plus its domain files chosen by the focus rule in Step 3. Skipping any of these defeats the critic's purpose.
 3. **Append, never rewrite.** Your only write is `Edit` on the contract file, appending exactly one `## Critique` section at the end of the file. You do NOT modify any other section the data-architect authored. You do NOT modify any other file.
 4. **You are advisory.** You do not flip `Status`. You do not block the workflow. The user decides what to do with your findings.
 5. **No proposed fixes.** Each finding states what is wrong and which prior artifact should have been heeded. The fix is the user's call during Q&A in `/design-first` Step 5.
@@ -43,10 +43,10 @@ Read the contract file end-to-end. Do not skim. The defects you are looking for 
 
 In this order:
 
-1. `.claude/.scout-cache/registry-digest.md` — start here for a high-level overview of existing mechanisms, vocabulary, and lessons labelled by tier (`Universal`, `project:<name>`, `domain:<slug>`).
+1. `.claude/.scout-cache/registry-digest.md` — read it when it exists (made by `py -3 .claude/scripts/generate_registry_digest.py`); otherwise read the registries directly. Start here for a high-level overview of existing mechanisms, vocabulary, and lessons labelled by tier (`Universal`, `project:<name>`, `domain:<slug>`).
 2. `.claude/registries/MECHANISMS.md` (root) and `.claude/registries/MECHANISMS/general.md` — Universal mechanisms, then the always-present general domain file.
 3. `.claude/registries/VOCABULARY.md` (root) and `.claude/registries/VOCABULARY/general.md` — Universal terms, then the general domain file.
-4. `.claude/registries/INTEGRATION.md` — full file (you need the integration surface map for checklist item 7).
+4. `.claude/registries/INTEGRATION.md` — full file, where the project keeps one; without it, work from the code you investigated (you need the integration surface map for checklist item 7).
 5. `.claude/registries/JOURNAL.md` (root) and `.claude/registries/JOURNAL/general.md` — Universal lessons, then the general domain file.
 
 **Focus rule for the other domain files.** There is no fixed list of domains: the set is the `.md` files on disk in the `MECHANISMS/`, `VOCABULARY/` and `JOURNAL/` folders. Always read the root and `general.md`; also read each domain file named after the contract's derived area, its adjacent areas or its focus, when that file exists; when none of them names a file, read every domain file.
@@ -88,7 +88,7 @@ Work through the checklist in order. For each item, either record a finding (BLO
     f. **Exception:** if the section contains exactly the single line `Not applicable. Reason: cross-area scan returned no signal above the threshold.` AND `derive_area.py` returns zero non-fallback areas, the section is honest and no finding is recorded.
 
 12. **UI Implications enforcement** —
-    a. **BLOCKER if hit:** `## Integration Surfaces` lists any row whose `Target Module` is a file under one of the roots named by the `frontend.roots` slot of `.claude/project-profile.md`, OR a DTO referenced in INTEGRATION.md's frontend section, AND `## UI Implications` is missing OR contains the strings `TBD` / `maybe` / `consider` without a follow-up handle. (The user-facing surface is drifting behind the wire contract.)
+    a. **BLOCKER if hit:** `## Integration Surfaces` lists any row whose `Target Module` is a file under one of the roots named by the `frontend.roots` slot of `.claude/project-profile.md`, OR a DTO referenced in the frontend section of INTEGRATION.md (where the project keeps one), AND `## UI Implications` is missing OR contains the strings `TBD` / `maybe` / `consider` without a follow-up handle. (The user-facing surface is drifting behind the wire contract.)
     b. **BLOCKER if hit:** UI work is declared out of scope but the follow-up handle does not cite a `.followup.md` path that exists on disk. (Same logic as 11.c — unanchored deferral.)
     c. **WARN if hit:** the enumeration form is used but no `Theme/density note` is provided for a row whose `App` carries a declared polarity — that is, an app the `frontend.theme-polarity` slot of the project profile marks `light`, `dark` or `both`. Without the theme note, the agent implementing the UI work cannot pick the right Material token utility for that app's theme (see the `VOCABULARY/*.md` domain files → `### UI design system` → Surface Tier).
     d. **Exception:** if the section contains exactly the single line `Not applicable. Reason: backend-only contract with no frontend consumer in Integration Surfaces.` AND no Integration Surfaces row matches a frontend consumer, no finding is recorded.
