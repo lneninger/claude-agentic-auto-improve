@@ -802,5 +802,62 @@ class WorktreeEntriesLockedKeyTests(TempWorldCase):
         self.assertIs(entry.get("locked"), True, msg="and the entry still reads locked")
 
 
+TASK_SKILL = REPO_ROOT / "skills" / "task" / "SKILL.md"
+
+
+def step_heading_count(text: str, label: str = "Step 1.5") -> int:
+    """Headings of the form ``## Step 1.5: ...`` (any level of two to four hashes)."""
+    pattern = re.compile(r"^#{2,4}\s+" + re.escape(label) + r"\b", re.MULTILINE)
+    return len(pattern.findall(text))
+
+
+def section_5c(text: str) -> str:
+    """The text from the ``### 5c.`` heading up to the next ``### 5d.`` heading ('' when 5c is absent)."""
+    start = re.search(r"^###\s+5c\.", text, re.MULTILINE)
+    if not start:
+        return ""
+    end = re.search(r"^###\s+5d\.", text[start.end():], re.MULTILINE)
+    return text[start.start():start.end() + end.start()] if end else text[start.start():]
+
+
+def worktree_add_command_lines(section: str) -> list:
+    """Lines that START with the command ``git worktree add`` (a shell line, not prose that names it)."""
+    return [line for line in section.splitlines() if re.match(r"\s*git worktree add\b", line)]
+
+
+class TaskSkillWorktreeTextTests(unittest.TestCase):
+    """Contract 2026-11-11-audit-followups-165, block 1 (V1, V2): /task creates its worktree once, in
+    Step 1.5 through flat_worktree.py. Step 5c holds no second recipe that runs ``git worktree add``."""
+
+    BAD_TWICE = "## Step 1.5: Enter a worktree\nx\n\n## Step 1.5: Enter a worktree\ny\n"
+    BAD_5C = ("### 5c. Branch\n\n```bash\ngit fetch origin master\n"
+              "git worktree add .claude/worktrees/<wt> -b <branch-name> origin/master\n```\n\n### 5d. Record it\n")
+
+    def test_control_two_step_1_5_headings_are_counted(self):
+        self.assertEqual(step_heading_count(self.BAD_TWICE), 2, msg="control: the planted text holds two headings")
+        self.assertEqual(step_heading_count("## Step 1.5: Enter a worktree\n"), 1, msg="control: one heading counts one")
+        self.assertEqual(step_heading_count("## Step 1.6: other\n"), 0, msg="control: another step is not counted")
+
+    def test_control_a_planted_git_worktree_add_line_in_5c_is_found(self):
+        found = worktree_add_command_lines(section_5c(self.BAD_5C))
+        self.assertEqual(len(found), 1, msg=f"control: the planted command line must be found, got {found}")
+        prose = "### 5c. x\n\nthe `git worktree add` commands are not run here\n\n### 5d. y\n"
+        self.assertEqual(worktree_add_command_lines(section_5c(prose)), [],
+                         msg="control: prose that merely names the command is not a command line")
+
+    def test_task_skill_has_exactly_one_step_1_5_heading(self):
+        text = TASK_SKILL.read_text(encoding="utf-8")
+        self.assertEqual(step_heading_count(text), 1,
+                         msg=f"{TASK_SKILL} must hold exactly one 'Step 1.5' heading (V1: it was pasted twice)")
+
+    def test_task_skill_step_5c_has_no_git_worktree_add_command_line(self):
+        text = TASK_SKILL.read_text(encoding="utf-8")
+        section = section_5c(text)
+        self.assertTrue(section, msg="fixture sanity: the 5c section is found in the skill")
+        self.assertEqual(worktree_add_command_lines(section), [],
+                         msg="V2: Step 5c must not run `git worktree add`; the worktree is created by "
+                             "flat_worktree.py in Step 1.5")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -117,22 +117,6 @@ py -3 .claude/scripts/flat_worktree.py --create --action <feature|bug|infra> --s
 
 The helper fetches `origin/master`, refuses a nested path, and prints one JSON plan. Go on only when `outcome` is `created` or `reused`; any `refused: ...` outcome halts, reported verbatim. Enter the plan's `path` with `EnterWorktree` (the path form), and record it in the brief's `worktree:` field at Step 5d. From here every command and every subagent runs inside that worktree. Never call `ExitWorktree`: it lands in the main checkout, where edits are refused. To leave, enter another worktree by path. Step 5b cuts the branch inside it.
 
-## Step 1.5: Enter a worktree
-
-Every change is made in a linked worktree under `.claude/worktrees/`, never in the main checkout. The main-checkout guard refuses edits, file writes and tree-changing git there. This step runs once Step 1 has resolved the work item and before Step 2 writes the brief, so the brief is created inside the worktree and travels with the branch.
-
-**Parent-aware mode never asks.** It works in the worktree its caller stands in. If `py -3 .claude/scripts/flat_worktree.py --describe` reports `current_tree: main-checkout`, halt and say: "enter a worktree with `EnterWorktree`, then relaunch". Otherwise skip the rest of this step.
-
-On the no-parent path, run `py -3 .claude/scripts/flat_worktree.py --describe` (under a plugin install, the copy beside `pr_merged.py`) and read `current_tree` from its JSON. Then ask once via `AskUserQuestion`: "new worktree (default) or current checkout". An explicit request in the invocation answers it without asking. **Refuse "current checkout" when `current_tree` is `main-checkout`**: say the guard would block every edit there, and take the new worktree.
-
-Cut the new worktree detached at the freshly fetched default branch, named `<YYYYMMDD>-<action>-<id-or-slug>` (the Step 5c naming, at most 60 characters):
-
-```bash
-py -3 .claude/scripts/flat_worktree.py --create --action <feature|bug|infra> --slug <id-or-slug> --detached origin/master
-```
-
-The helper fetches `origin/master`, refuses a nested path, and prints one JSON plan. Go on only when `outcome` is `created` or `reused`; any `refused: ...` outcome halts, reported verbatim. Enter the plan's `path` with `EnterWorktree` (the path form), and record it in the brief's `worktree:` field at Step 5d. From here every command and every subagent runs inside that worktree. Never call `ExitWorktree`: it lands in the main checkout, where edits are refused. To leave, enter another worktree by path. Step 5b cuts the branch inside it.
-
 ## Step 2: Write the Work Item Brief
 
 Write to `.claude/work-items/<YYYY-MM-DD>-<id-or-slug>.md`. Create the directory if needed. `<ProjectName>` is derived from the repo folder name, matching the `.claude/concepts/` convention already in use.
@@ -441,16 +425,16 @@ Naming is identical for both shapes. Follows this repo's convention (`feature/rb
   ```
 
   This registers the branch against the issue in GitHub's UI (a "linked branch"), which plain `git switch -c` does not do. Fall back to `git switch -c <name>` if `gh` is missing or the command fails.
-- **Already on a feature branch** → keep it *only if this work genuinely belongs there* (a follow-up to the same item). Confirm with the user. If it is a new item, this is the worktree case — go to 5c rather than stacking on unreviewed commits.
+- **Already on a feature branch** → keep it *only if this work genuinely belongs there* (a follow-up to the same item). Confirm with the user. If it is a new item, do not stack it on unreviewed commits: cut a fresh worktree with the `flat_worktree.py --create ... --detached origin/master` command in Step 1.5, then branch inside it (5b).
 
 ### 5c. Branch + parallel worktree from master
 
-**Creation moved to Step 1.5.** The worktree is now cut and entered through `flat_worktree.py` (an absolute flat path, detached at `origin/master`) and 5b cuts the branch inside it, so the `git worktree add` commands and the "enter it only if" paragraph below are not run for a fresh item. The base proof, the VS Code window, the lifecycle, and the rules about the stash and uncommitted work still apply.
+**Creation moved to Step 1.5.** The worktree is now cut and entered through `flat_worktree.py` (an absolute flat path, detached at `origin/master`) and 5b cuts the branch inside it, so nothing below creates or enters a worktree. The base proof, the VS Code window, the lifecycle, and the rules about the stash and uncommitted work still apply.
 
 **The base is the entire point of this shape. Get it wrong and the isolation is worthless.**
 
 1. **Base is always freshly-fetched `origin/master`.** Never local `master` (it is routinely stale), never the current `HEAD`.
-2. **Do not create the worktree with `EnterWorktree`'s `name:` form.** That form picks its base from the `worktree.baseRef` setting — `fresh` means `origin/<default-branch>`, but `head` means *your current local HEAD*. If the setting is `head` and you are standing on a feature branch, you silently seed the new item with that branch's commits. Create the tree with an explicit `git worktree add` naming the base, then enter it by path.
+2. **Do not create the worktree with `EnterWorktree`'s `name:` form.** That form picks its base from the `worktree.baseRef` setting — `fresh` means `origin/<default-branch>`, but `head` means *your current local HEAD*. If the setting is `head` and you are standing on a feature branch, you silently seed the new item with that branch's commits. The tree is created by `flat_worktree.py` (Step 1.5), never by `EnterWorktree`'s `name:` form.
 3. **A worktree does not carry uncommitted changes.** The current tree keeps them. If this item depends on WIP sitting in the parent tree, a worktree is the wrong tool — commit or finish that work first.
 4. **Git refuses to check out one branch in two worktrees.** One worktree per work item, and the directory name follows the convention below so `git worktree list` reads as a dated, classified list of in-flight items.
 5. **The stash stack is shared across worktrees.** A `git stash` in one tree is visible in all of them — never use the stash to move work between them.
@@ -465,37 +449,19 @@ Examples: `20260822-bug-18-mobile-dashboard-empty-selection`, `20260821-feature-
 
 The directory name and the branch name are deliberately **not** identical. The branch keeps GitHub's `feature/` / `fix/` prefixes because `gh issue develop`, the linked-branch UI and `/ship` all depend on them; the directory carries the date and action because it is what a human reads in `git worktree list`. Record the full worktree path in the brief's `worktree:` field so the two are never guessed at from each other.
 
-**Create it.** With `gh` (keeps the issue↔branch link and does *not* move the current checkout — note the absence of `--checkout`):
-
-```bash
-gh issue develop <number> --name feature/<number>-<slug> --base master
-git fetch origin
-git worktree add .claude/worktrees/<wt> \
-  --track -b feature/<number>-<slug> origin/feature/<number>-<slug>
-```
-
-Without `gh`, or for free-text work with no issue:
-
-```bash
-git fetch origin master
-git worktree add .claude/worktrees/<wt> -b <branch-name> origin/master
-```
-
 **Verify the base before writing the brief.** A fresh branch off master has the same tip as master — prove it rather than assuming:
 
 ```bash
 git rev-parse origin/master
-git -C .claude/worktrees/<wt> rev-parse HEAD          # must match the line above
-git -C .claude/worktrees/<wt> rev-parse --abbrev-ref HEAD   # must be the new branch
+git -C <plan path> rev-parse HEAD          # must match the line above
+git -C <plan path> rev-parse --abbrev-ref HEAD   # must be the new branch (after 5b)
 ```
 
 If the two SHAs differ, the worktree was seeded from the wrong ref. Remove it and redo — do not "fix it later with a rebase."
 
 **Keep it out of the parent's `git status`.** A worktree nested under the repo is not ignored automatically. Confirm `.claude/worktrees/` is listed in `.gitignore` (or `.git/info/exclude`) and add it if not; otherwise the second checkout shows up as a large untracked directory in every later status and diff.
 
-**Enter it only if this session continues the work.** Use the `EnterWorktree` tool with `path: .claude/worktrees/<wt>` — the path form enters the tree you just built rather than creating another one, and `ExitWorktree` will not delete a path-entered worktree, which is what keeps it available to parallel sessions. If instead this tree is being prepared for a *different* session or a background job, stay where you are and hand the path over.
-
-**Open the worktree in its own VS Code window.** The repository's `<project.name>.code-workspace` file — `project.name` is a slot in `.claude/project-profile.md` — is git-tracked, so `git worktree add` already placed a correct copy at the worktree root. Open **that** copy, never the parent tree's:
+**Open the worktree in its own VS Code window.** The repository's `<project.name>.code-workspace` file — `project.name` is a slot in `.claude/project-profile.md` — is git-tracked, so the worktree checkout already placed a correct copy at the worktree root. Open **that** copy, never the parent tree's:
 
 ```bash
 code -n ".claude/worktrees/<wt>/<project.name>.code-workspace"
@@ -555,8 +521,6 @@ NORTH_STARS: <the Step 3.5 grades, verbatim from the brief — or 'none'.
 ```
 
 The data-architect must treat the brief's acceptance criteria as requirements input to the contract. When the contract is written, write its path back into the brief's `contract:` field and set `status: designing`.
-
-**If Step 5c created a worktree, settle the working directory before handing off.** Either enter the worktree (`EnterWorktree` with its `path`) or state the path explicitly in the `CONTEXT:` block above so whoever implements works inside it. A contract implemented in the parent tree while the branch lives in the worktree produces exactly one outcome: a branch with no commits on it, discovered at `/ship`.
 
 Step 1.5 always leaves the session inside a worktree (a Parent-aware run starts inside the parent worktree), so the working directory is already settled. State its path in the `CONTEXT:` block anyway, for the agents `/design-first` dispatches.
 
