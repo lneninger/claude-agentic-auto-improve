@@ -13,9 +13,9 @@ branch: feature/21-finish-install-step3-proposals
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261111-infra-21-finish-install-followups
 north_stars: none
 contract: .claude/concepts/2026-11-11-finish-install-step3-proposals.md
-pr: UNKNOWN
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/373
+issue_link: closes
+status: shipped
 created: 2026-11-11
 ---
 
