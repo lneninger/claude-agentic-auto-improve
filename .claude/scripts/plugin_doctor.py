@@ -111,7 +111,17 @@ SCAFFOLDS: Dict[str, str] = {
             "format": "[<EFFORT>] <Title>",
             "pattern": "^\\[(FEATURE|BUG|IMPROVEMENT|REFACTOR|PERF|SECURITY|DOCS|CHORE|SPIKE)\\] .+",
             "exactlyOne": True,
-            "effortTypes": [],
+            "effortTypes": [
+                {"tag": "FEATURE", "means": "New capability that did not exist before", "canonical": True},
+                {"tag": "BUG", "means": "Existing behavior is wrong; there is a reproduction", "canonical": True},
+                {"tag": "IMPROVEMENT", "means": "Existing behavior works but is inadequate -- experience, ergonomics, coverage", "canonical": True},
+                {"tag": "REFACTOR", "means": "Internal structure changes, external behavior identical"},
+                {"tag": "PERF", "means": "Same behavior, measurably faster or lighter"},
+                {"tag": "SECURITY", "means": "Auth, credentials, encryption, ownership enforcement, disclosure"},
+                {"tag": "DOCS", "means": "Documentation, handbook, or contract text only"},
+                {"tag": "CHORE", "means": "Dependency bumps, config, build plumbing, cleanup"},
+                {"tag": "SPIKE", "means": "Timeboxed research; the deliverable is a finding, not code"}
+            ],
             "subIssue": {
                 "$comment": "Sub-issue title format, read by compose_subissue_title.py. "
                             "The effort list and pattern stay in the outer issueTitle block.",
@@ -140,7 +150,16 @@ SCAFFOLDS: Dict[str, str] = {
             "offerReasonField": "issue_offer_reason",
             "offerReasons": ["gh-missing", "gh-unauthenticated", "create-failed",
                              "no-problem-statement"],
-            "maxRepairAttempts": 1
+            "maxRepairAttempts": 1,
+            "parentLink": {
+                "$comment": "The sub-issue-to-parent link verified by verify_parent_link.py. "
+                            "maxRepairAttempts is owned by the outer issueLink block.",
+                "createFlag": "--parent",
+                "editFlag": "--parent",
+                "readCommand": "gh issue view <sub> --json parent",
+                "parentListCommand": "gh issue view <parent> --json subIssues",
+                "verdicts": ["unverifiable", "no-parent", "foreign-parent", "linked"]
+            }
         }
     }, indent=2) + "\n",
 }
