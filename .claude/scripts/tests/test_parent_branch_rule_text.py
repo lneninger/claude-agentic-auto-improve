@@ -227,6 +227,30 @@ class DesignFirstTextTests(TextCase):
 # ---------------------------------------------------------------------------
 class FlowTextTests(TextCase):
     REL = "skills/flow/SKILL.md"
+    REF = "skills/flow/references/open-sub-tasks.md"
+
+    def test_step_2_7_names_the_reference_and_the_read_in_full_and_stop_rule(self):
+        step = self.section(self.REL, "## Step 2.7: Open the sub-tasks", "\n## Step 3")
+        self.assertIn("references/open-sub-tasks.md", step, "Step 2.7 names the reference it loads")
+        self.assertIn("in full", step, "Step 2.7 says to read the reference in full")
+        self.assertMatches(r"cannot be read, stop[^.]{0,60}missing file", step,
+                           "Step 2.7 stops and reports the missing file when the reference is unreadable")
+        self.assertIn("do not continue from memory", step, "Step 2.7 forbids continuing from memory")
+
+    def test_the_reference_holds_the_moved_sub_task_mechanics(self):
+        ref = self.flat(self.REF)
+        for needle in ("--record-subtask", "verify_parent_link.py", "no:parent-issue"):
+            self.assertIn(needle, ref, "the reference carries %s" % needle)
+        step = self.section(self.REL, "## Step 2.7: Open the sub-tasks", "\n## Step 3")
+        # The kept Parent Branch Delivery Rule paragraph still names --record-subtask, so only the verifier lookup is pinned as moved.
+        self.assertNotIn("verify_parent_link.py", step, "the moved text no longer sits in Step 2.7")
+
+    def test_the_planted_controls_fail_on_text_missing_the_rule(self):
+        broken = "## Step 2.7: Open the sub-tasks\n3. open them from memory.\n\n## Step 3\n"
+        self.assertNotIn("references/open-sub-tasks.md", broken, "control: a step without the reference is caught")
+        self.assertNotIn("--record-subtask", broken, "control: a step without the call is caught")
+        self.assertIsNone(re.search(r"cannot be read, stop[^.]{0,60}missing file", broken),
+                          "control: a step without the stop rule is caught")
 
     def test_step_2_7_states_the_rule_and_is_the_remedy_of_needs_issue(self):
         step = self.section(self.REL, "## Step 2.7: Open the sub-tasks", "\n## Step 3")
