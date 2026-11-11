@@ -93,6 +93,10 @@ REQUIREMENTS: List[Requirement] = [
     Requirement(".claude/work-item-conventions.json", "scaffold",
                 "issue and pull request title conventions, shared by /task and /ship",
                 authored=True),
+    Requirement(".claude/.project-tokens.json", "scaffold",
+                "project-name tokens the sync and the memory sharing rule keep out of the shared plugin; "
+                "/auto-improve-finish-install proposes them",
+                authored=True),
     Requirement(".claude/settings.json", "manual",
                 "registering the hooks turns enforcement on; that is your decision, not this script's; /auto-improve-finish-install registers them once you agree"),
 ]
@@ -103,6 +107,21 @@ SCAFFOLDS: Dict[str, str] = {
                     "repository. An empty map makes every contract derive 'uncategorized', "
                     "which is honest but costs you the accuracy system.",
         "areas": {}
+    }, indent=2) + "\n",
+    # Same keys as the plugin's own .claude/.project-tokens.json (a test checks the parity); never a project name.
+    ".claude/.project-tokens.json": json.dumps({
+        "_comment": "Project-name token list, read by tools/sync-plugin.ps1 and by the memory sharing rule. "
+                    "Before the sync writes any file into the plugin repository, it searches that file's text "
+                    "for each token below; any hit stops the sync with exit code 5. An empty list also keeps "
+                    "every memory item this project captures private to the project.",
+        "_extension_seam": "Add a string to 'tokens'. Never add a file to an exemption list, because there is "
+                           "none: an 'allowed' entry is an exact string, never a file name.",
+        "_what_belongs_in_tokens": "The repository name, the front-end application names, the database names, "
+                                   "the source-project prefix, any vendor or broker names the domain uses, "
+                                   "and the project's own handbook file names.",
+        "project": "",
+        "tokens": [],
+        "allowed": []
     }, indent=2) + "\n",
     ".claude/work-item-conventions.json": json.dumps({
         "$comment": "Single source of truth for title conventions. Read by the intake and "
@@ -1138,7 +1157,7 @@ def main() -> int:
         for p in report["created"]:
             print(f"  created        {p}")
         for p in report["needs_authoring"]:
-            print(f"  NEEDS YOU      {p}  - it describes your repository; nothing can guess it")
+            print(f"  NEEDS YOU      {p}  - it describes your repository; run /auto-improve-finish-install, which proposes it for you to confirm")
         for p in report["left_to_you"]:
             print(f"  left alone     {p}  - writing it would change behaviour without asking; run /auto-improve-finish-install to register the hooks")
         for p in report["unresolved"]:

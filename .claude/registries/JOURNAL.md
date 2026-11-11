@@ -554,6 +554,20 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a block adds or moves a module-level import in a script named in a vendored-file list (a `VENDORED_FILES` constant, a README copy list or a sync configuration).
 - **Tags:** vendoring, imports, landing, verification, test-coverage
 
+### 2026-11-11 — A path-normalisation rule that lists the unsafe forms must also reject absolute paths
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-11-finish-install-step3-proposals.md
+- **Lesson:** Decision 1 rejected a profile root that is empty, `.`, or holds `..` or `*`, but said nothing about a leading `/` or a drive letter, so `/srv/Api` and `C:/Outside/Web` became areas whose patterns never match a repository-relative path, and `project / Path("C:", ...)` read an `angular.json` outside the project. When a contract normalises an operator-written path that must be repository-relative, list "absolute (leading `/` or `\`, a drive letter, a UNC prefix)" among the rejected forms and add a test row for each.
+- **Apply when:** a contract turns a profile slot, a config value or a command-line argument into a repository-relative path, glob or area pattern, and its rejection list names `..` but not absolute forms.
+- **Tags:** path-normalisation, absolute-path, profile-slot, area-map, glob
+
+### 2026-11-11 — A consent question whose trigger depends on the operator's own answer must be decidable before that answer
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-11-finish-install-step3-proposals.md
+- **Lesson:** Decision 7 asks for one answer holding the tokens and "yes or no to the narrowing statement when it applies", but `narrows` was computed only from the confirmed `--token` list, so the first preview (no tokens yet) always said `narrows: false`, the skill never asked, and the final apply was refused `narrowing-unconfirmed`, forcing a second confirmation on the main first-install path. A "no" also blocked the other two files, because the write is all or none. When a gate depends on a choice the operator makes in the same answer, have the plan report the condition before the choice (for example "would narrow if any token is named"), and say what a "no" does to the rest of the plan.
+- **Apply when:** a contract combines a single-confirmation flow with a gate flag (`--confirm-*`) whose condition is derived from flags the operator chooses in that same confirmation.
+- **Tags:** one-confirmation, consent-gate, preview-hash, narrowing, skill-flow
+
 ## Project tier
 
 This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.
