@@ -9,7 +9,7 @@
 **Tracking issue:** <optional — #<n>, the one issue that tracks this contract's follow-ups and its Not-performed disclosures>
 **Budget:** 12,000 tokens
 
-> **Protocol:** filled in by `data-architect`. Implementer agents (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`, `senior-test-engineer`, `ui-ux-designer`) refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
+> **Protocol:** filled in by `data-architect`. Implementer agents (`dotnet-backend-architect`, `angular-senior-dev`, `senior-test-engineer`, `ui-ux-designer`, `python-ai-developer`, `cloud-engineer`) refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
 >
 > **Lifecycle:**
 > - `draft` — data-architect has drafted; user still has Open Questions to resolve. Hook BLOCKS.
@@ -452,7 +452,7 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
-### 3. Data pipeline (`ingestion-data-architect`) — if applicable
+### 3. Data pipeline (`dotnet-backend-architect`, or the project's own ingestion agent if it declares one) — if applicable
 
 **Depends on:** 1
 

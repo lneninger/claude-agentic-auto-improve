@@ -480,6 +480,78 @@ class FinishInstallStage1aTests(unittest.TestCase):
         self.assertRegex(flat, r"(?i)NOT FOUND.{0,300}first.{0,200}asks? for the plugin path.{0,100}the run's one ask")
 
 
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+FIX_ASK_FORBIDDEN = re.compile(r"(?i)\boffer\b|\bask\s+(?:the user|once|whether|if)\b|preview again|run the preview")
+#: Stage 2 asks nothing about --fix; the run's one ask is Stage 1a's or the history record check's.
+FIX_STAGE_2_REQUIRED = (r"(?i)\bStage 2 asks nothing about\b", r"(?i)\bone ask\b", r"\bStage 1a\b",
+                        r"(?i)\bhistory record check\b")
+
+
+def stage_2_fix_violations(text: str) -> list:
+    """Sentences in Stage 2 that treat --fix as something Stage 2 offers, asks or re-previews (I-5).
+
+    Every sentence holding --fix must say Stage 2 asks nothing about it and name the run's one ask. No sentence
+    holding --fix, and no sentence of the scaffold-missing bullet, may offer, ask (with or without a condition)
+    or promise to run the preview again.
+    """
+    stage = re.sub(r"\s+", " ", section(text, "## Stage 2", "## Stage 3"))
+    bullet = re.search(r"- `scaffold-missing`:.*?(?= - `[a-z-]+`:|$)", stage)
+    sentences = SENTENCE_END.split(stage)
+    in_bullet = set(SENTENCE_END.split(bullet.group(0))) if bullet else set()
+    bad = []
+    for sentence in sentences:
+        holds_fix = "--fix" in sentence
+        if not holds_fix and not any(sentence in b or b in sentence for b in in_bullet):
+            continue
+        if FIX_ASK_FORBIDDEN.search(sentence):
+            bad.append(sentence)
+        elif holds_fix and not all(re.search(p, sentence) for p in FIX_STAGE_2_REQUIRED):
+            bad.append(sentence)
+    return bad
+
+
+class Stage2FixIsNeverAskedTests(unittest.TestCase):
+    """F2: the scaffold-missing bullet of Stage 2 must not take the run's one ask (I-5 runs a-d)."""
+
+    FI = "skills/auto-improve-finish-install/SKILL.md"
+    REWORDED = ("- `scaffold-missing`: the file is absent, and this command never creates it. Stage 2 asks nothing "
+                "about `plugin_doctor.py --fix`: the run's one ask is Stage 1a's, or the history record check's "
+                "when Stage 1a was skipped. Name the missing file and go on with the other files. Once the "
+                "doctor's fix has created it, the next run of this skill proposes its content.")
+
+    @staticmethod
+    def planted(bullet: str) -> str:
+        return "## Stage 2: files\n\n%s\n- `unrecognised`: never written.\n\n## Stage 3: hooks\n" % bullet
+
+    def test_control_masters_bullet_fails(self):
+        planted = self.planted("- `scaffold-missing`: the file is absent. This command never creates it. Offer to run\n"
+                               "  `plugin_doctor.py --fix` (see \"The project history record\" for the ask-first rule), "
+                               "then run the preview again.")
+        self.assertTrue(stage_2_fix_violations(planted))
+
+    def test_control_an_ask_whether_to_run_fix_fails(self):
+        planted = self.planted("- `scaffold-missing`: the file is absent. Ask the user whether to run `plugin_doctor.py --fix`.")
+        self.assertTrue(stage_2_fix_violations(planted))
+
+    def test_control_the_conditional_ask_fails(self):
+        planted = self.planted("- `scaffold-missing`: the file is absent. If this run has not yet asked about "
+                               "`plugin_doctor.py --fix`, ask once.")
+        self.assertTrue(stage_2_fix_violations(planted))
+
+    def test_control_a_re_preview_promise_in_its_own_sentence_fails(self):
+        planted = self.planted(self.REWORDED + " Then run the preview again.")
+        self.assertTrue(stage_2_fix_violations(planted))
+
+    def test_control_the_reworded_bullet_passes(self):
+        self.assertEqual(stage_2_fix_violations(self.planted(self.REWORDED)), [])
+
+    def test_the_real_stage_2_holds_no_fix_ask_offer_or_re_preview(self):
+        text = read(self.FI)
+        self.assertIn("`scaffold-missing`", section(text, "## Stage 2", "## Stage 3"))
+        self.assertEqual(stage_2_fix_violations(text), [])
+        self.assertEqual(fix_lines_without_ask(text), [])
+
+
 class MemoryReferenceTextTests(unittest.TestCase):
     """I1, I2, Q4 and I6 pins."""
 
