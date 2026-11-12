@@ -788,10 +788,9 @@ def cmd_record(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             dropped += line is None
             if line:
                 carried.append(line)
-        if not retrieved and not reported and outcome.get("state") != "unavailable":
-            # The keep rule for an enabled empty retrieval: nothing new to say about items, so the earlier
-            # Retrieved: and Reported: lines stay. An outcome that carries items replaces them; an unavailable
-            # outcome says the call did not happen and is written as before.
+        if not retrieved and not reported:
+            # The keep rule for an empty retrieval, enabled or unavailable: nothing new to say about items, so
+            # the earlier Retrieved: and Reported: lines stay. An outcome that carries items replaces them.
             carried = [l for l in existing if l.startswith(("Retrieved:", "Reported:"))]
         new_lines += carried
         new_lines += [l for l in existing if l.startswith(("Captured:", "Not sent:"))]

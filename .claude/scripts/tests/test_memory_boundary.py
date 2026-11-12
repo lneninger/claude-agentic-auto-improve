@@ -1049,6 +1049,14 @@ class RecordTests(CaptureBase):
         third = self.section_lines(p)
         self.assertEqual(third[0], "Memory: unconfigured (shape-unknown) | 2026-11-04")
         self.assertEqual(third[1:], second[1:])
+        # 3b. unavailable with empty lists: the one first line from the outcome, the same lines kept
+        p.write(".claude/project-profile.md", enabled_profile)
+        code, data, _ = self.record(p, self.outcome(p, state="unavailable", reason="timeout", date="2026-11-04",
+                                                    retrieved=[], reported=[]))
+        self.assertEqual(code, 0, data)
+        unavailable = self.section_lines(p)
+        self.assertEqual(unavailable[0], "Memory: unavailable (timeout) | 2026-11-04")
+        self.assertEqual(unavailable[1:], second[1:])
         # 4. enabled with new items: replaced, nothing of the old items left, receipts still there
         p.write(".claude/project-profile.md", enabled_profile)
         new = self.outcome(p, date="2026-11-05",
@@ -1061,13 +1069,34 @@ class RecordTests(CaptureBase):
         self.assertEqual([l for l in fourth if l.startswith(("Retrieved: m-1", "Retrieved: m-2", "Reported:"))], [])
         self.assertEqual([l for l in fourth if l.startswith("Captured:")], [l for l in first if l.startswith("Captured:")])
 
-    def test_an_unavailable_outcome_does_not_keep_earlier_items(self):
+    def test_an_unavailable_outcome_without_items_keeps_earlier_items(self):
         p = self.fixture()
         self.record(p, self.outcome(p))
-        self.record(p, self.outcome(p, state="unavailable", reason="timeout", retrieved=[], reported=[]))
-        text = p.read(BRIEF_REL).decode("utf-8")
-        self.assertIn("Memory: unavailable (timeout)", text)
-        self.assertNotIn("Retrieved:", text)
+        receipts = self.json_file(p, "receipts.json", {"receipts": [
+            {"key": "b" * 40, "source_ref": "f.md:1", "captured": True, "id": "c-1", "version": "1"}]})
+        self.record(p, receipts, "--receipts", "--run-report", self.report(p))
+        first = self.section_lines(p)
+        code, data, _ = self.record(p, self.outcome(p, state="unavailable", reason="timeout", date="2026-11-03",
+                                                    retrieved=[], reported=[]))
+        self.assertEqual(code, 0, data)
+        second = self.section_lines(p)
+        self.assertEqual(second[0], "Memory: unavailable (timeout) | 2026-11-03")
+        self.assertEqual(second[1:], [l for l in first if l.startswith(("Retrieved:", "Reported:"))]
+                         + [l for l in first if l.startswith(("Captured:", "Not sent:"))])
+        self.assertEqual(len([l for l in second if l.startswith("Retrieved:")]), 2)
+        self.assertEqual(len([l for l in second if l.startswith("Reported:")]), 1)
+
+    def test_an_unavailable_outcome_that_carries_items_replaces_the_earlier_lines(self):
+        p = self.fixture()
+        self.record(p, self.outcome(p))
+        new = self.outcome(p, state="unavailable", reason="timeout", date="2026-11-03",
+                           retrieved=[dict(item(id="m-9", version="2"), decision="applies")], reported=[])
+        code, data, _ = self.record(p, new)
+        self.assertEqual(code, 0, data)
+        lines = self.section_lines(p)
+        self.assertEqual(lines[0], "Memory: unavailable (timeout) | 2026-11-03")
+        self.assertEqual(len([l for l in lines if l.startswith("Retrieved: m-9@2")]), 1)
+        self.assertEqual([l for l in lines if l.startswith(("Retrieved: m-1", "Retrieved: m-2", "Reported:"))], [])
 
     def test_a_rewritten_section_keeps_existing_receipt_lines(self):
         p = self.fixture()
