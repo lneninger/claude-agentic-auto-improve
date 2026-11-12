@@ -89,15 +89,35 @@ three providers.
 
 ### 1a. Is there a profile yet?
 
-If `.claude/project-profile.md` does not exist, run the doctor first. It scaffolds the file
-with its placeholders intact. It never overwrites a file that exists:
+If a profile already exists, skip this step. The history record check (below) then holds the
+only ask of the run.
+
+If `.claude/project-profile.md` does not exist, run the doctor in report mode first. It
+writes nothing:
+
+```bash
+$PY "<dir of FI>/plugin_doctor.py" --project .
+```
+
+Resolve `plugin_doctor.py` from the same folder as `FI`. Ask once whether to go ahead, after you show
+the user the whole `missing` list as exactly what `--fix` would create. The fix scaffolds the
+profile with its placeholders intact, and it also creates every other missing requirement in
+the doctor's list. It never overwrites a file that exists. Only after the user says yes, run:
 
 ```bash
 $PY "<dir of FI>/plugin_doctor.py" --fix
 ```
 
-Resolve `plugin_doctor.py` from the same folder as `FI`. If a profile already exists, skip
-this step.
+Never run it on its own. The user's answer decides the rest of the run:
+
+- **Yes.** After the ask, `--fix` runs, and Stage 1 goes on to 1b. The later history record check finds
+  nothing missing, says so and asks nothing.
+- **No.** Stage 1 says it needs a profile, writes nothing and moves to Stage 2 (skip 1b to
+  1e). The later history record check reports the missing list, does not ask again, and names
+  the command to run later.
+- **`plugin: NOT FOUND`.** The doctor cannot seed anything. Whichever step reaches that
+  first asks for the plugin path, and that ask is the run's one ask. The other step does not
+  ask again.
 
 ### 1b. Preview
 
@@ -309,9 +329,13 @@ Tell the user to commit these files and never to delete, gitignore or bypass the
 $PY "<dir of FI>/plugin_doctor.py" --project .
 ```
 
-- If `plugin_doctor.py` prints `plugin:  NOT FOUND - pass --plugin`, say in one line that the registries cannot be seeded and ask for the plugin path. Offer `plugin_doctor.py --fix` only together with `--plugin <path>`.
+This check holds the only ask of the run when Stage 1a was skipped. When Stage 1a already asked, the check does not ask again (see 1a):
+
+- If Stage 1a asked and ran `--fix` after a yes, the check finds nothing missing, says so and asks nothing.
+- If the user said no in Stage 1a, the check reports the missing list, does not ask again, and names the command to run later: `plugin_doctor.py --fix`, run after the user decides.
+- If `plugin_doctor.py` prints `plugin:  NOT FOUND - pass --plugin`, say in one line that the registries cannot be seeded and ask for the plugin path, unless Stage 1a already asked for it: that ask is the run's one ask. Offer `plugin_doctor.py --fix` only together with `--plugin <path>`.
 - If `plugin_doctor.py` lists any `missing` entry, show the user that whole list as exactly what the fix would create. The fix creates every missing requirement in the doctor's list, not only the registries (for example `.claude/north-stars`, `.claude/orchestrator/results`, the contract template, `.claude/area-mapping.json` and `.claude/work-item-conventions.json`). It never overwrites a file and leaves `.claude/settings.json` alone.
-- Ask the user once whether to go ahead. Only after the user says yes, run:
+- When Stage 1a was skipped, ask the user once whether to go ahead. Only after the user says yes, run:
 
   ```bash
   $PY "<dir of FI>/plugin_doctor.py" --fix
@@ -360,7 +384,7 @@ settings file that already has every registration is not rewritten.
   mistake in `settings.json` can switch every check off, or block every action.
 - **Asking one question per slot.** Show one table. Ask once.
 - **Overwriting an authored slot.** Show the difference and ask. The script will refuse anyway.
-- **Treating the Central Memory System as the project's record, skipping the registries, or running the doctor's fix (`plugin_doctor.py --fix`) without asking.** The registries and the concept contracts are the record; the memory system only supplements them, and the doctor writes only after the user says yes.
+- **Treating the Central Memory System as the project's record, skipping the registries, or running the doctor's fix without asking first (`plugin_doctor.py --fix` needs a yes, and a run asks at most once).** The registries and the concept contracts are the record; the memory system only supplements them, and the doctor writes only after the user says yes.
 - **Skipping the new-session warning.** The user will otherwise test in this session and
   conclude the hooks do nothing.
 

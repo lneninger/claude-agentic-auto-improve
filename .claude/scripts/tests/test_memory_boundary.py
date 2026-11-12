@@ -1018,6 +1018,57 @@ class RecordTests(CaptureBase):
         self.assertIn("Memory: unconfigured (shape-unknown)", text)
         self.assertIn("Captured: " + "b" * 40, text)
 
+    def section_lines(self, p):
+        return p.read(BRIEF_REL).decode("utf-8").split("## Memory used\n", 1)[1].splitlines()
+
+    def test_keep_rule_round_trip_enabled_empty_unconfigured_then_new_items(self):
+        p = self.fixture()
+        enabled_profile = p.read(".claude/project-profile.md").decode("utf-8")
+        # 1. enabled with items, plus a receipt line that must always survive
+        self.record(p, self.outcome(p))
+        receipts = self.json_file(p, "receipts.json", {"receipts": [
+            {"key": "b" * 40, "source_ref": "f.md:1", "captured": True, "id": "c-1", "version": "1"}]})
+        self.record(p, receipts, "--receipts", "--run-report", self.report(p))
+        first = self.section_lines(p)
+        retrieved = [l for l in first if l.startswith("Retrieved:")]
+        reported = [l for l in first if l.startswith("Reported:")]
+        self.assertEqual((len(retrieved), len(reported)), (2, 1))
+        # 2. enabled, empty retrieval: the new first line, the earlier Retrieved and Reported lines kept in order
+        code, data, _ = self.record(p, self.outcome(p, date="2026-11-03", retrieved=[], reported=[]))
+        self.assertEqual(code, 0, data)
+        second = self.section_lines(p)
+        self.assertEqual(second[0], "Memory: enabled | 2026-11-03")
+        self.assertEqual([l for l in second if l.startswith("Retrieved:")], retrieved)
+        self.assertEqual([l for l in second if l.startswith("Reported:")], reported)
+        self.assertEqual(second[1:], [l for l in first if l.startswith(("Retrieved:", "Reported:"))]
+                         + [l for l in first if l.startswith("Captured:")])
+        # 3. unconfigured: the one first line from the profile, the same lines kept
+        p.write(".claude/project-profile.md", profile_text(dict(FULL_SLOTS, **{"memory.shape": "`nope`"})))
+        code, data, _ = self.record(p, self.outcome(p, state="unconfigured", date="2026-11-04"))
+        self.assertEqual(code, 0, data)
+        third = self.section_lines(p)
+        self.assertEqual(third[0], "Memory: unconfigured (shape-unknown) | 2026-11-04")
+        self.assertEqual(third[1:], second[1:])
+        # 4. enabled with new items: replaced, nothing of the old items left, receipts still there
+        p.write(".claude/project-profile.md", enabled_profile)
+        new = self.outcome(p, date="2026-11-05",
+                           retrieved=[dict(item(id="m-9", version="2"), decision="applies")], reported=[])
+        code, data, _ = self.record(p, new)
+        self.assertEqual(code, 0, data)
+        fourth = self.section_lines(p)
+        self.assertEqual(fourth[0], "Memory: enabled | 2026-11-05")
+        self.assertEqual(len([l for l in fourth if l.startswith("Retrieved: m-9@2")]), 1)
+        self.assertEqual([l for l in fourth if l.startswith(("Retrieved: m-1", "Retrieved: m-2", "Reported:"))], [])
+        self.assertEqual([l for l in fourth if l.startswith("Captured:")], [l for l in first if l.startswith("Captured:")])
+
+    def test_an_unavailable_outcome_does_not_keep_earlier_items(self):
+        p = self.fixture()
+        self.record(p, self.outcome(p))
+        self.record(p, self.outcome(p, state="unavailable", reason="timeout", retrieved=[], reported=[]))
+        text = p.read(BRIEF_REL).decode("utf-8")
+        self.assertIn("Memory: unavailable (timeout)", text)
+        self.assertNotIn("Retrieved:", text)
+
     def test_a_rewritten_section_keeps_existing_receipt_lines(self):
         p = self.fixture()
         self.record(p, self.outcome(p))
