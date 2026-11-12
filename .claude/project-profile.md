@@ -35,9 +35,9 @@ project profile", and this file is where that root is named.
 | `implementers` | *(the agents that may own a contract sub-task, or `none` to accept the plugin's own)* |
 | `review-gates` | *(the agents that review rather than implement, or `none` to accept the plugin's own)* |
 | `memory.server` | *(the name of the MCP server that holds shared memory, or `none` to turn memory off)* |
-| `memory.retrieve-tool` | *(the tool on that server that retrieves memory items, or `none` to turn retrieval off)* |
+| `memory.retrieve-tool` | *(the tool on that server that retrieves memory items; `none` with a server set reports unconfigured, and retrieval stays off)* |
 | `memory.capture-tool` | *(the tool on that server that stores a captured item, or `none` to turn capture off)* |
-| `memory.shape` | *(the response shape the server returns, one of the shapes the memory adapter knows, or `none` to turn memory off)* |
+| `memory.shape` | *(the response shape the server returns, one of the shapes the memory adapter knows; `none` with a server set reports unconfigured, and memory stays off)* |
 | `memory.project-key` | *(the key that scopes memory to this project, or `none` to send no key)* |
 | `cloud.providers` | *(the cloud providers this project uses: `azure`, `aws`, `gcp`, or `none` to turn the cloud capability off)* |
 | `cloud.iac` | *(the infrastructure-as-code tools in use: `terraform`, `bicep`, `docker`, `kubernetes`, or `none`)* |

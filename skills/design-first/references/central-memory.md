@@ -15,7 +15,7 @@ Read by `/design-first` Step 1.5 when `memory_boundary.py status` answered `"sta
 
 Take `retrieve_tool_id` from the `status` output. Look for exactly that id in the session's tool list.
 
-- **Absent:** record `unavailable (tool-absent)` (section 6), print one line (`Memory: unavailable (tool-absent)`) and go to Step 2. Do not search for a similarly named tool and do not call anything else.
+- **Absent:** record `unavailable (tool-absent)` (section 6), print one line (`Memory: unavailable (tool-absent); design continues from the project history record (registries and concept contracts)`) and go to Step 2. Do not search for a similarly named tool and do not call anything else.
 
 ## 2. Make one call
 
@@ -40,7 +40,7 @@ py -3 "$MEM" changed-items --project . --input <the normalised file>
 
 Write the `normalise` output to a second temporary file and pass that file to `changed-items`, so the comparison runs over neutralised items only.
 
-- `normalise` answers `{"items": [...], "rejected": {...}, "conflicts": [...]}`. Every field was neutralised and capped by the script. A `malformed-response` refusal records `unavailable (malformed-response)`, prints one line and goes to Step 2. An empty `items` list means an empty retrieval: print nothing, write nothing, go to Step 2.
+- `normalise` answers `{"items": [...], "rejected": {...}, "conflicts": [...]}`. Every field was neutralised and capped by the script. A `malformed-response` refusal records `unavailable (malformed-response)`, prints one line and goes to Step 2. An empty `items` list means an empty retrieval: record the empty outcome (`{"state": "enabled", "date": "<today>", "retrieved": [], "reported": []}`, section 5), print one line (`Memory: enabled | <date>; design continues from the project history record (registries and concept contracts)`) and go to Step 2. `record` keeps any `Retrieved:` and `Reported:` lines an earlier run wrote.
 - When `rejected.total` is not zero, say so in one line (a count, never the rejected content).
 - `conflicts` lists an id that came back at more than one version. Show them to the user with the question below.
 - `changed-items` compares the items every brief already recorded as `applies` with what came back now, and answers `{"notices": [...]}`. A notice means an item an earlier decision rested on is now `superseded`, `conflicting` or at a new version.
