@@ -4,7 +4,7 @@
 **Date:** 2026-11-11
 **Requested by:** user
 **Status:** approved
-**Revision:** 2 (2026-11-11). Q1-Q7 answered. Critic BLOCKER and WARNs 1-8 folded in. Graph: nine implementation blocks and one review; block 8 depends on 3, block 10 on 1-9, every other block on none.
+**Revision:** 4 (2026-11-12). Remedy for the blocked t10 review (see Amendments). Q8 and Q9 answered; the seven Revision 3 critic WARNs addressed. Graph: nine implementation blocks, one review (10, blocked), one scope note, two remedy blocks (12, 13) and one re-review (14). Block 8 depends on 3, block 10 on 1-9, block 13 on 12, block 14 on 12 and 13, every other block on none.
 **Work Item Brief:** .claude/work-items/2026-11-11-165-audit-followups.md
 **Tracking issue:** #165
 **Budget:** 12,000 tokens
@@ -42,6 +42,10 @@
 | V17 | t10 I6 | `.claude/project-profile.md:38,40` | open |
 | V18 | A mirror under `.claude/` | None exists (`.claude/skills/` and `.claude/agents/` are absent) | resolved |
 | V19 | Existing unshipped-name guard | `test_plugin_doctor.py:295-347` would fail today on the template (`llm-training-engineer`), but it skips from a flat worktree: its parent glob finds no checkout | open (blocks 3, 4, 7) |
+| V20 | t10 F1: the template still names `ingestion-data-architect` (re-read 2026-11-12) | `concept-contract.md:12` (Protocol line) and `:455` (handoff example heading). Not in `pr_merged.DEFAULT_IMPLEMENTERS` (`pr_merged.py:51-58`) | open (block 12) |
+| V21 | t10 F2: a second `--fix` ask from master (re-read 2026-11-12) | `auto-improve-finish-install/SKILL.md:241-242`, Stage 2 `scaffold-missing` bullet: "Offer to run `plugin_doctor.py --fix`". Stage 2 runs before the history record check (`:422-461`), so in run (a) it is an extra ask and in run (c) a re-ask after a no. `ASK_WORD` (`test_memory_off_parity.py:383`) has no "offer" | open (block 12) |
+| V22 | t10 F3: `unavailable` is outside the keep rule (re-read 2026-11-12) | `memory_boundary.py:791` (`outcome.get("state") != "unavailable"`), pinned by `test_memory_boundary.py:1064` | Q8 (block 13) |
+| V23 | t10 F4-F6 nits | F4 `test_plugin_text_scans.py:780` `def test_count_claims(text)`; F5 `skills/task/SKILL.md:467,482`; F6 `test_agent_skill_preloads.py` | Q9 |
 
 ---
 
@@ -63,18 +67,19 @@ Not applicable. Reason: no persistent entity. The one stored shape is the brief'
 |------|--------|---------|
 | Count claim | surface (README line), noun, stated number, oracle | The unit block 9 pins. Oracles: skills = folders under `skills/` holding `SKILL.md` (34); agents = `agents/*.md` (15); hooks = the existing measure (a) (14); helper modules = `.claude/hooks/_*.py` (8); hook data files = `.claude/hooks/*.json` minus `hooks.json` (5); agreements = `.claude/agreements/*.md` (7); add-ons = `.claude/addons/*/addon.json` (3); templates = `.claude/templates/*` (6); references = `.claude/references/*.md` (4) |
 | Text pin | file, section bounds, rule, planted-wrong fixture | Every new check. The control must fail on its fixture, and the real assertion must fail on today's tree before the fix |
-| Memory used section | first line `Memory: …`, then `Retrieved:`, `Reported:`, `Captured:`, `Not sent:` | **Keep rule (Q4 + Q5):** when the new outcome carries no retrieved item and no reported entry (an `unconfigured` profile, or an `enabled` empty retrieval), `record` writes the new first line and keeps the existing `Retrieved:` and `Reported:` lines in order, then the receipts. An outcome that carries items replaces them as today |
+| Memory used section | first line `Memory: …`, then `Retrieved:`, `Reported:`, `Captured:`, `Not sent:` | **Keep rule (Q4, Q5, Q8):** when the new outcome carries no retrieved item and no reported entry (an `unconfigured` profile, an `enabled` empty retrieval, or an `unavailable` outcome), `record` writes the new first line and keeps the existing `Retrieved:` and `Reported:` lines in order, then the receipts. Under `unconfigured`, items in the outcome are ignored. Under `enabled` or `unavailable`, an outcome that carries items has those items written in place of the earlier lines. `unavailable` is recorded with empty lists by convention (`central-memory.md:89`), so in practice it always keeps |
 
 **Invariants**
 - I-1 Every remaining README count equals its oracle. The `hooks/tests/`, `scripts/` and `scripts/tests/` tree lines carry no number (Q1).
 - I-2 No block lists a version file (`check_version_bump.MANIFESTS`). This contract does not change manifest text, and nothing in it changes the default branch except the one landing.
 - I-3 The `/flow` move leaves behaviour unchanged. The guard, the status call, the `defects` stop and the `<= 1` stop stay in SKILL.md, and the `>= 2` body moves verbatim apart from its own point numbers.
 - I-4 `memory-pager.py` writes no log record when no `claude_roots()` rank holds `memory-blocks.json`. A file at ANY rank is found and read. Any other load failure still logs `config-load-failed`. It always exits 0.
-- I-5 The finish-install skill asks about `--fix` at most once per run, and never runs `--fix` without a yes. The four runs:
+- I-5 The finish-install skill asks about `--fix` at most once per run, and never runs `--fix` without a yes. Four runs (a-d), then one rule for every other step:
   - (a) The profile exists, so Stage 1a is skipped. The history-record check holds the only ask.
   - (b) Stage 1a asks and the user says yes. `--fix` runs, and the later check finds nothing missing, says so and asks nothing.
   - (c) Stage 1a asks and the user says no. Stage 1 says it needs a profile and moves to Stage 2. The later check reports the missing list, does not ask again, and names the command to run later.
   - (d) The doctor prints `plugin: NOT FOUND`. Whichever step reaches that first asks for the plugin path, and that ask is the run's one ask.
+  - Every other step that meets a missing doctor requirement, such as Stage 2's `scaffold-missing` basis, asks nothing about `--fix`. It names the missing file, says the run's one ask is Stage 1a's (or the history record check's when Stage 1a was skipped), and goes on with what it can do. It does not promise to come back: once `--fix` has created the file, the next run of the skill proposes its content (block 12). True in all four runs: in (a) the ask comes later and nothing returns to Stage 2; in (b) `--fix` already ran, so the basis does not appear; in (c) and (d) no `--fix` runs this time.
 - I-6 The three I-M0 disabled tests in `test_memory_boundary.py` are not edited.
 - I-7 The template keeps the heading `## Chat Tool Impact` and the three sanctioned answers (contract-critic item 7).
 
@@ -98,7 +103,9 @@ Not applicable. Reason: no new command, subcommand or flag.
 - `Project profile` — consumed as-is. Block 7 corrects two slots' placeholder prose, which stays a Placeholder slot.
 - The `/task` and `/pr-merged` same-skill "read `references/<file>.md` in full; if unreadable, stop" rule — consumed as-is for `skills/flow/references/open-sub-tasks.md`.
 - The README hook-count pin in `test_repo_consistency.py` (violation-list helpers plus positive controls; not registered) — extended by block 9.
-- `test_plugin_text_scans.py` (`plugin_agent_names()`) and `test_plugin_doctor.py` (`NOT_SHIPPED`, `test_the_files_a_project_copies_carry_no_unshipped_name`) — consumed by blocks 3, 4 and 8. Block 4 reuses both helpers and writes neither again.
+- `test_plugin_text_scans.py` (`plugin_agent_names()`) and `test_plugin_doctor.py` (`NOT_SHIPPED`, `test_the_files_a_project_copies_carry_no_unshipped_name`) — consumed by blocks 3, 4, 8 and 12. Blocks 4 and 12 import both helpers and write neither again.
+- Block 7's I3 scan `fix_lines_without_ask` and `ASK_WORD` (`test_memory_off_parity.py:383-403`) — consumed unchanged by block 12; `ASK_WORD` is not widened.
+- The review artefact and its **Gate Output** (VOCABULARY) — block 14 supersedes the blocked t10 report through `supersedes`, which `read_review_set` (`pr_merged.py:3715-3791`) honours at the landing. Releases come from `compute_released` (`pr_merged.py:588-633`), which never reads `supersedes` and treats a `blocked` dependency as unmet for good, so no new block depends on 10. The clearance holds only while blocks 10 and 14 list their `.md` and never their `.gate.json` in Files to touch (`land_contract.py:1290-1298`): a listed `.gate.json` is never a key of `readings`, so P3 would stay blocked.
 
 ---
 
@@ -119,6 +126,9 @@ None.
   - `.claude/concepts/followups/2026-11-03-readme-tree-counts-and-step-pins.followup.md`
   - `.claude/concepts/followups/2026-11-03-memory-boundary-review-leftovers.followup.md`
   It also writes `contract: .claude/concepts/2026-11-11-audit-followups-165.md` into the brief, which today holds `UNKNOWN`, an unset value.
+- Revision 4: after approval, `/flow` Step 2.7 opens sub-issues and briefs for blocks 12, 13 and 14 only (t12, t13, t14), on the same parent branch. The state store keeps t1-t10 as they are. `compute_released` then releases t12 alone; t13 after t12 merges; t14 after both.
+- **Default-branch intake (main session, not a sub-task), between t13's merge and t14's dispatch:** if `origin/master` is not an ancestor of the parent tip, the main session merges `origin/master` into `feature/165-audit-followups` with one merge commit (never squash or rebase). Before the merge it records the `origin/master` commit and the stop list: every commit in `<merge-base>..origin/master` that touches a file in the Files to touch of blocks 1-13. After the merge it checks that the four manifests are byte-identical to `origin/master`, runs every suite named in blocks 1-13, and passes the recorded commit, the stop list and the merge commit to block 14. If `origin/master` is already an ancestor, the step records that and does nothing else.
+- `skills/design-first/references/central-memory.md` section 6: one sentence naming the keep rule for all three no-item outcomes (block 13).
 
 ---
 
@@ -138,6 +148,7 @@ Noticed by the architect:
 |------|----------|----------------------|--------|
 | shipped agents' chat-tool text | follow-up handle | `contract-critic.md` item 7 and `fullstack-code-reviewer.md:170-178` carry the V4 text; no issue-165 stub names them | `.claude/concepts/followups/2026-11-11-agent-chat-tool-genericity.followup.md` |
 | manifest description counts | follow-up handle | Q6: its own work item after the landing | `.claude/concepts/followups/2026-11-11-manifest-description-counts.followup.md` |
+| t10 review nits F5, F6 | follow-up handle | Q9: not folded into the remedy | `.claude/concepts/followups/2026-11-12-t10-review-nits-f5-f6.followup.md` |
 
 ---
 
@@ -162,6 +173,8 @@ Not applicable. Reason: backend-only contract with no frontend consumer in Integ
 - Memory behaviour beyond the keep rule.
 - Seeding `MECHANISMS/general.md` (Q7).
 - Instructions to write or update INTEGRATION.md (`fullstack-code-reviewer.md:301`, `contract-critic.md:153`); block 6 changes only reads.
+- t10 nits F5 (`skills/task/SKILL.md` two names for one path) and F6 (`test_agent_skill_preloads.py` repeated import setup), per Q9. They are tracked in `.claude/concepts/followups/2026-11-12-t10-review-nits-f5-f6.followup.md`. F4 is folded into block 12, which already edits that file.
+- The rest of the template's handoff examples (for example the `IExternalDataDispatcher` constraint in example 3): block 12 changes only the unshipped agent names.
 
 ---
 
@@ -194,6 +207,8 @@ Confidence: Medium. High on what is broken (every row re-read). Medium on the pa
 - `VERIFIED via _project_paths.py:62-82,242-252; _error_log.py:57,108`: config is the first `claude_roots()` rank holding the file. The log folder comes from the project folder, and the logger writes only when that folder exists.
 - `ASSUMED`: `test_pr_merged.py` runs 761 tests. It no longer matters after Q3.
 - `ASSUMED`: the cross-area script would print nothing (not run; the area map is empty).
+- `VERIFIED via file reads 2026-11-12`: V20-V23 at the lines cited; `classify_handoff` (`pr_merged.py:294-387`) takes a heading's own number as its ordinal, else its position, so the unnumbered scope note stays ordinal 11 and the new blocks are 12, 13 and 14 with ids `t12-review-remedy-f1-and-f2`, `t13-keep-rule-for-an-unavailable-outcome` and `t14-re-review`.
+- `ASSUMED` (the architect has no shell): `py -3 .claude/scripts/pr_merged.py --contract 2026-11-11-audit-followups-165 --status --json` shows empty `defects` and `layout_defects`, and t12-t14 as mergeable sub-tasks (t12 released; t13 waiting on t12; t14 waiting on t12 and t13). The main session runs it before approval.
 
 ---
 
@@ -214,11 +229,21 @@ Confidence: Medium. High on what is broken (every row re-read). Medium on the pa
 - **FM:** an empty retrieval on a re-run deletes earlier decisions (critic WARN 7).
   - **Mitigation:** the keep rule covers `enabled`-empty as well as `unconfigured`, with a round-trip row. I-6 is untouched.
 - **FM:** the finish-install skill asks twice, or never asks.
-  - **Mitigation:** I-5's four runs, each pinned.
+  - **Mitigation:** I-5's four runs and its rule for every other step, each pinned (blocks 7 and 12).
 - **FM:** making the template generic weakens critic item 7.
   - **Mitigation:** I-7. The pin's control plants a made-up name (journal 2026-10-05).
 - **FM:** the unshipped-name guard keeps skipping, so a leak ships.
   - **Mitigation:** blocks 3, 4 and 7 run it with `AGENTIC_PLUGIN_ROOT` set to the worktree root and paste a run with zero skips.
+- **FM (happened, t10 F1):** a block sees a red guard on a file it does not own and passes it on, so no block fixes it.
+  - **Mitigation:** block 12 owns the template fix and adds a template pin to `test_plugin_text_scans.py` that runs without `AGENTIC_PLUGIN_ROOT`, so it never skips. Every new block's CONSTRAINTS say a red suite in its Run list stops the block; it is reported, never passed on.
+- **FM (happened, t10 F2):** a default-branch merge into the parent branch brings text that breaks a whole-file pin, and CI does not run that suite (`version-bump.yml` runs only `test_check_version_bump.py` and `test_repo_consistency.py`).
+  - **Mitigation:** block 12's Run list names `test_memory_off_parity.py` and the doctor suite explicitly. The default-branch intake step (Extension Points) takes `origin/master` in before block 14 and records the stop list. Block 14 judges each stop-list commit by a severity rule, reviews the intake merge with `git show --remerge-diff`, and re-runs every suite named by blocks 1-13 (journal 2026-11-03 and 2026-11-07).
+- **FM:** the Stage 2 rewording passes the word scan but still asks.
+  - **Mitigation:** block 12's Stage 2 pin checks meaning, not a word. Its controls cover master's "Offer to run" bullet, a direct ask, and t10's conditional "if this run has not yet asked, ask once"; each must fail. The negated "asks nothing about `--fix`" must pass.
+- **FM:** block 13 starts before block 12 and stops on a suite block 12 turns green.
+  - **Mitigation:** block 13 depends on 12.
+- **FM:** a blocked re-review retires the report it failed to clear.
+  - **Mitigation:** block 14 writes `supersedes: ["t10-review-fullstack-code-reviewer.md"]` only on `pass` or `pass-with-findings`; on `blocked` it writes `[]`, and the next re-review supersedes both.
 
 ---
 
@@ -231,10 +256,19 @@ Confidence: Medium. High on what is broken (every row re-read). Medium on the pa
 - [x] Q5 Keep `Retrieved:` and `Reported:` under `unconfigured`? → Yes, with a round-trip test (2026-11-11).
 - [x] Q6 Manifest descriptions? → Dropped from this contract. They become their own work item after the landing (follow-up stub) (2026-11-11).
 - [x] Q7 Seed `MECHANISMS/general.md`? → No (2026-11-11).
+- [x] Q8 (t10 F3) Does a re-run whose memory call is `unavailable` keep the brief's earlier `Retrieved:` and `Reported:` lines? → Yes; block 13 (2026-11-12).
+- [x] Q9 (t10 F4-F6) Fold the nits into the remedy? → F4 only (block 12). F5 and F6 stay nits, tracked in `.claude/concepts/followups/2026-11-12-t10-review-nits-f5-f6.followup.md` (2026-11-12).
 
 ---
 
-## Critique
+## Amendments
+
+- **2026-11-12, Revision 3.** The block-10 review (`.claude/reviews/2026-11-11-audit-followups-165/t10-review-fullstack-code-reviewer.md`, PR #386) returned `**Verdict:** blocked` on parent tip `a0f4d4a`, and the landing halted at gate P3 `blocked-verdict`. Reason: two red suites that CI does not run (F1: the template names `ingestion-data-architect`; F2: master's Stage 2 bullet adds a second `--fix` ask, breaking I-5), one owner question (F3) and three nits. Added: V20-V23, the I-5 rule for other steps, the Q8 note in Data Shapes, Q8 and Q9, four Failure Modes, and blocks 12 (remedy), 13 (keep rule, Q8) and 14 (re-review). Blocks 1-10 and the scope note are unchanged, so their ids (t1-t10) and state-store entries hold. Status went back to `draft` for fresh approval.
+- **2026-11-12, Revision 4.** The owner answered Q8 (yes, keep block 13) and Q9 (F4 only; stub for F5 and F6), and asked for all seven Revision 3 critic WARNs to be addressed. Changes: block 13 depends on 12; block 13's pins match the code, its Files to touch gain `central-memory.md`, and its Run list gains `test_parent_branch_rule_text.py`; the Data Shapes keep rule names `unavailable`; the I-5 rule for other steps and block 12's Stage 2 wording no longer promise a re-preview; block 12's pin rejects the conditional ask; a default-branch intake step and a severity rule come before and inside block 14; the gate.json Files to touch rule is stated; the follow-up stub is written. Each WARN's disposition is under it in `## Critique (Revision 3)`. Status stays `draft` until the owner approves. The Revision 2 critique below is superseded. Under the budget rule it belongs in `.claude/contract-history/2026-11-11-audit-followups-165.round-2.md`, which the data-architect may not write, so the main session moves it.
+
+---
+
+## Critique (Revision 2, superseded)
 
 **Critic:** contract-critic
 **Date:** 2026-11-11
@@ -332,13 +366,22 @@ NIT dispositions: block 4 reuses both helpers. Block 1 rewords line 498. The FM 
 - **2026-10-05 — Never hide a forbidden name by hashing it when the test needs a positive control** — heeded by the made-up controls in block 3 and the guard run with zero skips.
 - **2026-11-06 — A sub-task that flips the state an earlier sub-task's test pins must re-run that suite** — heeded by block 10's Run list.
 - **2026-11-03 — A stop list checked against a moving default branch needs a rule for changes outside the edited lines** — heeded by block 9's pre-check.
+- **2026-11-02 — Keep a review-fix block to the review's findings** — heeded by block 12 (F1, F2, F4 only), block 13 (F3 only) and Q9.
+- **2026-11-02 — After amending a contract, update every summary of the block graph** — heeded by the Revision line and the Handoff intro.
+- **2026-11-02 — A revision that adds a path adds its failure modes** — heeded by the four Revision 3 Failure Modes.
+- **2026-11-02 — Name the tests a fix may change by the state they guard, after reading them** — heeded by block 13, which names the one block-7 test it flips and keeps I-6.
+- **2026-11-06 — A sub-task that flips the state an earlier sub-task's test pins must re-run that suite** — heeded by block 13 (`test_memory_off_parity.py`, which reads the keep rule) and block 14's Run list.
+- **2026-11-07 — A clean landing check goes stale when the default branch moves** and **2026-11-07 — A parent branch that shares files with a moving default branch must take the default branch in through a sub-task** — heeded by the default-branch intake step (Extension Points) and block 14's stop-list severity rule; F2 was that case.
+- **2026-11-03 — A stop list checked against a moving default branch needs a rule for changes outside the edited lines** — heeded by block 14's severity rule (Breaking versus note).
+- **2026-11-02 — A path that calls a command must say how it finds the command's input** — heeded by I-5's rule for other steps, which no longer promises a re-preview that no step runs.
+- **2026-11-02 — Describe a fixer a skill runs by everything it writes, and keep the skill's confirm-first promise** — heeded by block 12's Stage 2 wording.
 - Orthogonal to north-stars: none active (`.claude/north-stars/` is absent).
 
 ---
 
 ## Implementation Handoff
 
-Ten blocks: nine implementation blocks and one review. Block 8 depends on 3, block 10 on 1-9, the rest on none. The parent branch is `feature/165-audit-followups`. No block lists a version file. Each pull request pastes, for every new pin, the failing run from before the fix and the passing run after it. Run every suite with `py -3 -B <path>`. `test_plugin_doctor.py` runs with the root set; in PowerShell: `$env:AGENTIC_PLUGIN_ROOT = (Get-Location).Path; py -3 -B .claude/scripts/tests/test_plugin_doctor.py`.
+Fourteen headings: nine implementation blocks (1-9), one review (10, returned blocked), one scope note (ordinal 11 by position), two remedy blocks (12, 13) and one re-review (14). Block 8 depends on 3, block 10 on 1-9, block 13 on 12, block 14 on 12 and 13, the rest on none. So t12 is released first, then t13, then t14. No new block depends on 10: its blocked record is unmet for good (`compute_released`), and block 14's Gate Output is what clears it at the landing. Between t13's merge and t14's dispatch, the main session runs the default-branch intake step (Extension Points). It is not a sub-task and has no heading here, so no ordinal moves. The parent branch is `feature/165-audit-followups`. No block lists a version file. Each pull request pastes, for every new pin, the failing run from before the fix and the passing run after it. Run every suite with `py -3 -B <path>`. `test_plugin_doctor.py` runs with the root set; in PowerShell: `$env:AGENTIC_PLUGIN_ROOT = (Get-Location).Path; py -3 -B .claude/scripts/tests/test_plugin_doctor.py`.
 
 ### 1. Task skill worktree text (`python-ai-developer`)
 
@@ -638,6 +681,167 @@ PRIOR_FINDINGS:
 
 Not a sub-task. It names no agent and has no Files to touch. The owner moved the manifest descriptions and their drift test to their own work item, to start after this contract lands: `.claude/concepts/followups/2026-11-11-manifest-description-counts.followup.md`. This contract creates no pull request to the default branch other than the landing, and raises the version once, at the landing.
 
+### 12. Review remedy F1 and F2 (`python-ai-developer`)
+
+**Depends on:** none — blocks 1-9 are merged; block 10 is blocked and is never a dependency
+
+**Files to touch:**
+- `.claude/templates/concept-contract.md`
+- `skills/auto-improve-finish-install/SKILL.md`
+- `.claude/scripts/tests/test_plugin_text_scans.py`
+- `.claude/scripts/tests/test_memory_off_parity.py`
+
+**Pre-written TASK block:**
+```
+TASK: Fix the t10 blockers F1 and F2 and the nit F4. TDD: write each new pin first, paste its red run on the
+  parent tip, then fix, then paste the green run.
+  - F1 pin (test_plugin_text_scans.py, beside TestChatToolImpactSectionIsGeneric): the WHOLE template names no
+    TestTheRealPluginTree.NOT_SHIPPED name, and every backticked agent name in a "###" heading is in
+    plugin_agent_names(). Import both, never copy. It runs without AGENTIC_PLUGIN_ROOT, so it never skips. Control:
+    a planted "`ingestion-data-architect`" heading fails. Red today on lines 12 and 455.
+  - F1 fix: line 12's implementer list names exactly pr_merged.DEFAULT_IMPLEMENTERS (replace
+    `ingestion-data-architect` with `python-ai-developer` and `cloud-engineer`). Line 455 becomes
+    "### 3. Data pipeline (`dotnet-backend-architect`, or the project's own ingestion agent if it declares one) —
+    if applicable". Change nothing else in the template (I-7 holds).
+  - F2 pin (test_memory_off_parity.py, a new Stage 2 class): in the section from "## Stage 2" to "## Stage 3",
+    every sentence holding --fix says Stage 2 asks nothing about it and names the run's one ask (Stage 1a, or
+    the history record check when Stage 1a was skipped). No sentence there tells the reader to offer or ask,
+    with or without a condition, and none promises to run the Stage 2 preview again after --fix. Controls, each
+    must FAIL: master's bullet ("Offer to run `plugin_doctor.py --fix` ... then run the preview again"); "ask the
+    user whether to run --fix"; t10's conditional "if this run has not yet asked about `--fix`, ask once". The
+    conditional is rejected because in run (a) it would take the run's one ask in Stage 2, before the history
+    record check that I-5 (a) names as the only ask, and that check must not be edited. Control that must PASS:
+    the reworded bullet below. Red today. fix_lines_without_ask must still pass on the whole file; the reworded
+    bullet satisfies it with the existing ASK_WORD ("asks" comes before --fix).
+  - F2 fix: reword the scaffold-missing bullet (lines 241-242) to say: the file is absent, and this command never
+    creates it. Stage 2 asks nothing about `plugin_doctor.py --fix`: the run's one ask is Stage 1a's, or the
+    history record check's when Stage 1a was skipped. Name the missing file and go on with the other files. Once
+    --fix has created it, the next run of this skill proposes its content. The bullet promises no re-preview in
+    this run. Check the wording against I-5's four runs and its rule for every other step.
+  - F4: rename the module-level helper test_count_claims to count_claims_in, with its callers.
+CONTEXT: concept contract at .claude/concepts/2026-11-11-audit-followups-165.md (V20, V21, I-5, Revision 4);
+  review .claude/reviews/2026-11-11-audit-followups-165/t10-review-fullstack-code-reviewer.md (F1, F2, F4)
+FILES: the four above
+CONSTRAINTS:
+  - Do NOT add "offer" (or any word) to ASK_WORD, and do not loosen fix_lines_without_ask or any existing pin.
+  - Do not edit the history record check or Stage 1a text; their asks stay as they are (I-5 runs a-d).
+  - Write nothing under .claude/reviews/.
+  - Leave F5 and F6 alone (Q9).
+  - A sub-task pull request into the parent branch does not raise the plugin version (Parent Branch Delivery
+    Rule); the landing raises it once. Touch no check_version_bump.MANIFESTS file (plugin.json,
+    .claude-plugin/plugin.json, .cursor-plugin/plugin.json, .claude-plugin/marketplace.json).
+  - A red suite in the Run list stops the block; report it, never pass it on as outside your files.
+  - Run, each with py -3 -B, and paste every summary line:
+    test_plugin_doctor.py with AGENTIC_PLUGIN_ROOT set to the worktree root (PowerShell:
+      $env:AGENTIC_PLUGIN_ROOT = (Get-Location).Path), zero skips and zero failures;
+    test_memory_off_parity.py; test_plugin_text_scans.py; test_parent_branch_rule_text.py;
+    test_ship_skill_sync.py; test_repo_consistency.py;
+    py -3 .claude/scripts/check_version_bump.py --base origin/feature/165-audit-followups
+      --head-ref <this branch> --default-branch master (expect the parent-mode "keeps version" line)
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-11-audit-followups-165.md
+  contract_status: approved
+```
+
+### 13. Keep rule for an unavailable outcome (`python-ai-developer`)
+
+**Depends on:** 12 — test_memory_off_parity.py, in this block's Run list, is red on the parent tip until block 12 merges
+
+**Files to touch:**
+- `.claude/scripts/memory_boundary.py`
+- `.claude/scripts/tests/test_memory_boundary.py`
+- `skills/design-first/references/central-memory.md`
+
+**Pre-written TASK block:**
+```
+TASK: Extend the keep rule in cmd_record to an unavailable outcome (Q8 answered yes, t10 F3). TDD: first turn the
+  block-7 test test_an_unavailable_outcome_does_not_keep_earlier_items into one that pins the keep (rename it to
+  say so) and paste its red run. Then remove the `outcome.get("state") != "unavailable"` condition at
+  memory_boundary.py:791 and update the comment at :792-794. Change nothing else in cmd_record. Pins:
+  - enabled with items, then unavailable (timeout) with empty lists: first line
+    "Memory: unavailable (timeout) | <date>", the earlier Retrieved: and Reported: lines kept in order, then
+    Captured: and Not sent:
+  - extend the existing round trip with an unavailable step (empty lists) between the kept steps and the final
+    replace
+  - an unavailable outcome that carries items: those items are written in place of the earlier lines, exactly
+    as for enabled (Data Shapes). This pin states the behaviour the code keeps; it is not a new rule.
+  Reference: in central-memory.md section 6, add one sentence after the line table. It says that when the new
+  outcome carries no item (an unconfigured profile, an empty retrieval, or an unavailable outcome), record keeps
+  the earlier Retrieved: and Reported: lines in order. Leave line 43's empty-retrieval sentence as it is.
+CONTEXT: concept contract at .claude/concepts/2026-11-11-audit-followups-165.md (Data Shapes keep rule, V22, Q8)
+FILES: the three above
+CONSTRAINTS:
+  - I-6: the three I-M0 disabled tests are not edited. Name every test you change in the pull request.
+  - No new subcommand, refusal, state or reason (Memory adapter shape unchanged).
+  - A sub-task pull request into the parent branch does not raise the plugin version (Parent Branch Delivery
+    Rule). Touch no check_version_bump.MANIFESTS file.
+  - Write nothing under .claude/reviews/.
+  - A red suite in the Run list stops the block; report it.
+  - Run, each with py -3 -B, and paste every summary line: test_memory_boundary.py, test_memory_off_parity.py
+    (it reads the keep rule and pins central-memory.md), test_parent_branch_rule_text.py (it pins
+    central-memory.md), test_plugin_text_scans.py
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-11-audit-followups-165.md
+  contract_status: approved
+```
+
+### 14. Re-review (`fullstack-code-reviewer`)
+
+**Depends on:** 12, 13 — nothing to re-review until both remedies are merged
+
+**Files to touch:**
+- `.claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md`
+
+**Pre-written TASK block:**
+```
+TASK: Re-review the whole contract (blocks 1-9, 12 and 13, plus the default-branch intake merge if one was made)
+  on the parent branch tip, and write the review artefact. This report replaces the blocked t10 report, so it
+  must judge every item t10 judged, not only the remedies.
+CONTEXT: concept contract at .claude/concepts/2026-11-11-audit-followups-165.md (Revision 4); blocked report
+  .claude/reviews/2026-11-11-audit-followups-165/t10-review-fullstack-code-reviewer.md; the main session's
+  intake record (origin/master commit, stop list, merge commit or "already an ancestor")
+FILES: .claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md
+CONSTRAINTS:
+  - First, the default-branch check. Confirm that the recorded origin/master commit is an ancestor of the
+    parent tip (git merge-base --is-ancestor). If it is not, the intake step did not run: that is a Breaking
+    finding, and the verdict is blocked. Then fetch and record the current origin/master tip. Every commit in
+    <recorded commit>..origin/master that touches a file in blocks 1-13's Files to touch joins the stop list as
+    a finding for the landing to take in, rated by the rule below.
+  - Rate each stop-list commit (the intake list and any later one). Review the intake merge with
+    git show --remerge-diff <merge>.
+    Breaking: the commit changes a shipped file or a file a pin of blocks 1-13 reads, AND a re-run suite goes
+    red, or the change contradicts I-1..I-7 (for example a new --fix ask, an unshipped agent name, a README
+    count off its oracle).
+    Note: every other change, including a shipped or pinned file whose suites stay green and whose text keeps
+    I-1..I-7. A note may still pass.
+    Any Breaking item makes the verdict blocked. Notes allow pass-with-findings. List every commit with its
+    rating under "## What was checked".
+  - Judge t10's items C1-C23 again on the tip, and F1-F3 as fixed or answered (F3: Q8 answered yes, block 13).
+    Check I-1..I-7, I-5's rule for every other step, and that every new pin of blocks 12 and 13 has a control
+    that fails on its fixture (block 12's three failing controls, including the conditional ask). List F5 and
+    F6 as known nits tracked in .claude/concepts/followups/2026-11-12-t10-review-nits-f5-f6.followup.md, not as
+    new findings.
+  - Re-run on the tip: every suite named in blocks 1-9, 12 and 13, plus test_skill_script_lookup.py,
+    test_check_version_bump.py, and test_plugin_doctor.py with AGENTIC_PLUGIN_ROOT set (zero skips).
+  - Confirm that no block touched a check_version_bump.MANIFESTS file. A sub-task pull request into the parent
+    branch does not raise the version; the landing raises it once.
+  - The file does NOT exist yet: you create it; nobody pre-created a stub. Six sections in the template's order;
+    name the commit range base..head; "## Evidence" lists commands with exit codes and is never empty.
+  - The header ends with the verdict line, alone, exactly one of: "**Verdict:** pass",
+    "**Verdict:** pass-with-findings", "**Verdict:** blocked".
+  - Also write <artefact stem>.gate.json in the same diff, with every Review checklist line verbatim:
+    {"supersedes": ["t10-review-fullstack-code-reviewer.md"], "checklist": [{"item": "...", "outcome":
+    "met | partly-met | not-met | not-applicable"}]} on pass or pass-with-findings. On blocked, write
+    "supersedes": [] (a blocked report must not retire the one it failed to clear); the next re-review then
+    supersedes both.
+  - Files to touch lists only this .md, never the .gate.json. The landing's P3 check reads the reviews listed in
+    Files to touch, and a listed .gate.json would never match a report, so P3 would stay blocked
+    (land_contract.py:1290-1298). Write the .gate.json beside the .md, but do not add it to the list.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-11-audit-followups-165.md
+  contract_status: approved
+```
+
 ---
 
 ## Review checklist (filled in after implementation)
@@ -650,3 +854,90 @@ Not a sub-task. It names no agent and has no Files to touch. The owner moved the
 - [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
 - [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
 - [ ] `Status` flipped to `implemented`
+
+---
+
+## Critique (Revision 3)
+
+**Critic:** contract-critic
+**Date:** 2026-11-12
+**Verdict:** warnings-only
+
+Scope: Revision 3 only (Amendments, V20-V23, the new I-5 bullet, the Q8 note, Q8, Q9, the four new Failure Modes, blocks 12-14). Blocks 1-10 were not re-judged.
+
+Code check, gate P3: the amendment's central claim holds. `land_contract.py:2277-2283` builds each task's review files from its own `Files to touch` (only paths under `.claude/reviews/`) and reads the review folder at `parent_ref` through `pr_merged.read_review_set`. For t10 that list is the one `.md` (the `.gate.json` is not listed). `read_review_set` (`pr_merged.py:3753-3790`) takes the basename of each `supersedes` entry and sets `effective: False` on the target. `blocked_review_verdicts` (`land_contract.py:1290-1298`) then skips t10 because every name it wrote is superseded. A `pass` or `pass-with-findings` t14 with `supersedes: ["t10-review-fullstack-code-reviewer.md"]` therefore clears P3. The P8 coverage rule (`land_contract.py:3030-3033`) is met by t14's `-fullstack-code-reviewer.md` file. One condition is implicit: the clearance works only because neither block 10 nor block 14 lists its `.gate.json` under Files to touch. A listed `.gate.json` basename is never a key of `readings`, so `all(...)` would fail and P3 would stay blocked.
+
+Code check, graph: `classify_handoff` (`pr_merged.py:330-357`) gives the scope note ordinal 11 by position. Blocks 12-14 take their own numbers. `_parse_depends_on` (`pr_merged.py:284-291`) reads block 12 and block 13 as `[]` (the line starts with "none") and block 14 as `[12, 13]` (the text before the dash). The derived ids match the Uncertain Assumptions row. No block lists a `check_version_bump.MANIFESTS` file, and the `**Work Item Brief:**` header is present.
+
+### Findings
+
+- **[WARN] Block 13 is released together with block 12, but block 13's Run list holds a suite that stays red until block 12 merges**
+  - **What is wrong:** both blocks depend on none, so `compute_released` releases them at the same time. Block 13 runs `test_memory_off_parity.py`, which fails twice on the parent tip (t10 Evidence, F2) until block 12's Stage 2 fix merges. Block 13's own constraint, "A red suite in the Run list stops the block; report it", then stops block 13 every time it starts first.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-06 "A sub-task that flips the state an earlier sub-task's test pins must re-run that suite" (the suite and the block that turns it green must be ordered); `.claude/reviews/2026-11-11-audit-followups-165/t10-review-fullstack-code-reviewer.md:70`.
+  - **Where in this contract:** block 13 — "**Depends on:** none — written for Q8's recommended answer"; block 13 CONSTRAINTS — "Run, each with py -3 -B: test_memory_boundary.py, test_memory_off_parity.py (it reads the keep rule)".
+  - -> Addressed by: block 13 now depends on 12 and keeps the suite, so `compute_released` releases t12 alone first (t13 needs t12's record, t14 needs both).
+- **[WARN] Block 13's third pin needs a code change that its TASK and Q8 do not describe, and it contradicts the Data Shapes keep rule**
+  - **What is wrong:** the pin "an unavailable outcome never adds a Retrieved: or Reported: line of its own" fails after the prescribed fix whenever an unavailable outcome carries items. In the enabled branch, `memory_boundary.py:781-790` writes the outcome's items before the line-791 condition is reached, so removing that condition does not touch them. Q8 also says "The change is one condition plus flipping the block-7 test", and the Data Shapes cell says "An outcome that carries items replaces them as today", which allows exactly what the pin forbids.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-06 "An exception sentence that names the outcome of a later call must list every outcome that call can have"; `.claude/scripts/memory_boundary.py:776-797`; `skills/design-first/references/central-memory.md:89` (the convention that `unavailable` is written with empty lists is prose, not code).
+  - **Where in this contract:** block 13 TASK — "an unavailable outcome never adds a Retrieved: or Reported: line of its own"; `## Open Questions for User` Q8 — "The change is one condition".
+  - -> Addressed by: the third pin now states the real behaviour (an unavailable outcome carrying items is written like enabled), and the Data Shapes cell says which states keep and which replace.
+- **[WARN] On a "yes" to Q8, the keep-rule sentence in Data Shapes and the session reference still leave `unavailable` out**
+  - **What is wrong:** the Data Shapes cell says what to edit only for a "no". The main sentence ("an `unconfigured` profile, or an `enabled` empty retrieval") is the closed-looking list that t10 F3 flagged, and it stays as written on a "yes". `central-memory.md` describes the keep only for the empty retrieval (line 43). Section 6 (line 87) names only the receipts as kept, and its `unavailable` paths (lines 18, 29) say nothing. Block 13's Files to touch leaves out the reference, although block 7 listed it for the same rule.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-22 "An accepted critic WARN or answered Open Question must amend the contract body before approval"; this contract's V15 (the same reference already under-described the keep rule once) and block 7's Files to touch.
+  - **Where in this contract:** `## Data Shapes → Value Objects` "Memory used section" — "Block 13 is written for the recommended answer, yes; on a no, this cell gains …"; block 13 `Files to touch`.
+  - -> Addressed by: the keep-rule list now names `unavailable`. Block 13 adds `central-memory.md` (one section-6 sentence) and runs `test_memory_off_parity.py`, `test_parent_branch_rule_text.py` and `test_memory_boundary.py`, which pin it.
+- **[WARN] In run (a), Stage 2's new "run this preview again after a yes there" points at an ask that comes later, in a step block 12 may not edit**
+  - **What is wrong:** in run (a), Stage 1a is skipped and the run's one ask is the history record check. That check (`SKILL.md:422-461`) comes after Stages 2 and 3, and Stage 2 has already written its files at 2d. The skill text never sends the session back to Stage 2. Block 12 forbids editing the history record check, so the re-preview that the I-5 bullet and the F2 fix promise has no step that runs it.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-02 "A path that calls a command must say how it finds the command's input" (a rule that lives only on a sibling path); `JOURNAL.md` 2026-11-06 "An exception sentence that names the outcome of a later call must list every outcome that call can have"; this contract's V21 ("Stage 2 runs before the history record check").
+  - **Where in this contract:** I-5 last bullet — "After a yes there, it runs its preview again (block 12)"; block 12 F2 fix — "after --fix runs on a yes there, run this preview again"; block 12 CONSTRAINTS — "Do not edit the history record check or Stage 1a text".
+  - -> Addressed by: Stage 2 now asks nothing, names the missing file and the run's one ask, and says the next run proposes the file's content, with no re-preview promised. I-5's rule is reworded and checked against runs (a)-(d); the history record check is untouched.
+- **[WARN] The F2 pin's controls leave out the conditional ask, which is the rewording the t10 reviewer suggested**
+  - **What is wrong:** the controls are master's "Offer to run" bullet and "ask the user whether to run --fix". Neither covers "if this run has not yet asked about `--fix`, ask once", which is t10 F2's own suggested fix and which I-5's new bullet forbids ("asks nothing"). The pin must also accept the negated "do not ask here". Without a control, a word-shaped implementation can let the conditional form through while every listed control passes. `fix_lines_without_ask` passes on either form, because "ask" comes before `--fix`.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-05 "Never hide a forbidden name by hashing it when the test needs a positive control"; `JOURNAL.md` 2026-11-02 "A rule titled 'every' must list every line it covers"; t10 review F2 ("if this run has not yet asked about `--fix`, ask once …").
+  - **Where in this contract:** block 12 TASK, F2 pin — "Controls: master's bullet … fails; "ask the user whether to run --fix" fails; the reworded bullet passes".
+  - -> Addressed by: the conditional ask is a third control that must fail. The reason given is that in run (a) it would take the one ask before the history record check. The negated "asks nothing" bullet is the control that must pass, and `ASK_WORD` is unchanged.
+- **[WARN] Block 14's first check finds default-branch drift but has no rule for what may still pass and no route to take the default branch in**
+  - **What is wrong:** "A non-empty list is a finding" covers every commit on `origin/master` that touches any file of blocks 1-13, including busy shared files such as `README.md` and `skills/task/SKILL.md`. It says nothing about which hunks may still pass, the finding has no severity, and no block merges the default branch into the parent. So the likely outcome is a fourth amendment or a landing-time merge of unreviewed text, which is the class F2 came from.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-03 "A stop list checked against a moving default branch needs a rule for changes outside the edited lines" (heeded by block 9, not here); `JOURNAL.md` 2026-11-07 "A parent branch that shares files with a moving default branch must take the default branch in through a sub-task before its landing".
+  - **Where in this contract:** block 14 CONSTRAINTS — "A non-empty list is a finding (it would reach the parent unreviewed at the landing, as F2 did)"; `## Lessons referenced` — "heeded by block 14's first check".
+  - -> Addressed by: a main-session default-branch intake step (Extension Points) merges `origin/master` with a merge commit and records the stop list before t14 dispatches. Block 14 rates each stop-list commit: Breaking (red suite or an I-1..I-7 contradiction, which means blocked) or note (pass-with-findings allowed), and reviews the merge by `--remerge-diff`.
+- **[WARN] Q8's "no" branch lists three edits, but more summaries name block 13**
+  - **What is wrong:** removing block 13 also leaves these stale: the Revision line ("two remedy blocks (12, 13)"), the Handoff intro ("block 14 on 12 and 13"), Extension Points ("blocks 12, 13 and 14 only (t12, t13, t14)"), the Amendments entry, block 14's TASK ("blocks 1-9, 12, 13"), its pin check ("every new pin of blocks 12 and 13") and its Run list ("every suite named in blocks 1-9, 12 and 13").
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-02 "After amending a contract, update every summary of the block graph".
+  - **Where in this contract:** `## Open Questions for User` Q8 — "the main session adds … removes block 13, and changes block 14's Depends on to 12".
+  - -> Addressed by: Q8 is answered yes and its "no" branch is deleted. The Revision line, Handoff intro, Extension Points, Amendments and block 14's TASK, pin check and Run list all name the final graph (13 on 12, 14 on 12 and 13).
+- **[NIT] I-5 counts its runs two ways** — the heading says "The four runs:" over five bullets. Block 12 says "I-5 and its five rows apply" in one place and "I-5 runs a-d" in another.
+- **[NIT] Q9 is still open, but the body already follows its recommendation** — block 12 includes F4, Non-Goals says "F4 is folded into block 12", and nothing says which block would take F5 and F6 if the owner folds them in. Q8, by contrast, spells out its alternative.
+- **[NIT] F5 and F6 stay untracked unless someone acts** — Non-Goals defers them, but no Adjacent Areas row or follow-up stub holds them ("the architect has written none"). The deferral has no artifact.
+- **[NIT] P3 clearance depends on a Files to touch rule that the contract does not state** — it works only while blocks 10 and 14 list their `.md` and not their `.gate.json` (`land_contract.py:1296-1297`). Reused Mechanisms names `read_review_set` and the Gate Output, but not this condition.
+- **[NIT] The contract is over its budget, and the Revision 2 critique round was not moved out** — it is about 27,700 tokens against a 12,000 budget. Every Revision 2 finding is marked "Addressed by", so that round is superseded and belongs in `.claude/contract-history/2026-11-11-audit-followups-165.round-2.md` (`.claude/templates/concept-contract.md:22`). That folder holds no file for this contract.
+
+NIT dispositions (Revision 4):
+- I-5 now reads "Four runs (a-d), then one rule for every other step". Block 12 says "I-5's four runs and its rule for every other step", and its "I-5 runs a-d" constraint is about Stage 1a and the history record check only.
+- Q9 is answered (F4 in block 12).
+- F5 and F6 are tracked in `.claude/concepts/followups/2026-11-12-t10-review-nits-f5-f6.followup.md` (`Issue: pending`) and in an Adjacent Areas row.
+- The `.gate.json` Files to touch rule is in Reused Mechanisms and in block 14's CONSTRAINTS.
+- The Revision 2 critique is marked superseded, but it is not moved: the data-architect may not write under `.claude/contract-history/`, so the main session moves it to the `.round-2.md` path above.
+
+### Applicable journal entries
+
+- **2026-11-02 — Keep a review-fix block to the review's findings** — heeded: block 12 covers F1, F2 and F4, block 13 covers F3, and Q9 holds F5 and F6 out.
+- **2026-11-02 — A revision that adds a path adds its failure modes** — heeded by the four Revision 3 Failure Modes.
+- **2026-11-02 — After amending a contract, update every summary of the block graph** — heeded by the Revision line and the Handoff intro; violated in part by Q8's "no" edit list, see WARN.
+- **2026-10-30 — A failed record written by a new rule must not be the input of an older guard that blocks the rule's own exit** — heeded: no new block depends on 10, and the reason is given (`compute_released`, `pr_merged.py:624-626`).
+- **2026-10-30 — A rule that refuses must give already-delivered work a named way out** — heeded by block 14's conditional `supersedes`, checked against `land_contract.py:1279-1300`.
+- **2026-10-05 — Never hide a forbidden name by hashing it when the test needs a positive control** — heeded by the F1 pin's planted `ingestion-data-architect` heading; not met by the F2 pin's controls, see WARN.
+- **2026-11-02 — Name the tests a fix may change by the state they guard, after reading them** — heeded: block 13 names the one block-7 test it flips and keeps I-6.
+- **2026-11-06 — A sub-task that flips the state an earlier sub-task's test pins must re-run that suite** — heeded by the Run lists of blocks 12, 13 and 14, but block 13 is not ordered after block 12, see WARN.
+- **2026-11-07 — A clean landing check goes stale when the default branch moves** — heeded by block 14's first check, which records the `origin/master` tip.
+- **2026-11-07 — A parent branch that shares files with a moving default branch must take the default branch in through a sub-task** — partly heeded: block 14 finds the drift but no block takes the default branch in, see WARN.
+- **2026-11-03 — A stop list checked against a moving default branch needs a rule for changes outside the edited lines** — violated by block 14's first check, see WARN.
+- **2026-11-02 — Describe a fixer a skill runs by everything it writes, and keep the skill's confirm-first promise** — heeded by block 12's "never runs `--fix` without a yes" and by leaving `ASK_WORD` alone.
+- **2026-11-07 — A merge block's pull request must paste each required output** — heeded by "paste every summary line" in blocks 12 and 13.
+
+### What the critic did not check
+
+- `pr_merged.py --contract 2026-11-11-audit-followups-165 --status --json` was not run (no shell). Item 14 and the graph were judged by reading `classify_handoff` and `_parse_depends_on`. The contract's own `ASSUMED` row still needs that run.
+- Landing gate P4 (`children-still-open`): whether t10's sub-issue #364 is closed. The t10 brief defers its closing link, and P4 reads every child of #165.
+- `.claude/registries/INTEGRATION.md`, `.claude/.scout-cache/registry-digest.md` and `.claude/north-stars/` do not exist in this tree. Items 7, 12 and 13 produce no findings.
+- Blocks 1-10 and the Revision 2 dispositions were not re-judged.
