@@ -263,30 +263,44 @@ If `VAL` comes back empty, say the lint could not run (the plugin's script was n
 
 The database guard protects the names listed in the project's `.claude/hooks/db-destructive-guard.rules.json`. That file is an ordinary file, so this step checks the OUTCOME: this tree's list must still hold every name the same file holds at the tip of the default branch (a removed, respelled or space-padded name all fail). Only a person shortens the list, by merging a pull request by hand.
 
-Run the **installed plugin's** `protected_names_check.py`, never the copy in the project: a branch that edits the checker must not be the one that judges it. The lookup therefore has no project branch (`CLAUDE_PLUGIN_ROOT`, then the install folder Claude Code recorded for the plugin; never a `plugins/cache` folder picked by version number or modification time, which can hold an unreviewed version). The project is the tree being verified: `git rev-parse --show-toplevel` of the current folder, and `$CLAUDE_PROJECT_DIR` only when git cannot answer; when neither answers the checker is not started. The check runs with `--fetch`, so the default branch is read fresh when the network allows:
+Run the **installed plugin's** `protected_names_check.py`, never the copy in the project: a branch that edits the checker must not be the one that judges it. The lookup therefore has no project branch (`CLAUDE_PLUGIN_ROOT`, then the install folder Claude Code recorded for the plugin; never a `plugins/cache` folder picked by version number or modification time, which can hold an unreviewed version). The project is the tree being verified, chosen with no program run: the nearest folder at or above the current folder that holds a `.git` entry (a file or a folder), found by a shell loop, then `$CLAUDE_PROJECT_DIR`; when neither exists the checker is not started, so neither a `GIT_DIR` or `GIT_WORK_TREE` in your shell nor a `git` planted on PATH picks the tree. The user-scope entry of `installed_plugins.json` is used first; a project-scope entry only when no user-scope entry exists, and it is matched against the MAIN checkout of the project (a linked worktree's `.git` file names its git folder, whose `commondir` names the common folder), because Claude Code records the main checkout. The checker starts isolated (`-I -B`: no `PYTHONPATH`, no user site, no bytecode cache decides the verdict). The check runs with `--fetch`, so the default branch is read fresh when the network allows:
 
 ```bash
 PNC=
 S=.claude/scripts/protected_names_check.py
+# The tree being verified: the nearest folder at or above the current folder holding a .git entry (no program run), else the launch folder.
+W=$PWD; PROJ=
+while [ -n "$W" ]; do
+  [ -e "$W/.git" ] && { PROJ=$(cd "$W" 2>/dev/null && { pwd -W 2>/dev/null || pwd; }); [ -n "$PROJ" ] || PROJ=$W; break; }
+  W=${W%/*}
+done
+[ -n "$PROJ" ] || PROJ=$CLAUDE_PROJECT_DIR
+# The main checkout of PROJ, read from files (a linked worktree's .git file -> its git folder -> commondir), no program run.
+MAIN=$PROJ
+if [ -f "$PROJ/.git" ] && { read -r L || [ -n "$L" ]; } < "$PROJ/.git"; then
+  GD=${L#gitdir:}; GD=${GD# }; GD=${GD%$'\r'}
+  case "$GD" in /*|?:*) ;; *) GD=$PROJ/$GD ;; esac
+  if [ -f "$GD/commondir" ] && { read -r C || [ -n "$C" ]; } < "$GD/commondir"; then C=${C%$'\r'}; case "$C" in /*|?:*) GD=$C ;; *) GD=$GD/$C ;; esac; fi
+  CM=$(cd "$GD" 2>/dev/null && { pwd -W 2>/dev/null || pwd; })
+  case "$CM" in */.git) MAIN=${CM%/.git} ;; esac
+elif [ -n "$PROJ" ]; then MAIN=$(cd "$PROJ" 2>/dev/null && { pwd -W 2>/dev/null || pwd; }); fi
 if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/$S" ]; then PNC=$CLAUDE_PLUGIN_ROOT/$S
 else
-  # What Claude Code recorded for this plugin (this project's entry, then the user entry): its installPath, and no other cache folder.
+  # What Claude Code recorded for this plugin: the user-scope entry first, a project-scope entry only when there is none; its installPath, and no other cache folder.
   CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
-  ME=$(printf %s "$CLAUDE_PROJECT_DIR" | tr 'A-Z\134' 'a-z/' | tr -s /)
+  ME=$(printf %s "$MAIN" | tr 'A-Z\134' 'a-z/' | tr -s /)
   REC=$(tr -d '\r\n' 2>/dev/null < "$CFG/plugins/installed_plugins.json" | grep -o '"agentic-auto-improve@[^"]*" *: *\[[^]]*]' | grep -o '{[^{}]*}' | tr '\134' / | tr -s /)
-  MINE=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
+  SEL=$(printf '%s\n' "$REC" | grep '"scope" *: *"user"')
+  [ -n "$SEL" ] || SEL=$(printf '%s\n' "$REC" | grep '"scope" *: *"project"' | while IFS= read -r O; do
     P=$(printf %s "$O" | sed -n 's/.*"projectPath" *: *"\([^"]*\)".*/\1/p' | tr 'A-Z' 'a-z' | tr -s /)
     [ -n "$ME" ] && [ "${P%/}" = "${ME%/}" ] && printf '%s\n' "$O"
   done)
-  PNC=$({ printf '%s\n' "$MINE"; printf '%s\n' "$REC" | grep '"scope" *: *"user"'; } | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | while IFS= read -r D; do
+  PNC=$(printf '%s\n' "$SEL" | sed -n 's/.*"installPath" *: *"\([^"]*\)".*/\1/p' | while IFS= read -r D; do
     [ -n "$D" ] && [ -f "${D%/}/$S" ] && { printf '%s\n' "${D%/}/$S"; break; }
   done)
 fi
-# The tree being verified: what git reports for the current folder, else the launch folder.
-PROJ=$(git rev-parse --show-toplevel 2>/dev/null)
-[ -n "$PROJ" ] || PROJ=$CLAUDE_PROJECT_DIR
 if [ -n "$PROJ" ] && [ -n "$PNC" ]; then
-  py -3 "$PNC" --fetch --project "$PROJ"   # macOS and Linux: python3
+  py -3 -I -B "$PNC" --fetch --project "$PROJ"   # macOS and Linux: python3 -I -B
 else
   echo "Step 5.7 NOT RUN: project='$PROJ' checker='$PNC'"
 fi
