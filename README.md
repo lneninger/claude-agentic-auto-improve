@@ -961,8 +961,10 @@ translation would be worse than shipping none.
   every skill. Vendoring remains the path with no such gap.
 - **The four per-project configuration files cannot be delivered by an install.**
   `project-profile.md`, `area-mapping.json`, `work-item-conventions.json` and
-  `.project-tokens.json` describe *your* repository, so you must author them at
-  `.claude/` in your own project even when the rest arrives as a plugin.
+  `.project-tokens.json` describe *your* repository, so an install cannot ship them. The
+  doctor (`plugin_doctor.py --fix`) scaffolds them in your own `.claude/`, and
+  `/auto-improve-finish-install` proposes their content for you to confirm, even when the
+  rest arrives as a plugin.
 - **Not listed in any public directory yet.** Installation is direct from this git
   repository. Cursor's marketplace and OpenAI's plugin directory both require a submission
   and review that is tracked separately.
@@ -994,7 +996,7 @@ agents/          15 generic agents          (plugin root -- Claude and Cursor)
   area-mapping.json          TEMPLATE - schema intact, empty content set
   work-item-conventions.json TEMPLATE - schema intact, empty content set
   project-profile.md         TEMPLATE - blank slot table
-  .project-tokens.json       TEMPLATE - empty token array
+  .project-tokens.json       TEMPLATE - empty token array (the doctor scaffolds a copy in a project)
 README.md
 CONTRIBUTING.md
 LICENSE
@@ -1163,7 +1165,7 @@ both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suit
 `scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
 unfilled `implementers` slot would otherwise walk into. The finish-install script,
 `auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 475 cases. `scripts/tests/test_script_path_resolution.py` is the
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 601 cases. `scripts/tests/test_script_path_resolution.py` is the
 182-check suite for the two-layer path resolver. Shipping the resolver without its suite
 would ship the part that can be wrong and leave behind the part that would say so.
 
@@ -1309,9 +1311,10 @@ destructive-operation guards apply to those commands unchanged.
   An item that changed but is not returned by a later retrieval is not noticed, and briefs
   merged later are not seen.
 - **An empty project-name token list keeps all capture project-scoped.**
-  `.claude/.project-tokens.json` ships with `"tokens": []`, and an empty or missing list fails
-  closed: every candidate is lowered to `project`. Fill the list to let a candidate stay
-  `global`.
+  The doctor scaffolds `.claude/.project-tokens.json` with `"tokens": []`, and an empty or
+  missing list fails closed: every candidate is lowered to `project`. `/auto-improve-finish-install`
+  can fill the list, and writes a token only when you name it. Fill the list to let a candidate
+  stay `global`.
 - **Cursor and Codex MCP naming is untested.** Only the Claude Code form of the tool id is
   assumed, and not yet checked (next item).
 - **The tool id form and the host timeout are unverified.** The `mcp__<server>__<tool>` id form
@@ -1328,7 +1331,8 @@ destructive-operation guards apply to those commands unchanged.
 ## Quick start in a new project
 
 > Vendoring, not installing. To install instead, see [Installing](#installing) — you can
-> skip to step 4, since a plugin install delivers steps 1 to 3 for you.
+> skip to step 3, since a plugin install delivers steps 1 and 2 for you. For step 3, run the
+> doctor and then `/auto-improve-finish-install`.
 >
 > You may have several plugins installed. The skill that finishes this one is named
 > `auto-improve-finish-install`, so its name says which plugin it belongs to.
@@ -1350,7 +1354,14 @@ destructive-operation guards apply to those commands unchanged.
    those folders stays yours and is never synced. A project that still has `## Project:`
    sections follows "Moving a project onto registry layout 2" below.
 
-3. **Fill in the four templates.** `area-mapping.json`, `work-item-conventions.json`,
+3. **Fill in the project-shaped files: run `/auto-improve-finish-install`.** The doctor
+   (`plugin_doctor.py --fix`) scaffolds `area-mapping.json`, `work-item-conventions.json` and
+   `.project-tokens.json`, and the skill's second stage proposes their content from the
+   profile you confirmed in step 4 (run its profile stage first). It shows each proposal next
+   to the evidence that suggested it, writes the files after one confirmation, and never
+   changes a file you already wrote. A token is written only when you name it.
+
+   *By hand instead:* `area-mapping.json`, `work-item-conventions.json`,
    `project-profile.md` and `.project-tokens.json` ship with their schema and an empty
    content set, because their shape is generic and their content is not.
    `.project-tokens.json` is the one to fill in first: an unguarded outbound sync is how
@@ -1362,9 +1373,10 @@ destructive-operation guards apply to those commands unchanged.
    refuses to open sub-issues (`conventions-missing`) rather than create a title without the
    parent. A vendoring project must also list `.claude/scripts/compose_subissue_title.py` in
    its sync configuration's `files` array, or the helper is never delivered. A project whose
-   conventions file was built by the doctor must also fill in `issueTitle.effortTypes`, which
-   the doctor scaffolds empty, until the follow-up lands (issue #51); an empty list makes every
-   effort tag fail `pattern-mismatch`.
+   conventions file was built by the doctor already carries all nine effort tags in
+   `issueTitle.effortTypes`, because the doctor scaffolds them, so it needs no fill-in there.
+   Only `prTitle.map` and `prTitle.order` are project-shaped, and `/auto-improve-finish-install`
+   proposes them (step 3).
 
    **Upgrading from before 0.9.4:** `/task`, `/design-first` and `/ship` now record the outcome
    of the issue offer (the question "should this work get a tracker issue?") in the brief, in an
@@ -1395,7 +1407,7 @@ destructive-operation guards apply to those commands unchanged.
    empty slot reads `none`.
 
 5. **Register the hooks: the same `/auto-improve-finish-install` command does this as its
-   second stage.** Under a plugin install it checks that the hooks are ready to load and
+   third stage.** Under a plugin install it checks that the hooks are ready to load and
    writes nothing. Under a vendored copy it shows the exact `settings.json` change as a diff,
    asks, and writes it with a backup. The file is re-serialised, so the diff can show reflowed
    lines; the meaning is kept, and the diff is exactly what will be written. Either way, the
@@ -1419,8 +1431,9 @@ destructive-operation guards apply to those commands unchanged.
 
 ## Where to start once it is installed
 
-**Once per project, type `/auto-improve-finish-install`.** It finishes the two Quick start
-steps that nobody can finish by copying files: the project profile, and the hooks. Run it
+**Once per project, type `/auto-improve-finish-install`.** It finishes the Quick start
+steps that nobody can finish by copying files: the project profile, the three files built from
+it (the area map, the pull request module tags and the project-name tokens), and the hooks. Run it
 again whenever you like. A second run changes nothing. Under Cursor and Codex it fills in the
 profile and says that hooks are Claude-only in this release.
 

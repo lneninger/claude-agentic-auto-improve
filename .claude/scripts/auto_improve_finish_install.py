@@ -39,6 +39,18 @@ Usage:
   py -3 .claude/scripts/auto_improve_finish_install.py protect-databases --project . [--name <database>]... [--json]
   py -3 .claude/scripts/auto_improve_finish_install.py protect-databases --project . [--name <database>]... --apply \\
       --expect-sha256 <plan hash> [--confirm-narrowing]
+  py -3 .claude/scripts/auto_improve_finish_install.py project-files --project . [--token <text>]... \\
+      [--skip-file area-map|conventions|tokens]... [--json]
+  py -3 .claude/scripts/auto_improve_finish_install.py project-files --project . [--token <text>]... \\
+      [--skip-file ...]... --apply --expect-sha256 <plan hash> [--confirm-narrowing]
+
+The ``project-files`` subcommand (Quick start step 3) proposes content for the three per-project files the doctor
+scaffolds: the area map (``.claude/area-mapping.json``), ``prTitle.map`` and ``prTitle.order`` in
+``.claude/work-item-conventions.json``, and the project-name token list (``.claude/.project-tokens.json``). Areas and
+modules come only from AUTHORED profile slots. Tokens come from four closed sources, pass the exclusion rules, and are
+written only when the operator names them with ``--token``. A file the team already wrote is never changed; one plan
+and one hash cover all three files, and the write is all or none, with a dated backup under
+``.claude/cache/finish-install/``.
 
 The ``protect-databases`` subcommand appends the database names the person confirmed to ``protected_databases`` in
 the project's ``.claude/hooks/db-destructive-guard.rules.json`` (see the section "The database guard's protected
@@ -127,7 +139,7 @@ if _SCRIPTS_DIR not in sys.path:
 
 from pr_merged import DEFAULT_IMPLEMENTERS, DEFAULT_REVIEW_GATES, load_slot  # noqa: E402
 from plugin_doctor import find_plugin_root  # noqa: E402
-from _preview_apply import _atomic_write, _plan_digest  # noqa: E402
+from _preview_apply import _atomic_write, _plan_digest, stage_and_replace  # noqa: E402
 from _plugin_root import (  # noqa: E402
     PLUGIN_NAME, _cache_roots, _claude_home, _load_json_lenient, _manifest_names_plugin, _norm,
     _same_dir, _separate_plugin_root, _version_key)
@@ -205,6 +217,7 @@ REFUSAL_CODES: Tuple[str, ...] = (
     "name-is-disposable",
     "narrowing-unconfirmed",
     "guard-unreadable",
+    "token-invalid",
 )
 
 _ENVIRONMENT_CODES = ("project-unreadable", "template-missing", "hooks-json-missing",
@@ -3903,6 +3916,20 @@ def _load_disposable_patterns(path: Path) -> Optional[List[Any]]:
             sys.modules.pop(added, None)
 
 
+def _disposable_patterns_for(project: Path, root: Optional[Path]) -> Tuple[Optional[List[Any]], Path]:
+    """The guard's disposable-name patterns and the guard file they came from, searching the plugin root's guard
+    first and the project's own second. ``(None, <the first path tried>)`` when no guard file loads, so the caller
+    can name the file in its message. Shared by ``protect-databases`` and ``project-files``."""
+    guard_paths = ([root / Path(*DB_GUARD_REL.split("/"))] if root is not None else []) \
+        + [project / Path(*DB_GUARD_REL.split("/"))]
+    for guard in guard_paths:
+        if guard.is_file():
+            patterns = _load_disposable_patterns(guard)
+            if patterns:
+                return patterns, guard
+    return None, guard_paths[0]
+
+
 def _git_tracked_files(project: Path) -> List[str]:
     return [line for line in _git_output(project, "ls-files").splitlines() if line.strip()]
 
@@ -4102,18 +4129,10 @@ def _plan_protect_databases(project: Path, names: Sequence[str], plugin_root: Op
     # The first admissible plugin tree (CLAUDE_PLUGIN_ROOT first): no ``needs`` test, so a plugin tree without the
     # guard file is never silently replaced by another copy of the plugin.
     root = _separate_plugin_root(project, plugin_root, home)
-    disposable: Optional[List[Any]] = None
-    guard_paths = ([root / Path(*DB_GUARD_REL.split("/"))] if root is not None else []) \
-        + [project / Path(*DB_GUARD_REL.split("/"))]
-    for guard in guard_paths:
-        if guard.is_file():
-            disposable = _load_disposable_patterns(guard)
-            if disposable:
-                break
+    disposable, tried = _disposable_patterns_for(project, root)
     if not disposable:
         return refusal("guard-unreadable", "the database guard file cannot be loaded, so its disposable-name "
-                       "patterns are unknown; update the plugin or repair the guard file",
-                       guard_paths[0] if guard_paths else project / Path(*DB_GUARD_REL.split("/"))), {}
+                       "patterns are unknown; update the plugin or repair the guard file", tried), {}
     confirmed: List[str] = []
     for name in names:
         if not isinstance(name, str) or not DB_NAME_RE.match(name):
@@ -4238,6 +4257,668 @@ def apply_protect_databases(project: Path, names: Sequence[str], expect_sha256: 
 
 
 # =======================================================================================
+# Quick start step 3: the area map, the pull request module tags and the project-name tokens
+# =======================================================================================
+#
+# Contract 2026-11-11-finish-install-step3-proposals. ``project-files`` proposes content for the three per-project
+# files the doctor scaffolds (``.claude/area-mapping.json``, ``prTitle.map`` and ``prTitle.order`` in
+# ``.claude/work-item-conventions.json``, ``.claude/.project-tokens.json``) in ONE plan under ONE hash. A file whose
+# project-shaped part is still as scaffolded (an Unauthored project file) is the only kind it writes, and it writes
+# only that part (a text splice). Areas and modules come from AUTHORED profile slots only; tokens come from four
+# closed sources and are written only when the operator names them with ``--token``.
+
+STEP3_FILES: Tuple[str, ...] = ("area-map", "conventions", "tokens")
+STEP3_PATHS: Dict[str, str] = {"area-map": ".claude/area-mapping.json",
+                               "conventions": ".claude/work-item-conventions.json",
+                               "tokens": ".claude/.project-tokens.json"}
+STEP3_BACKUP_REL = ".claude/cache/finish-install"
+STEP3_GITIGNORE_HINT = ".claude/cache/"
+#: (kind, profile slot), in the order the kinds appear in the area map and in ``prTitle.order``.
+STEP3_KIND_SLOTS: Tuple[Tuple[str, str], ...] = (
+    ("backend", "backend.roots"), ("frontend", "frontend.roots"), ("tests", "test.roots"),
+    ("migrations", "migration.root"), ("auth", "auth.roots"), ("safety-critical", "safety-critical.roots"))
+STEP3_PR_KINDS: Tuple[str, ...] = ("backend", "frontend", "tests", "migrations")
+STEP3_NOT_INFERRED: Tuple[str, ...] = (
+    "vendor and broker names the domain uses (add them by hand)",
+    "the project's own handbook file names (add them by hand)")
+TOKEN_MIN_LENGTH = 4
+TOKEN_MAX_LENGTH = 128
+PLUGIN_TEXT_MAX_BYTES = 1_000_000
+#: Folders of the separate plugin root whose text a token must not occur in (a vendored copy carries the same text).
+PLUGIN_TEXT_FOLDERS: Tuple[str, ...] = (
+    "skills", "agents", ".claude/hooks", ".claude/scripts", ".claude/templates", ".claude/references",
+    ".claude/agreements", ".claude/addons", "scripts", "templates", "references", "agreements", "addons")
+PLUGIN_REGISTRIES_REL = ".claude/registries"
+#: Names a database server owns itself. As a protected name they were harmless; as a token each would stop every sync.
+SYSTEM_DATABASES = frozenset({
+    "master", "model", "msdb", "tempdb", "mssqlsystemresource", "distribution", "ssisdb", "reportserver",
+    "reportservertempdb", "postgres", "template0", "template1", "mysql", "sys", "information_schema",
+    "performance_schema", "admin", "local", "config"})
+#: Words too common to be a project name. The list is closed: changing it is a contract amendment.
+GENERIC_WORDS = frozenset({
+    "app", "apps", "application", "api", "apis", "web", "www", "site", "client", "clients", "server", "servers",
+    "frontend", "backend", "front", "back", "portal", "admin", "worker", "service", "services", "ui",
+    "src", "source", "lib", "libs", "main", "master", "core", "common", "shared", "util", "utils", "test",
+    "tests", "spec", "docs", "data", "database", "config", "default", "local", "public", "private", "static",
+    "assets", "scripts", "tools", "build", "dist",
+    "project", "projects", "demo", "sample", "example", "template",
+    "plugin", "plugins", "claude", "agent", "agents", "skill", "skills", "hook", "hooks"})
+TOKEN_EXCLUSION_MESSAGES: Dict[str, str] = {
+    "invalid-text": "it holds a line break or a control character, or is longer than %d characters" % TOKEN_MAX_LENGTH,
+    "system-database": "it is a database server's own system database; as a token it would stop every outbound sync",
+    "too-short": "it has fewer than %d characters and would match inside unrelated words" % TOKEN_MIN_LENGTH,
+    "generic-word": "it is a generic word that occurs in ordinary text; as a token it would stop every outbound sync",
+    "template-name": "it is a name from the plugin's own rules template, not this project's",
+    "disposable-database": "it is a disposable database name (an allow-listed disposable suffix)",
+    "in-plugin-text": "the text occurs in the plugin's own shipped files, so every outbound sync would stop on it",
+}
+STEP3_NARROWING_STATEMENT = (
+    "Today the project-name token list is empty, so every memory item this project captures stays "
+    "project-scoped. After this change an item stays global unless it contains a listed name, so a name that is "
+    "missing from the list can leave in a global item; the sync's project-name check also starts checking the "
+    "listed names.")
+
+
+def _normalise_root(raw: str) -> Optional[str]:
+    """A profile root as a clean relative path (forward slashes, no ``./`` prefix, no trailing slash), or ``None``
+    when it is absolute (leading slash, UNC, drive letter), empty, ``.``, or holds ``..`` or ``*``: such a root is
+    never proposed."""
+    slashed = raw.strip().replace("\\", "/")
+    if slashed.startswith("/") or re.match(r"[A-Za-z]:", slashed):  # absolute: leading slash, UNC, drive letter
+        return None
+    text = re.sub(r"/+", "/", slashed)
+    while text.startswith("./"):
+        text = text[2:]
+    text = text.rstrip("/")
+    if text in ("", ".") or "*" in text or ".." in text:
+        return None
+    return text
+
+
+def _step3_modules(ctx: Optional[_ProfileCtx]) -> Tuple[List[Dict[str, Any]], List[str], bool]:
+    """One ModuleProposal per authored, safe root of the six profile slots, the roots that were dropped, and
+    whether any root was authored at all (an authored ``none`` holds no root)."""
+    modules: List[Dict[str, Any]] = []
+    dropped: List[str] = []
+    any_root = False
+    if ctx is None or not ctx.existed:
+        return modules, dropped, any_root
+    used: Set[str] = set()
+    for order, (kind, slot) in enumerate(STEP3_KIND_SLOTS):
+        if ctx.kind(slot) != "authored":
+            continue
+        raw_roots = list(load_slot(ctx.base_text, slot))
+        any_root = any_root or bool(raw_roots)
+        safe: List[str] = []
+        for raw in raw_roots:
+            root = _normalise_root(raw)
+            if root is None:
+                dropped.append(raw)
+            elif root.lower() not in {s.lower() for s in safe}:  # the area pattern is lower-cased
+                safe.append(root)
+        for root in sorted(safe):
+            base = kind
+            if len(safe) > 1:
+                last = re.sub(r"[^a-z0-9]+", "-", root.rsplit("/", 1)[-1].lower()).strip("-")
+                base = "%s-%s" % (kind, last) if last else kind
+            slug, n = base, 1
+            while slug in used:
+                n += 1
+                slug = "%s-%d" % (base, n)
+            used.add(slug)
+            if kind in ("auth", "safety-critical"):
+                description = "Safety-critical %s code under %s: a defect here causes irreversible harm" % (kind, root)
+            else:
+                description = "%s code under %s" % (kind.capitalize(), root)
+            modules.append({
+                "kind": kind, "root": root, "slug": slug, "tag": slug.upper(),
+                "patterns": [root.lower() + "/..."], "globs": [root + "/**"], "description": description,
+                "evidence": [_evidence(PROFILE_REL, "profile-slot")], "_order": order})
+    modules.sort(key=lambda m: (m["_order"], m["slug"]))
+    for module in modules:
+        del module["_order"]
+    return modules, dropped, any_root
+
+
+def _profile_note(ctx: Optional[_ProfileCtx], any_root: bool) -> Optional[str]:
+    if ctx is None or not ctx.existed:
+        return "profile-missing"
+    if any_root:
+        return None
+    if any(ctx.kind(slot) != "authored" for _kind, slot in STEP3_KIND_SLOTS):
+        return "profile-has-placeholders"
+    return "roots-authored-none"
+
+
+PROFILE_NOTE_TEXT: Dict[str, str] = {
+    "profile-missing": "there is no project profile; fill the profile first (step 4)",
+    "profile-has-placeholders": "fill the profile first (step 4): no root slot is authored yet",
+    "roots-authored-none": "the profile says this project has no such roots",
+}
+
+
+# --- the token sources ------------------------------------------------------------------
+
+def _unsafe_character(text: str) -> bool:
+    return any(unicodedata.category(ch) in _ENTRY_UNSAFE_CATEGORIES
+               or (unicodedata.category(ch) == "Zs" and ch != " ") for ch in text)
+
+
+def _plugin_text_corpus(root: Path) -> List[Tuple[str, str]]:
+    """``(path relative to the plugin root, lower-cased text)`` of every text file (at most 1 MB) under the closed
+    list of plugin folders, and the registry root files. Read once per run."""
+    files: List[Path] = []
+    for folder in PLUGIN_TEXT_FOLDERS:
+        base = root / Path(*folder.split("/"))
+        if not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(str(base)):
+            dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".git", "node_modules")]
+            files.extend(Path(dirpath) / name for name in filenames)
+    registries = root / Path(*PLUGIN_REGISTRIES_REL.split("/"))
+    if registries.is_dir():
+        try:
+            files.extend(p for p in registries.iterdir() if p.is_file())
+        except OSError:
+            pass
+    texts: List[Tuple[str, str]] = []
+    for path in files:
+        try:
+            if path.stat().st_size > PLUGIN_TEXT_MAX_BYTES:
+                continue
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in data[:8192]:
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            rel = str(path)
+        texts.append((rel, data.decode("utf-8", errors="replace").lower()))
+    return texts
+
+
+class _TokenRules:
+    """The exclusion rules, applied to found strings and to every ``--token``."""
+
+    def __init__(self, plugin_root: Optional[Path]):
+        self.plugin_root = plugin_root
+        self._corpus: Optional[List[Tuple[str, str]]] = None
+        self.matched_file = ""  # the plugin file the last ``in-plugin-text`` verdict came from
+
+    def _in_plugin_text(self, low: str) -> bool:
+        if self.plugin_root is None:
+            return False
+        if self._corpus is None:
+            self._corpus = _plugin_text_corpus(self.plugin_root)
+        for rel, text in self._corpus:
+            if low in text:
+                self.matched_file = rel
+                return True
+        return False
+
+    def message(self, reason: str) -> str:
+        """The plain message for a verdict ``reason`` just returned; ``in-plugin-text`` names the matching file."""
+        text = TOKEN_EXCLUSION_MESSAGES[reason]
+        if reason == "in-plugin-text" and self.matched_file:
+            text += " (found in %s)" % self.matched_file
+        return text
+
+    def reason(self, text: str, proposal: bool, disposable: Optional[List[Any]] = None) -> Optional[str]:
+        """The first rule ``text`` meets, or ``None``. ``template-name`` and ``disposable-database`` apply to found
+        strings only."""
+        if not text or len(text) > TOKEN_MAX_LENGTH or _unsafe_character(text):
+            return "invalid-text"
+        low = text.lower()
+        if low in SYSTEM_DATABASES:
+            return "system-database"
+        if len(text) < TOKEN_MIN_LENGTH:
+            return "too-short"
+        if low in GENERIC_WORDS:
+            return "generic-word"
+        if proposal:
+            if low in {t.lower() for t in TEMPLATE_DATABASES}:
+                return "template-name"
+            if disposable and any(rx.search(text) for _l, rx in disposable):
+                return "disposable-database"
+        if self._in_plugin_text(low):
+            return "in-plugin-text"
+        return None
+
+
+def _bare_package_name(name: str) -> str:
+    return name.rsplit("/", 1)[-1] if name.startswith("@") else name
+
+
+def _step3_token_candidates(project: Path, ctx: Optional[_ProfileCtx], modules: List[Dict[str, Any]],
+                            rules: _TokenRules, root: Optional[Path]
+                            ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, str]]]:
+    """``(proposals, exclusions, source notes)`` from the four closed sources, before the ``already-listed`` mark."""
+    found: List[Dict[str, Any]] = []
+    exclusions: List[Dict[str, Any]] = []
+    notes: List[Dict[str, str]] = []
+    disposable: Optional[List[Any]] = None
+
+    def add(text: str, source: str, evidence: List[Dict[str, Any]]) -> None:
+        for item in found:
+            if item["text"].lower() == text.lower() and item["source"] == source:
+                item["evidence"].extend(e for e in evidence if e not in item["evidence"])
+                return
+        found.append({"text": text, "source": source, "evidence": list(evidence)})
+
+    # project-name: the authored project.name slot
+    if ctx is not None and ctx.existed and ctx.kind("project.name") == "authored":
+        for name in list(load_slot(ctx.base_text, "project.name"))[:1]:
+            add(name, "project-name", [_evidence(PROFILE_REL, "profile-slot")])
+    # frontend-app: angular.json projects, and package.json names under the authored frontend roots
+    frontend_roots = [m["root"] for m in modules if m["kind"] == "frontend"]
+    for folder in [""] + frontend_roots:
+        rel = _join(folder, "angular.json")
+        data = _load_json_lenient(project / Path(*rel.split("/")))
+        projects = data.get("projects") if isinstance(data, dict) else None
+        if isinstance(projects, dict):
+            for key in sorted(projects):
+                if isinstance(key, str):
+                    add(key, "frontend-app", [_evidence(rel, "config-entry")])
+    for folder in frontend_roots:
+        rel = _join(folder, "package.json")
+        data = _load_json_lenient(project / Path(*rel.split("/")))
+        name = data.get("name") if isinstance(data, dict) else None
+        if isinstance(name, str) and name:
+            add(_bare_package_name(name), "frontend-app", [_evidence(rel, "manifest")])
+    # database: names in tracked configuration, and the guard's own protected list
+    rules_problem, _data, protected = _read_db_rules(project / Path(*DB_RULES_REL.split("/")))
+    if rules_problem:
+        notes.append({"source": "database", "reason": "rules-unreadable", "message": rules_problem["message"]})
+    else:
+        disposable, tried = _disposable_patterns_for(project, root)
+        if not disposable:
+            notes.append({"source": "database", "reason": "guard-unreadable",
+                          "message": "the database guard file cannot be loaded (%s), so its disposable-name patterns "
+                                     "are unknown" % tried})
+        else:
+            proposals, excluded = _database_proposals(project, protected, disposable)
+            for entry in proposals:
+                add(entry["name"], "database",
+                    [dict(_evidence(e["path"], "config-entry"), line=e["line"]) for e in entry["evidence"]])
+            for name in protected:
+                add(name, "database", [_evidence(DB_RULES_REL, "config-entry")])
+            for entry in excluded:
+                reason = "system-database" if entry["name"].lower() in SYSTEM_DATABASES else "disposable-database"
+                exclusions.append({"text": entry["name"], "source": "database", "reason": reason,
+                                   "message": TOKEN_EXCLUSION_MESSAGES["system-database"]
+                                   if reason == "system-database" else entry["reason"]})
+    # source-prefix: the first dotted segment shared by two or more tracked project file names
+    by_prefix: Dict[str, List[str]] = {}
+    for rel in sorted(_git_tracked_files(project)):
+        base = posixpath.basename(rel)
+        if base.lower().endswith(".csproj"):
+            by_prefix.setdefault(base[:-len(".csproj")].split(".")[0], []).append(rel)
+    for prefix in sorted(by_prefix):
+        if prefix and len(by_prefix[prefix]) >= 2:
+            add(prefix, "source-prefix", [_evidence(p, "manifest") for p in by_prefix[prefix][:DB_EVIDENCE_MAX]])
+
+    proposals_out: List[Dict[str, Any]] = []
+    order = {"project-name": 0, "frontend-app": 1, "database": 2, "source-prefix": 3}
+    for item in sorted(found, key=lambda i: (order[i["source"]], i["text"].lower())):
+        reason = rules.reason(item["text"], True, disposable)
+        if reason is None:
+            proposals_out.append(item)
+        elif not any(e["text"].lower() == item["text"].lower() and e["source"] == item["source"]
+                     and e["reason"] == reason for e in exclusions):
+            exclusions.append({"text": item["text"], "source": item["source"], "reason": reason,
+                               "message": rules.message(reason)})
+    exclusions.sort(key=lambda e: (order[e["source"]], e["text"].lower(), e["reason"]))
+    return proposals_out, exclusions, notes
+
+
+def _token_refusal(rules: _TokenRules, tokens: Sequence[str], target: Path) -> Optional[Result]:
+    for token in tokens:
+        reason: Optional[str]
+        shown = repr(token)
+        if not isinstance(token, str) or not token.strip():
+            reason, message = "empty", "it is empty"
+        elif token != token.strip():
+            reason, message = "invalid-text", "it begins or ends with whitespace; the script never strips a token"
+        else:
+            reason = rules.reason(token, False)
+            message = rules.message(reason) if reason else ""
+        if reason:
+            return refusal("token-invalid", "--token %s is refused (%s): %s; nothing was written"
+                           % (shown, reason, message), target)
+    return None
+
+
+# --- the three files ----------------------------------------------------------------------
+
+def _step3_authored(name: str, data: Any) -> bool:
+    """True when the project-shaped part of the file already holds content. Raises ``ValueError`` when the expected
+    member is missing or of the wrong type."""
+    if not isinstance(data, dict):
+        raise ValueError("the top level is not an object")
+    if name == "area-map":
+        if not isinstance(data.get("areas"), dict):
+            raise ValueError("areas is missing or is not an object")
+        return bool(data["areas"])
+    if name == "conventions":
+        pr_title = data.get("prTitle")
+        if (not isinstance(pr_title, dict) or not isinstance(pr_title.get("map"), list)
+                or not isinstance(pr_title.get("order"), list)):
+            raise ValueError("prTitle.map and prTitle.order are missing or are not lists")
+        return bool(pr_title["map"]) or bool(pr_title["order"])
+    tokens = data.get("tokens")
+    if not isinstance(tokens, list) or not all(isinstance(t, str) for t in tokens):
+        raise ValueError("tokens is missing or is not a list of strings")
+    return bool(tokens)
+
+
+def _step3_inspect(project: Path, name: str) -> Dict[str, Any]:
+    """Read ``<project>/<the file>`` and nothing else: state is absent, unrecognised, unauthored or authored."""
+    rel = STEP3_PATHS[name]
+    path = project / Path(*rel.split("/"))
+    info: Dict[str, Any] = {"file": name, "rel": rel, "path": path, "old": None, "text": None, "data": None,
+                            "state": "absent", "why": ""}
+    if not os.path.lexists(str(path)):
+        return info
+    try:
+        if os.path.islink(str(path)):
+            raise OSError("it is a symbolic link (the apply would write through it)")
+        if not path.is_file():
+            raise OSError("it is not a regular file")
+        old = path.read_bytes()
+    except OSError as exc:
+        info.update(state="unrecognised", why="the file cannot be read: %s" % exc)
+        return info
+    info["old"] = old
+    try:
+        if old.startswith(b"\xef\xbb\xbf"):
+            raise ValueError("a byte order mark begins the file (the area map reader cannot read it)")
+        text = old.decode("utf-8")
+        data = json.loads(text, object_pairs_hook=_strict_pairs)
+        authored = _step3_authored(name, data)
+    except _DuplicateKey as exc:
+        info.update(state="unrecognised", why="the key %s appears twice" % exc)
+        return info
+    except (ValueError, UnicodeDecodeError) as exc:
+        info.update(state="unrecognised", why="the file is not usable: %s" % exc)
+        return info
+    info.update(text=text, data=data, state="authored" if authored else "unauthored")
+    return info
+
+
+def _span_of(text: str, box: _Box, key: str) -> Tuple[int, int]:
+    n = _member_named(text, box, key)
+    if n is None:
+        raise ValueError("the member %s is missing" % key)
+    _key_start, _key_end, value_start, value_end = box.members[n]
+    return value_start, value_end
+
+
+def _line_indent(text: str, pos: int) -> str:
+    start = text.rfind("\n", 0, pos) + 1
+    return re.match(r"[ \t]*", text[start:]).group(0)  # type: ignore[union-attr]
+
+
+def _step3_splice(name: str, text: str, data: Any, modules: List[Dict[str, Any]], tokens: List[str]) -> str:
+    """The file text with only its project-shaped value spans replaced. Raises ``ValueError`` or ``_SpliceRefused``
+    when the text cannot be spliced or the result fails its own strict re-read."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    indented = re.search(r"\n([ \t]+)\S", text)
+    unit = indented.group(1) if indented else "  "
+    try:
+        top = _open_box(text, _scan_space(text, 0), "the file")
+        edits: List[Tuple[int, int, str]] = []
+        expected = copy.deepcopy(data)
+        if name == "area-map":
+            areas = {m["slug"]: {"description": m["description"], "patterns": m["patterns"]} for m in modules}
+            start, end = _span_of(text, top, "areas")
+            edits.append((start, end, _block_json(areas, _line_indent(text, start), unit, newline)))
+            expected["areas"] = areas
+        elif name == "conventions":
+            pr_modules = [m for m in modules if m["kind"] in STEP3_PR_KINDS]
+            pr_map = [{"tag": m["tag"], "globs": m["globs"], "means": m["description"]} for m in pr_modules]
+            pr_order = [m["tag"] for m in pr_modules]
+            outer_start, _outer_end = _span_of(text, top, "prTitle")
+            inner = _open_box(text, outer_start, "prTitle")
+            for key, value in (("map", pr_map), ("order", pr_order)):
+                start, end = _span_of(text, inner, key)
+                edits.append((start, end, _block_json(value, _line_indent(text, start), unit, newline)))
+                expected["prTitle"][key] = value
+        else:
+            start, end = _span_of(text, top, "tokens")
+            edits.append((start, end, _inline_json(tokens)))
+            expected["tokens"] = tokens
+    except (AttributeError, IndexError) as exc:
+        raise ValueError("the text could not be read for a splice (%s)" % exc)
+    new_text = text
+    for start, end, body in sorted(edits, reverse=True):
+        new_text = new_text[:start] + body + new_text[end:]
+    try:
+        reread = json.loads(new_text, object_pairs_hook=_strict_pairs)
+    except ValueError as exc:
+        raise ValueError("the planned text is not valid JSON (%s)" % exc)
+    if reread != expected:
+        raise ValueError("the planned text failed its own check: only the project-shaped value may change")
+    return new_text
+
+
+def _step3_existing(name: str, data: Any) -> List[str]:
+    """What an authored file already holds, for the report."""
+    if name == "area-map":
+        return list(data["areas"])
+    if name == "conventions":
+        return [m.get("tag") for m in data["prTitle"]["map"] if isinstance(m, dict) and isinstance(m.get("tag"), str)]
+    return list(data["tokens"])
+
+
+def _fold_tokens(tokens: Sequence[str]) -> List[str]:
+    seen: Set[str] = set()
+    out: List[str] = []
+    for token in tokens:
+        if token.lower() not in seen:
+            seen.add(token.lower())
+            out.append(token)
+    return out
+
+
+def _plan_project_files(project: Path, tokens: Sequence[str], skip: Sequence[str], home: Optional[Path]
+                        ) -> Tuple[Optional[Result], Dict[str, Any]]:
+    """What a ``project-files`` run would write, shared by the preview and the apply so both hash the same."""
+    bad, ctx = _load_profile_ctx(project, None, home)
+    if bad is not None and bad.get("code") != "template-missing":
+        return bad, {}
+    if bad is not None:
+        ctx = None
+    skipped = {s for s in skip if s in STEP3_FILES}
+    root = _separate_plugin_root(project, None, home)
+    rules = _TokenRules(root)
+    token_target = project / Path(*STEP3_PATHS["tokens"].split("/"))
+    problem = _token_refusal(rules, list(tokens), token_target)
+    if problem:
+        return problem, {}
+    confirmed = _fold_tokens(list(tokens))
+
+    modules, dropped, any_root = _step3_modules(ctx)
+    note_key = _profile_note(ctx, any_root)
+    proposals, exclusions, source_notes = _step3_token_candidates(project, ctx, modules, rules, root)
+
+    infos = {name: _step3_inspect(project, name) for name in STEP3_FILES}
+    # The preview applies the same link checks as the apply, so it never offers what the apply would refuse.
+    folder_link = _linked_folder_refusal(project, (".claude", ".claude/cache", STEP3_BACKUP_REL), token_target)
+    if folder_link:
+        for info in infos.values():
+            info.update(state="unrecognised", why=folder_link["message"])
+    existing_tokens = {t.lower() for t in infos["tokens"]["data"]["tokens"]} \
+        if infos["tokens"]["state"] in ("authored", "unauthored") else set()
+    for item in proposals:
+        item["already-listed"] = item["text"].lower() in existing_tokens
+
+    pr_modules = [m for m in modules if m["kind"] in STEP3_PR_KINDS]
+    would_be: Dict[str, List[str]] = {
+        "area-map": [m["slug"] for m in modules], "conventions": [m["tag"] for m in pr_modules],
+        "tokens": [t for t in dict.fromkeys(p["text"] for p in proposals) if t.lower() not in existing_tokens]}
+    dropped_note = ("; roots dropped as unsafe: %s" % ", ".join(dropped)) if dropped else ""
+
+    def no_evidence_note(name: str) -> str:
+        if note_key:
+            return PROFILE_NOTE_TEXT[note_key] + dropped_note
+        if name == "conventions":
+            return "no backend, frontend, tests or migrations root is authored in the profile" + dropped_note
+        return "no usable root is authored in the profile" + dropped_note
+
+    entries: List[Dict[str, Any]] = []
+    planned: Dict[str, Optional[bytes]] = {}
+    for name in STEP3_FILES:
+        info = infos[name]
+        entry: Dict[str, Any] = {"file": name, "path": str(info["path"]), "values": [], "basis": "", "evidence": [],
+                                 "note": "", "advice": [], "unified-diff": "", "planned-bytes": None}
+        planned[name] = None
+        have = would_be[name]
+        if name in skipped:
+            entry.update(basis="skipped", note="named by --skip-file; the file is left as it is")
+        elif info["state"] == "absent":
+            entry.update(basis="scaffold-missing",
+                         note="the file is absent; run plugin_doctor.py --fix to scaffold it, then run this again "
+                              "(this command never creates a step-3 file)")
+        elif info["state"] == "unrecognised":
+            entry.update(basis="unrecognised", note="%s; the file is never written" % info["why"])
+        elif info["state"] == "authored":
+            entry.update(basis="kept-authored", values=_step3_existing(name, info["data"]), advice=have,
+                         note="the file already holds authored content and is never changed; what would have been "
+                              "proposed is shown as advice")
+        elif name == "tokens":
+            if confirmed:
+                entry.update(basis="inferred", values=confirmed,
+                             note="exactly the --token values, in the order given; nothing else is written")
+            elif proposals:
+                entry.update(basis="nothing-confirmed", advice=have,
+                             note="tokens were proposed but no --token was given; the file stays as scaffolded")
+            else:
+                entry.update(basis="none-found", note="no token evidence was found; the file stays as scaffolded")
+        else:
+            usable = modules if name == "area-map" else pr_modules
+            if usable:
+                entry.update(basis="inferred", values=have, evidence=[_evidence(PROFILE_REL, "profile-slot")],
+                             note=("from the authored profile roots" + dropped_note))
+            else:
+                entry.update(basis="none-found", note=no_evidence_note(name))
+        if entry["basis"] == "inferred":
+            try:
+                new_text = _step3_splice(name, info["text"], info["data"], modules, confirmed)
+            except (ValueError, _SpliceRefused) as exc:
+                entry.update(basis="unrecognised", values=[], evidence=[],
+                             note="the file cannot be spliced safely (%s); it is never written" % exc)
+            else:
+                planned[name] = new_text.encode("utf-8")
+                entry["unified-diff"] = "".join(difflib.unified_diff(
+                    info["text"].splitlines(keepends=True), new_text.splitlines(keepends=True),
+                    fromfile=str(info["path"]), tofile=str(info["path"])))
+                entry["planned-bytes"] = len(planned[name])
+        entries.append(entry)
+
+    basis_of = {e["file"]: e["basis"] for e in entries}
+    narrows = basis_of["tokens"] == "inferred"
+    narrows_if_tokens = basis_of["tokens"] in ("inferred", "none-found", "nothing-confirmed")
+    parts: List[bytes] = []
+    for name in STEP3_FILES:
+        old = infos[name]["old"]
+        parts.append(old if old is not None else b"absent")
+        parts.append(planned[name] if planned[name] is not None else (old if old is not None else b"absent"))
+    parts.append("\n".join(sorted(tokens)).encode("utf-8"))
+    parts.append("\n".join(sorted(skip)).encode("utf-8"))
+    plan: Dict[str, Any] = {
+        "plugin-root": str(root) if root is not None else None,
+        "plugin-text-check": "checked" if root is not None else "unverifiable",
+        "files": entries, "modules": modules, "token-proposals": proposals, "exclusions": exclusions,
+        "source-notes": source_notes, "not-inferred": list(STEP3_NOT_INFERRED), "narrows": narrows,
+        "narrows-if-tokens": narrows_if_tokens,
+        "narrowing-statement": STEP3_NARROWING_STATEMENT if narrows_if_tokens else "",
+        "backup-dir": "%s/<UTC yyyymmddTHHMMSSZ>/backup" % STEP3_BACKUP_REL,
+        "gitignore-hint": STEP3_GITIGNORE_HINT, "plan-sha256": _plan_digest(*parts),
+        "_infos": infos, "_planned": planned, "_folder_link": folder_link}
+    if note_key:
+        plan["profile-note"] = note_key
+    return None, plan
+
+
+def propose_project_files(project: Path, tokens: Sequence[str] = (), skip: Sequence[str] = (),
+                          claude_home: Optional[Path] = None) -> Dict[str, Any]:
+    """Preview what ``project-files`` would write (ProjectFilesPlan). Writes nothing. ``plan-sha256`` binds each
+    file's old and planned bytes, the sorted ``--token`` list and the sorted ``--skip-file`` list."""
+    problem, plan = _plan_project_files(Path(project), list(tokens), list(skip), claude_home)
+    if problem:
+        return problem
+    result = {"status": "plan"}
+    result.update({k: v for k, v in plan.items() if not k.startswith("_")})
+    return result
+
+
+def _step3_backup_dir(project: Path) -> Path:
+    """``.claude/cache/finish-install/<UTC stamp>/backup``, the registry migration's convention; a ``-2``, ``-3``
+    suffix on the stamp when the folder exists."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = project / Path(*STEP3_BACKUP_REL.split("/"))
+    n = 1
+    while True:
+        folder = base / (stamp if n == 1 else "%s-%d" % (stamp, n))
+        if not os.path.lexists(str(folder)):
+            return folder / "backup"
+        n += 1
+
+
+def apply_project_files(project: Path, tokens: Sequence[str], skip: Sequence[str], expect_sha256: str,
+                        confirm_narrowing: bool = False, claude_home: Optional[Path] = None) -> Dict[str, Any]:
+    """Write every ``inferred`` file the preview showed, all or none. Refused (nothing written) when a ``--token`` is
+    invalid, the plan hash is not the current one, the first tokens narrow memory scope and ``confirm_narrowing`` is
+    false, the ``.claude`` folder is a link, a target moved, or the write fails (every replaced file is restored)."""
+    project = Path(project)
+    problem, plan = _plan_project_files(project, list(tokens), list(skip), claude_home)
+    if problem:
+        return problem
+    token_target = project / Path(*STEP3_PATHS["tokens"].split("/"))
+    if expect_sha256 != plan["plan-sha256"]:
+        return refusal("changed-since-preview",
+                       "a step-3 file, the --token set or the --skip-file set changed since the preview (or the "
+                       "hash was not the plan-sha256); run the preview again", token_target)
+    if plan["_folder_link"]:
+        return plan["_folder_link"]
+    infos, planned = plan["_infos"], plan["_planned"]
+    writes =[(infos[name]["path"], planned[name]) for name in STEP3_FILES if planned[name] is not None]
+    if not writes:
+        return {"status": "nothing-to-do", "files": [{"file": e["file"], "basis": e["basis"]} for e in plan["files"]]}
+    if plan["narrows"] and not confirm_narrowing:
+        return refusal("narrowing-unconfirmed",
+                       "this change narrows memory scope (%s) and was not confirmed; nothing was written. Ask the "
+                       "person the yes-or-no question, then pass --confirm-narrowing" % STEP3_NARROWING_STATEMENT,
+                       token_target)
+    for target, _data in writes:
+        linked = _linked_folder_refusal(project, (".claude", ".claude/cache", STEP3_BACKUP_REL), target)
+        if linked:
+            return linked
+        if os.path.islink(str(target)):
+            return refusal("write-failed", "%s is a symbolic link; the apply would write through it, so nothing "
+                           "was written. Edit the file it points to by hand" % target.name, target)
+    for name in (n for n in STEP3_FILES if planned[n] is not None):
+        info = infos[name]
+        try:
+            current = info["path"].read_bytes() if info["path"].is_file() else None
+        except OSError as exc:
+            return refusal("write-failed", "%s cannot be read again: %s" % (info["rel"], exc), info["path"])
+        if current != info["old"]:
+            return refusal("changed-since-preview", "%s changed while the apply was running" % info["rel"],
+                           info["path"])
+    backup_dir = _step3_backup_dir(project)
+    outcome = stage_and_replace(writes, backup_dir, base=project)
+    if outcome.get("status") != "applied":
+        return outcome
+    return {"status": "applied", "written": outcome["written"], "backup-dir": str(backup_dir),
+            "gitignore-hint": STEP3_GITIGNORE_HINT,
+            "rollback": "copy each file under %s back over its place in the project" % backup_dir,
+            "files": [{"file": e["file"], "basis": e["basis"]} for e in plan["files"]]}
+
+
+# =======================================================================================
 # Command line
 # =======================================================================================
 
@@ -4295,6 +4976,18 @@ def build_parser() -> argparse.ArgumentParser:
                               "because the plan hash covers the names)")
     protect.add_argument("--confirm-narrowing", action="store_true",
                          help="the person answered yes to the narrowing question (needed when no list exists yet)")
+
+    files = sub.add_parser("project-files", parents=[common],
+                           help="step 3: propose the area map, the pull request module tags and the project-name tokens")
+    files.add_argument("--token", action="append", default=[], metavar="TEXT",
+                       help="a project-name token the person kept (repeatable; pass it at preview time too, because "
+                            "the plan hash covers the tokens). Only these are ever written")
+    files.add_argument("--skip-file", action="append", default=[], choices=STEP3_FILES, metavar="FILE",
+                       help="leave this file alone: area-map, conventions or tokens (repeatable; pass it at preview "
+                            "time too)")
+    files.add_argument("--confirm-narrowing", action="store_true",
+                       help="the person answered yes to the memory-scope question (needed when the first tokens are "
+                            "written)")
     return parser
 
 
@@ -4323,8 +5016,40 @@ def _render_text(result: Result) -> str:
     for stale in result.get("stale-exclusions", []):
         out.append("  stale Exclusion kept (matches no row; remove it by hand): %s %s" % (
             stale.get("event"), stale.get("identity")))
-    for item in result.get("files", []):
-        out.append("  file %-60s %s" % (item["path"], item["action"]))
+    if "token-proposals" in result:
+        for item in result["files"]:
+            out.append("  step-3 file %-14s %-18s %s" % (item["file"], item["basis"], item["note"]))
+            if item.get("advice"):
+                out.append("    advice for %s (not written): %s" % (item["file"], ", ".join(item["advice"])))
+        out.append("plugin-text-check: %s" % result["plugin-text-check"])
+        for module in result["modules"]:
+            out.append("  area %-22s %s" % (module["slug"], ", ".join(module["patterns"])))
+        for item in result["token-proposals"]:
+            out.append("  token %-24s %-13s %s%s" % (item["text"], item["source"],
+                                                    ", ".join(e["path"] for e in item["evidence"]),
+                                                    "  (already listed)" if item["already-listed"] else ""))
+        for item in result["exclusions"]:
+            out.append("  excluded %-22s %-13s %s" % (item["text"], item["source"], item["reason"]))
+        for item in result["source-notes"]:
+            out.append("  source note %s: %s" % (item["source"], item["message"]))
+        if result.get("profile-note"):
+            out.append("profile note: " + result["profile-note"])
+        if result.get("narrowing-statement"):
+            out.append("NARROWS MEMORY SCOPE: " + result["narrowing-statement"])
+        out.append("not inferred: " + "; ".join(result["not-inferred"]))
+        out.append("plan-sha256: %s" % result["plan-sha256"])
+        out += [item["unified-diff"] for item in result["files"] if item.get("unified-diff")]
+    elif "gitignore-hint" in result and "written" in result:
+        out += ["  wrote %s" % path for path in result["written"]]
+        out.append("backups: %s" % result["backup-dir"])
+        out.append("add to .gitignore if it is not covered: %s" % result["gitignore-hint"])
+        out.append("rollback: %s" % result["rollback"])
+    else:
+        for item in result.get("files", []):
+            if "action" in item:
+                out.append("  file %-60s %s" % (item["path"], item["action"]))
+            else:
+                out.append("  file %-14s %s" % (item.get("file"), item.get("basis")))
     if result.get("action") == "remove":
         out += ["  row  %-18s %s" % (r["event"], r["command"]) for r in result.get("rows", [])]
         out += ["  kept %-60s %s" % (k["path"], k["reason"]) for k in result.get("kept", [])]
@@ -4413,6 +5138,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                              args.confirm_narrowing, home)
         else:
             result = propose_protect_databases(project, args.name, home)
+    elif args.command == "project-files":
+        if args.apply:
+            result = apply_project_files(project, args.token, args.skip_file, args.expect_sha256 or "",
+                                         args.confirm_narrowing, home)
+        else:
+            result = propose_project_files(project, args.token, args.skip_file, home)
     elif args.command == "addon-remove":
         if args.apply:
             result = apply_addon_removal(project, args.name, args.expect_sha256 or "", home,

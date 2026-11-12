@@ -151,7 +151,7 @@ SCRIPT_ROOT = Path(fi.__file__).resolve().parents[2]
 ENVIRONMENT_CODES = {"project-unreadable", "template-missing", "hooks-json-missing",
                      "project-hook-launcher-missing", "guard-unreadable"}
 
-EVIDENCE_REASONS = {"manifest", "folder-name", "config-entry", "file-exists", "git-remote", "agent-file"}
+EVIDENCE_REASONS = {"manifest", "folder-name", "config-entry", "file-exists", "git-remote", "agent-file", "profile-slot"}
 
 PLUGIN_NAME = "agentic-auto-improve"
 
@@ -8101,6 +8101,1368 @@ class TestProtectDatabases(Base):
         report = fi.readiness_report(self.project, claude_home=self.home, plugin_root=self.plugin, platform="win32")
         self.assertNotIn("auto-improve-database-guard-install", json.dumps(report),
                          msg="nothing to fix, nothing to recommend")
+
+
+# ======================================================================================
+# #21 -- the project-files subcommand (contract 2026-11-11-finish-install-step3-proposals, Quick start step 3).
+# RED: the subcommand, the constants SYSTEM_DATABASES / GENERIC_WORDS, the refusal code token-invalid and the
+# helper _disposable_patterns_for do not exist yet. Every test goes through main() (the command line), so a
+# missing subcommand fails on an assertion about the result (rc / JSON), never at import or collection.
+#
+# SHAPE ASSUMPTIONS, pinned here as this file's convention is (the implementer satisfies them). The command line
+# is the contract's: ``project-files --project <dir> [--token T]... [--skip-file area-map|conventions|tokens]...
+# [--claude-home H] [--json]`` and ``--apply --expect-sha256 <plan hash> [--confirm-narrowing]``.
+#   plan      {"status": "plan", "plan-sha256": hex, "plugin-text-check": "checked"|"unverifiable",
+#              "files": [ProjectFileProposal x3], "modules": [ModuleProposal], "token-proposals": [TokenProposal],
+#              "exclusions": [TokenExclusion], "source-notes": [{"source", "reason", "message"}],
+#              "not-inferred": [str], "narrows": bool, "narrowing-statement": str, "profile-note": str|absent,
+#              "backup-dir": str, "gitignore-hint": ".claude/cache/"}                       exit 0
+#   file      {"file": area-map|conventions|tokens, "path", "values", "basis", "evidence", "note", "advice",
+#              "unified-diff"}   basis in inferred|none-found|kept-authored|scaffold-missing|unrecognised|
+#              skipped|nothing-confirmed
+#   module    {"kind", "root" (normalised), "slug", "tag", "patterns", "globs", "description", "evidence"}
+#   token     {"text", "source", "evidence": [{"path", "reason"}], "already-listed": bool}
+#   exclusion {"text", "source", "reason", "message"}
+#   apply     {"status": "applied", "written": [paths], "backup-dir", "gitignore-hint"} or
+#             {"status": "nothing-to-do"}; refusals are {"status": "refused", "code", "message", "path"}.
+# ======================================================================================
+AREA_REL = ".claude/area-mapping.json"
+CONV_REL = ".claude/work-item-conventions.json"
+TOK_REL = ".claude/.project-tokens.json"
+STEP3_FILES = {"area-map": AREA_REL, "conventions": CONV_REL, "tokens": TOK_REL}
+PROFILE_REL_P = ".claude/project-profile.md"
+SYSTEM_DATABASE_NAMES = {
+    "master", "model", "msdb", "tempdb", "mssqlsystemresource", "distribution", "ssisdb", "reportserver",
+    "reportservertempdb", "postgres", "template0", "template1", "mysql", "sys", "information_schema",
+    "performance_schema", "admin", "local", "config"}
+GENERIC_WORD_NAMES = {
+    "app", "apps", "application", "api", "apis", "web", "www", "site", "client", "clients", "server", "servers",
+    "frontend", "backend", "front", "back", "portal", "admin", "worker", "service", "services", "ui",
+    "src", "source", "lib", "libs", "main", "master", "core", "common", "shared", "util", "utils", "test",
+    "tests", "spec", "docs", "data", "database", "config", "default", "local", "public", "private", "static",
+    "assets", "scripts", "tools", "build", "dist",
+    "project", "projects", "demo", "sample", "example", "template",
+    "plugin", "plugins", "claude", "agent", "agents", "skill", "skills", "hook", "hooks"}
+
+
+class StepThreeBase(Base):
+    """A project with an authored profile, a tracked repository, and the three step-3 files exactly as scaffolded."""
+
+    PROFILE = {"project.name": "Zorbex", "backend.roots": "`src/Zorbex.Api/`", "frontend.roots": "`src/Zorbex.Web/`",
+               "test.roots": "`tests/Zorbex.Tests/`", "migration.root": "`src/Zorbex.Data/Migrations/`",
+               "auth.roots": "none", "safety-critical.roots": "none"}
+
+    def setUp(self):
+        super().setUp()
+        from plugin_doctor import scaffold_for
+        for hooks in (self.plugin / ".claude/hooks", self.project / ".claude/hooks"):
+            hooks.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(GUARD_SOURCE), str(hooks / "db-destructive-guard.py"))
+        self.put_profile(template_text(overrides=self.PROFILE))
+        self.make_files({
+            "src/Zorbex.Web/package.json": '{\n  "name": "@zorbex/webshell",\n  "version": "1.0.0"\n}\n',
+            "angular.json": '{\n  "projects": {\n    "quasarapp": {},\n    "portal": {},\n    "ab": {}\n  }\n}\n',
+            "src/Zorbex.Api/appsettings.json":
+                '{\n  "ConnectionStrings": {\n    "Default": "Server=.;Database=Qwertydb;Trusted_Connection=True;"\n  }\n}\n',
+            "config/extra.json":
+                '{\n  "A": "Server=.;Database=master;",\n  "B": "Server=.;Initial Catalog=postgres;",\n'
+                '  "C": "Server=.;Database=MsDb;",\n  "D": "Server=.;Database=%s;"\n}\n' % DISPOSABLE_NAME,
+            "src/Vexil.Api/Vexil.Api.csproj": "<Project />\n",
+            "src/Vexil.Data/Vexil.Data.csproj": "<Project />\n",
+            "src/Lonely.Only/Lonely.Only.csproj": "<Project />\n",
+            DG_RULES_REL: json.dumps({"protected_databases": ["Ledgerdb"]}, indent=2) + "\n",
+        })
+        git(self.project, "init", "-q")
+        git(self.project, "add", "-A")
+        git(self.project, "commit", "-q", "-m", "fixture")
+        self.area_scaffold = scaffold_for(AREA_REL)
+        self.conv_scaffold = scaffold_for(CONV_REL)
+        self.tok_scaffold = (SCRIPT_ROOT / ".claude" / ".project-tokens.json").read_text(encoding="utf-8")
+        self.assertIsNotNone(self.area_scaffold, msg="fixture: the doctor scaffolds the area map")
+        self.assertIsNotNone(self.conv_scaffold, msg="fixture: the doctor scaffolds the conventions")
+        self.write_step3()
+
+    # -- fixtures -------------------------------------------------------------------------------
+    def write_step3(self, area=None, conv=None, tok=None):
+        for rel, content in ((AREA_REL, area if area is not None else self.area_scaffold),
+                             (CONV_REL, conv if conv is not None else self.conv_scaffold),
+                             (TOK_REL, tok if tok is not None else self.tok_scaffold)):
+            (self.project / rel).write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
+
+    def track(self, files):
+        self.make_files(files)
+        git(self.project, "add", "-A")
+
+    def set_profile(self, **overrides):
+        merged = dict(self.PROFILE)
+        slot_of = {"project_name": "project.name", "backend_roots": "backend.roots", "frontend_roots": "frontend.roots",
+                   "test_roots": "test.roots", "migration_root": "migration.root", "auth_roots": "auth.roots",
+                   "safety_critical_roots": "safety-critical.roots"}
+        merged.update({slot_of[k]: v for k, v in overrides.items()})
+        self.put_profile(template_text(overrides=merged))
+
+    def plant_in_plugin(self, rel, text):
+        p = self.plugin / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def read(self, rel):
+        return (self.project / rel).read_bytes()
+
+    def three(self):
+        return {rel: self.read(rel) for rel in STEP3_FILES.values()}
+
+    # -- command line -----------------------------------------------------------------------------
+    def argv(self, tokens=(), skip=(), apply=False, sha=None, confirm=False, project=None):
+        argv = ["project-files", "--project", str(project or self.project), "--json", "--claude-home", str(self.home)]
+        for t in tokens:
+            argv += ["--token", t]
+        for s in skip:
+            argv += ["--skip-file", s]
+        if apply:
+            argv.append("--apply")
+        if sha is not None:
+            argv += ["--expect-sha256", sha]
+        if confirm:
+            argv.append("--confirm-narrowing")
+        return argv
+
+    def run_pf(self, patcher=None, **kw):
+        if patcher is None:
+            return self.cli(self.argv(**kw))
+        with patcher:
+            return self.cli(self.argv(**kw))
+
+    def preview(self, tokens=(), skip=(), patcher=None):
+        rc, out, parsed = self.run_pf(tokens=tokens, skip=skip, patcher=patcher)
+        self.assertIsInstance(parsed, dict, msg="project-files must print one JSON object (rc=%r, stdout=%r)" % (rc, out[:300]))
+        self.assertEqual(parsed.get("status"), "plan", msg="a preview is a plan: %r" % (parsed,))
+        self.assertEqual(rc, 0, msg="a preview exits 0")
+        return parsed
+
+    def apply(self, tokens=(), skip=(), confirm=False, sha=None, patcher=None):
+        if sha is None:
+            sha = self.need(self.preview(tokens, skip, patcher), "plan-sha256", "the plan hash")
+        return self.run_pf(tokens=tokens, skip=skip, apply=True, sha=sha, confirm=confirm, patcher=patcher)
+
+    def applied(self, tokens=(), skip=(), confirm=None, patcher=None):
+        confirm = bool(tokens) if confirm is None else confirm
+        rc, out, parsed = self.apply(tokens, skip, confirm, patcher=patcher)
+        self.assertIsInstance(parsed, dict, msg="stdout=%r" % out[:300])
+        self.assertEqual((rc, parsed.get("status")), (0, "applied"), msg="an apply writes: %r" % (parsed,))
+        return parsed
+
+    def assert_refused(self, rc, parsed, code, why):
+        self.assertIsInstance(parsed, dict, msg="%s: a refusal prints one JSON object (rc=%r)" % (why, rc))
+        self.assertEqual(parsed.get("status"), "refused", msg="%s: %r" % (why, parsed))
+        self.assertRefused(parsed, code, why)
+        self.assertEqual(rc, 3 if code in ENVIRONMENT_CODES else 2, msg="%s: exit class" % why)
+
+    def refused_preview(self, code, why, tokens=(), skip=(), project=None, patcher=None):
+        before = snapshot(self.tmp)
+        rc, out, parsed = self.run_pf(tokens=tokens, skip=skip, project=project, patcher=patcher)
+        self.assert_refused(rc, parsed, code, why)
+        self.assertTreeSame(before, "%s: nothing changed" % why)
+        return parsed
+
+    # -- plan readers -------------------------------------------------------------------------------
+    def files_of(self, plan):
+        files = self.need(plan, "files", "one entry per step-3 file")
+        self.assertEqual(sorted(f.get("file") for f in files), sorted(STEP3_FILES),
+                         msg="exactly one entry for each of the three files: %r" % (files,))
+        return {f["file"]: f for f in files}
+
+    def basis(self, plan, name):
+        return self.files_of(plan)[name].get("basis")
+
+    def modules(self, plan):
+        return {m.get("slug"): m for m in self.need(plan, "modules", "the proposed modules")}
+
+    def token_rows(self, plan, text, source=None):
+        return [p for p in self.need(plan, "token-proposals", "the token proposals")
+                if str(p.get("text", "")).lower() == text.lower() and (source is None or p.get("source") == source)]
+
+    def exclusion_rows(self, plan, text):
+        return [e for e in self.need(plan, "exclusions", "the exclusions") if str(e.get("text", "")).lower() == text.lower()]
+
+    def no_plugin_text(self):
+        """The plugin-text check unverifiable: no plugin root resolves.
+
+        The patch replaces the module-level name ``fi._separate_plugin_root``, so it reaches every call site in the
+        script (the profile, add-on, protect-databases and project-files paths), not only the one in
+        ``_plan_project_files``. A test that needs only the project-files lookup unverifiable must not run other
+        subcommands under it."""
+        return mock.patch.object(fi, "_separate_plugin_root", return_value=None)
+
+
+# ======================================================================================
+# the closed constants, the new refusal code and the extracted helper
+# ======================================================================================
+class TestStepThreeVocabulary(StepThreeBase):
+    def test_token_invalid_is_a_correctable_refusal_code(self):
+        self.assertIn("token-invalid", REFUSAL_CODES, msg="the one new refusal code of project-files")
+        self.assertEqual(EXIT_CLASS.get("token-invalid"), 2, msg="correctable: exit class 2")
+
+    def test_system_databases_is_exactly_the_contract_list(self):
+        names = getattr(fi, "SYSTEM_DATABASES", None)
+        self.assertIsNotNone(names, msg="SYSTEM_DATABASES must exist in the script")
+        self.assertEqual({str(n).lower() for n in names}, SYSTEM_DATABASE_NAMES)
+
+    def test_generic_words_is_exactly_the_contract_list(self):
+        words = getattr(fi, "GENERIC_WORDS", None)
+        self.assertIsNotNone(words, msg="GENERIC_WORDS must exist in the script")
+        self.assertEqual({str(w).lower() for w in words}, GENERIC_WORD_NAMES)
+
+    def test_the_guard_file_search_is_a_shared_helper_that_returns_the_guards_patterns(self):
+        helper = getattr(fi, "_disposable_patterns_for", None)
+        self.assertIsNotNone(helper, msg="_disposable_patterns_for(project, root) must be extracted from _plan_protect_databases")
+        patterns, tried = helper(self.project, self.plugin)
+        self.assertTrue(patterns, msg="the real guard's patterns load from the plugin root's guard first")
+        self.assertTrue(any(rx.search(DISPOSABLE_NAME) for _l, rx in patterns),
+                        msg="and they are the guard's own disposable-name patterns")
+
+    def test_the_helper_returns_none_and_the_path_it_tried_when_no_guard_loads(self):
+        helper = getattr(fi, "_disposable_patterns_for", None)
+        self.assertIsNotNone(helper, msg="_disposable_patterns_for must exist")
+        for hooks in (self.plugin / ".claude/hooks", self.project / ".claude/hooks"):
+            (hooks / "db-destructive-guard.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        patterns, tried = helper(self.project, self.plugin)
+        self.assertIsNone(patterns, msg="a guard with no DISPOSABLE_RE cannot be loaded")
+        self.assertTrue(str(tried).strip(), msg="the path it tried is returned for the message")
+
+
+# ======================================================================================
+# the preview: one plan, three files
+# ======================================================================================
+class TestStepThreePreview(StepThreeBase):
+    def test_a_preview_is_one_plan_with_an_entry_for_each_of_the_three_files(self):
+        plan = self.preview()
+        self.assertRegex(self.need(plan, "plan-sha256", "the plan hash"), r"^[0-9a-f]{64}$")
+        self.assertEqual(plan.get("plugin-text-check"), "checked", msg="a separate plugin root resolves in this fixture")
+        self.assertEqual(sorted(self.files_of(plan)), ["area-map", "conventions", "tokens"])
+
+    def test_a_preview_writes_nothing(self):
+        before = snapshot(self.tmp)
+        self.preview(tokens=["Zorbex"])
+        self.assertTreeSame(before, "a preview changes no byte")
+
+    def test_the_plan_hash_is_stable_and_covers_the_tokens_and_the_skip_list(self):
+        a = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        self.assertEqual(a, self.need(self.preview(["Zorbex"]), "plan-sha256", "again"), msg="the same plan, the same hash")
+        self.assertNotEqual(a, self.need(self.preview(["Vexil"]), "plan-sha256", "other token"))
+        self.assertNotEqual(a, self.need(self.preview(["Zorbex"], skip=["area-map"]), "plan-sha256", "other skip"))
+
+    def test_the_plan_says_what_it_does_not_infer(self):
+        text = json.dumps(self.need(self.preview(), "not-inferred", "the fixed list")).lower()
+        self.assertIn("vendor", text)
+        self.assertIn("handbook", text)
+
+    def test_an_unauthored_area_map_is_inferred_one_area_per_authored_root(self):
+        plan = self.preview()
+        self.assertEqual(self.basis(plan, "area-map"), "inferred")
+        mods = self.modules(plan)
+        self.assertEqual(sorted(mods), ["backend", "frontend", "migrations", "tests"], msg="slug is the kind for one root")
+        be = mods["backend"]
+        self.assertEqual((be.get("kind"), be.get("root"), be.get("tag")), ("backend", "src/Zorbex.Api", "BACKEND"))
+        self.assertEqual(be.get("patterns"), ["src/zorbex.api/..."], msg="area pattern: lowercased root plus /...")
+        self.assertEqual(be.get("globs"), ["src/Zorbex.Api/**"], msg="prTitle glob: case kept, root plus /**")
+        self.assertTrue(str(be.get("description", "")).strip())
+
+    def test_every_module_cites_the_profile_slot_that_named_its_root(self):
+        for slug, mod in self.modules(self.preview()).items():
+            evidence = self.need(mod, "evidence", "evidence for " + slug)
+            self.assertTrue(evidence, msg="%s carries evidence" % slug)
+            self.assertEqual(evidence[0].get("reason"), "profile-slot", msg="the closed set gains profile-slot")
+            self.assertEqual(evidence[0].get("path"), PROFILE_REL_P)
+
+    def test_conventions_are_inferred_with_the_order_by_kind_then_slug(self):
+        plan = self.preview()
+        self.assertEqual(self.basis(plan, "conventions"), "inferred")
+        self.applied()
+        pr = json.loads(self.read(CONV_REL).decode("utf-8"))["prTitle"]
+        self.assertEqual(pr["order"], ["BACKEND", "FRONTEND", "TESTS", "MIGRATIONS"])
+        self.assertEqual([m["tag"] for m in pr["map"]], ["BACKEND", "FRONTEND", "TESTS", "MIGRATIONS"])
+
+    def test_several_roots_in_one_slot_are_named_by_kind_and_last_folder_with_a_collision_suffix(self):
+        self.set_profile(backend_roots="`src/Zorbex.Api/`, `src/Zorbex.Worker`, `a/core`, `b/core`")
+        slugs = sorted(s for s in self.modules(self.preview()) if str(s).startswith("backend"))
+        self.assertEqual(slugs, ["backend-core", "backend-core-2", "backend-zorbex-api", "backend-zorbex-worker"],
+                         msg="lowercase [a-z0-9-]; a collision gets -2 in sorted root order")
+
+    def test_auth_and_safety_critical_areas_say_they_are_safety_critical_and_are_not_pr_modules(self):
+        self.set_profile(auth_roots="`src/Zorbex.Auth/`", safety_critical_roots="`src/Zorbex.Ledger/`")
+        mods = self.modules(self.preview())
+        for slug in ("auth", "safety-critical"):
+            self.assertIn(slug, mods, msg="an authored %s root is an area" % slug)
+            self.assertIn("safety-critical", mods[slug].get("description", "").lower())
+        self.applied()
+        tags = [m["tag"] for m in json.loads(self.read(CONV_REL).decode("utf-8"))["prTitle"]["map"]]
+        self.assertEqual(tags, ["BACKEND", "FRONTEND", "TESTS", "MIGRATIONS"],
+                         msg="only the four kinds become prTitle modules")
+
+    def test_an_unsafe_root_gives_no_proposal_and_the_note_names_it(self):
+        self.set_profile(backend_roots="`../outside`, `src/Zorbex.Api/`, `*`, `.`")
+        plan = self.preview()
+        backend = [m for m in self.need(plan, "modules", "modules") if m.get("kind") == "backend"]
+        self.assertEqual([m.get("root") for m in backend], ["src/Zorbex.Api"], msg="only the safe root is proposed")
+        self.assertIn("../outside", json.dumps(plan), msg="the note names the root that was dropped")
+
+    def test_a_seed_adjacency_is_never_proposed(self):
+        self.applied()
+        areas = json.loads(self.read(AREA_REL).decode("utf-8"))["areas"]
+        self.assertTrue(areas, msg="control: areas were written")
+        self.assertTrue(all("seed_adjacency" not in body for body in areas.values()))
+
+    def test_only_the_step_three_files_of_the_project_are_read(self):
+        # a plugin-root copy of the area map must not be judged or filled (area_mapping_path() is never used)
+        decoy = json.dumps({"areas": {"decoy": {"description": "d", "patterns": ["x/..."]}}})
+        self.plant_in_plugin(AREA_REL, decoy)
+        self.assertEqual(self.basis(self.preview(), "area-map"), "inferred",
+                         msg="the project's own scaffold is judged, not the plugin's authored copy")
+        self.applied()
+        self.assertEqual((self.plugin / AREA_REL).read_text(encoding="utf-8"), decoy, msg="the plugin copy is never written")
+
+
+# ======================================================================================
+# the profile-note: why nothing is proposed
+# ======================================================================================
+class TestStepThreeProfileNote(StepThreeBase):
+    def _assert_nothing_proposed(self, note):
+        plan = self.preview()
+        self.assertEqual(plan.get("profile-note"), note)
+        for name in ("area-map", "conventions"):
+            self.assertEqual(self.basis(plan, name), "none-found", msg="%s: no authored root to propose from" % name)
+            self.assertTrue(str(self.files_of(plan)[name].get("note", "")).strip(), msg="the note names why")
+        before = self.three()
+        rc, out, parsed = self.apply()
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg="%r" % (parsed,))
+        self.assertEqual(self.three(), before, msg="none-found leaves every file byte-identical")
+
+    def test_a_missing_profile_is_profile_missing(self):
+        (self.project / PROFILE_REL_P).unlink()
+        self._assert_nothing_proposed("profile-missing")
+
+    def test_a_profile_of_placeholders_is_profile_has_placeholders(self):
+        self.put_profile(template_text())
+        self._assert_nothing_proposed("profile-has-placeholders")
+
+    def test_a_profile_with_missing_rows_is_profile_has_placeholders_not_roots_authored_none(self):
+        self.put_profile(template_text(drop=("backend.roots", "frontend.roots", "test.roots", "migration.root",
+                                             "auth.roots", "safety-critical.roots")))
+        self._assert_nothing_proposed("profile-has-placeholders")
+
+    def test_six_authored_none_slots_are_roots_authored_none(self):
+        self.set_profile(backend_roots="none", frontend_roots="none", test_roots="none", migration_root="none")
+        self._assert_nothing_proposed("roots-authored-none")
+
+    def test_with_one_authored_root_there_is_no_profile_note(self):
+        self.set_profile(frontend_roots="none", test_roots="none", migration_root="none")
+        plan = self.preview()
+        self.assertIsNone(plan.get("profile-note"), msg="an authored root means no note")
+        self.assertEqual(sorted(self.modules(plan)), ["backend"])
+
+
+# ======================================================================================
+# per-file states: kept-authored, scaffold-missing, unrecognised, skipped
+# ======================================================================================
+AUTHORED = {
+    "area-map": ("area", '{"areas": {"mine": {"description": "mine", "patterns": ["lib/..."]}}}\n', "backend"),
+    "conventions": ("conv", '{"prTitle": {"map": [{"tag": "MINE", "globs": ["lib/**"], "means": "m"}], "order": ["MINE"]}}\n',
+                    "BACKEND"),
+    "tokens": ("tok", '{"tokens": ["Existing"], "allowed": [], "project": ""}\n', "Zorbex"),
+}
+
+
+class TestStepThreeFileStates(StepThreeBase):
+    def test_an_authored_file_is_kept_byte_identical_and_the_advice_is_shown(self):
+        for name, (kwarg, text, advice_word) in AUTHORED.items():
+            with self.subTest(file=name):
+                self.write_step3()
+                plan = self.preview(["Zorbex"])
+                self.assertEqual(self.basis(plan, name), "inferred", msg="positive control: the scaffold is unauthored")
+                self.write_step3(**{kwarg: text})
+                plan = self.preview(["Zorbex"])
+                entry = self.files_of(plan)[name]
+                self.assertEqual(entry.get("basis"), "kept-authored", msg="an edited file is detected")
+                self.assertIn(advice_word.lower(), json.dumps(entry.get("advice")).lower(),
+                              msg="what would have been proposed is shown as advice")
+                self.applied(["Zorbex"], confirm=True)
+                self.assertEqual(self.read(STEP3_FILES[name]), text.encode("utf-8"),
+                                 msg="an authored file is never overwritten")
+
+    def test_a_conventions_file_with_only_one_of_the_two_lists_filled_is_authored(self):
+        self.write_step3(conv='{"prTitle": {"map": [], "order": ["MINE"]}}\n')
+        self.assertEqual(self.basis(self.preview(), "conventions"), "kept-authored",
+                         msg="both lists must be empty for the file to be unauthored")
+
+    def test_an_authored_token_list_gets_advice_and_marks_the_listed_tokens(self):
+        self.write_step3(tok='{"tokens": ["Zorbex"], "allowed": [], "project": ""}\n')
+        plan = self.preview(["Vexil"])
+        self.assertEqual(self.basis(plan, "tokens"), "kept-authored")
+        zorbex = self.token_rows(plan, "Zorbex", "project-name")
+        vexil = self.token_rows(plan, "Vexil", "source-prefix")
+        self.assertTrue(zorbex and vexil, msg="the proposals are still shown")
+        self.assertIs(zorbex[0].get("already-listed"), True)
+        self.assertIs(vexil[0].get("already-listed"), False)
+
+    def test_an_absent_file_is_scaffold_missing_and_is_never_created(self):
+        for name, rel in STEP3_FILES.items():
+            with self.subTest(file=name):
+                self.write_step3()
+                (self.project / rel).unlink()
+                plan = self.preview(["Zorbex"])
+                entry = self.files_of(plan)[name]
+                self.assertEqual(entry.get("basis"), "scaffold-missing")
+                self.assertIn("plugin_doctor", str(entry.get("note", "")), msg="the remedy is the doctor's --fix")
+                self.applied(["Zorbex"], confirm=True)
+                self.assertFalse((self.project / rel).exists(), msg="the script never creates a step-3 file")
+
+    UNRECOGNISED = {
+        "area-map": {"bom": lambda s: b"\xef\xbb\xbf" + s.encode("utf-8"),
+                     "duplicate-key": lambda s: b'{"areas": {}, "areas": {}}\n',
+                     "member-missing": lambda s: b'{"$comment": "x"}\n',
+                     "wrong-type": lambda s: b'{"areas": []}\n',
+                     "not-json": lambda s: b"{ not json"},
+        "conventions": {"bom": lambda s: b"\xef\xbb\xbf" + s.encode("utf-8"),
+                        "duplicate-key": lambda s: b'{"prTitle": {"map": [], "order": []}, "prTitle": {"map": [], "order": []}}\n',
+                        "member-missing": lambda s: b'{"issueTitle": {}}\n',
+                        "wrong-type": lambda s: b'{"prTitle": {"map": {}, "order": []}}\n'},
+        "tokens": {"bom": lambda s: b"\xef\xbb\xbf" + s.encode("utf-8"),
+                   "duplicate-key": lambda s: b'{"tokens": [], "tokens": []}\n',
+                   "member-missing": lambda s: b'{"allowed": []}\n',
+                   "wrong-type": lambda s: b'{"tokens": "x"}\n'},
+    }
+
+    def test_an_unreadable_file_is_unrecognised_never_written_and_does_not_block_the_others(self):
+        scaffolds = {"area-map": self.area_scaffold, "conventions": self.conv_scaffold, "tokens": self.tok_scaffold}
+        for name, variants in self.UNRECOGNISED.items():
+            for label, build in variants.items():
+                with self.subTest(file=name, variant=label):
+                    self.write_step3()
+                    bad = build(scaffolds[name])
+                    (self.project / STEP3_FILES[name]).write_bytes(bad)
+                    others = [n for n in STEP3_FILES if n != name]
+                    plan = self.preview(["Zorbex"])
+                    self.assertEqual(self.basis(plan, name), "unrecognised")
+                    self.assertEqual({n: self.basis(plan, n) for n in others},
+                                     {n: "inferred" for n in others}, msg="one bad file never blocks the other two")
+                    self.applied(["Zorbex"])
+                    self.assertEqual(self.read(STEP3_FILES[name]), bad, msg="an unrecognised file is never written")
+
+    def test_a_skipped_file_is_left_alone_and_the_others_are_written(self):
+        before = self.read(AREA_REL)
+        plan = self.preview(["Zorbex"], skip=["area-map"])
+        self.assertEqual(self.basis(plan, "area-map"), "skipped")
+        self.applied(["Zorbex"], skip=["area-map"])
+        self.assertEqual(self.read(AREA_REL), before)
+        self.assertNotEqual(self.read(CONV_REL), self.conv_scaffold.encode("utf-8"), msg="control: the others were written")
+
+    def test_skipping_every_file_writes_nothing(self):
+        before = snapshot(self.project)
+        rc, out, parsed = self.apply(["Zorbex"], skip=["area-map", "conventions", "tokens"])
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg="%r" % (parsed,))
+        self.assertTreeSame(before, "nothing is written", root=self.project)
+
+
+# ======================================================================================
+# the splice and the round trip through the readers the project already uses
+# ======================================================================================
+class TestStepThreeSpliceAndRoundTrip(StepThreeBase):
+    def test_the_area_map_changes_only_the_areas_value(self):
+        old = self.area_scaffold
+        self.applied()
+        new = self.read(AREA_REL).decode("utf-8")
+        head = old[:old.index('"areas": ') + len('"areas": ')]
+        tail = old[old.index('"areas": {}') + len('"areas": {}'):]
+        self.assertTrue(new.startswith(head), msg="every byte before the areas value is unchanged")
+        self.assertTrue(new.endswith(tail), msg="every byte after it is unchanged")
+        self.assertNotEqual(new, old, msg="control: the value did change")
+
+    def test_the_conventions_change_only_the_two_pr_title_values(self):
+        old = self.conv_scaffold
+        self.applied()
+        new = self.read(CONV_REL).decode("utf-8")
+        old_obj, new_obj = json.loads(old), json.loads(new)
+        self.assertNotEqual(new_obj["prTitle"], old_obj["prTitle"], msg="control: prTitle changed")
+        for key in old_obj:
+            if key != "prTitle":
+                self.assertEqual(new_obj[key], old_obj[key], msg="block %s is unchanged" % key)
+        self.assertEqual(set(new_obj["prTitle"]), {"map", "order"})
+        head = old[:old.index('"map": ') + len('"map": ')]
+        tail = old[old.index('"order": []') + len('"order": []'):]
+        self.assertTrue(new.startswith(head), msg="every byte before the map value is unchanged")
+        self.assertTrue(new.endswith(tail), msg="every byte after the order value is unchanged")
+
+    def test_the_token_file_changes_only_the_tokens_value_and_keeps_crlf(self):
+        crlf = self.tok_scaffold.replace("\r\n", "\n").replace("\n", "\r\n")
+        self.write_step3(tok=crlf)
+        self.applied(["Zorbex", "Vexil"])
+        new = self.read(TOK_REL).decode("utf-8")
+        head = crlf[:crlf.index('"tokens": ') + len('"tokens": ')]
+        tail = crlf[crlf.index('"tokens": []') + len('"tokens": []'):]
+        self.assertTrue(new.startswith(head), msg="every byte before the tokens value is unchanged")
+        self.assertTrue(new.endswith(tail), msg="every byte after it is unchanged (allowed and project included)")
+        self.assertEqual(json.loads(new)["tokens"], ["Zorbex", "Vexil"])
+
+    def test_the_written_files_re_read_through_the_projects_own_readers(self):
+        import derive_area
+        import land_contract
+        import memory_boundary
+        import _registry_layout
+        plan = self.preview(["Zorbex", "Vexil"])
+        mods = self.modules(plan)
+        self.applied(["Zorbex", "Vexil"])
+        mapping = derive_area.load_area_mapping(self.project / AREA_REL)
+        self.assertEqual(mapping, {slug: m["patterns"] for slug, m in mods.items()},
+                         msg="derive_area reads exactly the proposed slugs and patterns")
+        pr_title = json.loads(self.read(CONV_REL).decode("utf-8"))["prTitle"]
+        samples = {"backend": "src/Zorbex.Api/Program.cs", "frontend": "src/Zorbex.Web/main.ts",
+                   "tests": "tests/Zorbex.Tests/ProgramTests.cs", "migrations": "src/Zorbex.Data/Migrations/0001_init.cs"}
+        for slug, path in samples.items():
+            self.assertEqual(land_contract.module_tag_reading([path], pr_title)["tags"], [mods[slug]["tag"]],
+                             msg="a path under the %s root reads as that root's tag" % slug)
+        self.assertEqual(memory_boundary.token_list(self.project), ["Zorbex", "Vexil"])
+        self.assertEqual(_registry_layout.load_project_tokens(self.project), (("Zorbex", "Vexil"), ()))
+
+    def test_roots_written_with_backslashes_dot_slash_and_a_trailing_slash_still_round_trip(self):
+        import derive_area
+        import land_contract
+        self.set_profile(backend_roots="`src\\Zorbex.Api\\`", frontend_roots="`./src//Zorbex.Web/`",
+                         migration_root="`src/Zorbex.Data/Migrations/`")
+        mods = self.modules(self.preview())
+        self.assertEqual(mods["backend"]["root"], "src/Zorbex.Api", msg="backslashes become / and the trailing slash goes")
+        self.assertEqual(mods["frontend"]["root"], "src/Zorbex.Web", msg="./ and repeated / are removed")
+        self.applied()
+        mapping = derive_area.load_area_mapping(self.project / AREA_REL)
+        self.assertEqual(mapping["backend"], ["src/zorbex.api/..."])
+        self.assertEqual(mapping["frontend"], ["src/zorbex.web/..."])
+        pr_title = json.loads(self.read(CONV_REL).decode("utf-8"))["prTitle"]
+        for path, tag in (("src/Zorbex.Api/Program.cs", "BACKEND"), ("src/Zorbex.Web/main.ts", "FRONTEND"),
+                          ("src/Zorbex.Data/Migrations/0001_init.cs", "MIGRATIONS")):
+            self.assertEqual(land_contract.module_tag_reading([path], pr_title)["tags"], [tag],
+                             msg="the glob matches: %s -> %s (a mixed-case root keeps its case)" % (path, tag))
+
+
+# ======================================================================================
+# tokens: the four sources
+# ======================================================================================
+class TestStepThreeTokenSources(StepThreeBase):
+    def test_each_of_the_four_sources_finds_its_proposal_with_evidence(self):
+        plan = self.preview()
+        for text, source in (("Zorbex", "project-name"), ("webshell", "frontend-app"), ("quasarapp", "frontend-app"),
+                             ("Qwertydb", "database"), ("Ledgerdb", "database"), ("Vexil", "source-prefix")):
+            rows = self.token_rows(plan, text, source)
+            self.assertEqual(len(rows), 1, msg="%s from %s: %r" % (text, source, plan.get("token-proposals")))
+            self.assertTrue(self.need(rows[0], "evidence", "evidence of " + text), msg="%s carries evidence" % text)
+            self.assertIn("already-listed", rows[0])
+
+    def test_the_npm_scope_is_removed_from_a_package_name(self):
+        plan = self.preview()
+        self.assertTrue(self.token_rows(plan, "webshell"), msg="control: the name is proposed")
+        self.assertFalse(self.token_rows(plan, "@zorbex/webshell"), msg="the scope is not part of the token")
+
+    def test_a_prefix_shared_by_a_single_project_file_is_not_proposed(self):
+        plan = self.preview()
+        self.assertTrue(self.token_rows(plan, "Vexil"), msg="control: a shared prefix is proposed")
+        self.assertFalse(self.token_rows(plan, "Lonely"), msg="two or more csproj files must share it")
+
+    def test_a_name_in_an_untracked_config_file_is_not_evidence(self):
+        self.make_files({"scratch/untracked.json": '{"Db": "Server=.;Database=Untrackeddb;"}\n'})
+        plan = self.preview()
+        self.assertTrue(self.token_rows(plan, "Qwertydb"), msg="control: a tracked name is proposed")
+        self.assertFalse(self.token_rows(plan, "Untrackeddb"))
+
+    def test_the_project_name_token_comes_only_from_an_authored_slot(self):
+        self.assertTrue(self.token_rows(self.preview(), "Zorbex", "project-name"), msg="control: authored name proposed")
+        self.put_profile(template_text())
+        plan = self.preview()
+        self.assertFalse([p for p in self.need(plan, "token-proposals", "proposals") if p.get("source") == "project-name"],
+                         msg="a placeholder project.name is not a name")
+
+    def test_a_malformed_rules_file_is_a_source_note_skips_the_database_source_and_does_not_refuse(self):
+        (self.project / DG_RULES_REL).write_bytes(b"{ not json")
+        plan = self.preview()
+        notes = self.need(plan, "source-notes", "the source notes")
+        self.assertTrue([n for n in notes if n.get("source") == "database" and n.get("reason") == "rules-unreadable"],
+                        msg="the database source is skipped with rules-unreadable: %r" % (notes,))
+        self.assertFalse([p for p in plan["token-proposals"] if p.get("source") == "database"],
+                         msg="no database proposal when the source is skipped")
+        self.assertTrue(self.token_rows(plan, "Zorbex", "project-name"), msg="the other sources go on")
+        self.assertEqual(self.basis(plan, "area-map"), "inferred", msg="and so do the other files")
+
+    def test_an_unloadable_guard_is_a_source_note_skips_the_database_source_and_does_not_refuse(self):
+        for hooks in (self.plugin / ".claude/hooks", self.project / ".claude/hooks"):
+            (hooks / "db-destructive-guard.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        plan = self.preview()
+        notes = self.need(plan, "source-notes", "the source notes")
+        self.assertTrue([n for n in notes if n.get("source") == "database" and n.get("reason") == "guard-unreadable"],
+                        msg="the database source is skipped with guard-unreadable: %r" % (notes,))
+        self.assertFalse([p for p in plan["token-proposals"] if p.get("source") == "database"])
+        self.assertTrue(self.token_rows(plan, "Zorbex", "project-name"))
+
+    def test_a_readable_rules_file_leaves_no_source_note(self):
+        self.assertEqual(self.need(self.preview(), "source-notes", "the source notes"), [])
+
+
+# ======================================================================================
+# tokens: the exclusion rules
+# ======================================================================================
+class TestStepThreeTokenExclusions(StepThreeBase):
+    def assert_excluded(self, plan, text, reason):
+        rows = self.exclusion_rows(plan, text)
+        self.assertTrue(rows, msg="%s must be listed as excluded: %r" % (text, plan.get("exclusions")))
+        self.assertIn(reason, [r.get("reason") for r in rows], msg="%s: reason %s; got %r" % (text, reason, rows))
+        self.assertTrue(all(str(r.get("message", "")).strip() for r in rows), msg="each exclusion carries a message")
+        self.assertFalse(self.token_rows(plan, text), msg="%s is never also proposed" % text)
+
+    def test_a_short_token_is_excluded_as_too_short(self):
+        self.assert_excluded(self.preview(), "ab", "too-short")
+
+    def test_a_generic_word_is_excluded_as_generic_word(self):
+        self.assert_excluded(self.preview(), "portal", "generic-word")
+
+    def test_a_word_that_is_not_on_the_generic_list_is_not_generic(self):
+        self.assertTrue(self.token_rows(self.preview(), "webshell"), msg="webshell is not listed, so it is proposed")
+
+    def test_server_system_databases_are_excluded_with_the_plugin_text_check_unverifiable(self):
+        plan = self.preview(patcher=self.no_plugin_text())
+        self.assertEqual(plan.get("plugin-text-check"), "unverifiable")
+        for text in ("master", "postgres", "msdb"):
+            self.assert_excluded(plan, text, "system-database")
+
+    def test_server_system_databases_are_never_proposed_when_the_plugin_text_check_runs(self):
+        plan = self.preview()
+        self.assertEqual(plan.get("plugin-text-check"), "checked")
+        for text in ("master", "postgres", "msdb"):
+            self.assertTrue(self.exclusion_rows(plan, text), msg="%s is excluded" % text)
+            self.assertFalse(self.token_rows(plan, text), msg="%s is never proposed" % text)
+
+    def test_a_system_name_is_excluded_whatever_its_letter_case_and_from_the_guards_own_list(self):
+        (self.project / DG_RULES_REL).write_text(json.dumps({"protected_databases": ["Ledgerdb", "MySQL", "Template1"]}),
+                                                 encoding="utf-8")
+        self.track({"config/more.json": '{"E": "Server=.;Database=MASTER;"}\n'})
+        plan = self.preview(patcher=self.no_plugin_text())
+        for text in ("MASTER", "mysql", "template1"):
+            self.assert_excluded(plan, text, "system-database")
+
+    def test_a_template_database_name_is_excluded_as_template_name(self):
+        self.track({"config/tpl.json": '{"F": "Server=.;Database=AcmeApp_Testing;"}\n'})
+        self.assert_excluded(self.preview(patcher=self.no_plugin_text()), "AcmeApp_Testing", "template-name")
+
+    def test_a_disposable_database_name_is_excluded_as_disposable_database(self):
+        self.assert_excluded(self.preview(), DISPOSABLE_NAME, "disposable-database")
+
+    def test_a_name_that_occurs_in_the_plugin_text_is_excluded_as_in_plugin_text(self):
+        self.assertTrue(self.token_rows(self.preview(), "Ledgerdb", "database"), msg="positive control: proposed before the plant")
+        self.plant_in_plugin("skills/some-skill/SKILL.md", "A made-up word: ledgerdb appears here.\n")
+        plan = self.preview()
+        self.assertEqual(plan.get("plugin-text-check"), "checked")
+        self.assert_excluded(plan, "Ledgerdb", "in-plugin-text")
+
+    def test_a_planted_word_in_a_registry_root_file_of_the_plugin_is_in_plugin_text_too(self):
+        self.plant_in_plugin(".claude/registries/MECHANISMS.md", "# Mechanisms\n\nQwertydb is named here.\n")
+        self.assert_excluded(self.preview(), "Qwertydb", "in-plugin-text")
+
+    def test_a_word_only_in_a_folder_the_check_does_not_scan_is_still_proposed(self):
+        self.plant_in_plugin("notes/elsewhere.md", "ledgerdb\n")
+        self.assertTrue(self.token_rows(self.preview(), "Ledgerdb", "database"), msg="the folder list is closed")
+
+    def test_an_overlong_found_string_is_excluded_as_invalid_text(self):
+        long_name = "a" * 129
+        self.set_profile(project_name=long_name)
+        self.assert_excluded(self.preview(), long_name, "invalid-text")
+
+
+# ======================================================================================
+# tokens: --token, the narrowing, and what is written
+# ======================================================================================
+class TestStepThreeTokenWrite(StepThreeBase):
+    def test_only_the_tokens_the_operator_names_are_written_in_order_with_case_duplicates_folded(self):
+        self.applied(["Zorbex", "zorbex", "Vexil", "Hexagonia"])
+        self.assertEqual(json.loads(self.read(TOK_REL).decode("utf-8"))["tokens"], ["Zorbex", "Vexil", "Hexagonia"],
+                         msg="exactly the --token values; an operator name that no source found is allowed")
+
+    def test_proposals_without_a_token_give_nothing_confirmed_and_write_no_token_file(self):
+        plan = self.preview()
+        self.assertTrue(plan.get("token-proposals"), msg="control: proposals exist")
+        self.assertEqual(self.basis(plan, "tokens"), "nothing-confirmed")
+        self.assertIs(plan.get("narrows"), False, msg="nothing would be written, so nothing narrows")
+        before = self.read(TOK_REL)
+        self.applied()
+        self.assertEqual(self.read(TOK_REL), before)
+
+    def test_the_first_tokens_narrow_memory_scope_and_the_plan_says_so_plainly(self):
+        plan = self.preview(["Zorbex"])
+        self.assertIs(plan.get("narrows"), True)
+        statement = str(self.need(plan, "narrowing-statement", "the plain statement")).lower()
+        self.assertIn("empty", statement, msg="today the list is empty and every memory item stays project-scoped")
+        self.assertIn("listed", statement, msg="afterwards an item stays global unless it contains a listed name")
+
+    def test_a_narrowing_apply_without_the_confirmation_is_refused_and_writes_nothing(self):
+        before = snapshot(self.project)
+        rc, out, parsed = self.apply(["Zorbex"], confirm=False)
+        self.assert_refused(rc, parsed, "narrowing-unconfirmed", "no --confirm-narrowing")
+        self.assertTreeSame(before, "all three files stay as they were", root=self.project)
+
+    def test_the_same_apply_writes_once_the_confirmation_is_given(self):
+        result = self.applied(["Zorbex"], confirm=True)
+        self.assertEqual(json.loads(self.read(TOK_REL).decode("utf-8"))["tokens"], ["Zorbex"])
+        self.assertEqual(len(result.get("written", [])), 3)
+
+    def test_an_apply_with_no_tokens_needs_no_confirmation(self):
+        self.applied([], confirm=False)
+        self.assertNotEqual(self.read(AREA_REL), self.area_scaffold.encode("utf-8"), msg="control: the area map was written")
+
+    def test_skipping_the_token_file_needs_no_confirmation(self):
+        self.applied(["Zorbex"], skip=["tokens"], confirm=False)
+        self.assertEqual(self.read(TOK_REL), self.tok_scaffold.encode("utf-8"))
+        self.assertNotEqual(self.read(AREA_REL), self.area_scaffold.encode("utf-8"), msg="control: the others were written")
+
+    def test_an_authored_token_list_is_not_narrowed_and_needs_no_confirmation(self):
+        self.write_step3(tok='{"tokens": ["Existing"], "allowed": []}\n')
+        self.assertIs(self.preview(["Zorbex"]).get("narrows"), False)
+        self.applied(["Zorbex"], confirm=False)
+        self.assertEqual(json.loads(self.read(TOK_REL).decode("utf-8"))["tokens"], ["Existing"])
+
+
+class TestStepThreeTokenInvalid(StepThreeBase):
+    def _refused(self, token, rule=None):
+        parsed = self.refused_preview("token-invalid", "--token %r" % (token,), tokens=[token])
+        if rule:
+            self.assertIn(rule, str(parsed.get("message", "")), msg="the message names the rule")
+
+    def test_a_valid_token_is_accepted(self):
+        self.preview(["Zorbex"])
+
+    def test_an_empty_token_is_refused(self):
+        self._refused("")
+
+    def test_a_token_over_128_characters_is_refused(self):
+        self._refused("a" * 129)
+
+    def test_a_token_with_a_control_character_is_refused(self):
+        self._refused("bad\x07name")
+
+    def test_a_token_with_a_format_character_is_refused(self):
+        self._refused("zero​width")
+
+    def test_a_token_under_four_characters_is_refused_as_too_short(self):
+        self._refused("abc", "too-short")
+
+    def test_a_generic_word_is_refused_as_generic_word_in_any_letter_case(self):
+        self._refused("service", "generic-word")
+        self._refused("Service", "generic-word")
+
+    def test_a_system_database_name_is_refused_as_system_database(self):
+        self._refused("msdb", "system-database")
+        self._refused("PostgreS", "system-database")
+
+    def test_a_name_in_the_plugin_text_is_refused_as_in_plugin_text(self):
+        self.plant_in_plugin("agents/some-agent.md", "the word Hexagonia appears in shipped text\n")
+        self._refused("Hexagonia", "in-plugin-text")
+
+    def test_a_token_is_refused_at_apply_time_too(self):
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        before = snapshot(self.project)
+        rc, out, parsed = self.run_pf(tokens=["abc"], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "token-invalid", "an invalid token at apply")
+        self.assertTreeSame(before, "nothing written", root=self.project)
+
+
+# ======================================================================================
+# apply: the hash, the refusals, all-or-none, backups, idempotence
+# ======================================================================================
+class TestStepThreeApply(StepThreeBase):
+    def test_an_apply_without_the_plan_hash_changes_nothing(self):
+        self.need(self.preview(["Zorbex"]), "plan-sha256", "control: the subcommand previews")
+        before = snapshot(self.project)
+        rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, confirm=True)
+        self.assertIsInstance(parsed, dict, msg="stdout=%r" % out[:200])
+        self.assertNotEqual(rc, 0, msg="an apply needs --expect-sha256")
+        self.assert_refused(rc, parsed, "changed-since-preview", "an apply with no --expect-sha256 is a stale hash")
+        self.assertTreeSame(before, "nothing written", root=self.project)
+
+    def test_a_file_edited_after_the_preview_is_changed_since_preview(self):
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        (self.project / AREA_REL).write_bytes(self.area_scaffold.encode("utf-8") + b"\n")
+        before = snapshot(self.project)
+        rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "changed-since-preview", "a target moved between preview and yes")
+        self.assertTreeSame(before, "nothing written", root=self.project)
+
+    def test_a_different_token_set_at_apply_is_changed_since_preview(self):
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        before = snapshot(self.project)
+        rc, out, parsed = self.run_pf(tokens=["Vexil"], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "changed-since-preview", "another --token set")
+        self.assertTreeSame(before, "nothing written", root=self.project)
+
+    def test_a_different_skip_list_at_apply_is_changed_since_preview(self):
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        before = snapshot(self.project)
+        rc, out, parsed = self.run_pf(tokens=["Zorbex"], skip=["area-map"], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "changed-since-preview", "another --skip-file list")
+        self.assertTreeSame(before, "nothing written", root=self.project)
+
+    def test_the_plugins_own_checkout_is_refused(self):
+        own = self.tmp / "ownplugin"
+        (own / ".claude-plugin").mkdir(parents=True)
+        (own / ".claude-plugin/plugin.json").write_text(json.dumps({"name": PLUGIN_NAME, "version": "0.0.1"}), encoding="utf-8")
+        (own / ".claude").mkdir()
+        (own / AREA_REL).write_text(self.area_scaffold, encoding="utf-8")
+        self.refused_preview("plugin-source-checkout", "the project is the plugin's own checkout", project=own)
+
+    def test_an_unreadable_project_is_refused_as_project_unreadable(self):
+        self.refused_preview("project-unreadable", "no such project", project=self.tmp / "nope")
+
+    def test_an_injected_replace_failure_restores_all_three_files(self):
+        old = self.three()
+        real_replace = os.replace
+        names = {Path(rel).name for rel in STEP3_FILES.values()}
+        state = {"hits": 0, "failed": False}
+
+        def flaky(src, dst, *args, **kwargs):
+            if Path(dst).name in names and not state["failed"]:
+                state["hits"] += 1
+                if state["hits"] == 2:
+                    state["failed"] = True
+                    raise OSError("injected replace failure")
+            return real_replace(src, dst, *args, **kwargs)
+
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        with mock.patch("os.replace", side_effect=flaky):
+            rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assertTrue(state["failed"], msg="the injected failure must have been reached (the write uses os.replace)")
+        self.assert_refused(rc, parsed, "write-failed", "the second replace failed")
+        self.assertEqual(self.three(), old, msg="all three files are back to their old bytes")
+        leftovers = [p.name for p in (self.project / ".claude").iterdir() if ".stage-" in p.name]
+        self.assertEqual(leftovers, [], msg="no stage file is left behind")
+
+    def test_the_backups_land_under_the_ignored_cache_folder_and_the_result_says_so(self):
+        old = self.three()
+        result = self.applied(["Zorbex"])
+        backup = Path(self.need(result, "backup-dir", "the backup folder"))
+        rel = backup.resolve().relative_to(self.project.resolve()).as_posix()
+        self.assertRegex(rel, r"^\.claude/cache/finish-install/\d{8}T\d{6}Z(-\d+)?/backup$")
+        self.assertEqual(result.get("gitignore-hint"), ".claude/cache/")
+        for target, data in old.items():
+            copies = [p for p in backup.rglob(Path(target).name) if p.is_file()]
+            self.assertEqual([p.read_bytes() for p in copies], [data], msg="a dated copy of %s as it was" % target)
+
+    def test_a_second_run_changes_nothing(self):
+        self.applied(["Zorbex"])
+        after_first = snapshot(self.project)
+        plan = self.preview(["Zorbex"])
+        self.assertEqual({n: self.basis(plan, n) for n in STEP3_FILES}, {n: "kept-authored" for n in STEP3_FILES},
+                         msg="the written files are now authored")
+        rc, out, parsed = self.apply(["Zorbex"], confirm=True)
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "nothing-to-do"), msg="%r" % (parsed,))
+        self.assertTreeSame(after_first, "the second run writes nothing, not even a backup", root=self.project)
+
+    def test_the_written_area_map_carries_only_the_proposed_areas(self):
+        mods = self.modules(self.preview())
+        self.applied()
+        areas = json.loads(self.read(AREA_REL).decode("utf-8"))["areas"]
+        self.assertEqual(sorted(areas), sorted(mods))
+        for slug, body in areas.items():
+            self.assertEqual(body.get("patterns"), mods[slug]["patterns"])
+            self.assertTrue(str(body.get("description", "")).strip())
+
+
+# ======================================================================================
+# Follow-up tests from the two reviews of issue #21 (the code review and the test-strategy critic)
+# ======================================================================================
+class TestStepThreeTextMode(StepThreeBase):
+    """The skill's apply line runs WITHOUT --json, so the text renderer must handle every result status."""
+
+    def text_pf(self, **kw):
+        argv = [a for a in self.argv(**kw) if a != "--json"]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": str(self.plugin)}):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    rc = fi.main(argv)
+                except SystemExit as exc:
+                    rc = exc.code
+                except Exception as exc:  # noqa: BLE001 -- the crash IS the defect being pinned
+                    self.fail("text mode crashed with %s: %s (argv=%r)" % (type(exc).__name__, exc, argv))
+        return rc, out.getvalue()
+
+    def test_a_text_preview_shows_the_plan_hash_and_the_diffs(self):
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "the plan hash")
+        rc, out = self.text_pf(tokens=["Zorbex"])
+        self.assertEqual(rc, 0, msg=out)
+        self.assertIn(sha, out, msg="the operator needs the plan hash to pass --expect-sha256; text:\n%s" % out)
+        self.assertIn("@@", out, msg="the unified diffs are shown in the text preview")
+
+    def test_a_text_apply_prints_the_written_files_the_gitignore_hint_and_the_rollback_line(self):
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "the plan hash")
+        rc, out = self.text_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assertEqual(rc, 0, msg=out)
+        self.assertIn("applied", out)
+        self.assertIn("backups:", out)
+        self.assertIn(".claude/cache/", out, msg="the gitignore hint is printed:\n%s" % out)
+        self.assertIn("copy each file", out, msg="the rollback line is printed:\n%s" % out)
+
+    def test_a_text_nothing_to_do_does_not_crash(self):
+        self.applied(["Zorbex"])
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "the plan hash")
+        rc, out = self.text_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assertEqual(rc, 0, msg=out)
+        self.assertIn("nothing-to-do", out)
+
+    def test_a_text_refusal_prints_the_code_and_the_message(self):
+        rc, out = self.text_pf(tokens=["Zorbex"], apply=True, confirm=True)
+        self.assertEqual(rc, 2, msg=out)
+        self.assertIn("REFUSED changed-since-preview", out)
+        rc, out = self.text_pf(tokens=["abc"])
+        self.assertEqual(rc, 2, msg=out)
+        self.assertIn("REFUSED token-invalid", out)
+
+
+class TestStepThreeUnsafeRoots(StepThreeBase):
+    def test_an_absolute_root_is_dropped_like_any_unsafe_root_and_nothing_outside_the_project_is_read(self):
+        self.set_profile(backend_roots="`/srv/Api/`, `src/Zorbex.Api/`",
+                         frontend_roots="`C:/Outside/Web`, `C:\\Outside\\Web2`, `src/Zorbex.Web/`")
+        seen = []
+        real = fi._load_json_lenient
+
+        def spy(path, *a, **k):
+            seen.append(str(path))
+            return real(path, *a, **k)
+
+        with mock.patch.object(fi, "_load_json_lenient", side_effect=spy):
+            plan = self.preview()
+        roots = {kind: sorted(m["root"] for m in plan["modules"] if m["kind"] == kind)
+                 for kind in ("backend", "frontend")}
+        self.assertEqual(roots, {"backend": ["src/Zorbex.Api"], "frontend": ["src/Zorbex.Web"]},
+                         msg="an absolute root (leading slash, drive letter) is never a module: %r" % (plan["modules"],))
+        for mod in plan["modules"]:
+            self.assertFalse(mod["globs"][0].startswith("/") or re.match(r"^[A-Za-z]:", mod["globs"][0]),
+                             msg="no absolute glob: %r" % (mod,))
+        inside = os.path.realpath(str(self.project))
+        for path in seen:
+            real_path = os.path.realpath(path)
+            self.assertTrue(real_path == inside or real_path.startswith(inside + os.sep),
+                            msg="angular.json/package.json were looked up outside the project: %s" % path)
+        self.assertIn("/srv/Api", json.dumps(plan), msg="the note names the root that was dropped")
+
+
+class TestStepThreeWhitespaceTokens(StepThreeBase):
+    def test_a_token_with_leading_or_trailing_whitespace_is_refused_as_invalid_text_at_preview(self):
+        for token in (" Zorbex ", "Zorbex ", " Zorbex"):
+            with self.subTest(token=token):
+                parsed = self.refused_preview("token-invalid", "--token %r" % token, tokens=[token])
+                self.assertIn("invalid-text", str(parsed.get("message", "")), msg="the message names the rule")
+
+    def test_a_token_with_whitespace_is_refused_at_apply_and_never_written_or_stripped(self):
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        before = snapshot(self.project)
+        rc, out, parsed = self.run_pf(tokens=[" Zorbex "], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "token-invalid", "a padded token at apply")
+        self.assertIn("invalid-text", str(parsed.get("message", "")))
+        self.assertTreeSame(before, "nothing written", root=self.project)
+
+
+class TestStepThreeLinks(StepThreeBase):
+    def cleanup_link(self, link):
+        def _remove():
+            try:
+                os.rmdir(str(link))
+            except OSError:
+                pass
+        self.addCleanup(_remove)  # runs before the temporary folder is removed: the link goes first
+
+    def test_a_symbolic_link_target_previews_as_unrecognised_and_is_never_written_through(self):
+        for name, rel in STEP3_FILES.items():
+            with self.subTest(file=name):
+                link = self.project / rel
+                for other in STEP3_FILES.values():  # drop every link an earlier iteration left, so no write goes through one
+                    if os.path.lexists(str(self.project / other)):
+                        (self.project / other).unlink()
+                self.write_step3()
+                real = self.tmp / ("real-%s.json" % name)
+                real.write_bytes(self.read(rel))
+                link.unlink()
+                try:
+                    os.symlink(str(real), str(link))
+                except (OSError, NotImplementedError, AttributeError) as exc:
+                    self.skipTest("a file symbolic link cannot be created here: %s" % exc)
+                others = [n for n in STEP3_FILES if n != name]
+                plan = self.preview(["Zorbex"])
+                self.assertEqual(self.basis(plan, name), "unrecognised",
+                                 msg="a linked file is never inferred (the apply refuses to write through it)")
+                self.assertEqual({n: self.basis(plan, n) for n in others}, {n: "inferred" for n in others})
+                before = real.read_bytes()
+                self.apply(["Zorbex"], confirm=True)
+                self.assertEqual(real.read_bytes(), before, msg="the link's target is never written")
+                self.assertTrue(link.is_symlink(), msg="the link is still a link")
+
+    def test_a_linked_claude_folder_is_refused_and_the_target_is_unchanged(self):
+        elsewhere = self.tmp / "elsewhere-claude"
+        os.rename(str(self.project / ".claude"), str(elsewhere))
+        self.cleanup_link(self.project / ".claude")
+        make_directory_link(self.project / ".claude", elsewhere)
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        before = snapshot(elsewhere)
+        rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "write-failed", "the .claude folder is a link")
+        self.assertEqual(snapshot(elsewhere), before, msg="nothing landed in the link's target")
+
+    def test_a_linked_cache_folder_is_refused_and_the_target_is_unchanged(self):
+        elsewhere = self.tmp / "elsewhere-cache"
+        (self.project / ".claude").mkdir(exist_ok=True)
+        self.cleanup_link(self.project / ".claude" / "cache")
+        make_directory_link(self.project / ".claude" / "cache", elsewhere)
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        before, old = snapshot(elsewhere), self.three()
+        rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "write-failed", ".claude/cache is a link")
+        self.assertEqual(snapshot(elsewhere), before, msg="no backup landed in the link's target")
+        self.assertEqual(self.three(), old)
+
+    def test_a_linked_finish_install_backup_folder_is_refused_and_the_target_is_unchanged(self):
+        elsewhere = self.tmp / "elsewhere-finish-install"
+        cache = self.project / ".claude" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        self.cleanup_link(cache / "finish-install")
+        make_directory_link(cache / "finish-install", elsewhere)
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        before, old = snapshot(elsewhere), self.three()
+        rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "write-failed", ".claude/cache/finish-install is a link")
+        self.assertEqual(snapshot(elsewhere), before, msg="no backup landed in the link's target")
+        self.assertEqual(self.three(), old, msg="no file was written")
+
+
+class TestStepThreePluginTextMessage(StepThreeBase):
+    PLANTED = "skills/some-skill/SKILL.md"
+
+    def test_the_exclusion_message_names_the_matching_plugin_file(self):
+        self.plant_in_plugin(self.PLANTED, "A made-up word: ledgerdb appears here.\n")
+        rows = self.exclusion_rows(self.preview(), "Ledgerdb")
+        self.assertTrue(rows, msg="control: Ledgerdb is excluded")
+        text = " ".join(str(r.get("message", "")) for r in rows).replace("\\", "/")
+        self.assertIn(self.PLANTED, text, msg="the operator must see which plugin file holds the word: %r" % rows)
+
+    def test_the_token_refusal_names_the_matching_plugin_file(self):
+        self.plant_in_plugin(self.PLANTED, "the word Hexagonia appears in shipped text\n")
+        parsed = self.refused_preview("token-invalid", "Hexagonia is in the plugin text", tokens=["Hexagonia"])
+        self.assertIn(self.PLANTED, str(parsed.get("message", "")).replace("\\", "/"))
+
+
+class TestStepThreeReReadBeforeWrite(StepThreeBase):
+    def test_a_target_that_changes_after_the_plan_is_built_is_changed_since_preview(self):
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        real_plan = fi._plan_project_files
+
+        def plan_then_edit(*args, **kwargs):
+            result = real_plan(*args, **kwargs)
+            with open(str(self.project / CONV_REL), "ab") as handle:
+                handle.write(b"\n")
+            return result
+
+        with mock.patch.object(fi, "_plan_project_files", side_effect=plan_then_edit):
+            rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assert_refused(rc, parsed, "changed-since-preview", "a target moved after the plan was built")
+        self.assertIn("while the apply was running", str(parsed.get("message", "")))
+        self.assertEqual(self.read(AREA_REL), self.area_scaffold.encode("utf-8"))
+        self.assertEqual(self.read(CONV_REL), self.conv_scaffold.encode("utf-8") + b"\n", msg="only the edit landed")
+        self.assertEqual(self.read(TOK_REL), self.tok_scaffold.encode("utf-8"))
+        self.assertFalse((self.project / ".claude" / "cache").exists(), msg="no backup was made")
+
+
+class TestStepThreeEscapedKeys(StepThreeBase):
+    VARIANTS = {
+        "area-map": ('{"\\u0061reas": {}}\n',),
+        "conventions": ('{"\\u0070rTitle": {"map": [], "order": []}}\n',
+                        '{"prTitle": {"\\u006dap": [], "order": []}}\n'),
+        "tokens": ('{"\\u0074okens": []}\n',),
+    }
+
+    def test_a_file_whose_key_is_written_with_an_escape_is_unrecognised_and_the_others_are_still_written(self):
+        scaffolds = {"area-map": self.area_scaffold, "conventions": self.conv_scaffold, "tokens": self.tok_scaffold}
+        for name, texts in self.VARIANTS.items():
+            for text in texts:
+                with self.subTest(file=name, text=text):
+                    self.write_step3()
+                    bad = text.encode("utf-8")
+                    (self.project / STEP3_FILES[name]).write_bytes(bad)
+                    others = [n for n in STEP3_FILES if n != name]
+                    plan = self.preview(["Zorbex"])
+                    entry = self.files_of(plan)[name]
+                    self.assertEqual(entry["basis"], "unrecognised")
+                    self.assertIn("cannot be spliced safely", entry["note"])
+                    self.assertEqual({n: self.basis(plan, n) for n in others}, {n: "inferred" for n in others})
+                    self.applied(["Zorbex"])
+                    self.assertEqual(self.read(STEP3_FILES[name]), bad, msg="the file is never written")
+                    for n in others:
+                        self.assertNotEqual(self.read(STEP3_FILES[n]), scaffolds[n].encode("utf-8"),
+                                            msg="%s was written" % n)
+
+
+class TestStepThreeExclusionBoundaries(StepThreeBase):
+    def test_a_token_of_exactly_the_minimum_length_is_accepted(self):
+        self.assertEqual(fi.TOKEN_MIN_LENGTH, 4, msg="the contract's minimum")
+        self.applied(["Qzxv"])
+        self.assertEqual(json.loads(self.read(TOK_REL).decode("utf-8"))["tokens"], ["Qzxv"])
+
+    def test_a_found_string_of_exactly_the_minimum_length_is_proposed(self):
+        self.set_profile(project_name="Qzxv")
+        self.assertTrue(self.token_rows(self.preview(), "Qzxv", "project-name"))
+
+    def test_a_token_of_exactly_128_characters_is_accepted(self):
+        token = "Z" + "q" * 127
+        self.applied([token])
+        self.assertEqual(json.loads(self.read(TOK_REL).decode("utf-8"))["tokens"], [token])
+
+    def test_a_plugin_text_word_inside_a_longer_word_still_excludes_the_name(self):
+        self.plant_in_plugin("skills/some-skill/SKILL.md", "xledgerdbx\n")
+        plan = self.preview()
+        self.assertTrue(self.exclusion_rows(plan, "Ledgerdb"), msg="a substring match is enough")
+        self.assertFalse(self.token_rows(plan, "Ledgerdb"))
+
+    def test_a_disposable_name_in_the_guards_protected_list_is_excluded_as_disposable_database(self):
+        (self.project / DG_RULES_REL).write_text(
+            json.dumps({"protected_databases": ["Ledgerdb", DISPOSABLE_NAME]}), encoding="utf-8")
+        plan = self.preview()
+        rows = [r for r in self.exclusion_rows(plan, DISPOSABLE_NAME) if r.get("source") == "database"]
+        self.assertIn("disposable-database", [r.get("reason") for r in rows], msg="%r" % (plan["exclusions"],))
+        self.assertFalse(self.token_rows(plan, DISPOSABLE_NAME))
+
+    def test_tempdb_is_relabelled_as_a_system_database(self):
+        self.track({"config/tmp.json": '{"T": "Server=.;Database=tempdb;"}\n'})
+        plan = self.preview()
+        reasons = [r.get("reason") for r in self.exclusion_rows(plan, "tempdb")]
+        self.assertEqual(reasons, ["system-database"], msg="%r" % (plan["exclusions"],))
+
+    def test_the_proposals_are_still_shown_when_the_plugin_text_check_is_unverifiable(self):
+        self.plant_in_plugin("skills/some-skill/SKILL.md", "ledgerdb\n")
+        plan = self.preview(patcher=self.no_plugin_text())
+        self.assertEqual(plan.get("plugin-text-check"), "unverifiable")
+        self.assertTrue(self.token_rows(plan, "Zorbex", "project-name"))
+        self.assertTrue(self.token_rows(plan, "Ledgerdb", "database"), msg="nothing can be excluded as plugin text")
+
+
+class TestStepThreePluginTextFolderScan(StepThreeBase):
+    def _refused_as_plugin_text(self, word):
+        parsed = self.refused_preview("token-invalid", "%s is in the plugin text" % word, tokens=[word])
+        self.assertIn("in-plugin-text", str(parsed.get("message", "")))
+
+    def test_a_word_planted_in_each_scanned_folder_is_found(self):
+        self.preview(["Qnoneplant"])  # control: an unplanted word is accepted
+        for index, folder in enumerate(fi.PLUGIN_TEXT_FOLDERS):
+            word = "Qnonce%02dxyz" % index
+            with self.subTest(folder=folder):
+                self.plant_in_plugin("%s/planted.txt" % folder, "text %s text\n" % word)
+                self._refused_as_plugin_text(word)
+
+    def test_a_word_planted_in_the_registry_root_files_is_found(self):
+        for index, name in enumerate(("VOCABULARY.md", "JOURNAL.md")):
+            word = "Qregistry%02dxyz" % index
+            with self.subTest(file=name):
+                self.plant_in_plugin(".claude/registries/%s" % name, "# x\n%s\n" % word)
+                self._refused_as_plugin_text(word)
+
+    def test_a_word_in_a_registry_subfolder_is_not_scanned(self):
+        self.plant_in_plugin(".claude/registries/MECHANISMS/general.md", "Qsubfolderxyz\n")
+        self.preview(["Qsubfolderxyz"])
+
+    def test_a_word_in_a_file_over_one_megabyte_is_not_scanned(self):
+        path = self.plugin / "skills" / "big" / "BIG.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"Qbigfilexyz " + b"x" * 1_000_001)
+        self.preview(["Qbigfilexyz"])
+
+
+class TestStepThreeGuardSearchOrder(StepThreeBase):
+    def setUp(self):
+        super().setUp()
+        self.plugin_guard = self.plugin / ".claude/hooks/db-destructive-guard.py"
+        self.project_guard = self.project / ".claude/hooks/db-destructive-guard.py"
+        self.plugin_guard.write_text("import re\nDISPOSABLE_RE = [('p', re.compile('AAA_Plugin'))]\n", encoding="utf-8")
+        self.project_guard.write_text("import re\nDISPOSABLE_RE = [('q', re.compile('BBB_Project'))]\n", encoding="utf-8")
+
+    def _matches(self, patterns):
+        return {word for word in ("AAA_Plugin", "BBB_Project") if any(rx.search(word) for _l, rx in patterns)}
+
+    def test_the_plugin_roots_guard_is_searched_first(self):
+        patterns, path = fi._disposable_patterns_for(self.project, self.plugin)
+        self.assertEqual(self._matches(patterns), {"AAA_Plugin"})
+        self.assertEqual(Path(path), self.plugin_guard)
+
+    def test_the_projects_own_guard_is_the_fallback_when_the_plugin_guard_is_missing(self):
+        self.plugin_guard.unlink()
+        patterns, path = fi._disposable_patterns_for(self.project, self.plugin)
+        self.assertEqual(self._matches(patterns), {"BBB_Project"})
+        self.assertEqual(Path(path), self.project_guard)
+
+    def test_the_projects_own_guard_is_the_fallback_when_the_plugin_guard_cannot_load(self):
+        self.plugin_guard.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        patterns, path = fi._disposable_patterns_for(self.project, self.plugin)
+        self.assertEqual(self._matches(patterns), {"BBB_Project"})
+        self.assertEqual(Path(path), self.project_guard)
+
+    def test_with_no_plugin_root_only_the_projects_guard_is_used(self):
+        patterns, path = fi._disposable_patterns_for(self.project, None)
+        self.assertEqual(self._matches(patterns), {"BBB_Project"})
+        self.assertEqual(Path(path), self.project_guard)
+
+
+class TestStepThreeThirdReplaceFailure(StepThreeBase):
+    def test_a_failure_at_the_third_replace_restores_two_files_and_leaves_the_backups(self):
+        old = self.three()
+        real_replace = os.replace
+        names = {Path(rel).name for rel in STEP3_FILES.values()}
+        state = {"hits": 0, "failed": False}
+
+        def flaky(src, dst, *args, **kwargs):
+            if Path(dst).name in names and not state["failed"]:
+                state["hits"] += 1
+                if state["hits"] == 3:
+                    state["failed"] = True
+                    raise OSError("injected replace failure")
+            return real_replace(src, dst, *args, **kwargs)
+
+        sha = self.need(self.preview(["Zorbex"]), "plan-sha256", "hash")
+        with mock.patch("os.replace", side_effect=flaky):
+            rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assertTrue(state["failed"], msg="the third replace must have been reached")
+        self.assert_refused(rc, parsed, "write-failed", "the third replace failed")
+        self.assertEqual(self.three(), old, msg="the two replaced files are restored, the third never changed")
+        leftovers = [p.name for p in (self.project / ".claude").iterdir() if ".stage-" in p.name]
+        self.assertEqual(leftovers, [], msg="no stage file is left behind")
+        backups = sorted((self.project / ".claude" / "cache" / "finish-install").glob("*/backup"))
+        self.assertEqual(len(backups), 1, msg="the backups stay under the ignored cache folder after a failure")
+        for rel, data in old.items():
+            copies = [p for p in backups[0].rglob(Path(rel).name) if p.is_file()]
+            self.assertEqual([p.read_bytes() for p in copies], [data], msg="a backup of %s as it was" % rel)
+
+
+# ======================================================================================
+# Second-pass review of issue #21
+# ======================================================================================
+class TestStepThreeNarrowsIfTokens(StepThreeBase):
+    """The first preview (no --token) must tell the operator the token file WOULD narrow memory scope."""
+
+    def flag(self, plan):
+        return self.need(plan, "narrows-if-tokens", "the first preview exposes the narrowing condition")
+
+    def test_an_unauthored_token_file_exposes_the_condition_and_the_statement_before_any_token_is_chosen(self):
+        plan = self.preview()
+        self.assertIs(self.flag(plan), True)
+        self.assertIs(plan.get("narrows"), False, msg="narrows stays false until a token is chosen")
+        statement = str(plan.get("narrowing-statement", "")).lower()
+        self.assertIn("empty", statement)
+        self.assertIn("listed", statement)
+
+    def test_the_condition_stays_true_once_a_token_is_chosen(self):
+        plan = self.preview(["Zorbex"])
+        self.assertIs(self.flag(plan), True)
+        self.assertIs(plan.get("narrows"), True)
+
+    def test_the_condition_is_false_for_an_authored_skipped_unrecognised_or_missing_token_file(self):
+        cases = {
+            "authored": lambda: self.write_step3(tok='{"tokens": ["Existing"], "allowed": []}\n'),
+            "unrecognised": lambda: (self.project / TOK_REL).write_bytes(b"{ not json"),
+            "scaffold-missing": lambda: (self.project / TOK_REL).unlink(),
+        }
+        for label, arrange in cases.items():
+            with self.subTest(state=label):
+                self.write_step3()
+                arrange()
+                self.assertIs(self.flag(self.preview()), False)
+        self.write_step3()
+        self.assertIs(self.flag(self.preview(skip=["tokens"])), False, msg="a skipped token file")
+
+    def test_the_skill_flow_first_preview_then_a_token_preview_then_the_confirmed_apply(self):
+        first = self.preview()
+        self.assertIs(self.flag(first), True, msg="the skill reads this before asking which tokens to keep")
+        self.assertTrue(self.token_rows(first, "Zorbex", "project-name"), msg="control: a proposal to choose from")
+        second = self.preview(["Zorbex"])
+        sha = self.need(second, "plan-sha256", "the hash of the re-preview")
+        before = snapshot(self.project)
+        rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=False)
+        self.assert_refused(rc, parsed, "narrowing-unconfirmed", "positive control: no --confirm-narrowing")
+        self.assertTreeSame(before, "the unconfirmed apply wrote nothing", root=self.project)
+        rc, out, parsed = self.run_pf(tokens=["Zorbex"], apply=True, sha=sha, confirm=True)
+        self.assertEqual((rc, (parsed or {}).get("status")), (0, "applied"), msg="%r" % (parsed,))
+        self.assertEqual(json.loads(self.read(TOK_REL).decode("utf-8"))["tokens"], ["Zorbex"])
+
+    def test_the_first_preview_in_text_mode_prints_the_narrowing_statement(self):
+        rc, out = TestStepThreeTextMode.text_pf(self)
+        self.assertEqual(rc, 0, msg=out)
+        self.assertIn(fi.STEP3_NARROWING_STATEMENT, out, msg="the operator reads it before choosing tokens:\n%s" % out)
+
+
+class TestStepThreeLinkedFoldersAtPreview(StepThreeBase):
+    def link(self, link, target):
+        def _remove():
+            try:
+                os.rmdir(str(link))
+            except OSError:
+                pass
+        self.addCleanup(_remove)
+        try:
+            make_directory_link(link, target)
+        except AssertionError as exc:
+            self.skipTest(str(exc))
+
+    def assert_all_unrecognised(self, plan):
+        for name, entry in self.files_of(plan).items():
+            self.assertEqual(entry.get("basis"), "unrecognised", msg="%s: the apply would refuse the link" % name)
+            self.assertIn("link", str(entry.get("note", "")).lower(), msg="%s: the note says why" % name)
+
+    def test_a_linked_claude_folder_previews_every_file_as_unrecognised(self):
+        elsewhere = self.tmp / "elsewhere-claude-preview"
+        os.rename(str(self.project / ".claude"), str(elsewhere))
+        self.link(self.project / ".claude", elsewhere)
+        self.assert_all_unrecognised(self.preview(["Zorbex"]))
+
+    def test_a_linked_cache_folder_previews_every_file_as_unrecognised(self):
+        (self.project / ".claude").mkdir(exist_ok=True)
+        self.link(self.project / ".claude" / "cache", self.tmp / "elsewhere-cache-preview")
+        self.assert_all_unrecognised(self.preview(["Zorbex"]))
+
+    def test_a_linked_finish_install_folder_previews_every_file_as_unrecognised(self):
+        cache = self.project / ".claude" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        self.link(cache / "finish-install", self.tmp / "elsewhere-fi-preview")
+        self.assert_all_unrecognised(self.preview(["Zorbex"]))
+
+
+class TestStepThreeTextModeDetails(StepThreeBase):
+    text_pf = TestStepThreeTextMode.text_pf
+
+    def test_a_kept_authored_file_prints_its_advice(self):
+        self.write_step3(conv=AUTHORED["conventions"][1])
+        rc, out = self.text_pf()
+        self.assertEqual(rc, 0, msg=out)
+        for tag in ("BACKEND", "MIGRATIONS"):
+            self.assertIn(tag, out, msg="the advice (what would have been proposed) is printed:\n%s" % out)
+
+    def test_an_unverifiable_plugin_text_check_is_printed(self):
+        with self.no_plugin_text():
+            rc, out = self.text_pf()
+        self.assertEqual(rc, 0, msg=out)
+        self.assertIn("plugin-text-check: unverifiable", out)
+
+
+class TestStepThreeSecondPassPins(StepThreeBase):
+    def test_roots_that_differ_only_in_case_give_one_area(self):
+        self.set_profile(backend_roots="`src/Api/`, `src/api/`")
+        backend = [m for m in self.modules(self.preview()).values() if m["kind"] == "backend"]
+        self.assertEqual(len(backend), 1, msg="the patterns are lower-cased, so two modules would be one: %r" % backend)
+
+    def test_a_token_with_a_unicode_space_separator_inside_it_is_refused_as_invalid_text(self):
+        parsed = self.refused_preview("token-invalid", "a no-break space inside", tokens=["Zor bex"])
+        self.assertIn("invalid-text", str(parsed.get("message", "")))
+
+    def test_the_tempdb_exclusion_message_is_the_token_exclusion_wording(self):
+        self.track({"config/tmp.json": '{"T": "Server=.;Database=tempdb;"}\n'})
+        rows = self.exclusion_rows(self.preview(), "tempdb")
+        self.assertEqual([r.get("message") for r in rows], [fi.TOKEN_EXCLUSION_MESSAGES["system-database"]])
+        self.assertNotIn("can never be protected", json.dumps(rows))
 
 
 if __name__ == "__main__":

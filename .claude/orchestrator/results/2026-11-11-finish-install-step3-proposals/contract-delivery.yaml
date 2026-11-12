@@ -1,0 +1,14 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/373
+number: 373
+head_ref: feature/21-finish-install-step3-proposals
+base_ref: master
+base_is_default: true
+commit: f354bb37f728869cf98a7428e3aa9f67685f59fe
+merged_at: '2026-11-11T23:37:41Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-11T23:51:24.031471+00:00'
+blocks_recorded:
+- t1-quick-start-step-3-proposals-in-finish-install
+blocks_already_recorded: []

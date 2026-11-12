@@ -1,20 +1,24 @@
 ---
 name: auto-improve-finish-install
-description: "Finish installing the agentic-auto-improve plugin in this project: fill in the project profile (Quick start step 4) and check or register the hooks (Quick start step 5). Looks at the repository, shows each proposed value with its evidence, asks for one confirmation, and writes only slots that are still placeholders. For the hooks it first works out how the plugin reached this project, then reports readiness (plugin install) or shows the exact settings.json change and writes it only after a yes (vendored copy). The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-finish-install, 'finish installing the auto-improve plugin', 'finish the agentic-auto-improve install', 'set up the project profile', 'fill in the project profile', 'register the hooks', or 'are the auto-improve hooks on'. Never guesses a value and never overwrites an authored slot."
+description: "Finish installing the agentic-auto-improve plugin in this project: fill in the project profile (Quick start step 4), propose the area map, the pull request module tags and the project-name tokens (Quick start step 3), and check or register the hooks (Quick start step 5). Looks at the repository, shows each proposed value with its evidence, asks for one confirmation, and writes only slots and files that are still as scaffolded. For the hooks it first works out how the plugin reached this project, then reports readiness (plugin install) or shows the exact settings.json change and writes it only after a yes (vendored copy). The name carries the plugin name because you may have several plugins installed. Use when: user says /auto-improve-finish-install, 'finish installing the auto-improve plugin', 'finish the agentic-auto-improve install', 'set up the project profile', 'fill in the project profile', 'fill in the area map', 'propose the project tokens', 'register the hooks', or 'are the auto-improve hooks on'. Never guesses a value and never overwrites an authored slot or file."
 user_invocable: true
 ---
 
-# /auto-improve-finish-install — finish the last two Quick start steps
+# /auto-improve-finish-install — finish the Quick start steps the plugin cannot copy
 
-The plugin cannot copy two things for you. One is the project profile, which describes
-**your** repository. The other is the hook registration, which switches enforcement on.
+The plugin cannot copy three things for you. One is the project profile, which describes
+**your** repository. Another is the three per-project files built from it: the area map, the
+pull request module tags and the project-name tokens. The last is the hook registration, which
+switches enforcement on.
 
-This skill walks you through both. It proposes, you confirm, and only then does it write.
+This skill walks you through all three. It proposes, you confirm, and only then does it write.
 
 ```
 /auto-improve-finish-install
    Stage 1  project profile   propose -> one confirmation -> write the placeholder slots
-   Stage 2  hooks             plugin install:  report readiness, write nothing
+   Stage 2  step-3 files      area map, PR module tags, project-name tokens:
+                              propose -> one confirmation -> write the files still as scaffolded
+   Stage 3  hooks             plugin install:  report readiness, write nothing
                               vendored copy:   show the diff -> ask -> write, with a backup
 ```
 
@@ -71,7 +75,7 @@ PY="py -3"        # Windows
 PY="python3"      # macOS and Linux
 ```
 
-Every command below is `$PY "$FI" <profile|hooks> --project . ...`.
+Every command below is `$PY "$FI" <profile|project-files|hooks> --project . ...`.
 
 **Exit codes.** `0` means a plan, an apply or nothing to do. `2` means a refusal you can
 correct. `3` means an environment problem, such as a missing template. On `2` or `3`, read
@@ -80,10 +84,10 @@ A refusal always means nothing was changed.
 
 ### Which provider is this?
 
-Hooks are Claude-only in this release. On **Cursor** and **Codex**, run Stage 1 in full, then
+Hooks are Claude-only in this release. On **Cursor** and **Codex**, run Stages 1 and 2 in full, then
 run `hooks --provider cursor` (or `codex`). It returns `provider-has-no-hooks`. Say that hooks
-are Claude-only here, that nothing was written, and stop. The profile is the same on all
-three providers.
+are Claude-only here, that nothing was written, and stop. The profile and the three step-3 files are
+the same on all three providers.
 
 ## Stage 1: the project profile (Quick start step 4)
 
@@ -175,12 +179,124 @@ If the apply says `changed-since-preview`, the file changed after you showed it.
 
 Declining writes nothing.
 
-## Stage 2: the hooks (Quick start step 5)
+## Stage 2: the three per-project files (Quick start step 3)
+
+This stage reads the profile that Stage 1 just filled, so it runs after Stage 1 and before the
+hooks. It proposes content for three files the doctor scaffolds: the area map
+(`.claude/area-mapping.json`), the pull request module tags (`prTitle.map` and `prTitle.order` in
+`.claude/work-item-conventions.json`) and the project-name token list (`.claude/.project-tokens.json`).
+One plan covers all three, one confirmation releases it, and one plan hash binds the write.
+
+### 2a. Preview
+
+```bash
+$PY "$FI" project-files --project . --json
+```
+
+The answer carries `files` (one entry per file), `modules`, `token-proposals`, `exclusions`,
+`source-notes`, `not-inferred`, `narrows`, `narrows-if-tokens`, `narrowing-statement`, `profile-note`,
+`plugin-text-check`, `backup-dir`, `gitignore-hint` and `plan-sha256`. This first preview has no
+`--token` and no `--skip-file`, so it is for showing the table. **Its `plan-sha256` is not the one to
+apply with:** the hash covers every file's old and planned bytes, the `--token` list and the
+`--skip-file` list, so the hash of the final preview in 2d is the only one that is accepted.
+
+If the answer is refused as `plugin-source-checkout`, `project-unreadable` or `token-invalid`, say
+the reason in one plain sentence and stop. A problem with one file is never a refusal: it is that
+file's `basis`, and the other two files go on.
+
+### 2b. Show one table
+
+Show one row per file with its `basis` and its `unified-diff`, one row per entry in `modules`
+(the area, its patterns and the profile slot that named its root), and one row per token proposal
+(the text, the source, the evidence, and whether it is `already-listed`) or exclusion (the text and
+the reason). Show every `source-notes` entry too. A source note means a token source was skipped
+and why; the other sources and files went on.
+
+The file bases mean:
+
+- `inferred`: the file is still as scaffolded and the script has content for it. The diff shows it.
+- `none-found`: nothing to propose. The file stays as scaffolded, and the note says why.
+- `kept-authored`: the team already wrote this file. It is never changed. What would have been
+  proposed is shown as `advice`.
+- `scaffold-missing`: the file is absent. This command never creates it. Offer to run
+  `plugin_doctor.py --fix` (see "The project history record" for the ask-first rule), then run the preview again.
+- `unrecognised`: the file is not strict JSON, has a duplicate key or a byte order mark, or lacks
+  the expected member. It is never written. Tell the user the note's reason.
+- `skipped`: the user named it with `--skip-file`.
+- `nothing-confirmed`: tokens were proposed but no `--token` was given. The file stays as it is.
+
+If `profile-note` is present, the profile is the reason: `profile-missing` or
+`profile-has-placeholders` means "fill the profile first (Stage 1)"; `roots-authored-none` means the
+profile says this project has no such roots. Say which, and do not propose anything yourself.
+
+Say what the script does **not** infer (`not-inferred`): vendor and broker names, and the project's
+own handbook file names. The user adds those by hand. If `plugin-text-check` is `unverifiable`,
+say that no plugin copy could be read, so the check that a token does not occur in the plugin's
+own files could not run.
+
+### 2c. Ask once
+
+State your recommendation first, in one or two sentences. Then ask for **one** answer that holds:
+
+- **The tokens to keep.** Only a token the user names is ever written. Pass each one with
+  `--token`. A name the user gives that no source found is allowed. Never propose or type a token
+  the script did not list or the user did not name.
+- **Any file to skip**, with `--skip-file area-map|conventions|tokens`.
+- **A yes or no to the narrowing statement**, whenever `narrows-if-tokens` is true (the token file
+  is still empty and not skipped; the first preview already says so, before any token is chosen).
+  Print the `narrowing-statement` in plain words: today the empty list keeps every memory item
+  private to the project; after the change an item stays global unless it contains a listed name, so
+  a name missing from the list can leave in a global item. Ask it here, with the other answers, so
+  that one reply holds everything. Without a yes, do not pass `--confirm-narrowing`.
+
+  What a **no** does: drop every `--token`, or pass `--skip-file tokens`, preview again (2d), and
+  apply the other two files. The token file then stays as scaffolded and no confirmation is needed.
+
+### 2d. Preview again with the confirmed flags, then write
+
+Run the preview **again** with every confirmed `--token` and `--skip-file`, and take the
+`plan-sha256` of THAT answer. Check that its diffs are the ones the user confirmed:
+
+```bash
+$PY "$FI" project-files --project . [--token <text>]... [--skip-file <file>]... --json
+```
+
+Then apply with that hash and the SAME `--token` and `--skip-file` flags. Always pass `--json`, so
+the answer is one JSON object to read (`status`, `written`, `backup-dir`, `rollback`, or `code` and
+`message`):
+
+```bash
+$PY "$FI" project-files --project . [--token <text>]... [--skip-file <file>]... --json --apply \
+    --expect-sha256 <plan-sha256 of the second preview> [--confirm-narrowing]
+```
+
+Pass `--confirm-narrowing` on this apply only after the user said yes to the narrowing statement
+(it is needed only when the 2d preview says `narrows` is true). The re-preview and the apply need no
+further question, so the user confirms once.
+
+- `changed-since-preview`: a file, the `--token` set or the `--skip-file` set changed after the
+  preview. Run the preview of this step again with the same flags and take its new hash. If its
+  diffs are the ones the user confirmed, apply with the new hash; if they differ, show what changed
+  and ask again. Never reuse an old hash.
+- `narrowing-unconfirmed`: the first tokens were not confirmed. Nothing was written. Ask again.
+- `token-invalid`: the message names the rule (empty, too long, a control character, `too-short`,
+  `generic-word`, `system-database` or `in-plugin-text`). Ask the user for another token.
+- `write-failed`: nothing was written; every file replaced before the failure was restored.
+  A `.claude` folder that is a link is refused the same way.
+
+The files are written all together or not at all, and each changed file is first copied under
+`backup-dir`. Print the `backup-dir` and the `rollback` line. If the project's `.gitignore` does not
+cover `.claude/cache/` (the `gitignore-hint`), tell the user to add it.
+
+Declining writes nothing. If no file is `inferred`, the script answers `nothing-to-do` and writes
+nothing. Running the stage again changes nothing: the files it wrote are now authored.
+
+## Stage 3: the hooks (Quick start step 5)
 
 Registering hooks turns enforcement on. That is the user's decision, so this stage reports
 first and writes only after a yes.
 
-### 2a. Plan
+### 3a. Plan
 
 ```bash
 $PY "$FI" hooks --project . --json
@@ -192,7 +308,7 @@ field: a readiness report carries `mode: plugin`, and a settings plan carries
 copy, is `vendored`: only the vendored hooks run. Managed settings and a settings file passed
 on Claude Code's own command line are not read, and the answer's message says so.
 
-### 2b. `mode` is `plugin`: report, write nothing
+### 3b. `mode` is `plugin`: report, write nothing
 
 The plugin's own `hooks.json` registers the hooks, so a plugin install needs no registration
 and the project's `settings.json` registers none of them (a hook registered in both places
@@ -235,7 +351,7 @@ version mismatch, a missing launcher, a duplicate registration), name it. Do not
 `hooks --apply` when `mode` is `plugin` is refused as `plugin-install-needs-no-registration`.
 Do not try it.
 
-### 2c. `install-mode` is `vendored`: show the diff, ask, write
+### 3c. `install-mode` is `vendored`: show the diff, ask, write
 
 1. Show the user the `hooks-json` path the registrations come from and the `plugin-root`
    (empty when the project's own `hooks.json` is the source), so a wrong pick is visible.
@@ -276,7 +392,7 @@ project's hooks folder must be brought to the same release as the scripts (copy 
 folder from that release). Then run the preview again. Never write
 a row by hand to get past it.
 
-### 2d. Any other mode: stop
+### 3d. Any other mode: stop
 
 `both`, `none`, `plugin-source`, `plugin-disabled` and `install-record-unreadable` each stop
 with the script's named reason. Say the reason in plain words. Write nothing. For `both`,
@@ -310,7 +426,7 @@ $PY "<dir of FI>/plugin_doctor.py" --project .
 ```
 
 - If `plugin_doctor.py` prints `plugin:  NOT FOUND - pass --plugin`, say in one line that the registries cannot be seeded and ask for the plugin path. Offer `plugin_doctor.py --fix` only together with `--plugin <path>`.
-- If `plugin_doctor.py` lists any `missing` entry, show the user that whole list as exactly what the fix would create. The fix creates every missing requirement in the doctor's list, not only the registries (for example `.claude/north-stars`, `.claude/orchestrator/results`, the contract template, `.claude/area-mapping.json` and `.claude/work-item-conventions.json`). It never overwrites a file and leaves `.claude/settings.json` alone.
+- If `plugin_doctor.py` lists any `missing` entry, show the user that whole list as exactly what the fix would create. The fix creates every missing requirement in the doctor's list, not only the registries (for example `.claude/north-stars`, `.claude/orchestrator/results`, the contract template, `.claude/area-mapping.json`, `.claude/work-item-conventions.json` and `.claude/.project-tokens.json`). It never overwrites a file and leaves `.claude/settings.json` alone.
 - Ask the user once whether to go ahead. Only after the user says yes, run:
 
   ```bash
@@ -337,7 +453,7 @@ Only name them. Do not start one of them unless the user asks.
 
 End with a short summary:
 
-- what was written (the profile slots, the settings change and the backup path),
+- what was written (the profile slots, the step-3 files with their backup folder, the settings change and its backup path),
 - what was **not** written, and why, and
 - which Project history record files exist and which the doctor created, if the user agreed.
 
@@ -345,8 +461,8 @@ Then give the **first-session check**. In a NEW session, ask for an edit to a so
 that has no approved contract. The concept gate should block it. If it does not, the hooks
 are not loaded in that session.
 
-Say that running this skill again changes nothing: authored slots stay as they are, and a
-settings file that already has every registration is not rewritten.
+Say that running this skill again changes nothing: authored slots and authored step-3 files stay as
+they are, and a settings file that already has every registration is not rewritten.
 
 ## Anti-patterns
 
@@ -359,15 +475,17 @@ settings file that already has every registration is not rewritten.
 - **Hand-editing `settings.json` or the profile instead of using the script.** A typing
   mistake in `settings.json` can switch every check off, or block every action.
 - **Asking one question per slot.** Show one table. Ask once.
-- **Overwriting an authored slot.** Show the difference and ask. The script will refuse anyway.
+- **Overwriting an authored slot or an authored step-3 file.** Show the difference and ask. The script will refuse anyway.
+- **Proposing or typing a token the script did not list or the user did not name.** Only a `--token` the user named is ever written, and a wrong token can stop every outbound sync or change how shared memory behaves.
 - **Treating the Central Memory System as the project's record, skipping the registries, or running the doctor's fix (`plugin_doctor.py --fix`) without asking.** The registries and the concept contracts are the record; the memory system only supplements them, and the doctor writes only after the user says yes.
 - **Skipping the new-session warning.** The user will otherwise test in this session and
   conclude the hooks do nothing.
 
 ## When NOT to use
 
-- To finish the other per-project files (the area map, the title conventions, the protected
-  names list). This skill does not fill them. They are Quick start step 3.
+- To change a step-3 file the team already wrote, or to add tokens to a list that already has some.
+  Stage 2 shows advice for such a file and leaves the edit to the team.
+- To set the database guards' protected names. Use `/auto-improve-database-guard-install`.
 - To set up the sync configuration. That is Quick start step 6.
 - To change how a hook behaves. To give the database guards the project's own database
   names, use `/auto-improve-database-guard-install`.
