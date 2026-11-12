@@ -238,8 +238,10 @@ The file bases mean:
 - `none-found`: nothing to propose. The file stays as scaffolded, and the note says why.
 - `kept-authored`: the team already wrote this file. It is never changed. What would have been
   proposed is shown as `advice`.
-- `scaffold-missing`: the file is absent. This command never creates it. Offer to run
-  `plugin_doctor.py --fix` (see "The project history record" for the ask-first rule), then run the preview again.
+- `scaffold-missing`: the file is absent, and this command never creates it. Stage 2 asks nothing about
+  `plugin_doctor.py --fix`: the run's one ask is Stage 1a's, or the history record check's when Stage 1a was
+  skipped. Name the missing file and go on with the other files. Once the doctor's fix has created it, the next
+  run of this skill proposes its content.
 - `unrecognised`: the file is not strict JSON, has a duplicate key or a byte order mark, or lacks
   the expected member. It is never written. Tell the user the note's reason.
 - `skipped`: the user named it with `--skip-file`.

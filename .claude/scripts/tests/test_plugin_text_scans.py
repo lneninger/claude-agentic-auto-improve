@@ -773,11 +773,59 @@ class TestChatToolImpactSectionIsGeneric(unittest.TestCase):
         self.assertIn("Deferred", section)
 
 
+_HEADING_BACKTICK_RE = re.compile(r"`([^`]+)`")
+
+
+def template_unshipped_names(text: str, agents: set[str], not_shipped: tuple[str, ...]) -> list[str]:
+    """Names in `text` that the plugin does not ship.
+
+    Two kinds: any NOT_SHIPPED name anywhere in the text, and any backticked name in a "###" heading that is
+    not a plugin agent. Both lists come from the callers, never copied here.
+    """
+    found = [name for name in not_shipped if name in text]
+    for line in text.splitlines():
+        if line.startswith("###"):
+            found += [n for n in _HEADING_BACKTICK_RE.findall(line) if n not in agents]
+    return found
+
+
+class TestTemplateNamesOnlyShippedAgents(unittest.TestCase):
+    """The whole concept-contract template, not only its Chat Tool Impact section, names no unshipped agent."""
+
+    @staticmethod
+    def not_shipped() -> tuple[str, ...]:
+        tests_dir = str(Path(__file__).resolve().parent)
+        if tests_dir not in sys.path:
+            sys.path.append(tests_dir)
+        from test_plugin_doctor import TestTheRealPluginTree
+        return TestTheRealPluginTree.NOT_SHIPPED
+
+    def test_control_a_planted_unshipped_name_and_a_planted_heading_fail(self):
+        agents, not_shipped = plugin_agent_names(), self.not_shipped()
+        self.assertIn("ingestion-data-architect", not_shipped)
+        self.assertTrue(template_unshipped_names("implementers: `ingestion-data-architect`", agents, not_shipped))
+        self.assertTrue(template_unshipped_names("### 3. Data (`ingestion-data-architect`)", agents, not_shipped))
+        self.assertTrue(template_unshipped_names("### 3. Data (`frob-reviewer`)", agents, not_shipped))
+        self.assertEqual(template_unshipped_names("### 1. Backend (`dotnet-backend-architect`)", agents, not_shipped), [])
+
+    def test_the_whole_template_names_no_unshipped_agent(self):
+        text = (TEMPLATES / "concept-contract.md").read_text(encoding="utf-8")
+        self.assertEqual(template_unshipped_names(text, plugin_agent_names(), self.not_shipped()), [])
+
+    def test_the_protocol_line_names_exactly_the_default_implementers(self):
+        import pr_merged
+        text = (TEMPLATES / "concept-contract.md").read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines() if l.startswith("> **Protocol:**"))
+        listed = re.search(r"Implementer agents \((.*?)\) refuse", line)
+        self.assertIsNotNone(listed)
+        self.assertEqual(tuple(re.findall(r"`([^`]+)`", listed.group(1))), tuple(pr_merged.DEFAULT_IMPLEMENTERS))
+
+
 _TEST_COUNT_RE = re.compile(r"\b\d[\d,]*\s+(?:unit\s+)?(?:tests|cases)\b", re.I)
 PR_MERGED_SUITE = ".claude/scripts/tests/test_pr_merged.py"
 
 
-def test_count_claims(text: str) -> list[str]:
+def count_claims_in(text: str) -> list[str]:
     """Digit counts of tests or cases ("760 cases", "Ran 760 tests"): they go stale on the next test added."""
     return [m.group(0) for m in _TEST_COUNT_RE.finditer(text)]
 
@@ -786,15 +834,15 @@ class TestSkillsStateNoTestCountForThePrMergedSuite(unittest.TestCase):
     FILES = ("pr-merged", "advance")
 
     def test_control_a_planted_ran_760_tests_is_flagged_and_prose_is_not(self):
-        self.assertEqual(test_count_claims("reads `Ran 760 tests ... OK`"), ["760 tests"])
-        self.assertEqual(test_count_claims("covered by 760 cases over identity"), ["760 cases"])
-        self.assertEqual(test_count_claims("its unittest summary line must end OK"), [])
-        self.assertEqual(test_count_claims("every test case and the tests"), [])
+        self.assertEqual(count_claims_in("reads `Ran 760 tests ... OK`"), ["760 tests"])
+        self.assertEqual(count_claims_in("covered by 760 cases over identity"), ["760 cases"])
+        self.assertEqual(count_claims_in("its unittest summary line must end OK"), [])
+        self.assertEqual(count_claims_in("every test case and the tests"), [])
 
     def test_neither_skill_states_a_digit_count_of_tests_or_cases(self):
         for name in self.FILES:
             text = (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
-            self.assertEqual(test_count_claims(text), [], name)
+            self.assertEqual(count_claims_in(text), [], name)
 
     def test_each_skill_names_the_suite_its_run_command_and_the_ok_ending(self):
         for name in self.FILES:
