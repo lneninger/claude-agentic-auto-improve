@@ -188,7 +188,9 @@ class MemoryOffParityTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotEqual(brief.read_bytes(), original)
         self.assertIn(b"Memory: unconfigured (shape-unknown) | 2026-11-02", brief.read_bytes())
-        self.assertNotIn(b"Retrieved:", brief.read_bytes())
+        # the outcome's own item is ignored; the keep rule leaves the brief's earlier Retrieved: line in place
+        self.assertNotIn(b"m-9@1", brief.read_bytes())
+        self.assertIn(b'Retrieved: m-1@2 | project | validated | applies | cited "A title"', brief.read_bytes())
 
 
 def read(rel: str) -> str:
@@ -333,12 +335,9 @@ class ProjectHistoryRecordTextTests(unittest.TestCase):
         sec = self.fi_section()
         self.assertRegex(sec, r"plugin_doctor\.py\" --project \.")
         flat = re.sub(r"\s+", " ", sec)
-        hits = [m.start() for m in re.finditer(r"--fix", flat)]
-        self.assertTrue(hits, "the section must mention --fix")
-        for i in hits:
-            before = flat[:i]
-            self.assertRegex(before, r"(?i)(asks?|ask|only after|says yes|agree|confirm)",
-                             "a --fix mention must come after a confirmation sentence")
+        self.assertIn("--fix", flat, "the section must mention --fix")
+        # I3: every --fix line in the whole file, not only this section, with a word-bounded ask word in its paragraph
+        self.assertEqual(fix_lines_without_ask(read(self.FI)), [])
         self.assertRegex(flat, r"(?i)ask(s)? before .{0,40}--fix|only after the user says yes")
 
     def test_nothing_appends_on_every_run(self):
@@ -379,6 +378,171 @@ class ProjectHistoryRecordTextTests(unittest.TestCase):
         self.assertTrue(text.startswith("# Use the Project History Record"))
         self.assertLess(len(text), 400)
         self.assertNotRegex(text, r"(?i)memory_|mcp__")
+
+
+ASK_WORD = re.compile(r"(?i)\b(asks?|asked|asking|only after|says yes|agrees?|confirm\w*)\b")
+BLANK_LINE = re.compile(r"\n[ \t]*\n")
+
+
+def fix_lines_without_ask(text: str) -> list:
+    """Every `--fix` in `text` whose own paragraph holds no ask word before it (I3).
+
+    A paragraph is a run of lines between blank lines. A paragraph that is a code fence belongs to the prose
+    paragraph just above it, so the sentence that introduces the command counts. The look-back stops at the
+    paragraph: an ask word in an earlier section is no confirmation for this command.
+    """
+    blocks = BLANK_LINE.split(text)
+    bad = []
+    for i, block in enumerate(blocks):
+        for m in re.finditer(r"--fix\b", block):
+            before = block[:m.start()]
+            if block.lstrip().startswith("```") and i > 0:
+                before = blocks[i - 1] + "\n" + before
+            if not ASK_WORD.search(before):
+                bad.append(block[max(0, m.start() - 60):m.end()].strip())
+    return bad
+
+
+class FixAskPinTests(unittest.TestCase):
+    """I3 controls: the scan fails on a bare --fix and on an ask word that is only part of another word."""
+
+    def test_a_bare_fix_after_no_ask_is_found(self):
+        planted = "If there is no profile, run the doctor first:\n\n```bash\n$PY plugin_doctor.py --fix\n```\n"
+        self.assertEqual(len(fix_lines_without_ask(planted)), 1)
+
+    def test_a_task_word_is_no_ask(self):
+        planted = "This task scaffolds the profile:\n\n```bash\n$PY plugin_doctor.py --fix\n```\n"
+        self.assertEqual(len(fix_lines_without_ask(planted)), 1)
+
+    def test_an_ask_in_an_earlier_paragraph_does_not_count(self):
+        planted = "Ask the user once.\n\nThen run the doctor.\n\n```bash\n$PY plugin_doctor.py --fix\n```\n"
+        self.assertEqual(len(fix_lines_without_ask(planted)), 1)
+
+    def test_an_ask_before_the_fence_in_the_same_paragraph_counts(self):
+        ok = "Ask the user once. Only after a yes, run:\n\n```bash\n$PY plugin_doctor.py --fix\n```\n"
+        self.assertEqual(fix_lines_without_ask(ok), [])
+
+    def test_the_real_file_has_every_fix_line_covered(self):
+        text = read("skills/auto-improve-finish-install/SKILL.md")
+        self.assertGreaterEqual(text.count("--fix"), 4)
+        self.assertEqual(fix_lines_without_ask(text), [])
+
+
+class FinishInstallStage1aTests(unittest.TestCase):
+    """W1 and I-5: Stage 1a reports, shows the missing list, asks once, and runs --fix only on a yes."""
+
+    FI = "skills/auto-improve-finish-install/SKILL.md"
+
+    def stage_1a(self) -> str:
+        return section(read(self.FI), "### 1a.", "### 1b.")
+
+    def history(self) -> str:
+        return section(read(self.FI), "## The project history record", "## Add-ons")
+
+    def test_stage_1a_runs_the_doctor_in_report_mode_first(self):
+        s = self.stage_1a()
+        self.assertRegex(s, r"plugin_doctor\.py\" --project \.")
+        self.assertLess(s.index("--project ."), s.index("--fix"))
+
+    def test_stage_1a_shows_the_missing_list_as_what_fix_would_create(self):
+        flat = re.sub(r"\s+", " ", self.stage_1a())
+        self.assertRegex(flat, r"(?i)missing.{0,200}(exactly )?what .{0,20}--fix.{0,20}would create")
+
+    def test_stage_1a_asks_once_and_runs_fix_only_on_a_yes(self):
+        flat = re.sub(r"\s+", " ", self.stage_1a())
+        self.assertRegex(flat, r"(?i)ask(s)? (the user )?once")
+        self.assertRegex(flat, r"(?i)only after the user says yes")
+        self.assertRegex(flat, r"(?i)never run(s)? it (on its own|without)")
+
+    def test_planted_bare_stage_1a_fix_fails(self):
+        planted = ("### 1a. Is there a profile yet?\n\nIf `.claude/project-profile.md` does not exist, run the doctor "
+                   "first:\n\n```bash\n$PY \"<dir of FI>/plugin_doctor.py\" --fix\n```\n\n### 1b. Preview\n")
+        self.assertEqual(len(fix_lines_without_ask(section(planted, "### 1a.", "### 1b."))), 1)
+
+    # I-5, the four runs
+    def test_run_a_profile_exists_stage_1a_is_skipped_and_the_history_check_holds_the_only_ask(self):
+        flat = re.sub(r"\s+", " ", self.stage_1a())
+        self.assertRegex(flat, r"(?i)profile already exists.{0,80}skip")
+        self.assertRegex(re.sub(r"\s+", " ", self.history()), r"(?i)holds the only ask")
+
+    def test_run_b_after_a_yes_the_later_check_finds_nothing_missing_and_asks_nothing(self):
+        flat = re.sub(r"\s+", " ", self.history())
+        self.assertRegex(flat, r"(?i)Stage 1a.{0,300}yes.{0,300}nothing (is )?missing.{0,100}asks? nothing")
+
+    def test_run_c_after_a_no_stage_1_needs_a_profile_and_the_later_check_does_not_ask_again(self):
+        flat = re.sub(r"\s+", " ", self.stage_1a())
+        self.assertRegex(flat, r"(?i)\bno\b.{0,200}needs a profile.{0,100}Stage 2")
+        hist = re.sub(r"\s+", " ", self.history())
+        self.assertRegex(hist, r"(?i)Stage 1a.{0,300}\bno\b.{0,300}does not ask again.{0,200}command to run later")
+
+    def test_run_d_plugin_not_found_the_first_step_to_reach_it_asks_and_that_is_the_one_ask(self):
+        flat = re.sub(r"\s+", " ", read(self.FI))
+        self.assertRegex(flat, r"(?i)NOT FOUND.{0,300}first.{0,200}asks? for the plugin path.{0,100}the run's one ask")
+
+
+class MemoryReferenceTextTests(unittest.TestCase):
+    """I1, I2, Q4 and I6 pins."""
+
+    REF = "skills/design-first/references/central-memory.md"
+    CC = "skills/pr-merged/references/contract-completion.md"
+    SUFFIX = ProjectHistoryRecordTextTests.SUFFIX
+
+    @staticmethod
+    def unavailable_examples_without_suffix(text: str, suffix: str) -> list:
+        return [m for m in re.findall(r"`(Memory: unavailable[^`]*)`", text) if not m.endswith(suffix)]
+
+    def test_i1_every_backticked_unavailable_example_ends_with_the_suffix(self):
+        ref = read(self.REF)
+        self.assertTrue(re.findall(r"`Memory: unavailable[^`]*`", ref), "the reference has the example")
+        self.assertEqual(self.unavailable_examples_without_suffix(ref, self.SUFFIX), [])
+
+    def test_i1_control_a_bare_example_is_found(self):
+        planted = "print one line (`Memory: unavailable (tool-absent)`) and go on"
+        self.assertEqual(len(self.unavailable_examples_without_suffix(planted, self.SUFFIX)), 1)
+        good = "print one line (`Memory: unavailable (tool-absent)%s`)" % self.SUFFIX
+        self.assertEqual(self.unavailable_examples_without_suffix(good, self.SUFFIX), [])
+
+    def step_5a_1(self) -> str:
+        m = re.search(r"(?ms)^\s+1\. \*\*Read the candidates.*?(?=^\s+2\. \*\*)", read(self.CC))
+        self.assertIsNotNone(m, "5a.1")
+        return re.sub(r"\s+", " ", m.group(0))
+
+    def test_i2_5a_1_names_default_branch_unknown_and_the_one_rerun(self):
+        s = self.step_5a_1()
+        self.assertIn("default-branch-unknown", s)
+        self.assertRegex(s, r"(?i)re-run.{0,200}--default-branch")
+        self.assertIn("git symbolic-ref refs/remotes/origin/HEAD", s)
+        self.assertRegex(s, r"(?i)from the user")
+        self.assertRegex(s, r"(?i)never a guessed")
+
+    def test_i2_control_the_old_text_fails(self):
+        old = "1. **Read the candidates** It refuses `not-flipped`, `brief-not-carried` and `capture-not-enabled`."
+        self.assertNotIn("default-branch-unknown", old)
+
+    def test_the_step_labels_are_unchanged(self):
+        text = read(self.CC)
+        for label in ("1. **A read-only dry run first", "2. **Stop only when", "3. **Show the one confirmation",
+                      "4. **On yes, disclose", "5. **Run for real", "5a. **Capture", "6. **Put the stable branch",
+                      "7. **Copy exactly", "8. **Open a draft pull request", "9. **Remove the records worktree"):
+            self.assertIn(label, text)
+        for sub in ("Read the candidates", "No candidates ends the step silently", "Ask the capture question",
+                    "Send each confirmed candidate", "Record the receipts", "No outcome of this step blocks"):
+            self.assertIn(sub, text)
+
+    def test_q4_section_3_records_the_empty_outcome_and_prints_one_line_with_the_suffix(self):
+        sec = re.sub(r"\s+", " ", section(read(self.REF), "## 3.", "## 4."))
+        m = re.search(r"(?i)An empty `items` list means an empty retrieval:(.{0,400})", sec)
+        self.assertIsNotNone(m)
+        self.assertNotRegex(m.group(1), r"(?i)print nothing|write nothing")
+        self.assertRegex(m.group(1), r"(?i)record")
+        self.assertIn("`Memory: enabled | <date>%s`" % self.SUFFIX, m.group(1))
+
+    def test_i6_the_retrieve_tool_and_shape_rows_say_none_with_a_server_set_reports_unconfigured(self):
+        text = read(".claude/project-profile.md")
+        for slot in ("memory.retrieve-tool", "memory.shape"):
+            row = [l for l in text.splitlines() if l.startswith("| `%s`" % slot)]
+            self.assertEqual(len(row), 1, slot)
+            self.assertRegex(row[0], r"(?i)`none` with a server set.{0,40}unconfigured", slot)
 
 
 if __name__ == "__main__":

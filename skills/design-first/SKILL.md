@@ -93,7 +93,7 @@ CWD: <current working directory — used to detect project>
 FILES: <files the user mentioned, if any>
 PRIOR_AGENT: none
 PRIOR_FINDINGS:
-  registry_digest: .claude/.scout-cache/registry-digest.md
+  registry_digest: .claude/.scout-cache/registry-digest.md   # only when that file exists; omit this line otherwise
   mechanisms_registry: .claude/registries/MECHANISMS.md (root) and .claude/registries/MECHANISMS/*.md (domain files)
   vocabulary_registry: .claude/registries/VOCABULARY.md (root) and .claude/registries/VOCABULARY/*.md (domain files)
   contract_template: .claude/templates/concept-contract.md
@@ -209,7 +209,7 @@ PRIOR_FINDINGS:
   contract_status: draft
 ```
 
-The critic reads the contract plus the root registry files and their domain files (`MECHANISMS/general.md`, `VOCABULARY/general.md`, `JOURNAL/general.md` and the other `MECHANISMS/*.md`, `VOCABULARY/*.md`, `JOURNAL/*.md` that match the contract) and INTEGRATION.md, applies its adversarial checklist (reuse drift, vocabulary drift, hidden Open Questions, integration-surface omissions, journal-lesson applicability, End-User View completeness, etc.) and **appends a `## Critique` section to the contract file** with BLOCKER / WARN / NIT findings.
+The critic reads the contract plus the root registry files and their domain files (`MECHANISMS/general.md`, `VOCABULARY/general.md`, `JOURNAL/general.md` and the other `MECHANISMS/*.md`, `VOCABULARY/*.md`, `JOURNAL/*.md` that match the contract) and INTEGRATION.md where the project keeps one, applies its adversarial checklist (reuse drift, vocabulary drift, hidden Open Questions, integration-surface omissions, journal-lesson applicability, End-User View completeness, etc.) and **appends a `## Critique` section to the contract file** with BLOCKER / WARN / NIT findings.
 
 The critic is **advisory** — it does NOT flip `Status` and does NOT block the workflow. Its only output is the appended `## Critique` section plus a HANDOFF summary. Do NOT proceed to Step 3 until the critic returns.
 

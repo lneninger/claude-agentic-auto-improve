@@ -195,10 +195,10 @@ Choose the agent by area:
 - Backend C# → `dotnet-backend-architect`
 - Angular frontend → `angular-senior-dev`
 - Third-party service integration → the project's own integration agent for that service, if it declares one
-- Ingestion jobs → `ingestion-data-architect`
+- Ingestion jobs → `dotnet-backend-architect`, or the project's own ingestion agent if it declares one
 - SQL / index / migration perf → `dotnet-backend-architect` with `/sql-server-patterns` skill (+ `sql-performance-reviewer` to audit)
 - Docker / container lifecycle, Kubernetes, Terraform, Bicep or cloud infrastructure → `cloud-engineer` (active when `cloud.providers` is set in the project profile). It refuses to run without an approved contract: pass `PRIOR_FINDINGS` with the `contract_path` and `contract_status: approved` when one exists. When none exists, do not invoke the agent: say a contract is required first and run `/design-first`.
-- LLM pipeline / Python sidecar → `python-ai-developer` or `llm-training-engineer`
+- LLM pipeline / Python sidecar → `python-ai-developer`, or the project's own model-training agent if it declares one
 
 ### Safety-critical path bugs require escalation
 

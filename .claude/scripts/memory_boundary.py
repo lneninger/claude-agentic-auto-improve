@@ -768,21 +768,32 @@ def cmd_record(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
                 new_lines.append(line)
                 existing_keys.add(entry["key"])
     elif unconfigured:
-        # One line, the reason from the profile; whatever the outcome carries is ignored.
+        # One line, the reason from the profile; whatever the outcome carries is ignored. The keep rule: the
+        # earlier Retrieved: and Reported: lines stay, in order, so a profile that went unconfigured loses nothing.
         new_lines = [_unconfigured_line(cfg, outcome)]
+        new_lines += [l for l in existing if l.startswith(("Retrieved:", "Reported:"))]
         new_lines += [l for l in existing if l.startswith(("Captured:", "Not sent:"))]
     else:
         new_lines = [_memory_line(cfg, outcome)]
-        for item in outcome.get("retrieved") if isinstance(outcome.get("retrieved"), list) else []:
+        retrieved = outcome.get("retrieved") if isinstance(outcome.get("retrieved"), list) else []
+        reported = outcome.get("reported") if isinstance(outcome.get("reported"), list) else []
+        carried: List[str] = []
+        for item in retrieved:
             line = retrieved_line(item)
             dropped += line is None
             if line:
-                new_lines.append(line)
-        for entry in outcome.get("reported") if isinstance(outcome.get("reported"), list) else []:
+                carried.append(line)
+        for entry in reported:
             line = reported_line(entry)
             dropped += line is None
             if line:
-                new_lines.append(line)
+                carried.append(line)
+        if not retrieved and not reported and outcome.get("state") != "unavailable":
+            # The keep rule for an enabled empty retrieval: nothing new to say about items, so the earlier
+            # Retrieved: and Reported: lines stay. An outcome that carries items replaces them; an unavailable
+            # outcome says the call did not happen and is written as before.
+            carried = [l for l in existing if l.startswith(("Retrieved:", "Reported:"))]
+        new_lines += carried
         new_lines += [l for l in existing if l.startswith(("Captured:", "Not sent:"))]
 
     head = lines[:start]
