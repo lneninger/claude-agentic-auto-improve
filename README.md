@@ -985,13 +985,13 @@ agents/          15 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    7 shipped working agreements, delivered at session start
   addons/        3 opt-in add-ons (addon.json + hook files), never registered by hooks.json
-  hooks/         14 generic hooks, a gate launcher, 8 shared helper modules, 6 generic data files
+  hooks/         14 generic hooks, a gate launcher, 8 shared helper modules, 5 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
-    tests/       23 hook test suites
-  scripts/       23 workflow scripts, 3 shared helper modules
-    tests/       36 suites, including the path-resolution suite
+    tests/       hook test suites
+  scripts/       workflow scripts and shared helper modules
+    tests/       suites, including the path-resolution suite
   templates/     6 document templates
-  references/    3 reference documents
+  references/    4 reference documents
   registries/    MECHANISMS.md, VOCABULARY.md, JOURNAL.md (Universal tier only)
   area-mapping.json          TEMPLATE - schema intact, empty content set
   work-item-conventions.json TEMPLATE - schema intact, empty content set
