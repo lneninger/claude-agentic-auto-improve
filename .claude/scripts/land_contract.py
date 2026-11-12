@@ -2710,27 +2710,117 @@ PN_GIT_SETTINGS = ("core.fsmonitor=false", "core.untrackedCache=false", "index.s
 _PN_RUN: Optional[Dict[str, Any]] = None
 
 
-def _pn_norm(path: Any) -> str:
-    return os.path.normcase(os.path.realpath(str(path)))
+class GitFailure(Exception):
+    """A pointer file or a git call could not be read: the Protected-name check is ``unverifiable``."""
+
+
+#: C8 (contract 2026-10-13, Revision 6), local copy of ``_protected_names``: this script never imports it.
+_PN_LONG_UNC_RE = re.compile(r"^\\\\[?]\\UNC\\", re.IGNORECASE)
+_PN_DEVICE_RE = re.compile(r"^\\\\[?.]\\")
+_PN_ADMIN_SHARE_RE = re.compile(r"^\\\\([^\\]+)\\([A-Za-z])\$(?=\\|$)")
+
+
+def _pn_strip_prefixes(path: Any) -> str:
+    """C8 steps 1 and 2: the ``\\\\?\\`` and ``\\\\.\\`` prefixes, and an own-computer drive share, as text."""
+    text = str(path)
+    if _PN_LONG_UNC_RE.match(text):
+        text = "\\\\" + text[len("\\\\?\\UNC\\"):]
+    else:
+        text = _PN_DEVICE_RE.sub("", text, count=1)
+    match = _PN_ADMIN_SHARE_RE.match(text)
+    if match and match.group(1).lower() in ("localhost", "127.0.0.1", socket.gethostname().lower()):
+        text = match.group(2) + ":" + text[match.end():]
+    return text
+
+
+def comparable_path(path: Any) -> str:
+    """C8's resolved spelling: steps 1 and 2, ``realpath``, steps 1 and 2 again, ``normcase``."""
+    return os.path.normcase(_pn_strip_prefixes(os.path.realpath(_pn_strip_prefixes(path))))
+
+
+def written_path(path: Any) -> str:
+    """C8's written spelling: steps 1, 2 and 5 with ``abspath`` for ``realpath`` (no link is followed)."""
+    return os.path.normcase(os.path.abspath(_pn_strip_prefixes(path)))
 
 
 def _pn_inside(folder: str, root: str) -> bool:
     return folder == root or folder.startswith(root.rstrip("\\/") + os.sep)
 
 
+def _pn_read_pointer(path: Path, what: str) -> str:
+    """The one-line text of a git pointer file; ``GitFailure`` when it exists but cannot be read, is not a file
+    or holds nothing."""
+    try:
+        if not path.is_file():
+            raise GitFailure("%s exists but is not a readable file: %s" % (what, path))
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as exc:
+        raise GitFailure("%s cannot be read: %s" % (what, exc)) from exc
+    if not text:
+        raise GitFailure("%s holds no path: %s" % (what, path))
+    return text
+
+
+def linked_worktrees(project: Any) -> List[str]:
+    """C7: ``project``, the main checkout, every linked worktree and the common git folder, read from files
+    with no git process (``commondir`` resolved relative to the git folder, so the same set comes from the main
+    checkout and from a linked worktree). A pointer file that exists but cannot be read or parsed raises
+    ``GitFailure``; a missing ``worktrees`` folder is an empty list. Local copy of
+    ``_protected_names.linked_worktrees``."""
+    root = Path(project)
+    roots = [str(root)]
+    dot_git = root / ".git"
+    if not os.path.lexists(str(dot_git)):
+        return roots
+    if dot_git.is_dir():
+        git_dir = dot_git
+    else:
+        text = _pn_read_pointer(dot_git, "the .git file")
+        if not text.lower().startswith("gitdir:"):
+            raise GitFailure("the .git file holds no gitdir line: %s" % dot_git)
+        git_dir = Path(root, text[len("gitdir:"):].strip())
+        if not git_dir.is_dir():
+            raise GitFailure("the gitdir the .git file names is not a folder: %s" % git_dir)
+    pointer = git_dir / "commondir"
+    if os.path.lexists(str(pointer)):
+        common = Path(git_dir, _pn_read_pointer(pointer, "commondir"))
+        if not common.is_dir():
+            raise GitFailure("the commondir names no folder: %s" % common)
+    else:
+        common = git_dir
+    common = Path(os.path.normpath(str(common)))
+    if common.name.lower() == ".git":
+        roots.append(str(common.parent))
+    try:
+        worktrees = common / "worktrees"
+        entries = sorted(worktrees.iterdir()) if worktrees.is_dir() else []
+    except OSError as exc:
+        raise GitFailure("the worktrees folder cannot be read: %s" % exc) from exc
+    for entry in entries:
+        gitdir = entry / "gitdir"
+        if os.path.lexists(str(gitdir)):
+            roots.append(str(Path(entry, _pn_read_pointer(gitdir, "a worktree gitdir file")).parent))
+    roots.append(str(common))
+    return roots
+
+
 def resolve_git(path_value: Optional[str], excluded_roots: Optional[Sequence[Any]]) -> Optional[str]:
     """The absolute path of the git program to run, or None: the first ``git.exe`` (``git`` elsewhere) in the
     ``PATH`` entries, in order, skipping an empty, relative or ``.`` entry, the current folder and any entry
-    inside an excluded root. Local copy of ``_protected_names.resolve_git``."""
+    one of whose two spellings (written, resolved) lies inside either spelling of an excluded root. Local copy
+    of ``_protected_names.resolve_git``."""
     name = "git.exe" if os.name == "nt" else "git"
-    roots = [_pn_norm(root) for root in (excluded_roots or []) if root]
-    here = _pn_norm(os.getcwd())
+    roots: List[str] = []
+    for root in (excluded_roots or []):
+        if root:
+            roots.extend({written_path(root), comparable_path(root)})
+    here = comparable_path(os.getcwd())
     for entry in (path_value or "").split(os.pathsep):
         entry = entry.strip().strip('"')
         if not entry or entry == "." or not os.path.isabs(entry):
             continue
-        folder = _pn_norm(entry)
-        if folder == here or any(_pn_inside(folder, root) for root in roots):
+        spellings = {written_path(entry), comparable_path(entry)}
+        if comparable_path(entry) == here or any(_pn_inside(s, root) for s in spellings for root in roots):
             continue
         candidate = os.path.join(entry, name)
         if os.path.isfile(candidate) and (os.name == "nt" or os.access(candidate, os.X_OK)):
@@ -2781,21 +2871,33 @@ def _pn_git(cwd: Any, args: Sequence[str]) -> Optional[Any]:
         return None
 
 
-def _git_show_bytes(cwd: Any, ref: str, path: str) -> Optional[bytes]:
-    """The exact bytes of ``path`` at ``ref`` (``git cat-file blob``, no text conversion), or None when git
-    cannot read it. The blob is named by its object id, taken from the same whole-tree listing the checker
-    reads, so no argument of a git process ends in the checker's file name."""
+def _git_show_bytes(cwd: Any, ref: str, path: str) -> Tuple[str, Optional[bytes]]:
+    """``(state, bytes)`` of ``path`` at ``ref``: ``found`` (the exact bytes, ``git cat-file blob``, no text
+    conversion), ``absent`` (the whole-tree listing succeeded and has no entry of the exact path),
+    ``duplicate`` (it lists the exact path more than once) or ``failed`` (the listing or the read failed).
+    The blob is named by its object id, taken from the same whole-tree listing the checker reads, so no
+    argument of a git process ends in the checker's file name."""
     listing = _pn_git(cwd, ["ls-tree", "-r", "-z", "--full-tree", ref])
     if listing is None or listing.returncode != 0:
-        return None
+        return "failed", None
     wanted = path.encode("utf-8")
+    oids: List[Optional[str]] = []
     for entry in listing.stdout.split(b"\0"):
         meta, _tab, raw = entry.partition(b"\t")
+        if raw != wanted:
+            continue
         fields = meta.split()
-        if raw == wanted and len(fields) == 3 and fields[1] == b"blob":
-            proc = _pn_git(cwd, ["cat-file", "blob", fields[2].decode("ascii")])
-            return proc.stdout if proc is not None and proc.returncode == 0 else None
-    return None
+        oids.append(fields[2].decode("ascii") if len(fields) == 3 and fields[1] == b"blob" else None)
+    if not oids:
+        return "absent", None
+    if len(oids) > 1:
+        return "duplicate", None
+    if oids[0] is None:
+        return "failed", None
+    proc = _pn_git(cwd, ["cat-file", "blob", oids[0]])
+    if proc is None or proc.returncode != 0:
+        return "failed", None
+    return "found", proc.stdout
 
 
 #: An 8.3 short-name shape, and the characters a full case mapping misses (see ``_protected_names``).
@@ -2837,23 +2939,37 @@ def _git_lists_path(cwd: Any, ref: str, path: str) -> Optional[bool]:
     return False
 
 
-def _installed_plugin_checker() -> Optional[Path]:
-    """The INSTALLED plugin's ``protected_names_check.py``: ``CLAUDE_PLUGIN_ROOT``, then the newest plugin
-    cache folder of the Claude home. Never the copy this script lives in, and never the landing worktree's."""
+def _installed_plugin_checker(wt: Optional[Path] = None) -> Optional[Path]:
+    """The INSTALLED plugin's ``protected_names_check.py`` (C9): ``CLAUDE_PLUGIN_ROOT``, then the
+    ``installPath`` that Claude Code recorded in ``installed_plugins.json`` (a user-scope entry; a
+    project-scope entry only when no user-scope entry exists and its ``projectPath`` is the main checkout of
+    ``wt``). Never a cache folder chosen by version or date, never the copy this script lives in, and never
+    the landing worktree's."""
     roots: List[Path] = []
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "").strip()
     if plugin_root:
         roots.append(Path(plugin_root))
     cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    cache = (Path(cfg) if cfg else Path.home() / ".claude") / "plugins" / "cache"
-    versions: List[Tuple[Tuple[int, ...], Path]] = []
+    record = (Path(cfg) if cfg else Path.home() / ".claude") / "plugins" / "installed_plugins.json"
+    entries: List[Any] = []
     try:
-        for folder in cache.glob("*/agentic-auto-improve/*"):
-            if re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", folder.name):
-                versions.append((tuple(int(p) for p in folder.name.split(".")), folder))
-    except OSError:
-        pass
-    roots.extend(path for _version, path in sorted(versions, key=lambda item: item[0], reverse=True))
+        plugins = json.loads(record.read_text(encoding="utf-8")).get("plugins") or {}
+        for key, value in plugins.items():
+            if key.startswith("agentic-auto-improve@") and isinstance(value, list):
+                entries.extend(item for item in value if isinstance(item, dict))
+    except (OSError, ValueError, AttributeError):
+        entries = []
+    chosen = [e for e in entries if e.get("scope") == "user"]
+    if not chosen and wt is not None:
+        try:
+            common = Path(linked_worktrees(wt)[-1])
+        except GitFailure:
+            common = None
+        if common is not None and common.name.lower() == ".git":
+            main = comparable_path(common.parent)
+            chosen = [e for e in entries if e.get("scope") == "project" and e.get("projectPath")
+                      and comparable_path(e["projectPath"]) == main]
+    roots.extend(Path(e["installPath"]) for e in chosen if isinstance(e.get("installPath"), str) and e["installPath"])
     for root in roots:
         script = root / PN_SCRIPT_REL
         if script.is_file() and (root / PN_HELPER_REL).is_file():
@@ -2898,7 +3014,16 @@ def _p7_protected_names(wt: Path, mark_m: str, head: str, facts: Dict[str, Any],
         details["unverifiable"] = detail
 
     global _PN_RUN
-    git_program = resolve_git(os.environ.get("PATH", ""), [str(wt)])
+    try:
+        # C7: every tree under check, read without git. The working folder itself is skipped by resolve_git's own
+        # equality test; it is NOT a root (a root excludes everything inside it, and a landing may be started from
+        # a folder that holds the trees and unrelated tool folders: the Stage fixtures do exactly that).
+        excluded = [str(wt)] + linked_worktrees(wt)
+    except (GitFailure, OSError) as exc:
+        unverifiable("the Protected-name check cannot run: the folders to keep git programs out of cannot be "
+                     "read (%s)" % exc)
+        return
+    git_program = resolve_git(os.environ.get("PATH", ""), excluded)
     if git_program is None:
         unverifiable("the Protected-name check cannot run: no git program was found on PATH outside the landing "
                      "worktree")
@@ -2920,31 +3045,36 @@ def _p7_protected_names(wt: Path, mark_m: str, head: str, facts: Dict[str, Any],
                              "merged head")
                 return
 
-            script_text = _git_show_bytes(wt, mark_m, PN_SCRIPT_REL)
-            helper_text = _git_show_bytes(wt, mark_m, PN_HELPER_REL)
-            if script_text is not None or helper_text is not None:
+            script_state, script_text = _git_show_bytes(wt, mark_m, PN_SCRIPT_REL)
+            helper_state, helper_text = _git_show_bytes(wt, mark_m, PN_HELPER_REL)
+            states = (script_state, helper_state)
+            # C9: the installed copy runs only when mark_m's whole-tree listing succeeded and holds NEITHER
+            # file. A failed read, a duplicate entry or exactly one of the two is not "mark_m lacks it".
+            if "failed" in states or "duplicate" in states:
+                unverifiable("the Protected-name check cannot run: mark_m's copy of the checker cannot be read "
+                             "whole (protected_names_check.py: %s, _protected_names.py: %s)" % states)
+                return
+            if states in (("found", "absent"), ("absent", "found")):
+                unverifiable("the Protected-name check cannot run: mark_m holds exactly one of the checker's two "
+                             "files (protected_names_check.py: %s, _protected_names.py: %s), a broken checker that "
+                             "would end with exit code 1 if it ran, so none is run" % states)
+                return
+            if states == ("found", "found"):
                 # mark_m's own copy: whatever it holds is written as it is, as <tmp>/.claude/scripts/ and
-                # <tmp>/.claude/hooks/, so the script's ``../hooks`` is this private folder's and nothing
-                # else. A script without its helper (or the reverse) is a broken checker; running it gives the
-                # child's own exit 1, which reads as unverifiable.
+                # <tmp>/.claude/hooks/, so the script's ``../hooks`` is this private folder's and nothing else.
                 scripts_dir = Path(tmp) / ".claude" / "scripts"
                 hooks_dir = Path(tmp) / ".claude" / "hooks"
                 scripts_dir.mkdir(parents=True)
                 hooks_dir.mkdir(parents=True)
                 script = scripts_dir / "protected_names_check.py"
-                if script_text is not None:
-                    script.write_bytes(script_text)
-                else:
-                    script.write_text("raise SystemExit('the default branch holds the helper but not the "
-                                      "script')\n", encoding="utf-8")
-                if helper_text is not None:
-                    (hooks_dir / "_protected_names.py").write_bytes(helper_text)
+                script.write_bytes(script_text or b"")
+                (hooks_dir / "_protected_names.py").write_bytes(helper_text or b"")
             else:
-                script_found = _installed_plugin_checker()
+                script_found = _installed_plugin_checker(wt)
                 if script_found is None:
                     unverifiable("the Protected-name check cannot run: the default branch (%s) lacks "
                                  "protected_names_check.py and _protected_names.py, and no installed plugin "
-                                 "copy was found (CLAUDE_PLUGIN_ROOT, then the plugin cache folder)" % mark_m[:12])
+                                 "copy was found (CLAUDE_PLUGIN_ROOT, then the installed plugin folder)" % mark_m[:12])
                     return
                 script = script_found
             cmd = [sys.executable, "-I", "-B", str(script), "--project", str(wt), "--working-ref", head,
