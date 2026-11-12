@@ -59,7 +59,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from test_protected_names import (RULES_REL, _GIT_ENV, _rm_tree, git, make_git_shim, make_world,  # noqa: E402
-                                  read_shim_log, rules_bytes)
+                                  read_shim_log, rules_bytes, shim_name, shim_subcommand)
 
 CLAUDE_DIR = HERE.parents[1]
 PLUGIN_ROOT = CLAUDE_DIR.parent
@@ -592,9 +592,13 @@ class StepBlockCase(WarningCase):
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("# a checker\n", encoding="utf-8")
         return script
+        return script
 
-    def run_block(self, cwd, plugin_root=None, project_dir=None):
-        env = {"PATH": str(self.shim) + os.pathsep + os.environ.get("PATH", ""), "REC_LOG": str(self.rec),
+    def run_block(self, cwd, plugin_root=None, project_dir=None, path_prefix=(), extra_env=None):
+        # ``path_prefix`` and ``extra_env`` are additive (block 18): folders put before the recording ``py`` on PATH
+        # (a recording git, for R6-T8-2) and extra caller variables (GIT_DIR, GIT_WORK_TREE, for R6-T8-1).
+        env = {"PATH": os.pathsep.join([str(p) for p in path_prefix] + [str(self.shim), os.environ.get("PATH", "")]),
+               "REC_LOG": str(self.rec),
                "HOME": str(self.state), "TEMP": str(self.state), "TMP": str(self.state),
                "CLAUDE_CONFIG_DIR": str(self.cfg)}
         for key in ("SYSTEMROOT", "WINDIR", "COMSPEC"):
@@ -604,22 +608,55 @@ class StepBlockCase(WarningCase):
             env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
         if project_dir is not None:
             env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+        env.update(extra_env or {})
         proc = subprocess.run([self.bash, "-c", self.block], cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120)
         args = self.rec.read_text(encoding="utf-8").splitlines() if self.rec.exists() else []
         return args, proc
+
+    def run_block_real(self, cwd, plugin_root, extra_env=None):
+        """Step 5.7's block run END TO END: the real ``py`` (no recording shim) starts the real checker, so a row can
+        read the verdict the step would print. Returns ``(verdict object or None, process)``."""
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(self.state), "TEMP": str(self.state), "TMP": str(self.state),
+               "CLAUDE_CONFIG_DIR": str(self.cfg), "CLAUDE_PLUGIN_ROOT": str(plugin_root), "CLAUDE_PROJECT_DIR": str(self.launch)}
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LOCALAPPDATA", "APPDATA", "USERPROFILE"):
+            if key in os.environ:
+                env[key] = os.environ[key]
+        env.update(extra_env or {})
+        proc = subprocess.run([self.bash, "-c", self.block], cwd=str(cwd), env=env, capture_output=True, text=True, timeout=180)
+        obj = None
+        for line in proc.stdout.splitlines():
+            if line.startswith("{"):
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    pass
+        return obj, proc
 
     def project_arg(self, args, proc):
         self.assertIn("--project", args, "the step starts the checker with --project. args=%r stderr=%r" % (args, proc.stderr[-300:]))
         return args[args.index("--project") + 1]
 
     def script_arg(self, args):
-        self.assertIn("-3", args, "the step runs py -3 <checker>. args=%r" % args)
-        return args[args.index("-3") + 1]
+        """NAMED EDIT (#623 t18, F6): the step now runs ``py -3 -I -B <checker>`` (or ``python3 -I -B <checker>``), so
+        the checker is no longer the argument right after ``-3``. It is found by its suffix, and ``-I`` and ``-B``
+        must both come BEFORE it: without them a PYTHONPATH folder or a user-site file decides the verdict (T6)."""
+        hits = [i for i, a in enumerate(args) if posix_norm(a).endswith("/protected_names_check.py")]
+        self.assertTrue(hits, "the step runs the checker (py -3 -I -B <checker> or python3 -I -B <checker>). args=%r" % args)
+        index = hits[0]
+        for flag in ("-I", "-B"):
+            self.assertIn(flag, args[:index],
+                          "the step starts the checker with %s before the script (isolated mode: no PYTHONPATH, no user site, no "
+                          "bytecode cache decides the verdict). args=%r" % (flag, args))
+        return args[index]
 
 
 class StepFiveSevenProjectTests(StepBlockCase):
 
     def test_R5_W3_1_the_project_is_the_tree_git_reports_not_the_launch_tree(self):
+        """NAMED EDIT (#623 t18, R5-W3-1; Revision 6, C10): Step 5.7 takes the NEAREST FOLDER AT OR ABOVE the current
+        folder THAT HOLDS A .git ENTRY (a file or a folder) as the project, found with no program run, and uses
+        $CLAUDE_PROJECT_DIR only when no such folder exists. The row still fails if $CLAUDE_PROJECT_DIR is used first:
+        the launch folder differs from the tree here."""
         tree = self.tree("tree-w3", A, A)
         cwd = tree / "sub" / "deeper"
         cwd.mkdir(parents=True)
@@ -628,10 +665,10 @@ class StepFiveSevenProjectTests(StepBlockCase):
         args, proc = self.run_block(cwd, plugin_root=plugin, project_dir=self.launch)
         self.assertEqual(posix_norm(self.script_arg(args)), posix_norm(plugin / ".claude" / "scripts" / "protected_names_check.py"),
                          "control: the checker is the one in CLAUDE_PLUGIN_ROOT")
-        want = git(cwd, "rev-parse", "--show-toplevel")
+        want = next(folder for folder in [cwd, *cwd.parents] if (folder / ".git").exists())
         self.assertEqual(posix_norm(self.project_arg(args, proc)), posix_norm(want),
-                         "--project is `git rev-parse --show-toplevel` of the current folder (%s), never "
-                         "$CLAUDE_PROJECT_DIR (%s) while git can answer" % (want, self.launch))
+                         "--project is the nearest folder at or above the current folder that holds a .git entry (%s), never "
+                         "$CLAUDE_PROJECT_DIR (%s) while such a folder exists" % (want, self.launch))
 
     def test_R5_W3_1_when_git_cannot_answer_claude_project_dir_is_the_fallback(self):
         plugin = self.root / "plugin"
@@ -678,6 +715,154 @@ class StepFiveSevenCheckerLookupTests(StepBlockCase):
         text = "\n".join(posix_norm(a) for a in args)
         self.assertNotIn("0.18.4", text, "the unreviewed newest cache folder must not be run (args=%r)" % args)
         self.assertNotIn("0.16.5", text, "nor any cache folder the install record does not name (args=%r)" % args)
+
+
+# =====================================================================================================
+# REVISION 6 REMEDY (block 18, RED): what Step 5.7 runs and on which tree. Findings T6 (the interpreter
+# flags), T7 (user-scope entry first; a project-scope entry matched against the MAIN CHECKOUT) and T8 (no
+# program chooses the project), invariant C10 of the contract
+# 2026-10-13-database-guard-names-in-rules-file. Like the R5-W3 rows these RUN the skill's own bash block.
+# =====================================================================================================
+class StepFiveSevenSecondRemedyCase(StepBlockCase):
+
+    def write_install_record(self, entries):
+        """``entries``: (scope, installPath, projectPath or None). Writes installed_plugins.json under the case's config folder."""
+        plugins = []
+        for scope, install_path, project_path in entries:
+            item = {"scope": scope, "installPath": str(install_path), "version": "0.19.0"}
+            if project_path is not None:
+                item["projectPath"] = str(project_path)
+            plugins.append(item)
+        (self.cfg / "plugins").mkdir(exist_ok=True)
+        (self.cfg / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {"agentic-auto-improve@auto-improve": plugins}}, indent=2), encoding="utf-8")
+
+    def checker_arg(self, args):
+        """The checker the step started, found by its suffix and WITHOUT judging the interpreter flags (the T6 rows and
+        the named edit of script_arg do that), so a T7 row fails on WHICH checker was chosen and never on -I."""
+        hits = [a for a in args if posix_norm(a).endswith("/protected_names_check.py")]
+        self.assertTrue(hits, "the step started a checker. args=%r" % args)
+        return hits[0]
+
+    def linked_world(self, name="tree-r6"):
+        """A main checkout (an origin and a default branch keeping both names) and one linked worktree of it."""
+        main = self.tree(name, A, A)
+        linked = self.root / (name + "-linked")
+        git(main, "worktree", "add", "-q", "-b", name + "-branch", str(linked))
+        return main, linked
+
+
+class StepFiveSevenInterpreterFlagTests(StepFiveSevenSecondRemedyCase):
+
+    def test_R6_T6_1_a_pythonpath_folder_holding_a_kept_helper_decides_nothing_and_the_removal_is_reported(self):
+        """Step 5.7's own block, END TO END with the real py and the real checker: ``py -3 -I -B`` ignores PYTHONPATH.
+        Without -I the folder's ``_protected_names.py`` is imported before the checker's sibling ../hooks one."""
+        tree = self.tree("tree-t6", A, A[:1])
+        planted = self.root / "planted-pythonpath"
+        planted.mkdir()
+        marker = self.root / "planted-marker.txt"
+        (planted / "_protected_names.py").write_text(
+            "open(%r, 'a').write('planted\\n')\nEXIT_CODES = {'kept': 0}\n\n\ndef check(project, working_ref=None, "
+            "default_ref=None, fetch=False):\n    return {'verdict': 'kept', 'missing': [], 'working_ref': '', "
+            "'default_ref': '', 'fetched': None, 'reason': ''}\n" % str(marker), encoding="utf-8")
+        obj, proc = self.run_block_real(tree, PLUGIN_ROOT, {"PYTHONPATH": str(planted)})
+        self.assertFalse(marker.exists(), "the helper planted on PYTHONPATH must never run: the step starts the checker with "
+                                          "-I -B (stdout=%r stderr=%r)" % (proc.stdout[-300:], proc.stderr[-300:]))
+        self.assertIsNotNone(obj, "the step prints the checker's one JSON object. stdout=%r stderr=%r" % (proc.stdout[-300:], proc.stderr[-300:]))
+        self.assertEqual(obj.get("verdict"), "names-removed",
+                         "the tree's file drops a name, so the step reports names-removed (a planted helper reads 'kept'). %r" % obj)
+
+    def test_R6_T6_1_control_without_the_planted_pythonpath_the_same_tree_reports_names_removed(self):
+        """Without this the row above could pass because the block cannot run the real checker at all."""
+        tree = self.tree("tree-t6", A, A[:1])
+        obj, proc = self.run_block_real(tree, PLUGIN_ROOT)
+        self.assertIsNotNone(obj, "control: the real checker ran. stdout=%r stderr=%r" % (proc.stdout[-300:], proc.stderr[-300:]))
+        self.assertEqual(obj.get("verdict"), "names-removed", "control: %r" % obj)
+
+
+class StepFiveSevenScopeTests(StepFiveSevenSecondRemedyCase):
+
+    def _folders(self):
+        user_install, project_install = self.root / "install-user", self.root / "install-project"
+        return (user_install, self.plugin_with_checker(user_install), project_install, self.plugin_with_checker(project_install))
+
+    def test_R6_T7_1_the_user_scope_entry_is_used_before_a_project_scope_entry_of_the_main_checkout(self):
+        main, linked = self.linked_world()
+        user_install, user_checker, project_install, project_checker = self._folders()
+        self.write_install_record([("project", project_install, main), ("user", user_install, None)])
+        args, proc = self.run_block(linked, project_dir=main)
+        self.assertEqual(posix_norm(self.checker_arg(args)), posix_norm(user_checker),
+                         "the user-scope entry's installPath wins although a project-scope entry names the main checkout "
+                         "(%s would be the project-scope one)" % project_checker)
+
+    def test_R6_T7_1_with_only_a_project_scope_entry_for_the_main_checkout_it_is_used_from_a_linked_worktree(self):
+        main, linked = self.linked_world()
+        user_install, user_checker, project_install, project_checker = self._folders()
+        self.write_install_record([("project", project_install, main)])
+        args, proc = self.run_block(linked, project_dir=linked)
+        self.assertEqual(posix_norm(self.checker_arg(args)), posix_norm(project_checker),
+                         "Claude Code records the MAIN checkout as projectPath (C7's main checkout); the run is in a linked "
+                         "worktree (%s), and the entry is still found" % linked)
+
+    def test_R6_T7_1_with_only_a_project_scope_entry_for_an_unrelated_folder_the_step_is_not_performed(self):
+        main, linked = self.linked_world()
+        user_install, user_checker, project_install, project_checker = self._folders()
+        unrelated = self.root / "some-other-project"
+        unrelated.mkdir()
+        self.write_install_record([("project", project_install, unrelated)])
+        args, proc = self.run_block(linked, project_dir=linked)
+        self.assertEqual(args, [], "no entry names this project, so no checker is started (args=%r)" % args)
+        self.assertIn("NOT RUN", proc.stdout, "and the step says it was not performed. stdout=%r" % proc.stdout[-300:])
+
+
+class StepFiveSevenProjectChoiceTests(StepFiveSevenSecondRemedyCase):
+
+    def _decoy(self):
+        return self.tree("decoy", A, A)  # its default branch and its file both keep every name
+
+    def test_R6_T8_1_git_dir_and_git_work_tree_in_the_callers_environment_do_not_choose_the_project(self):
+        main, linked = self.linked_world()
+        decoy = self._decoy()
+        cwd = linked / "sub" / "deeper"
+        cwd.mkdir(parents=True)
+        plugin = self.root / "plugin"
+        self.plugin_with_checker(plugin)
+        args, proc = self.run_block(cwd, plugin_root=plugin, project_dir=self.launch,
+                                    extra_env={"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)})
+        self.assertEqual(posix_norm(self.project_arg(args, proc)), posix_norm(linked),
+                         "--project is the linked worktree's top folder (the nearest folder holding a .git entry), not the "
+                         "decoy repository (%s) that GIT_DIR and GIT_WORK_TREE name" % decoy)
+
+    def test_R6_T8_1_end_to_end_the_verdict_is_the_linked_worktrees_names_removed_not_the_decoys_kept(self):
+        main, linked = self.linked_world()
+        (linked / RULES_REL).write_bytes(rules_bytes(A[:1]))
+        decoy = self._decoy()
+        cwd = linked / "sub"
+        cwd.mkdir()
+        obj, proc = self.run_block_real(cwd, PLUGIN_ROOT, {"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)})
+        self.assertIsNotNone(obj, "one JSON object. stdout=%r stderr=%r" % (proc.stdout[-300:], proc.stderr[-300:]))
+        self.assertEqual(obj.get("verdict"), "names-removed",
+                         "the linked worktree's file drops a name; the decoy repository keeps every name. %r" % obj)
+
+    def test_R6_T8_2_a_git_on_path_that_answers_rev_parse_with_a_decoy_is_never_asked_to_choose_the_project(self):
+        main, linked = self.linked_world()
+        decoy = self._decoy()
+        recorder_dir, recorder_log = self.root / "git-recorder", self.root / "git-recorder.log"
+        make_git_shim(recorder_dir, recorder_log, mode="toplevel:" + str(decoy).replace("\\", "/"))
+        cwd = linked / "sub"
+        cwd.mkdir()
+        plugin = self.root / "plugin"
+        self.plugin_with_checker(plugin)
+        # The recorder is first on PATH. Git's own bash puts its /ucrt64/bin and /usr/bin in front of whatever PATH it is
+        # given, so there the recorder would never be found by name; an exported function named git (BASH_FUNC_git%%)
+        # puts the same recorder first for ANY bash, and is the equivalent of "a git first on PATH".
+        recorder_exe = str(recorder_dir / shim_name()).replace("\\", "/")
+        args, proc = self.run_block(cwd, plugin_root=plugin, project_dir=self.launch, path_prefix=(recorder_dir,),
+                                    extra_env={"BASH_FUNC_git%%": '() { "%s" "$@"; }' % recorder_exe})
+        asked =[r["args"] for r in read_shim_log(recorder_log) if shim_subcommand(r["args"]) == "rev-parse"]
+        self.assertEqual(asked, [], "Step 5.7 runs no program to choose the project: the recorder git was asked %r" % asked)
+        self.assertEqual(posix_norm(self.project_arg(args, proc)), posix_norm(linked),
+                         "--project is still the current tree, not the decoy the recorder would have named")
 
 
 if __name__ == "__main__":

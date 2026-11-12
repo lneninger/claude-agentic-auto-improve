@@ -59,6 +59,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 from pathlib import Path
@@ -201,8 +202,38 @@ def _decode_path(raw):
 # ---------------------------------------------------------------------------
 # git: program, environment, calls
 # ---------------------------------------------------------------------------
+#: C8 (contract 2026-10-13, Revision 6): a leading ``\\?\UNC\``, ``\\?\`` or ``\\.\``, and an administrative
+#: drive share ``\\<host>\<letter>$`` reached through this computer.
+_LONG_UNC_RE = re.compile(r"^\\\\[?]\\UNC\\", re.IGNORECASE)
+_DEVICE_RE = re.compile(r"^\\\\[?.]\\")
+_ADMIN_SHARE_RE = re.compile(r"^\\\\([^\\]+)\\([A-Za-z])\$(?=\\|$)")
+
+
+def _strip_prefixes(path):
+    """C8 steps 1 and 2: the ``\\\\?\\`` and ``\\\\.\\`` prefixes, and an own-computer drive share, as text."""
+    text = str(path)
+    if _LONG_UNC_RE.match(text):
+        text = "\\\\" + text[len("\\\\?\\UNC\\"):]
+    else:
+        text = _DEVICE_RE.sub("", text, count=1)
+    match = _ADMIN_SHARE_RE.match(text)
+    if match and match.group(1).lower() in ("localhost", "127.0.0.1", socket.gethostname().lower()):
+        text = match.group(2) + ":" + text[match.end():]
+    return text
+
+
+def comparable_path(path):
+    """C8's resolved spelling: steps 1 and 2, ``realpath``, steps 1 and 2 again, ``normcase``."""
+    return os.path.normcase(_strip_prefixes(os.path.realpath(_strip_prefixes(path))))
+
+
+def written_path(path):
+    """C8's written spelling: steps 1, 2 and 5 with ``abspath`` for ``realpath`` (no link is followed)."""
+    return os.path.normcase(os.path.abspath(_strip_prefixes(path)))
+
+
 def _norm(path):
-    return os.path.normcase(os.path.realpath(str(path)))
+    return comparable_path(path)
 
 
 def _inside(folder, root):
@@ -214,16 +245,20 @@ def resolve_git(path_value, excluded_roots):
 
     Walks the ``PATH`` entries in order, skipping an empty, relative or ``.`` entry, the current folder, and
     any entry inside an excluded root (the project, the linked worktrees, any tree under check); the first
-    ``git.exe`` (``git`` elsewhere) found is the program."""
+    ``git.exe`` (``git`` elsewhere) found is the program. Roots and entries both go through C8: an entry is
+    skipped when EITHER of its two spellings (written, resolved) lies inside EITHER spelling of a root."""
     name = "git.exe" if os.name == "nt" else "git"
-    roots = [_norm(root) for root in (excluded_roots or []) if root]
-    here = _norm(os.getcwd())
+    roots = []
+    for root in (excluded_roots or []):
+        if root:
+            roots.extend({written_path(root), comparable_path(root)})
+    here = comparable_path(os.getcwd())
     for entry in (path_value or "").split(os.pathsep):
         entry = entry.strip().strip('"')
         if not entry or entry == "." or not os.path.isabs(entry):
             continue
-        folder = _norm(entry)
-        if folder == here or any(_inside(folder, root) for root in roots):
+        spellings = {written_path(entry), comparable_path(entry)}
+        if comparable_path(entry) == here or any(_inside(s, root) for s in spellings for root in roots):
             continue
         candidate = os.path.join(entry, name)
         if os.path.isfile(candidate) and (os.name == "nt" or os.access(candidate, os.X_OK)):
@@ -258,39 +293,62 @@ def git_environment(private_dir, git_program):
     return env
 
 
-def linked_worktrees(project):
-    """The roots of every worktree that shares ``project``'s repository, read from the files under the git
-    folder with no git process: each ``<common>/worktrees/*/gitdir`` names a worktree's ``.git``, and the
-    main worktree is the parent of a common folder named ``.git``."""
-    roots = []
-    dot_git = Path(project) / ".git"
+def _read_pointer(path, what):
+    """The one-line text of a git pointer file (``.git``, ``commondir``, ``gitdir``). Raises ``GitFailure``
+    when it exists but cannot be read, is not a file, or holds nothing."""
     try:
-        common = None
-        if dot_git.is_dir():
-            common = dot_git
-        elif dot_git.is_file():
-            text = dot_git.read_text(encoding="utf-8", errors="replace").strip()
-            if text.lower().startswith("gitdir:"):
-                git_dir = Path(project, text[len("gitdir:"):].strip())
-                pointer = git_dir / "commondir"
-                if pointer.is_file():
-                    common = Path(git_dir, pointer.read_text(encoding="utf-8", errors="replace").strip())
-                else:
-                    common = git_dir
-        if common is None:
-            return roots
-        if common.name.lower() == ".git":
-            roots.append(str(common.parent))
+        if not path.is_file():
+            raise GitFailure("%s exists but is not a readable file: %s" % (what, path))
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as exc:
+        raise GitFailure("%s cannot be read: %s" % (what, exc)) from exc
+    if not text:
+        raise GitFailure("%s holds no path: %s" % (what, path))
+    return text
+
+
+def linked_worktrees(project):
+    """C7 (contract 2026-10-13, Revision 6): the folders a git program found on PATH must never come from,
+    read from files with NO git process: ``project``, the main checkout (the parent of the common folder when
+    that is named ``.git``, letter case folded), every linked worktree (the parent of each
+    ``<common>/worktrees/*/gitdir``) and the common folder. The same set from the main checkout and from a
+    linked worktree: ``commondir`` is resolved relative to the git folder. A pointer file that exists but
+    cannot be read or parsed raises ``GitFailure`` (unverifiable); a missing ``worktrees`` folder is an empty
+    list."""
+    root = Path(project)
+    roots = [str(root)]
+    dot_git = root / ".git"
+    if not os.path.lexists(str(dot_git)):
+        return roots
+    if dot_git.is_dir():
+        git_dir = dot_git
+    else:
+        text = _read_pointer(dot_git, "the .git file")
+        if not text.lower().startswith("gitdir:"):
+            raise GitFailure("the .git file holds no gitdir line: %s" % dot_git)
+        git_dir = Path(root, text[len("gitdir:"):].strip())
+        if not git_dir.is_dir():
+            raise GitFailure("the gitdir the .git file names is not a folder: %s" % git_dir)
+    pointer = git_dir / "commondir"
+    if os.path.lexists(str(pointer)):
+        common = Path(git_dir, _read_pointer(pointer, "commondir"))
+        if not common.is_dir():
+            raise GitFailure("the commondir names no folder: %s" % common)
+    else:
+        common = git_dir
+    common = Path(os.path.normpath(str(common)))
+    if common.name.lower() == ".git":
+        roots.append(str(common.parent))
+    try:
         worktrees = common / "worktrees"
-        if worktrees.is_dir():
-            for entry in worktrees.iterdir():
-                pointer = entry / "gitdir"
-                if pointer.is_file():
-                    target = pointer.read_text(encoding="utf-8", errors="replace").strip()
-                    if target:
-                        roots.append(str(Path(target).parent))
-    except OSError:
-        pass
+        entries = sorted(worktrees.iterdir()) if worktrees.is_dir() else []
+    except OSError as exc:
+        raise GitFailure("the worktrees folder cannot be read: %s" % exc) from exc
+    for entry in entries:
+        gitdir = entry / "gitdir"
+        if os.path.lexists(str(gitdir)):
+            roots.append(str(Path(entry, _read_pointer(gitdir, "a worktree gitdir file")).parent))
+    roots.append(str(common))
     return roots
 
 
@@ -375,29 +433,37 @@ def _branch_name_only(project):
 
 
 def read_rules(project, commit, rules_rel):
-    """``(listed, data, aliases)`` of ``commit``: whether it holds ``rules_rel`` byte for byte, that file's
-    bytes, and every listed path that is a rules-path alias. The whole tree is listed once from the root with
-    no pathspec. Raises ``GitFailure`` when the listing fails."""
+    """``(listed, data, aliases, copies)`` of ``commit``: whether it holds ``rules_rel`` byte for byte, that
+    file's bytes, every listed path that is a rules-path alias, and how many times the exact path is listed.
+    The whole tree is listed once from the root with no pathspec; the blob is read by the object id from that
+    listing. With ``copies`` above one (a duplicate entry of the file or of a folder on its path) nothing is
+    read: ``data`` is ``None`` and the caller reports the side as malformed (``duplicate-entry``). Raises
+    ``GitFailure`` when the listing fails."""
     code, out = git(project, ["ls-tree", "-r", "-z", "--full-tree", commit])
     if code != 0:
         raise GitFailure("git ls-tree failed for %s (exit %d)" % (commit, code))
     exact = rules_rel.encode("utf-8")
-    listed = False
+    oids = []
     aliases = []
     for entry in out.split(b"\0"):
         if not entry:
             continue
-        _meta, _tab, raw = entry.partition(b"\t")
+        meta, _tab, raw = entry.partition(b"\t")
         if raw == exact:
-            listed = True
+            fields = meta.split()
+            oids.append(fields[2].decode("ascii") if len(fields) == 3 else "")
         elif is_rules_alias(_decode_path(raw), rules_rel):
             aliases.append(_decode_path(raw))
-    if not listed:
-        return False, None, aliases
-    code, blob = git(project, ["cat-file", "blob", "%s:%s" % (commit, rules_rel)])
+    if not oids:
+        return False, None, aliases, 0
+    if len(oids) > 1:
+        return True, None, aliases, len(oids)
+    if not oids[0]:
+        raise GitFailure("git ls-tree gave no object id for %s:%s" % (commit, rules_rel))
+    code, blob = git(project, ["cat-file", "blob", oids[0]])
     if code != 0:
         raise GitFailure("git cat-file failed for %s:%s (exit %d)" % (commit, rules_rel, code))
-    return True, blob, aliases
+    return True, blob, aliases, 1
 
 
 def commit_date(project, commit):
@@ -561,9 +627,10 @@ def _check(project, working_ref, default_ref, fetch, rules_rel):
         return _result(verdict, reason, code, missing, working_label, default_commit, fetched,
                        default_branch, default_date)
 
-    listed, default_bytes, default_aliases = read_rules(project, default_commit, rules_rel)  # may raise GitFailure
+    listed, default_bytes, default_aliases, default_copies = read_rules(project, default_commit, rules_rel)  # may raise GitFailure
+    working_copies = 0
     if working_commit is not None:
-        _wl, working_bytes, working_aliases = read_rules(project, working_commit, rules_rel)
+        _wl, working_bytes, working_aliases, working_copies = read_rules(project, working_commit, rules_rel)
     else:
         working_bytes = _read_working_disk(project, rules_rel)
         working_aliases = _disk_aliases(project, rules_rel)
@@ -572,7 +639,13 @@ def _check(project, working_ref, default_ref, fetch, rules_rel):
         working = {"state": "malformed", "names": [],
                    "reason": "a path that is an alias of the rules file exists beside it: %s"
                              % ", ".join(repr(a) for a in working_aliases[:3])}
+    if working_copies > 1:
+        working = {"state": "malformed", "names": [],
+                   "reason": "duplicate-entry: the rules path is listed %d times in the tree" % working_copies}
 
+    if default_copies > 1:
+        return done("reference-malformed", "duplicate-entry: the default branch lists the rules path %d times"
+                    % default_copies)
     if default_aliases:
         return done("reference-malformed", "the default branch holds an alias of the rules file path: %s"
                     % ", ".join(repr(a) for a in default_aliases[:3]))
