@@ -773,5 +773,36 @@ class TestChatToolImpactSectionIsGeneric(unittest.TestCase):
         self.assertIn("Deferred", section)
 
 
+_TEST_COUNT_RE = re.compile(r"\b\d[\d,]*\s+(?:unit\s+)?(?:tests|cases)\b", re.I)
+PR_MERGED_SUITE = ".claude/scripts/tests/test_pr_merged.py"
+
+
+def test_count_claims(text: str) -> list[str]:
+    """Digit counts of tests or cases ("760 cases", "Ran 760 tests"): they go stale on the next test added."""
+    return [m.group(0) for m in _TEST_COUNT_RE.finditer(text)]
+
+
+class TestSkillsStateNoTestCountForThePrMergedSuite(unittest.TestCase):
+    FILES = ("pr-merged", "advance")
+
+    def test_control_a_planted_ran_760_tests_is_flagged_and_prose_is_not(self):
+        self.assertEqual(test_count_claims("reads `Ran 760 tests ... OK`"), ["760 tests"])
+        self.assertEqual(test_count_claims("covered by 760 cases over identity"), ["760 cases"])
+        self.assertEqual(test_count_claims("its unittest summary line must end OK"), [])
+        self.assertEqual(test_count_claims("every test case and the tests"), [])
+
+    def test_neither_skill_states_a_digit_count_of_tests_or_cases(self):
+        for name in self.FILES:
+            text = (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
+            self.assertEqual(test_count_claims(text), [], name)
+
+    def test_each_skill_names_the_suite_its_run_command_and_the_ok_ending(self):
+        for name in self.FILES:
+            text = squash((SKILLS / name / "SKILL.md").read_text(encoding="utf-8"))
+            self.assertIn(PR_MERGED_SUITE, text, name)
+            self.assertIn("py -3 " + PR_MERGED_SUITE, text, name)
+            self.assertIn("its unittest summary line must end OK", text.replace("`", ""), name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
