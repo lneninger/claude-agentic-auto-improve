@@ -4845,12 +4845,353 @@ class TestStageProtectedNamesRemedy(PnLandingCase):
             self.assertTrue(os.path.isabs(call["argv"][0]), "a program path must be absolute, got %r" % (call["argv"][0],))
             self.assertFalse(_is_under(call["argv"][0], st.worktree),
                              "no program may come from the landing worktree: %r" % (call["argv"][0],))
-        children = [c for c in calls if any(a.endswith("protected_names_check.py") for a in c["argv"])]
-        self.assertTrue(children, "control: the checker was started")
+        # NAMED EDIT (#623 t18, F5): the child is found by WHAT IT IS (the recorded call whose argv[0] is the gate's own
+        # interpreter, started with -I and -B before the script), never by a path suffix: a gate that reads the checker's
+        # blobs by object id (or by <commit>:<path>, which ends in the file name) must not turn this row red.
+        children = [c for c in calls if pn_is_checker_child(c)]
+        self.assertTrue(children, "control: the checker was started (a call of sys.executable with -I and -B before the script)")
         self.assertEqual([norm(c["argv"][0]) for c in children], [norm(sys.executable)] * len(children),
                          "the child is the gate's own interpreter")
         self.assertHaltedAtP7(report, "protected-names-removed",
                               "a branch that drops a name still halts although a git.exe and a py.exe sit in the current folder")
+
+    def test_R6_F2_1_every_git_call_the_gate_starts_carries_the_flag_the_five_settings_and_one_exact_safe_directory(self):
+        """Extends R5-B2-7 (guard row; it PASSES at M, where the code is right and only the guard was missing). On
+        EVERY git process the gate itself starts: --no-replace-objects first, then the five -c settings of C2, then
+        exactly one -c safe.directory equal to the landing worktree's real path, never *. The mutation of gate 4's
+        table that it guards: MB2f-l (every setting, safe.directory and the flag removed from land_contract._pn_git)
+        and MB2b-l-flag (only the flag removed, which the environment variable alone hides)."""
+        st = self.world(self.kept_world(), {PN_RULES: pn_rules(PN_NAMES)})
+        with contextlib.ExitStack() as stack:
+            calls = self.recording_gate(stack)
+            report = st.run()
+        self.assertOutcome(report, "landed", "control: every name is kept, so the landing passes P7")
+        git_calls = [c for c in calls if os.path.basename(c["argv"][0]).lower() in ("git", "git.exe")]
+        self.assertTrue(git_calls, "control: the gate started git processes")
+        for call in git_calls:
+            argv = call["argv"]
+            label = "git %s" % " ".join(argv[1:16])
+            self.assertEqual(argv[1:2], ["--no-replace-objects"], label + ": --no-replace-objects comes first")
+            given = []
+            index = 2
+            while index + 1 < len(argv) and argv[index] == "-c":
+                given.append(argv[index + 1])
+                index += 2
+            safe = [s for s in given if s.startswith("safe.directory=")]
+            self.assertEqual(sorted(s for s in given if not s.startswith("safe.directory=")), sorted(PN_C2_SETTINGS),
+                             label + ": exactly the five -c settings of C2 follow the flag")
+            self.assertEqual(len(safe), 1, label + ": exactly one -c safe.directory")
+            self.assertNotEqual(safe[0], "safe.directory=*", label + ": never a wildcard")
+            self.assertEqual(norm(safe[0].split("=", 1)[1]), norm(st.worktree),
+                             label + ": safe.directory is the landing worktree's real path")
+
+    def test_R6_F4_1_an_alias_only_on_both_sides_still_runs_the_checker_and_halts_reference_malformed(self):
+        """Guard row for gate 4's F4 (it PASSES at M). mark_m and the merged head each hold ONLY a case-variant of the
+        rules file, and the head drops a name. The gate's "no rules file at either commit" shortcut must be
+        alias-aware: it must NOT return early, the checker child must run, and it answers reference-malformed
+        (the default side holds an alias). The mutation it guards: MB3a-l (the shortcut put back to the exact path)."""
+        alias = ".claude/hooks/DB-destructive-guard.rules.json"
+        base = dict(self.real_checker(), **{alias: pn_rules(PN_NAMES)})
+        st = self.world(base, {alias: pn_rules(PN_NAMES[:1])})
+        listed = git(st.kit.main, "ls-tree", "-r", "--name-only", "origin/master")
+        self.assertIn(alias, listed, "control: the default branch holds the alias")
+        self.assertNotIn(PN_RULES, listed.splitlines(), "control: and not the exact rules path")
+        with contextlib.ExitStack() as stack:
+            calls = self.recording_gate(stack)
+            report = st.run()
+        self.assertHaltedAtP7(report, "protected-names-removed", "an alias on the default branch is reference-malformed, not a skipped check")
+        self.assertIn("reference-malformed", str(report.get("detail")), "the verdict is reference-malformed")
+        self.assertTrue([c for c in calls if pn_is_checker_child(c)],
+                        "the checker child ran: the shortcut did not return early on 'no rules file at either commit'")
+
+
+# ===========================================================================
+# REVISION 6 REMEDY (block 18, RED). The landing gate's rows for the blocked reviews of gates 4 and 16: T1 (two
+# entries of a path), T2 (the PATH walk excludes only the landing worktree), T4 (path spellings), T5 and T10 (which
+# checker runs when mark_m has none, or cannot be read), and the helpers the named edit F5 and the guard rows F2 and F4
+# use. Contract 2026-10-13-database-guard-names-in-rules-file, Revision 6, invariants C6 to C10.
+#
+# SAFETY (as block 14): no file is planted in the real system temporary folder or on the real PATH. Every recorder
+# (a pass-through git, hostile only for the gate's own isolated listing, or failing one named blob read) lives in a
+# test-owned folder under the case's temporary root, and PATH is changed only inside ``mock.patch.dict``. A raw tree
+# with duplicate entries is built with hash-object --literally and commit-tree only; nothing of it touches the disk
+# but the objects of the fixture repository. Everything is removed with the case's temporary folder.
+# ===========================================================================
+PN_C2_SETTINGS = ("core.fsmonitor=false", "core.untrackedCache=false", "index.sparse=false", "core.quotePath=false",
+                  "core.longpaths=true")
+_HOOKS_TESTS = None
+
+
+def pn_hooks_tests():
+    """The hooks suite's module (its recording-git builder), loaded by path: the same shim the checker rows use."""
+    global _HOOKS_TESTS
+    if _HOOKS_TESTS is None:
+        _HOOKS_TESTS = pn_load_by_path("_t18_hooks_tests", SCRIPTS_DIR.parent / "hooks" / "tests" / "test_protected_names.py")
+    return _HOOKS_TESTS
+
+
+def pn_is_checker_child(call):
+    """True for the recorded process that is the gate's CHILD: argv[0] is this interpreter, and -I and -B come before
+    the script (the first argument that is not a flag). Never a path suffix."""
+    argv = call["argv"]
+    if not argv or norm(argv[0]) != norm(sys.executable):
+        return False
+    flags = []
+    for item in argv[1:]:
+        if item.startswith("-"):
+            flags.append(item)
+        else:
+            return "-I" in flags and "-B" in flags
+    return False
+
+
+def pn_git_out(main, *args, data=None):
+    proc = _REAL_SUBPROCESS_RUN(["git", *args], cwd=str(main), capture_output=True, input=data, env=_GIT_ENV)
+    if proc.returncode != 0:
+        raise AssertionError("fixture git %r failed: %s" % (args, proc.stderr.decode("utf-8", "replace")))
+    return proc.stdout
+
+
+def pn_tree_entries(main, treeish):
+    entries = []
+    for record in pn_git_out(main, "ls-tree", "-z", treeish).split(b"\0"):
+        if record:
+            meta, _tab, name = record.partition(b"\t")
+            mode, _kind, sha = meta.split()
+            entries.append((mode.decode().lstrip("0"), name.decode("utf-8"), sha.decode()))
+    return entries
+
+
+def pn_write_tree(main, entries):
+    body = b"".join(mode.encode() + b" " + name.encode("utf-8") + b"\0" + bytes.fromhex(sha) for mode, name, sha in entries)
+    return pn_git_out(main, "hash-object", "-t", "tree", "-w", "--literally", "--stdin", data=body).decode().strip()
+
+
+def pn_duplicate_tree(main, commit, folder, name, blob):
+    """The tree of ``commit`` with ONE EXTRA entry ``name`` (object id ``blob``) appended AFTER the existing entries of
+    ``folder`` (``/`` separated), so the path then appears twice, the original copy first."""
+    def rewrite(tree, parts):
+        entries = pn_tree_entries(main, tree)
+        if not parts:
+            return pn_write_tree(main, entries + [("100644", name, blob)])
+        return pn_write_tree(main, [(mode, nm, rewrite(sha, parts[1:]) if nm == parts[0] else sha) for mode, nm, sha in entries])
+    return rewrite(commit, folder.split("/"))
+
+
+def pn_push_commit(kit, branch, tree, parents, message="duplicate entry"):
+    args = ["commit-tree", tree, "-m", message]
+    for parent in parents:
+        args += ["-p", parent]
+    commit = pn_git_out(kit.main, *args).decode().strip()
+    proc = _REAL_SUBPROCESS_RUN(["git", "push", "origin", "%s:refs/heads/%s" % (commit, branch)], cwd=str(kit.main),
+                                capture_output=True, text=True, env=_GIT_ENV)
+    if proc.returncode != 0:
+        raise AssertionError("fixture push failed: %s" % proc.stderr)
+    kit.fetch()
+    return commit
+
+
+def pn_install_record(config_dir, entries):
+    """installed_plugins.json under ``config_dir``: ``entries`` is a list of (scope, installPath)."""
+    folder = Path(config_dir) / "plugins"
+    folder.mkdir(parents=True, exist_ok=True)
+    plugins = [{"scope": scope, "installPath": str(path), "version": "0.19.0"} for scope, path in entries]
+    (folder / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {"agentic-auto-improve@auto-improve": plugins}}, indent=2), encoding="utf-8")
+
+
+class TestStageProtectedNamesSecondRemedy(PnLandingCase):
+
+    def kept_world(self, marker=None):
+        return TestStageProtectedNamesRemedy.kept_world(self, marker)
+
+    def recording_gate(self, stack):
+        return TestStageProtectedNamesRemedy.recording_gate(self, stack)
+
+    def with_path(self, *folders):
+        return mock.patch.dict(os.environ, {"PATH": os.pathsep.join([str(f) for f in folders] + [os.environ.get("PATH", "")])})
+
+    def recorder(self, folder, mode, log_name):
+        log = Path(self._tmp.name) / log_name
+        pn_hooks_tests().make_git_shim(folder, log, mode)
+        return log
+
+    def gate_calls_seen_by(self, log):
+        """The calls a recorder saw that carry the isolation prefix: only the gate and its child start those."""
+        return [r["args"][:4] for r in pn_hooks_tests().read_shim_log(log) if r["args"][:1] == ["--no-replace-objects"]]
+
+    # -- C6 / T1: a duplicate entry -------------------------------------------------------------------------
+    def test_R6_T1_2_a_merged_head_holding_two_exact_rules_entries_with_the_kept_one_first_halts_working_malformed(self):
+        kit = Kit(Path(self._tmp.name), base_files=self.kept_world(), parent_files={"src/feature.py": "x = 1\n"})
+        tip = git(kit.main, "rev-parse", "refs/remotes/origin/%s" % PARENT)
+        narrowed = pn_git_out(kit.main, "hash-object", "-w", "--stdin", data=pn_rules(PN_NAMES[:1]).encode()).decode().strip()
+        tree = pn_duplicate_tree(kit.main, tip, ".claude/hooks", "db-destructive-guard.rules.json", narrowed)
+        pn_push_commit(kit, PARENT, tree, [tip])
+        listed = git(kit.main, "ls-tree", "-r", "--name-only", "origin/%s" % PARENT).splitlines()
+        self.assertEqual(listed.count(PN_RULES), 2, "control: the merged head lists the exact rules path twice (kept first)")
+        report = Stage(self, kit).run()
+        self.assertHaltedAtP7(report, "protected-names-removed",
+                              "git checkout writes the LAST entry (the narrowed file); the check must not read only the first")
+        self.assertIn("working-malformed", str(report.get("detail")), "the verdict is working-malformed (reason duplicate-entry)")
+
+    def test_R6_T1_2_a_mark_m_holding_a_duplicate_entry_of_the_checker_is_unverifiable_and_the_installed_copy_never_runs(self):
+        installed = Path(self._tmp.name) / "installed-plugin"
+        write_files(installed, self.real_checker(self.marker("installed"), "installed"))
+        base = {PN_RULES: pn_rules(PN_NAMES)}
+        base.update(self.real_checker(self.marker("mark_m"), "mark_m"))
+        kit = Kit(Path(self._tmp.name), base_files=base,
+                  parent_files={"src/feature.py": "x = 1\n", PN_RULES: pn_rules(PN_NAMES[:1])})
+        always_kept = pn_git_out(kit.main, "hash-object", "-w", "--stdin", data=pn_stub(PN_KEPT, 0).encode()).decode().strip()
+        master_tip = git(kit.main, "rev-parse", "refs/remotes/origin/master")
+        parent_tip = git(kit.main, "rev-parse", "refs/remotes/origin/%s" % PARENT)
+        master_tree = pn_duplicate_tree(kit.main, master_tip, ".claude/scripts", "protected_names_check.py", always_kept)
+        merged = pn_push_commit(kit, "master", master_tree, [master_tip])
+        parent_tree = pn_duplicate_tree(kit.main, parent_tip, ".claude/scripts", "protected_names_check.py", always_kept)
+        pn_push_commit(kit, PARENT, parent_tree, [parent_tip, merged])
+        listed = git(kit.main, "ls-tree", "-r", "--name-only", "origin/master").splitlines()
+        self.assertEqual(listed.count(PN_CHECK), 2, "control: mark_m lists the checker's path twice")
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": str(installed)}), contextlib.ExitStack() as stack:
+            calls = self.recording_gate(stack)
+            report = Stage(self, kit).run()
+        self.assertHaltedAtP7(report, "unverifiable", "a duplicate entry of a checker file on mark_m cannot be trusted")
+        self.assertEqual(self.marked("installed"), [], "the installed copy never runs (a duplicate is not 'mark_m lacks it')")
+        self.assertEqual(self.marked("mark_m"), [], "and neither does a copy picked from one of the two entries")
+        self.assertEqual([c for c in calls if pn_is_checker_child(c)], [], "no checker child was started at all")
+
+    # -- C7 / T2: the gate's PATH walk -----------------------------------------------------------------------
+    def test_R6_T2_1_a_hostile_git_planted_in_the_main_checkout_or_another_linked_worktree_is_never_the_gates_git(self):
+        for place in ("main-checkout", "other-linked-worktree"):
+            with self.subTest(place=place):
+                st = self.world(self.kept_world(), {PN_RULES: pn_rules(PN_NAMES[:1])}, subdir=place)
+                folder = (st.kit.main if place == "main-checkout" else st.kit.add_worktree("other-linked")) / "tools-planted"
+                log = self.recorder(folder, "hostile-gate", "planted-%s.log" % place)
+                with self.with_path(folder):
+                    report = st.run()
+                self.assertHaltedAtP7(report, "protected-names-removed",
+                                      "%s: a hostile git that answers the gate's tree listing with nothing must not be the gate's "
+                                      "git (it makes 'no rules file at either commit' and lands a narrowed head)" % place)
+                self.assertEqual(self.gate_calls_seen_by(log), [],
+                                 "%s: no gate call and no child call used the planted git" % place)
+
+    def test_R6_T2_1_control_the_same_recorder_outside_every_tree_is_the_one_the_gate_uses(self):
+        """Without this the row above could pass because the recorder never starts (the documented residual: a git
+        in a user-writable folder outside every tree is trusted)."""
+        st = self.world(self.kept_world(), {PN_RULES: pn_rules(PN_NAMES[:1])})
+        folder = Path(self._tmp.name) / "recorder-outside-every-tree"
+        log = self.recorder(folder, "record", "outside.log")
+        with self.with_path(folder):
+            report = st.run()
+        self.assertHaltedAtP7(report, "protected-names-removed", "control: a pass-through recorder changes no verdict")
+        self.assertTrue(self.gate_calls_seen_by(log), "control: the gate's calls DID go through the recorder outside every tree")
+
+    # -- C8 / T4: path spellings -----------------------------------------------------------------------------
+    def test_R6_T4_2_a_hostile_git_in_the_landing_worktree_spelled_with_a_unc_or_long_prefix_path_is_never_the_gates_git(self):
+        if os.name != "nt":
+            self.skipTest("UNC and \\\\?\\ spellings exist only on Windows")
+        for variant in ("unc-localhost", "long-prefix"):
+            with self.subTest(spelling=variant):
+                st = self.world(self.kept_world(), {PN_RULES: pn_rules(PN_NAMES[:1])}, subdir=variant)
+                real = Path(st.worktree).resolve()
+                folder = real / "tools-planted"
+                log = self.recorder(folder, "hostile-gate", "planted-%s.log" % variant)
+                drive, tail = os.path.splitdrive(str(real))
+                spelled = ("\\\\localhost\\%s$\\%s\\tools-planted" % (drive[:1], tail.strip("\\")) if variant == "unc-localhost"
+                           else "\\\\?\\" + str(folder))
+                if not os.path.isfile(os.path.join(spelled, pn_hooks_tests().shim_name())):
+                    self.skipTest("%r cannot be reached from this account (an administrative share needs rights this run "
+                                  "does not have), so the recorder is not reachable through that spelling" % spelled)
+                with self.with_path(spelled):
+                    report = st.run()
+                self.assertHaltedAtP7(report, "protected-names-removed",
+                                      "%s: a folder INSIDE the landing worktree is excluded however it is spelled" % variant)
+                self.assertEqual(self.gate_calls_seen_by(log), [], "%s: the recorder never ran for the gate or its child" % variant)
+
+    # -- C9 / T5: which installed copy -----------------------------------------------------------------------
+    def _t5_world(self):
+        cfg = Path(self._tmp.name) / "claude-config-t5"
+        cache = cfg / "plugins" / "cache" / "auto-improve" / "agentic-auto-improve"
+        planted = self.stub_checker(PN_KEPT, 0, extra="open(%r, 'a').write('cache999\\n')" % str(self.marker("cache999")))
+        write_files(cache / "999.0.0", planted)
+        st = self.world({PN_RULES: pn_rules(PN_NAMES)}, {PN_RULES: pn_rules(PN_NAMES[:1])})
+        return cfg, cache, st
+
+    def test_R6_T5_1_with_no_checker_on_mark_m_the_installed_plugins_install_path_runs_and_a_higher_cache_folder_never_does(self):
+        cfg, cache, st = self._t5_world()
+        install = cache / "0.19.0"
+        write_files(install, self.real_checker(self.marker("installed"), "installed"))
+        pn_install_record(cfg, [("user", install)])
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(cfg)}):
+            os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
+            report = st.run()
+        self.assertEqual(self.marked("cache999"), [], "the planted higher-numbered cache folder (999.0.0) never runs")
+        self.assertHaltedAtP7(report, "protected-names-removed",
+                              "the recorded installPath's checker judges the head, which drops a name (the planted stub says kept)")
+        self.assertEqual(self.marked("installed"), ["installed"], "and it is the installPath's copy that ran")
+
+    def test_R6_T5_2_with_no_plugin_entry_in_installed_plugins_json_and_only_cache_folders_the_verdict_is_unverifiable(self):
+        cfg, cache, st = self._t5_world()
+        write_files(cache / "0.19.0", self.real_checker(self.marker("cache019"), "cache019"))
+        pn_install_record(cfg, [])
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(cfg)}):
+            os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
+            report = st.run()
+        self.assertHaltedAtP7(report, "unverifiable", "no installed plugin is recorded, and a cache folder is never chosen by its version")
+        self.assertEqual((self.marked("cache999"), self.marked("cache019")), ([], []), "no cache copy ran")
+
+    # -- C9 / T10: a failed or partial read of mark_m's checker ------------------------------------------------
+    def _t10_world(self, base_checker):
+        installed = Path(self._tmp.name) / "installed-plugin-t10"
+        write_files(installed, self.real_checker(self.marker("installed"), "installed"))
+        base = dict(base_checker, **{PN_RULES: pn_rules(PN_NAMES)})
+        st = self.world(base, {PN_RULES: pn_rules(PN_NAMES[:1])})
+        return installed, st
+
+    def test_R6_T10_1_a_failed_read_of_mark_ms_checker_script_while_the_listing_succeeds_is_unverifiable(self):
+        installed, st = self._t10_world(self.real_checker())
+        oid = git(st.kit.main, "rev-parse", "origin/master:%s" % PN_CHECK)
+        folder = Path(self._tmp.name) / "failing-read-bin"
+        log = self.recorder(folder, "fail-cat:" + oid, "failing-read.log")
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": str(installed)}), self.with_path(folder), contextlib.ExitStack() as stack:
+            calls = self.recording_gate(stack)
+            report = st.run()
+        self.assertTrue([r for r in pn_hooks_tests().read_shim_log(log) if "cat-file" in r["args"]],
+                       "control: the recorder saw the read it was told to fail")
+        self.assertHaltedAtP7(report, "unverifiable", "a read that failed is not 'mark_m lacks the checker'")
+        self.assertEqual(self.marked("installed"), [], "the installed copy never runs")
+        self.assertEqual([c for c in calls if pn_is_checker_child(c)], [],
+                         "and no half-written checker is started (a script without its helper would crash with exit 1 and "
+                         "read as unverifiable by luck, not by the rule)")
+
+    def test_R6_T10_1_when_every_read_of_mark_ms_two_checker_files_fails_the_installed_copy_still_never_runs(self):
+        installed, st = self._t10_world(self.real_checker())
+        oids = [git(st.kit.main, "rev-parse", "origin/master:%s" % rel) for rel in (PN_CHECK, PN_HELPER)]
+        folder = Path(self._tmp.name) / "failing-read-bin"
+        self.recorder(folder, "fail-cat:" + ",".join(oids), "failing-read.log")
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": str(installed)}), self.with_path(folder), contextlib.ExitStack() as stack:
+            calls = self.recording_gate(stack)
+            report = st.run()
+        self.assertHaltedAtP7(report, "unverifiable", "both reads failed although the listing holds both files")
+        self.assertEqual(self.marked("installed"), [], "the installed copy never runs: a failed read is not an absent file")
+        self.assertEqual([c for c in calls if pn_is_checker_child(c)], [], "no checker child was started")
+
+    def test_R6_T10_1_a_mark_m_holding_only_one_of_the_two_checker_files_is_unverifiable_without_running_anything(self):
+        files = self.real_checker()
+        for label, only in (("only the script", {PN_CHECK: files[PN_CHECK]}), ("only the helper", {PN_HELPER: files[PN_HELPER]})):
+            with self.subTest(mark_m_holds=label):
+                installed, st = self._t10_world(only) if label == "only the script" else self._t10_world_named(only, "helper")
+                with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": str(installed)}), contextlib.ExitStack() as stack:
+                    calls = self.recording_gate(stack)
+                    report = st.run()
+                self.assertHaltedAtP7(report, "unverifiable", "mark_m holds %s: a broken checker, not an absent one" % label)
+                self.assertEqual(self.marked("installed"), [], "%s: the installed copy never runs" % label)
+                self.assertEqual([c for c in calls if pn_is_checker_child(c)], [],
+                                 "%s: no child is started (it would only crash with exit 1)" % label)
+
+    def _t10_world_named(self, base_checker, subdir):
+        installed = Path(self._tmp.name) / ("installed-plugin-" + subdir)
+        write_files(installed, self.real_checker(self.marker("installed"), "installed"))
+        base = dict(base_checker, **{PN_RULES: pn_rules(PN_NAMES)})
+        return installed, self.world(base, {PN_RULES: pn_rules(PN_NAMES[:1])}, subdir=subdir)
 
 
 if __name__ == "__main__":

@@ -39,11 +39,13 @@ Run:
 from __future__ import annotations
 
 import ast
+import importlib.util
 import io
 import json
 import os
 import platform
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -609,6 +611,14 @@ def subcommand(items):
     return ""
 
 
+if MODE == "hostile-gate" and args[:1] == ["--no-replace-objects"] and subcommand(args) == "ls-tree":
+    sys.exit(0)  # a hostile git: it answers the isolated listing of a tree with nothing and exit 0
+if MODE.startswith("fail-cat:") and subcommand(args) == "cat-file" and any(o and o in args for o in MODE[9:].split(",")):
+    sys.stderr.write("fatal: unable to read blob (simulated failure of one named read)\n")
+    sys.exit(128)
+if MODE.startswith("toplevel:") and subcommand(args) == "rev-parse" and "--show-toplevel" in args:
+    sys.stdout.write(MODE[9:] + "\n")  # a planted git that answers `rev-parse --show-toplevel` with a decoy
+    sys.exit(0)
 if MODE == "ownership" and not any(a.startswith("safe.directory=") for a in args):
     sys.stderr.write("fatal: detected dubious ownership in repository (simulated: no safe.directory given)\n")
     sys.exit(128)
@@ -638,7 +648,11 @@ def make_git_shim(folder, log, mode="record"):
 
     ``mode``: ``record`` (log, then run git); ``planted`` (log, then exit 0 doing nothing: a program that
     must NEVER run); ``ownership`` (a call without ``-c safe.directory=`` fails as git's ownership check
-    does); ``fetch-silent`` (``git fetch`` succeeds and writes nothing). Skips the test where no
+    does); ``fetch-silent`` (``git fetch`` succeeds and writes nothing). Block 18 adds three modes, each
+    a pass-through recorder except for the one call it names: ``hostile-gate`` (an isolated
+    ``--no-replace-objects ... ls-tree`` answers nothing with exit 0, as gate 16's probe did);
+    ``fail-cat:<oid>[,<oid>]`` (a ``cat-file`` naming one of those object ids exits 128);
+    ``toplevel:<path>`` (``rev-parse --show-toplevel`` answers ``<path>``). Skips the test where no
     executable can be built."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -936,25 +950,28 @@ class EnvironmentIsolationTests(RemedyCase):
 
     # -- R5-B2-8: variables C2 never names ---------------------------------------------------------------
     def test_R5_B2_8_variables_the_contract_never_names_are_absent_not_removed(self):
+        # NAMED EDIT (#623 t18, F8): the GIT_EXEC_PATH and GIT_SSH_COMMAND recorder halves are deleted. On a
+        # local fixture git never starts a non-builtin git program (the listing and the blob read are
+        # builtins) and never starts ssh, so no recorder could ever have run: those halves could not fail.
+        # What stays is what CAN fail: the key set of the environment every git call receives (a copy that
+        # only REMOVES the contract's excluded names keeps GIT_EXEC_PATH, GIT_SSH_COMMAND, GIT_TRACE... and
+        # fails assert_isolated) and the two trace files (a trace variable that is passed on writes one).
         self.install_shim()
         work = self.world(NAMES, NAMES[:1])
         execdir = self.root / "exec-path"
         execdir.mkdir()
-        logs = {}
-        for name in ("git-ls-tree", "git-cat-file"):
-            logs[name] = self.root / (name + ".log")
-            (execdir / name).write_text("#!/bin/sh\necho ran >> \"%s\"\nexit 1\n" % str(logs[name]).replace("\\", "/"),
-                                        encoding="utf-8", newline="\n")
-        ssh_prog, ssh_log = self._recorder("ssh-recorder")
         trace2, trace = self.root / "trace2.json", self.root / "trace.txt"
         env = self.shim_env({"GIT_EXEC_PATH": str(execdir), "GIT_TRACE2_EVENT": str(trace2), "GIT_TRACE": str(trace),
-                             "GIT_SSH_COMMAND": ssh_prog, "GIT_ZZ_CANARY": "1", "PYTHONSTARTUP": str(self.root / "startup.py")})
+                             "GIT_SSH_COMMAND": "no-such-ssh-program", "GIT_ZZ_CANARY": "1",
+                             "PYTHONSTARTUP": str(self.root / "startup.py")})
         self.expect(work, "names-removed", env=env, why="the fixture's verdict")
-        for name, log in list(logs.items()) + [("ssh", ssh_log)]:
-            self.assertFalse(log.exists(), "the recording %s program never ran" % name)
-        self.assertFalse(trace2.exists(), "GIT_TRACE2_EVENT is not passed on: no trace file was written")
-        self.assertFalse(trace.exists(), "GIT_TRACE is not passed on: no trace file was written")
-        self.assert_isolated(read_shim_log(self.shim_log), "R5-B2-8 variables C2 never names")
+        self.assertFalse(trace2.exists(), "GIT_TRACE2_EVENT is not passed on: no trace file was written (a passed-on "
+                                          "trace variable makes git write the file)")
+        self.assertFalse(trace.exists(), "GIT_TRACE is not passed on: no trace file was written (a passed-on trace "
+                                         "variable makes git write the file)")
+        self.assert_isolated(read_shim_log(self.shim_log),
+                             "R5-B2-8 variables C2 never names (the key set of every git call's environment is exactly "
+                             "C2's named list, so GIT_EXEC_PATH, GIT_SSH_COMMAND, GIT_ZZ_CANARY and PYTHONSTARTUP are absent)")
 
     # -- R5-B2-9: the PATH walk -------------------------------------------------------------------------
     def _planted_world(self):
@@ -1140,15 +1157,15 @@ class AliasTests(RemedyCase):
         self.expect(self.repo, expected, "--working-ref", working, "--default-ref", default, why=why)
 
     # -- the working side ---------------------------------------------------------------------------------
-    def _each_alias(self, shapes, side):
+    def _each_alias(self, shapes, side, note=""):
         for label, alias in shapes.items():
             with self.subTest(alias=label, side=side):
                 if side == "working":
                     working = self.good({alias: rules_bytes(NAMES[:1])})
-                    self.verdict_of(working, self.good(), "working-malformed", "working side: " + label)
+                    self.verdict_of(working, self.good(), "working-malformed", "working side: " + label + note)
                 else:
                     default = self.good({alias: rules_bytes(NAMES)})
-                    self.verdict_of(self.good(), default, "reference-malformed", "default side: " + label)
+                    self.verdict_of(self.good(), default, "reference-malformed", "default side: " + label + note)
 
     def test_R5_B3_2_every_alias_of_the_rules_path_is_working_malformed(self):
         self._each_alias(ALIAS_SHAPES, "working")
@@ -1162,9 +1179,17 @@ class AliasTests(RemedyCase):
         self._each_alias(shapes, "default")
 
     def test_R5_B3_6_the_lowercase_half_and_the_explicit_family_are_malformed_on_both_sides(self):
+        """NAMED EDIT (#623 t18, F9): the U+212A (Kelvin sign) case is caught by THREE independent routes:
+        ``casefold()`` (the sign folds to a plain k), ``lower()`` (so does its lowercase) and the explicit
+        family (it is listed there by hand). It therefore fails ONLY when all three are gone: an upper-only
+        fold with the Kelvin sign also dropped from the family. An upper-only fold on its own does not fail
+        this row (Revision 5 said it did; Revision 6, F9, corrects that). U+0130 is the other member: it
+        needs ``lower()`` or the family. No assertion changed; only this text."""
         shapes = {k: v for k, v in UNICODE_SHAPES.items() if k.startswith(("U+212A", "U+0130"))}
-        self._each_alias(shapes, "working")
-        self._each_alias(shapes, "default")
+        note = (" (U+212A is caught by casefold(), by lower() and by the explicit family; this fails only when all "
+                "three are gone, an upper-only fold with the Kelvin sign also dropped from the family)")
+        self._each_alias(shapes, "working", note)
+        self._each_alias(shapes, "default", note)
 
     def test_R5_B3_3_a_default_commit_holding_only_an_alias_is_reference_malformed_never_first_install(self):
         for label, alias in ALIAS_SHAPES.items():
@@ -1218,6 +1243,566 @@ class AliasTests(RemedyCase):
             self.skipTest("this file system folds letter case within a folder (listing: %r), so a second "
                           "case-variant file cannot exist on disk here" % listing)
         self.expect(self.repo, "working-malformed", why="a second file differing only in letter case")
+
+
+# =====================================================================================================
+# REVISION 6 REMEDY (block 18, RED). The blocked reviews of gates 4 and 16, findings T1, T3, T4 and the
+# guard rows F3-1 and F3-2, with invariants C6 (duplicate entries), C7 (excluded roots) and C8 (one rule for
+# path spellings). Contract 2026-10-13-database-guard-names-in-rules-file, Revision 6.
+#
+# NAMES THIS SUITE PINS (Revision 6, "Names and shapes pinned for block 18's tests"), each in BOTH
+# .claude/hooks/_protected_names.py and .claude/scripts/land_contract.py (loaded here by path; the landing keeps
+# a local copy and never imports the helper):
+#   linked_worktrees(root) -> list[str]   C7's set minus the call's working folder: the main checkout, every
+#       linked worktree and the common git folder (and so the project root itself), read with no git process.
+#       An unreadable or unparseable .git, commondir or gitdir file RAISES (any exception: this suite only
+#       needs a raise; the check then reads it as unverifiable); a missing worktrees folder is no error.
+#   comparable_path(path) -> str          C8's resolved spelling (steps 1 to 5).
+#   written_path(path) -> str             C8's written spelling (steps 1, 2 and 5, abspath for realpath).
+#   resolve_git(path_value, excluded_roots) -> str | None   (existing) skips an entry when either spelling
+#       of the entry lies inside either spelling of a root.
+# A row that needs one of these asks for it through ``need``, so its absence is an ASSERTION failure that
+# names the missing function, never an ImportError.
+#
+# SAFETY. Every fixture lives in self.root (removed whether the row passes or fails). Planted programs are
+# recorders in test-owned folders. A junction, a case-sensitive folder and a ``.claude.`` folder made with the
+# \\?\ prefix are removed by their own cleanup (the dot-ending folder through the \\?\ prefix) before the
+# case's root is. Nothing is planted in the real system temporary folder or on the real PATH: a row that
+# changes PATH hands the changed value only to the process it starts.
+# =====================================================================================================
+SCRIPTS_DIR = CLAUDE_DIR / "scripts"
+LAND = SCRIPTS_DIR / "land_contract.py"
+_LOADED_COPIES = {}
+
+
+def load_copy(label):
+    """One of the two copies of the path rules, loaded by path (never by import name): ``_protected_names``
+    or ``land_contract``."""
+    if label not in _LOADED_COPIES:
+        path = HELPER if label == "_protected_names" else LAND
+        if not path.is_file():
+            raise unittest.SkipTest("%s is not present in this checkout, so its copy of the rule cannot be compared"
+                                    % path.name)
+        if label == "land_contract" and str(SCRIPTS_DIR) not in sys.path:
+            sys.path.insert(0, str(SCRIPTS_DIR))
+        spec = importlib.util.spec_from_file_location("_t18_" + label, str(path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _LOADED_COPIES[label] = module
+    return _LOADED_COPIES[label]
+
+
+def both_copies():
+    return [(label, load_copy(label)) for label in ("_protected_names", "land_contract")]
+
+
+def real_git_exe():
+    found = shutil.which("git")
+    if not found:
+        raise unittest.SkipTest("no git on PATH")
+    return found
+
+
+def raw_tree(repo, entries):
+    """A tree object whose entries are written IN THE ORDER GIVEN, duplicates included (``git mktree`` would
+    sort them; ``--literally`` skips the checks). ``entries`` is a list of (mode, name, object id)."""
+    body = b"".join(mode.encode("ascii") + b" " + name.encode("utf-8") + b"\0" + bytes.fromhex(oid)
+                    for mode, name, oid in entries)
+    return git_in(repo, "hash-object", "-t", "tree", "-w", "--literally", "--stdin", input=body)
+
+
+RULES_NAME = "db-destructive-guard.rules.json"
+
+
+def duplicate_commit(repo, shape, kept_first):
+    """A parentless commit holding TWO entries where the rules path has one: ``file`` (the file entry
+    doubled), ``hooks-folder`` (the hooks folder entry doubled) or ``claude-folder`` (the .claude folder entry
+    doubled). The first listed copy keeps both names when ``kept_first``, else the narrowed one comes first."""
+    kept = hash_blob(repo, rules_bytes(NAMES))
+    narrowed = hash_blob(repo, rules_bytes(NAMES[:1]))
+    readme = hash_blob(repo, b"x\n")
+    first, second = (kept, narrowed) if kept_first else (narrowed, kept)
+
+    def hooks(blobs):
+        return raw_tree(repo, [("100644", RULES_NAME, blob) for blob in blobs])
+
+    if shape == "file":
+        claude = raw_tree(repo, [("40000", "hooks", hooks([first, second]))])
+        root = raw_tree(repo, [("100644", "README.txt", readme), ("40000", ".claude", claude)])
+    elif shape == "hooks-folder":
+        claude = raw_tree(repo, [("40000", "hooks", hooks([first])), ("40000", "hooks", hooks([second]))])
+        root = raw_tree(repo, [("100644", "README.txt", readme), ("40000", ".claude", claude)])
+    else:
+        one = raw_tree(repo, [("40000", "hooks", hooks([first]))])
+        two = raw_tree(repo, [("40000", "hooks", hooks([second]))])
+        root = raw_tree(repo, [("100644", "README.txt", readme), ("40000", ".claude", one), ("40000", ".claude", two)])
+    return git_in(repo, "commit-tree", root, "-m", "duplicate entries (%s)" % shape)
+
+
+class SecondRemedyCase(RemedyCase):
+
+    def need(self, module, label, name):
+        fn = getattr(module, name, None)
+        if fn is None:
+            self.fail("%s.%s does not exist yet: Revision 6 (Names and shapes pinned for block 18's tests) adds it, "
+                      "so this row cannot say anything until block 19" % (label, name))
+        return fn
+
+    def plant(self, folder):
+        """A file named like git in ``folder`` (a recorder stands in: resolve_git only asks whether it is a file)."""
+        folder = Path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / shim_name()
+        target.write_bytes(b"MZ planted\n")
+        if os.name != "nt":
+            target.chmod(0o755)
+        return target
+
+    def linked_world(self):
+        """A main checkout ``work`` with an origin whose default branch keeps both names, and two linked
+        worktrees ``wt1`` and ``wt2`` of it."""
+        work = self.world(NAMES)
+        wt1, wt2 = self.root / "wt1", self.root / "wt2"
+        git(work, "worktree", "add", "-q", "-b", "wt1-branch", str(wt1))
+        git(work, "worktree", "add", "-q", "-b", "wt2-branch", str(wt2))
+        return work, wt1, wt2
+
+
+# -----------------------------------------------------------------------------------------------------
+# C6 / T1: two entries of the rules path
+# -----------------------------------------------------------------------------------------------------
+class DuplicateEntryTests(SecondRemedyCase):
+
+    def setUp(self):
+        super().setUp()
+        self.repo = make_world(self.root, {RULES_REL: rules_bytes(NAMES)})
+        self.good = plumbing_commit(self.repo, {RULES_REL: rules_bytes(NAMES)})
+
+    def _each(self, side):
+        for shape in ("file", "hooks-folder", "claude-folder"):
+            for kept_first in (True, False):
+                label = "%s doubled, %s copy first" % (shape, "kept" if kept_first else "narrowed")
+                with self.subTest(shape=shape, kept_first=kept_first, side=side):
+                    dup = duplicate_commit(self.repo, shape, kept_first)
+                    working, default = (dup, self.good) if side == "working" else (self.good, dup)
+                    verdict = "working-malformed" if side == "working" else "reference-malformed"
+                    obj = self.expect(self.repo, verdict, "--working-ref", working, "--default-ref", default,
+                                      why="R6-T1-1 %s side, %s: git checkout writes the LAST entry, while a read by "
+                                          "<commit>:<path> takes the FIRST (older git) or is refused with exit 128 "
+                                          "(newer git, which reads as unverifiable). The rules path listed twice is "
+                                          "malformed with reason duplicate-entry, never kept, never first-install, "
+                                          "never unverifiable" % (side, label))
+                    self.assertIn("duplicate-entry", str(obj.get("reason")),
+                                  "R6-T1-1 %s side, %s: the malformed reason is duplicate-entry. Result %r" % (side, label, obj))
+
+    def test_R6_T1_1_a_duplicate_rules_path_on_the_working_side_is_working_malformed_with_reason_duplicate_entry(self):
+        self._each("working")
+
+    def test_R6_T1_1_a_duplicate_rules_path_on_the_default_side_is_reference_malformed_with_reason_duplicate_entry(self):
+        self._each("default")
+
+    def test_R6_T1_1_control_the_fixture_trees_hold_the_rules_path_twice_and_a_clean_tree_is_kept(self):
+        """Without this a row above could pass because the fixture never held a duplicate (or fail on a fixture bug)."""
+        for shape in ("file", "hooks-folder", "claude-folder"):
+            dup = duplicate_commit(self.repo, shape, True)
+            listing = git_in(self.repo, "ls-tree", "-r", "--name-only", dup).splitlines()
+            self.assertEqual(listing.count(RULES_REL), 2, "control: %s leaves the exact path listed twice (%r)" % (shape, listing))
+        self.expect(self.repo, "kept", "--working-ref", self.good, "--default-ref", self.good,
+                    why="control: a tree with the exact path once is kept")
+
+
+# -----------------------------------------------------------------------------------------------------
+# C7 / T3: linked_worktrees from a linked worktree, and the PATH walk it feeds
+# -----------------------------------------------------------------------------------------------------
+class LinkedWorktreesTests(SecondRemedyCase):
+
+    def _norm_set(self, paths):
+        return {_norm(p) for p in paths}
+
+    def test_R6_T3_1_from_main_and_from_a_linked_worktree_the_set_is_the_same_and_holds_the_main_checkout(self):
+        work, wt1, wt2 = self.linked_world()
+        want = self._norm_set([work, wt1, wt2, work / ".git"])
+        for label, module in both_copies():
+            fn = self.need(module, label, "linked_worktrees")
+            from_main, from_linked = self._norm_set(fn(str(work))), self._norm_set(fn(str(wt1)))
+            self.assertIn(_norm(work), from_linked,
+                          "%s: from a linked worktree the main checkout is in the set (its commondir, ../.., is resolved "
+                          "relative to the git folder). Got %r" % (label, sorted(from_linked)))
+            self.assertEqual(from_main, from_linked, "%s: the same set from the main checkout and from a linked worktree" % label)
+            self.assertEqual(from_linked, want, "%s: the main checkout, both linked worktrees and the common folder" % label)
+
+    def test_R6_T3_1_a_git_file_whose_gitdir_cannot_be_read_gives_unverifiable(self):
+        for label, module in both_copies():
+            fn = self.need(module, label, "linked_worktrees")
+            for what, text in (("a gitdir line that names a folder that does not exist", "gitdir: %s\n" % (self.root / "no-such-git-dir")),
+                               ("a .git file with no gitdir line", "this is not a gitdir pointer\n")):
+                with self.subTest(copy=label, shape=what):
+                    folder = self.root / ("broken-%s-%s" % (label, abs(hash(what))))
+                    folder.mkdir()
+                    (folder / ".git").write_text(text, encoding="utf-8")
+                    with self.assertRaises(Exception, msg="%s: %s must raise (unverifiable), not return an empty list" % (label, what)):
+                        fn(str(folder))
+        work = self.world(NAMES)
+        broken = self.root / "broken-for-check"
+        broken.mkdir()
+        (broken / ".git").write_text("gitdir: %s\n" % (self.root / "no-such-git-dir"), encoding="utf-8")
+        self.expect(broken, "unverifiable", why="check() on a project whose .git file points nowhere")
+
+    def test_R6_T3_1_a_commondir_that_exists_but_cannot_be_read_or_holds_no_path_gives_unverifiable(self):
+        work, wt1, wt2 = self.linked_world()
+        pointer = work / ".git" / "worktrees" / "wt1" / "commondir"
+        self.assertTrue(pointer.is_file(), "control: a linked worktree's git folder holds a commondir file")
+        original = pointer.read_bytes()
+        for label, module in both_copies():
+            fn = self.need(module, label, "linked_worktrees")
+            for what in ("holds no path", "is a folder, not a readable file"):
+                with self.subTest(copy=label, commondir=what):
+                    if pointer.is_dir():
+                        pointer.rmdir()
+                    if what == "holds no path":
+                        pointer.write_bytes(b"\n")
+                    else:
+                        if pointer.exists():
+                            pointer.unlink()
+                        pointer.mkdir()
+                    with self.assertRaises(Exception, msg="%s: a commondir that %s must raise (unverifiable)" % (label, what)):
+                        fn(str(wt1))
+        if pointer.is_dir():
+            pointer.rmdir()
+        pointer.write_bytes(original)
+        self.expect(wt1, "kept", why="control: with commondir restored the linked worktree reaches its normal verdict")
+
+    def test_R6_T3_1_a_gitdir_file_under_the_worktrees_folder_that_cannot_be_read_gives_unverifiable(self):
+        work, wt1, wt2 = self.linked_world()
+        pointer = work / ".git" / "worktrees" / "wt1" / "gitdir"
+        self.assertTrue(pointer.is_file(), "control: the worktrees folder holds one gitdir file per linked worktree")
+        self.expect(work, "kept", why="control: before the file is damaged the main checkout is kept")
+        pointer.unlink()
+        pointer.mkdir()  # exists, cannot be read as a file; git itself never reads it for the calls the check makes
+        for label, module in both_copies():
+            fn = self.need(module, label, "linked_worktrees")
+            with self.assertRaises(Exception, msg="%s: a gitdir entry that exists but cannot be read must raise" % label):
+                fn(str(work))
+        self.expect(work, "unverifiable", why="the check cannot tell which folders are linked worktrees, so it says so")
+
+    def test_R6_T3_1_a_common_folder_with_no_worktrees_folder_gives_the_main_checkout_and_the_common_folder_only(self):
+        work = self.world(NAMES)
+        self.assertFalse((work / ".git" / "worktrees").exists(), "control: no linked worktree was ever made")
+        for label, module in both_copies():
+            fn = self.need(module, label, "linked_worktrees")
+            self.assertEqual(self._norm_set(fn(str(work))), self._norm_set([work, work / ".git"]),
+                             "%s: a missing worktrees folder is an empty list, not an error; the set is the main checkout and "
+                             "the common folder only" % label)
+        self.expect(work, "kept", why="and the check reaches its normal verdict")
+
+
+class EqualCopiesTests(SecondRemedyCase):
+
+    def test_R6_EQ_the_two_copies_return_equal_results_for_the_same_inputs(self):
+        """Extends R5-B2-6 (the environment rule and the git resolution): the path rules exist twice."""
+        work, wt1, wt2 = self.linked_world()
+        copies = both_copies()
+        helper, landing = copies[0][1], copies[1][1]
+        fns = {name: [self.need(module, label, name) for label, module in copies]
+               for name in ("linked_worktrees", "comparable_path", "written_path")}
+        for project in (work, wt1, wt2):
+            a, b = (sorted(_norm(p) for p in fn(str(project))) for fn in fns["linked_worktrees"])
+            self.assertEqual(a, b, "linked_worktrees(%s) is equal in the two copies" % project.name)
+        inputs = [str(work), str(work) + "\\x\\..\\y", str(work).upper(), str(work) + "\\", "relative\\folder"]
+        if os.name == "nt":
+            drive, tail = os.path.splitdrive(str(work))
+            inputs += ["\\\\?\\" + str(work), "\\\\.\\" + str(work), "\\\\localhost\\%s$\\%s" % (drive[:1], tail.strip("\\")),
+                       "\\\\?\\UNC\\127.0.0.1\\%s$\\%s" % (drive[:1], tail.strip("\\"))]
+        for name in ("comparable_path", "written_path"):
+            for text in inputs:
+                a, b = (fn(text) for fn in fns[name])
+                self.assertEqual(a, b, "%s(%r) is equal in the two copies" % (name, text))
+
+
+# -----------------------------------------------------------------------------------------------------
+# C7 / T3: the PATH walk from a linked worktree (the checker child, disk mode and --working-ref mode)
+# -----------------------------------------------------------------------------------------------------
+class LinkedWorktreePathWalkTests(SecondRemedyCase):
+
+    def _planted(self, work):
+        folder = work / "tools-planted"
+        log = self.root / "planted-main.log"
+        make_git_shim(folder, log, mode="planted")
+        return folder, log
+
+    def _path(self, folder):
+        return os.pathsep.join([str(folder), os.path.dirname(real_git_exe())])
+
+    def test_R6_T3_2_disk_mode_from_a_linked_worktree_never_runs_a_git_planted_in_the_main_checkout(self):
+        work, wt1, wt2 = self.linked_world()
+        (wt1 / RULES_REL).write_bytes(rules_bytes(NAMES[:1]))
+        folder, log = self._planted(work)
+        rc, obj, out, err = self.run_checker(wt1, env={"PATH": self._path(folder)})
+        self.assertEqual([r["args"][:3] for r in read_shim_log(log)], [],
+                         "a git planted in the MAIN checkout (a .venv\\Scripts or node_modules\\.bin folder) is inside a tree "
+                         "under check and must never run, even when the project is a linked worktree")
+        self.assertEqual((obj or {}).get("verdict"), "names-removed",
+                         "the real git, after the planted entry, reaches the fixture's verdict (a hostile git here answers "
+                         "nothing, which reads as unverifiable or first-install). Result %r stderr=%r" % (obj, err[:200]))
+        self.assertEqual(rc, 10)
+
+    def test_R6_T3_2_working_ref_mode_from_a_linked_worktree_never_runs_a_git_planted_in_the_main_checkout(self):
+        work, wt1, wt2 = self.linked_world()
+        (wt1 / RULES_REL).write_bytes(rules_bytes(NAMES[:1]))
+        git(wt1, "commit", "-q", "-am", "narrow the list")
+        folder, log = self._planted(work)
+        rc, obj, out, err = self.run_checker(wt1, "--working-ref", "HEAD", env={"PATH": self._path(folder)})
+        self.assertEqual([r["args"][:3] for r in read_shim_log(log)], [],
+                         "no git planted in the main checkout may run in --working-ref mode either")
+        self.assertEqual((obj or {}).get("verdict"), "names-removed", "Result %r stderr=%r" % (obj, err[:200]))
+        self.assertEqual(rc, 10)
+
+    def test_R6_T3_2_control_the_same_planted_git_is_the_one_that_runs_when_it_is_first_and_outside_every_tree(self):
+        """Without this the rows above could pass because the recorder never starts at all."""
+        work, wt1, wt2 = self.linked_world()
+        elsewhere = self.root / "elsewhere-bin"
+        log = self.root / "planted-elsewhere.log"
+        make_git_shim(elsewhere, log, mode="planted")
+        rc, obj, out, err = self.run_checker(wt1, env={"PATH": self._path(elsewhere)})
+        self.assertTrue(read_shim_log(log), "control: a planted git in a folder outside every tree IS chosen (this is the "
+                                            "documented residual) and its calls are recorded")
+
+
+# -----------------------------------------------------------------------------------------------------
+# C8 / T4: one rule for path spellings
+# -----------------------------------------------------------------------------------------------------
+UNC_KINDS = ("long-unc-localhost", "unc-localhost", "unc-127-0-0-1", "unc-own-name")
+SPELLING_KINDS = ("long-prefix", "device-prefix") + UNC_KINDS + ("letter-case",)
+
+
+def spelled_folder(root, kind, leaf="x"):
+    """``<root>\\<leaf>`` written in one of the spellings of C8's threat model (covered list)."""
+    root = str(root)
+    drive, tail = os.path.splitdrive(root)
+    letter, tail = drive[:1], tail.strip("\\")
+    host = {"long-unc-localhost": "localhost", "unc-localhost": "localhost", "unc-127-0-0-1": "127.0.0.1",
+            "unc-own-name": socket.gethostname()}.get(kind)
+    if kind == "long-prefix":
+        return "\\\\?\\" + root + "\\" + leaf
+    if kind == "device-prefix":
+        return "\\\\.\\" + root + "\\" + leaf
+    if kind == "long-unc-localhost":
+        return "\\\\?\\UNC\\%s\\%s$\\%s\\%s" % (host, letter, tail, leaf)
+    if kind in UNC_KINDS:
+        return "\\\\%s\\%s$\\%s\\%s" % (host, letter, tail, leaf)
+    return root.swapcase() + "\\" + leaf  # letter-case
+
+
+class PathSpellingCase(SecondRemedyCase):
+
+    def setUp(self):
+        super().setUp()
+        if os.name != "nt":
+            self.skipTest("these spellings (\\\\?\\, \\\\.\\, UNC administrative shares) exist only on Windows")
+        self.excluded = self.root / "root"
+        self.excluded.mkdir()
+        self.plant(self.excluded / "x")
+        self.git_exe = real_git_exe()
+
+    def assert_real_git(self, path_value, roots, why):
+        for label, module in both_copies():
+            resolve = self.need(module, label, "resolve_git")
+            got = resolve(path_value, roots)
+            self.assertTrue(got, "%s: %s: a git was found (the real one, last on PATH)" % (label, why))
+            self.assertEqual(_norm(got), _norm(self.git_exe),
+                             "%s: %s: the planted git in the excluded root must be skipped and the real git returned, not %r"
+                             % (label, why, got))
+
+
+class PathSpellingRowTests(PathSpellingCase):
+    pass
+
+
+def _spelling_rows():
+    def string_half(kind):
+        def test(self):
+            expected_tail = os.sep + "x"
+            for label, module in both_copies():
+                comparable = self.need(module, label, "comparable_path")
+                spelled = spelled_folder(self.excluded, kind)
+                self.assertEqual(comparable(spelled), comparable(str(self.excluded)) + expected_tail,
+                                 "%s: R6-T4-1 string half, %s: comparable_path of %r equals the root's comparable path plus "
+                                 "\\x (steps 1 and 2 rewrite the string before realpath, so no share is touched)"
+                                 % (label, kind, spelled))
+        return test
+
+    def end_to_end_half(kind):
+        def test(self):
+            spelled = spelled_folder(self.excluded, kind)
+            if kind in UNC_KINDS and not os.path.isfile(os.path.join(spelled, shim_name())):
+                self.skipTest("the administrative share %r cannot be reached from this account, so the planted git in the "
+                              "excluded root is not reachable through that spelling and the row would prove nothing (the "
+                              "string half of this spelling ran and never skips)" % spelled)
+            self.assertTrue(os.path.isfile(os.path.join(spelled, shim_name())),
+                            "control: the planted git is reachable through the spelling %r" % spelled)
+            path_value = os.pathsep.join([spelled, os.path.dirname(self.git_exe)])
+            self.assert_real_git(path_value, [str(self.excluded)], "R6-T4-1 end to end, %s" % kind)
+        return test
+
+    for kind in SPELLING_KINDS:
+        slug = kind.replace("-", "_")
+        setattr(PathSpellingRowTests, "test_R6_T4_1_string_half_%s" % slug, string_half(kind))
+        setattr(PathSpellingRowTests, "test_R6_T4_1_end_to_end_half_%s" % slug, end_to_end_half(kind))
+
+
+_spelling_rows()
+
+
+class PathSpellingRootsTests(PathSpellingCase):
+
+    def _root_spellings(self):
+        drive, tail = os.path.splitdrive(str(self.excluded))
+        return {"long-prefix": "\\\\?\\" + str(self.excluded),
+                "unc-localhost": "\\\\localhost\\%s$\\%s" % (drive[:1], tail.strip("\\"))}
+
+    def test_R6_T4_3_string_half_a_root_spelled_with_the_long_prefix_has_the_plain_roots_comparable_path(self):
+        spelled = self._root_spellings()["long-prefix"]
+        for label, module in both_copies():
+            comparable = self.need(module, label, "comparable_path")
+            self.assertEqual(comparable(spelled), comparable(str(self.excluded)),
+                             "%s: the root %r and the plain root are one folder once C8 is applied to the roots too" % (label, spelled))
+
+    def test_R6_T4_3_string_half_a_root_spelled_as_a_unc_path_has_the_plain_roots_comparable_path(self):
+        spelled = self._root_spellings()["unc-localhost"]
+        for label, module in both_copies():
+            comparable = self.need(module, label, "comparable_path")
+            self.assertEqual(comparable(spelled), comparable(str(self.excluded)),
+                             "%s: the root %r (rewritten to its drive form before realpath, so no share is touched) equals the "
+                             "plain root" % (label, spelled))
+
+    def test_R6_T4_3_end_to_end_with_the_root_given_with_the_long_prefix_and_path_holding_the_plain_spelling(self):
+        path_value = os.pathsep.join([str(self.excluded / "x"), os.path.dirname(self.git_exe)])
+        self.assert_real_git(path_value, [self._root_spellings()["long-prefix"]],
+                             "R6-T4-3: an implementation that applies C8 to the PATH entries but not to the roots fails here")
+
+    def test_R6_T4_3_end_to_end_with_the_root_given_as_a_unc_path_and_path_holding_the_plain_spelling(self):
+        path_value = os.pathsep.join([str(self.excluded / "x"), os.path.dirname(self.git_exe)])
+        self.assert_real_git(path_value, [self._root_spellings()["unc-localhost"]],
+                             "R6-T4-3: the root as \\\\localhost\\<letter>$\\... (no share is read: the root is only a string "
+                             "that C8 rewrites)")
+
+
+class JunctionTests(PathSpellingCase):
+    """R6-T4-J and R6-T4-J2: a junction written INSIDE a tree that leads OUT of every root."""
+
+    def _entry(self, root):
+        return os.path.join(str(root), "ClientApp", "node_modules", ".bin")
+
+    def test_R6_T4_J2_the_pure_half_the_written_spelling_of_the_bin_folder_lies_inside_the_written_spelling_of_the_root(self):
+        for label, module in both_copies():
+            written = self.need(module, label, "written_path")
+            inner, outer = written(self._entry(self.excluded)), written(str(self.excluded))
+            self.assertTrue(inner.startswith(outer.rstrip("\\/") + os.sep),
+                            "%s: written_path of <root>\\ClientApp\\node_modules\\.bin (%r) lies inside written_path of the "
+                            "root (%r) with no link on disk: C8 compares the spelling before any link is followed" % (label, inner, outer))
+
+    def _make_junction(self, project_root):
+        outside = self.root / "outside-every-root"
+        (outside / ".bin").mkdir(parents=True)
+        log = self.root / "junction-planted.log"
+        make_git_shim(outside / ".bin", log, mode="planted")
+        parent = Path(project_root) / "ClientApp"
+        parent.mkdir(exist_ok=True)
+        link = parent / "node_modules"
+        try:
+            import _winapi  # noqa: WPS433 -- Windows only, as the row
+            _winapi.CreateJunction(str(outside), str(link))
+        except (ImportError, AttributeError, OSError) as exc:
+            self.skipTest("a junction cannot be created here (%s: %s); R6-T4-J2 still guards the rule" % (type(exc).__name__, exc))
+        self.addCleanup(lambda: os.rmdir(str(link)) if os.path.lexists(str(link)) else None)  # the link only, never its target
+        return log
+
+    def test_R6_T4_J_a_bin_folder_reached_through_a_junction_that_leaves_the_tree_is_still_excluded(self):
+        self._make_junction(self.excluded)
+        entry = self._entry(self.excluded)
+        self.assertTrue(os.path.isfile(os.path.join(entry, shim_name())),
+                        "control: the recorder is reachable through the junction")
+        self.assertNotEqual(_norm(entry), _norm(self.excluded) + os.sep + "clientapp" + os.sep + "node_modules" + os.sep + ".bin",
+                            "control: the junction really leads out of the tree (the resolved folder is elsewhere)")
+        path_value = os.pathsep.join([entry, os.path.dirname(self.git_exe)])
+        self.assert_real_git(path_value, [str(self.excluded)], "R6-T4-J: written inside the root, resolved outside it")
+
+    def test_R6_T4_J_a_check_with_such_a_folder_first_on_path_reaches_names_removed_and_never_runs_the_recorder(self):
+        work = self.world(NAMES, NAMES[:1])
+        log = self._make_junction(work)
+        path_value = os.pathsep.join([self._entry(work), os.path.dirname(self.git_exe)])
+        rc, obj, out, err = self.run_checker(work, env={"PATH": path_value})
+        self.assertEqual([r["args"][:3] for r in read_shim_log(log)], [],
+                         "the recorder behind <project>\\ClientApp\\node_modules\\.bin never runs: the entry is written inside the tree")
+        self.assertEqual((obj or {}).get("verdict"), "names-removed",
+                         "the real git, after the junction entry, reaches the fixture's verdict. Result %r stderr=%r" % (obj, err[:200]))
+        self.assertEqual(rc, 10)
+
+
+class StatedResidualTests(PathSpellingCase):
+
+    def test_R6_T4_R_a_unc_spelling_through_another_address_of_this_computer_is_NOT_recognised(self):
+        """PINS A STATED LIMIT, not a goal: Revision 6, "Threat model for path spellings", lists "a UNC spelling
+        through another address of this computer (its network address, an IPv6 literal, a DNS alias)" under
+        "It does not cover". comparable_path of \\\\192.0.2.10\\<letter>$\\<root tail>\\x therefore does NOT lie
+        inside the root's comparable path. A rule that later covers it changes THIS ROW DELIBERATELY (and the
+        paragraph); an accidental change must fail here. The row passes whenever the function exists. The
+        address is 192.0.2.10 (TEST-NET-1, RFC 5737: never routed), so no real share is meant; realpath may
+        wait for a network answer that never comes."""
+        drive, tail = os.path.splitdrive(str(self.excluded))
+        spelled = "\\\\192.0.2.10\\%s$\\%s\\x" % (drive[:1], tail.strip("\\"))
+        for label, module in both_copies():
+            comparable = self.need(module, label, "comparable_path")
+            inner, outer = comparable(spelled), comparable(str(self.excluded))
+            self.assertFalse(inner == outer or inner.startswith(outer.rstrip("\\/") + os.sep),
+                             "%s: R6-T4-R pins the stated residual of the Revision 6 threat model (another address of this "
+                             "computer is not recognised). If a rule now covers it, change this row on purpose and say so in "
+                             "that paragraph. comparable_path gave %r against the root %r" % (label, inner, outer))
+
+
+# -----------------------------------------------------------------------------------------------------
+# Guard rows F3-1 and F3-2: the disk-mode directory listing (they PASS at M; the mutation MB3g-h turns them red)
+# -----------------------------------------------------------------------------------------------------
+class DiskDirectoryListingGuardTests(RemedyCase):
+
+    def setUp(self):
+        super().setUp()
+        if os.name != "nt":
+            self.skipTest("both rows build their second spelling with Windows folder semantics")
+
+    def test_R6_F3_1_a_case_variant_second_file_in_a_case_sensitive_folder_is_working_malformed(self):
+        cs = self.root / "case-sensitive"
+        cs.mkdir()
+        proc = subprocess.run(["fsutil", "file", "setCaseSensitiveInfo", str(cs), "enable"], capture_output=True, text=True)
+        if proc.returncode != 0:
+            self.skipTest("fsutil file setCaseSensitiveInfo failed here (exit %d: %s%s)" % (
+                proc.returncode, proc.stdout.strip()[:160], proc.stderr.strip()[:160]))
+        work = make_world(cs, {RULES_REL: rules_bytes(NAMES)})
+        hooks = work / ".claude" / "hooks"
+        self.expect(work, "kept", why="control: before the second file the disk holds the one exact file")
+        (hooks / "DB-destructive-guard.rules.json").write_bytes(rules_bytes(NAMES[:1]))
+        listing = [n for n in os.listdir(str(hooks)) if n.lower() == RULES_NAME]
+        if len(listing) < 2:
+            self.skipTest("the folder did not stay case-sensitive for the new .claude\\hooks (listing %r)" % listing)
+        rc, obj, out, err = self.run_checker(work)
+        self.assertEqual((rc, (obj or {}).get("verdict")), (11, "working-malformed"),
+                         "R6-F3-1: both %s and DB-%s on disk (a directory listing sees both; the index does not hold the "
+                         "variant). Result %r stderr=%r" % (RULES_NAME, RULES_NAME[3:], obj, err[:200]))
+
+    def test_R6_F3_2_a_literal_dot_claude_dot_folder_made_with_the_long_prefix_is_working_malformed(self):
+        work = make_world(self.root, {RULES_REL: rules_bytes(NAMES)})
+        self.expect(work, "kept", why="control: before the second folder the disk holds the one exact file")
+        extended = "\\\\?\\" + str(work / ".claude.")
+        self.addCleanup(lambda: self.assertFalse(os.path.exists(extended), "the .claude. folder was removed"))
+        self.addCleanup(lambda: _rm_tree(extended) if os.path.exists(extended) else None)
+        os.makedirs(extended + "\\hooks")
+        with open(extended + "\\hooks\\" + RULES_NAME, "wb") as handle:
+            handle.write(rules_bytes(NAMES[:1]))
+        self.assertTrue(os.path.exists(extended + "\\hooks\\" + RULES_NAME), "control: the folder with the trailing dot exists")
+        rc, obj, out, err = self.run_checker(work)
+        self.assertEqual((rc, (obj or {}).get("verdict")), (11, "working-malformed"),
+                         "R6-F3-2: a folder literally named '.claude.' beside '.claude' holding a narrowed rules file is an "
+                         "alias that Windows folds onto the exact path. Result %r stderr=%r" % (obj, err[:200]))
 
 
 if __name__ == "__main__":
