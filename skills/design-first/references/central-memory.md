@@ -86,6 +86,8 @@ Written and replaced by `record` in the Work Item Brief, below the body and neve
 | `Reported: <kind> \| <id>@<version> \| <detail>` | One per change notice. |
 | `Captured:` / `Not sent:` | Receipt lines written later by `/pr-merged`; `record` keeps them when it rewrites the section. |
 
+When the new outcome carries no item (an unconfigured profile, an empty retrieval, or an unavailable outcome), `record` keeps the earlier `Retrieved:` and `Reported:` lines, in order.
+
 Reasons are `profile-absent`, `slot-unset`, `shape-unknown`, `tool-absent`, `call-failed`, `timeout` and `malformed-response`. Recording `unavailable` uses `{"state": "unavailable", "reason": "<reason>", "date": "<today>", "retrieved": [], "reported": []}` as the outcome file.
 
 ## 7. At Step 3: check the contract
