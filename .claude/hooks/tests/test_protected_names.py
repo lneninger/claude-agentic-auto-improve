@@ -1805,5 +1805,476 @@ class DiskDirectoryListingGuardTests(RemedyCase):
                          "alias that Windows folds onto the exact path. Result %r stderr=%r" % (obj, err[:200]))
 
 
+# =====================================================================================================
+# REVISION 7 REMEDY (block 22, RED). Gate 20's blocked report (t20), findings N3 and N4 (fixed: invariants C12
+# and C11), and one documenting row per STATED RESIDUAL of Revision 6, "Threat model for path spellings",
+# "Trust boundary" (N1, N2, I1, the working-folder residual, N5). Contract
+# 2026-10-13-database-guard-names-in-rules-file, Revision 7.
+#
+# NAMES THIS SUITE PINS (Revision 7, "Names and shapes for block 22's tests"), each in BOTH
+# .claude/hooks/_protected_names.py and .claude/scripts/land_contract.py:
+#   is_device_path(path) -> bool   new. True for a path that is a device path after C8 step 1 (``\\.\Volume{GUID}\``,
+#       ``\\?\Volume{GUID}\``, ``\\.\GLOBALROOT\Device\...``, ``\\.\pipe\``), whichever separator is used in its first
+#       four characters; False for a drive form (``\\?\C:\``), a long UNC form (``\\?\UNC\``, any letter case) and
+#       a plain path. A row that needs it asks for it through ``need``, so its absence is an ASSERTION failure.
+#   comparable_path / written_path of a device path return os.path.normcase of the text (no realpath, no abspath).
+#   resolve_git skips a device-path PATH entry, and returns None when an excluded root is a device path.
+#   A malformed reading for C11 carries a JSON ``reason`` containing ``backslash-in-path``.
+#
+# SAFETY. As block 18. Every fixture, recorder and compiled file lives in a test-owned folder that the case removes
+# whether the row passes or fails. The only calls into the volume manager are the two READING calls
+# GetVolumeNameForVolumeMountPointW and QueryDosDeviceW; nothing here runs net use, subst, fsutil 8dot3name or
+# mountvol, and no mount is changed. A row that changes the working folder restores it before the case's root goes.
+# =====================================================================================================
+BACKSLASH_RULES = ".claude\\hooks\\db-destructive-guard.rules.json"
+FAKE_GUID = "{11111111-2222-3333-4444-555555555555}"
+TRUST_BOUNDARY = "Revision 6, Threat model for path spellings, Trust boundary"
+
+
+def volume_identity(path):
+    """(volume name, device name) of the drive that holds ``path``: ``\\\\?\\Volume{GUID}\\`` from
+    GetVolumeNameForVolumeMountPointW and ``\\Device\\HarddiskVolumeN`` from QueryDosDeviceW. Both only READ.
+    Raises RuntimeError naming the failing call and its error."""
+    if os.name != "nt":
+        raise RuntimeError("volume names exist only on Windows")
+    import ctypes
+    drive = os.path.splitdrive(os.path.abspath(str(path)))[0]
+    if len(drive) != 2 or drive[1] != ":":
+        raise RuntimeError("%r has no drive letter" % str(path))
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    volume = ctypes.create_unicode_buffer(260)
+    if not kernel.GetVolumeNameForVolumeMountPointW(drive + "\\", volume, 260):
+        raise RuntimeError("GetVolumeNameForVolumeMountPointW(%s\\) failed with error %d" % (drive, ctypes.get_last_error()))
+    device = ctypes.create_unicode_buffer(260)
+    if not kernel.QueryDosDeviceW(drive, device, 260):
+        raise RuntimeError("QueryDosDeviceW(%s) failed with error %d" % (drive, ctypes.get_last_error()))
+    return volume.value, device.value
+
+
+def device_forms(folder):
+    """The four device spellings of ``folder`` that Windows itself resolves (read from this drive's own GUID and
+    device number): ``\\\\.\\Volume{GUID}\\<tail>``, ``\\\\?\\Volume{GUID}\\<tail>``, and the two GLOBALROOT forms."""
+    volume, device = volume_identity(folder)
+    tail = os.path.splitdrive(os.path.abspath(str(folder)))[1].lstrip("\\")
+    return {"dot-volume": "\\\\.\\" + volume[4:] + tail,
+            "question-volume": volume + tail,
+            "dot-globalroot": "\\\\.\\GLOBALROOT" + device + "\\" + tail,
+            "question-globalroot": "\\\\?\\GLOBALROOT" + device + "\\" + tail}
+
+
+class Revision7Case(SecondRemedyCase):
+
+    def need(self, module, label, name):
+        fn = getattr(module, name, None)
+        if fn is None:
+            self.fail("%s.%s does not exist yet: Revision 7 (Names and shapes for block 22's tests) adds it, so this row "
+                      "cannot say anything until block 23" % (label, name))
+        return fn
+
+    def chdir_to(self, name):
+        """Make the working folder a test-owned folder (outside every fixture tree); restored before the root goes."""
+        folder = self.root / name
+        folder.mkdir(parents=True, exist_ok=True)
+        saved = os.getcwd()
+        os.chdir(str(folder))
+        self.addCleanup(os.chdir, saved)
+        return folder
+
+    def real_git_dir(self):
+        return os.path.dirname(real_git_exe())
+
+    def roots_of(self, module, label, project):
+        """The fixture's excluded roots as the landing computes them: the project and ``linked_worktrees(project)``."""
+        fn = self.need(module, label, "linked_worktrees")
+        return [str(project)] + list(fn(str(project)))
+
+
+# -----------------------------------------------------------------------------------------------------
+# R7-N4-1 (C11, finding N4): a backslash anywhere in a listing makes that side malformed
+# -----------------------------------------------------------------------------------------------------
+class BackslashListingTests(RemedyCase):
+
+    def setUp(self):
+        super().setUp()
+        self.repo = make_world(self.root, {RULES_REL: rules_bytes(NAMES)})
+        self.kept = rules_bytes(NAMES)
+        self.narrowed = rules_bytes(NAMES[:1])
+
+    def tree_with(self, extra, with_exact=True):
+        files = {RULES_REL: self.kept} if with_exact else {"README.txt": b"x\n"}
+        files.update(extra)
+        return plumbing_commit(self.repo, files)
+
+    def listed(self, commit):
+        return git_in(self.repo, "ls-tree", "-r", "-z", "--full-tree", commit).split("\0")
+
+    def malformed(self, obj, why):
+        self.assertIn("backslash-in-path", str(obj.get("reason")),
+                      "%s: the malformed reason names backslash-in-path (Revision 7, C11). Result %r" % (why, obj))
+
+    def test_R7_N4_1_i_a_root_entry_with_backslash_separators_beside_the_kept_file_is_working_malformed(self):
+        """Gate 20 N4: a checkout with core.protectNTFS=false writes the root entry named
+        ``.claude\\hooks\\db-destructive-guard.rules.json`` over the guard's file, while the exact kept file beside it
+        made the check read ``kept``."""
+        working = self.tree_with({BACKSLASH_RULES: self.narrowed})
+        good = self.tree_with({})
+        self.assertIn(BACKSLASH_RULES, [e.partition("\t")[2] for e in self.listed(working)],
+                      "control: the working tree lists the backslash-named root entry beside the exact file")
+        obj = self.expect(self.repo, "working-malformed", "--working-ref", working, "--default-ref", good,
+                          why="R7-N4-1 (i) working side: any path holding a backslash makes the side malformed")
+        self.malformed(obj, "R7-N4-1 (i) working side")
+
+    def test_R7_N4_1_i_the_same_root_entry_on_the_default_side_is_reference_malformed(self):
+        default = self.tree_with({BACKSLASH_RULES: self.narrowed})
+        good = self.tree_with({})
+        obj = self.expect(self.repo, "reference-malformed", "--working-ref", good, "--default-ref", default,
+                          why="R7-N4-1 (i) default side: the same entry on the default branch")
+        self.malformed(obj, "R7-N4-1 (i) default side")
+
+    def test_R7_N4_1_ii_an_unrelated_backslash_path_beside_the_kept_file_is_malformed_on_each_side(self):
+        """Pins the whole-listing rule (C11): the path is ``docs\\a.md``, nothing like the rules path."""
+        stray = {"docs\\a.md": b"x\n"}
+        with_stray, good = self.tree_with(stray), self.tree_with({})
+        obj = self.expect(self.repo, "working-malformed", "--working-ref", with_stray, "--default-ref", good,
+                          why="R7-N4-1 (ii) working side: an unrelated backslash path")
+        self.malformed(obj, "R7-N4-1 (ii) working side")
+        obj = self.expect(self.repo, "reference-malformed", "--working-ref", good, "--default-ref", with_stray,
+                          why="R7-N4-1 (ii) default side: an unrelated backslash path")
+        self.malformed(obj, "R7-N4-1 (ii) default side")
+
+    def test_R7_N4_1_iii_disk_mode_an_index_entry_holding_a_backslash_is_working_malformed(self):
+        for label, name in (("the rules path spelled with backslashes", BACKSLASH_RULES), ("an unrelated path", "docs\\a.md")):
+            with self.subTest(index_entry=label):
+                world_root = self.root / ("idx-" + label.split()[1])
+                world_root.mkdir()
+                work = make_world(world_root, {RULES_REL: self.kept})
+                blob = hash_blob(work, self.narrowed)
+                proc = subprocess.run(["git", "-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo",
+                                       "100644,%s,%s" % (blob, name)], cwd=str(work), capture_output=True, text=True, env=_GIT_ENV)
+                if proc.returncode != 0:
+                    self.skipTest("git refused to put %r in the index (exit %d): %s; R7-N4-1 (i) and (ii) still guard the "
+                                  "rule" % (name, proc.returncode, proc.stderr.strip()[:200]))
+                listed = git(work, "ls-files", "-z", "--full-name").split("\0")
+                self.assertIn(name, listed, "control: the index holds the backslash entry beside the exact path")
+                self.assertIn(RULES_REL, listed, "control: and the exact path")
+                rc, obj, out, err = self.run_checker(work)
+                self.assertEqual((rc, (obj or {}).get("verdict")), (11, "working-malformed"),
+                                 "R7-N4-1 (iii) disk mode, %s in the index. Result %r stderr=%r" % (label, obj, err[:200]))
+                self.malformed(obj or {}, "R7-N4-1 (iii) disk mode, " + label)
+
+    def test_R7_N4_1_iv_control_the_same_trees_without_the_backslash_entry_are_kept(self):
+        """PASSES today: without this a row above could pass because the fixture trees are broken."""
+        good = self.tree_with({})
+        self.expect(self.repo, "kept", "--working-ref", good, "--default-ref", good, why="control: working-ref mode, no backslash entry")
+        self.expect(self.repo, "kept", why="control: disk mode, no backslash entry")
+        beside = self.tree_with({"docs/a.md": b"x\n"})
+        self.expect(self.repo, "kept", "--working-ref", beside, "--default-ref", good,
+                    why="control: an unrelated path with a forward slash is no backslash path")
+
+    def test_R7_N4_1_v_a_default_side_with_no_rules_file_and_an_unrelated_backslash_path_is_reference_malformed_never_first_install(self):
+        """Verdict step (2): such a listing is never ``first-install``, which would let any working list pass."""
+        default = self.tree_with({"docs\\a.md": b"x\n"}, with_exact=False)
+        self.assertNotIn(RULES_REL, [e.partition("\t")[2] for e in self.listed(default)],
+                         "control: the default tree holds no rules file")
+        good = self.tree_with({})
+        obj = self.expect(self.repo, "reference-malformed", "--working-ref", good, "--default-ref", default,
+                          why="R7-N4-1 (v): no rules file and a backslash path on the default side is reference-malformed, "
+                              "never first-install")
+        self.malformed(obj, "R7-N4-1 (v)")
+
+
+# -----------------------------------------------------------------------------------------------------
+# R7-N3-1 (C12, finding N3): the string halves, in both copies, never skipped
+# -----------------------------------------------------------------------------------------------------
+DEVICE_SPELLINGS = ("\\\\.\\Volume" + FAKE_GUID + "\\x", "\\\\?\\Volume" + FAKE_GUID + "\\x",
+                    "\\\\.\\GLOBALROOT\\Device\\HarddiskVolume1\\x", "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\x",
+                    "//./Volume" + FAKE_GUID + "/x", "\\\\.\\pipe\\x")
+NOT_DEVICE_SPELLINGS = ("\\\\?\\C:\\x", "\\\\.\\C:\\x", "//?/C:/x", "\\\\?\\UNC\\localhost\\C$\\x",
+                        "\\\\.\\UNC\\localhost\\C$\\x", "\\\\?\\unc\\localhost\\C$\\x", "C:\\x")
+DRIVE_FORMS = ("\\\\?\\C:\\x", "\\\\.\\C:\\x", "//?/C:/x")
+
+
+class DevicePathStringTests(Revision7Case):
+
+    def test_R7_N3_1_is_device_path_is_true_for_every_device_spelling(self):
+        for label, module in both_copies():
+            with self.subTest(copy=label):
+                fn = self.need(module, label, "is_device_path")
+                for text in DEVICE_SPELLINGS:
+                    self.assertIs(fn(text), True, "%s: is_device_path(%r) is True: a device-namespace spelling that is not a "
+                                                  "drive form or a UNC form (Revision 7, C12)" % (label, text))
+
+    def test_R7_N3_1_is_device_path_is_false_for_a_drive_form_a_unc_form_and_a_plain_path(self):
+        for label, module in both_copies():
+            with self.subTest(copy=label):
+                fn = self.need(module, label, "is_device_path")
+                for text in NOT_DEVICE_SPELLINGS:
+                    self.assertIs(fn(text), False, "%s: is_device_path(%r) is False (a drive form, a long UNC form with the letter "
+                                                   "case of UNC ignored, or a plain path)" % (label, text))
+
+    def test_R7_N3_1_comparable_and_written_path_of_a_device_path_keep_the_prefix_and_never_start_with_the_working_folder(self):
+        here = self.chdir_to("working-folder-outside-every-tree")
+        folder = os.path.normcase(str(here))
+        for label, module in both_copies():
+            with self.subTest(copy=label):
+                comparable = self.need(module, label, "comparable_path")
+                written = self.need(module, label, "written_path")
+                for text in DEVICE_SPELLINGS:
+                    for name, fn in (("comparable_path", comparable), ("written_path", written)):
+                        got = fn(text)
+                        self.assertFalse(got.startswith(folder),
+                                         "%s: %s(%r) = %r must never begin with the working folder %r: a device path is never "
+                                         "given to realpath or abspath and never joined to the working folder (N3)"
+                                         % (label, name, text, got, folder))
+                        self.assertEqual(got, os.path.normcase(text),
+                                         "%s: %s(%r) keeps the device prefix: os.path.normcase of the text" % (label, name, text))
+
+    def test_R7_N3_1_each_drive_form_has_the_comparable_path_of_the_plain_drive_path(self):
+        """PASSES today: the drive forms were already stripped and are not touched by C12."""
+        if os.name != "nt":
+            self.skipTest("a drive letter and the \\\\?\\ prefix are Windows spellings")
+        self.chdir_to("working-folder-outside-every-tree")
+        for label, module in both_copies():
+            with self.subTest(copy=label):
+                comparable = self.need(module, label, "comparable_path")
+                for text in DRIVE_FORMS:
+                    self.assertEqual(comparable(text), comparable("C:\\x"),
+                                     "%s: comparable_path(%r) equals comparable_path('C:\\\\x'): C12 still strips a prefix that "
+                                     "is followed by a drive letter and a colon" % (label, text))
+
+    def test_R7_N3_1_a_device_path_as_an_excluded_root_makes_resolve_git_return_none(self):
+        """A device root cannot be compared with any entry, so the program search is unverifiable (a landing halt)."""
+        self.chdir_to("working-folder-outside-every-tree")
+        path_value = self.real_git_dir()
+        for label, module in both_copies():
+            with self.subTest(copy=label):
+                resolve = self.need(module, label, "resolve_git")
+                self.assertTrue(resolve(path_value, [str(self.root)]),
+                                "%s: control: with an ordinary root and PATH holding only the real git's folder, git is found" % label)
+                for root in DEVICE_SPELLINGS[:4]:
+                    self.assertIsNone(resolve(path_value, [root]),
+                                      "%s: an excluded root %r is a device path, so resolve_git returns None (unverifiable) "
+                                      "instead of a git that was never compared with it (Revision 7, C12)" % (label, root))
+
+
+# -----------------------------------------------------------------------------------------------------
+# R7-N3-2 (C12): end to end, a tree folder spelled as a device path is never the program search's git
+# -----------------------------------------------------------------------------------------------------
+class DevicePathEndToEndTests(Revision7Case):
+
+    def setUp(self):
+        super().setUp()
+        if os.name != "nt":
+            self.skipTest("device paths (\\\\.\\Volume{GUID}\\, \\\\.\\GLOBALROOT\\) exist only on Windows; "
+                          "R7-N3-1 still guards the rule")
+        self.work, self.wt1, self.wt2 = self.linked_world()
+        self.git_exe = real_git_exe()
+        self.chdir_to("working-folder-outside-every-tree")
+
+    def forms_of(self, folder):
+        try:
+            return device_forms(folder)
+        except RuntimeError as exc:
+            self.skipTest("the volume of the fixture cannot be read (%s); R7-N3-1 still guards the rule" % exc)
+
+    def test_R7_N3_2_a_recorder_in_the_linked_worktree_reached_through_a_device_path_is_never_the_git_returned(self):
+        planted = self.wt1 / "tools-planted"
+        self.plant(planted)
+        for form, spelled in self.forms_of(planted).items():
+            self.assertTrue(os.path.isfile(os.path.join(spelled, shim_name())),
+                            "control: the recorder in the tree is reachable through %s: %r" % (form, spelled))
+            path_value = os.pathsep.join([spelled, self.real_git_dir()])
+            for label, module in both_copies():
+                with self.subTest(copy=label):
+                    resolve = self.need(module, label, "resolve_git")
+                    got = resolve(path_value, self.roots_of(module, label, self.wt1))
+                    self.assertTrue(got, "%s: %s: a git was found (the real one, second on PATH)" % (label, form))
+                    self.assertEqual(_norm(got), _norm(self.git_exe),
+                                     "%s: %s: a folder of the tree spelled as a device path must be skipped and the real git returned, "
+                                     "not %r (N3: the prefix was stripped and the rest joined to the working folder, so the entry "
+                                     "looked like an unrelated relative folder)" % (label, form, got))
+
+    def test_R7_N3_2_control_the_same_recorder_outside_every_tree_listed_by_its_plain_spelling_is_returned(self):
+        """PASSES today: a row above cannot pass because the recorder is invisible to the program search."""
+        for form in ("dot-volume", "question-volume", "dot-globalroot", "question-globalroot"):
+            outside = self.root / ("outside-bin-" + form)
+            recorder = self.plant(outside)
+            spelled = self.forms_of(outside)[form]
+            self.assertTrue(os.path.isfile(os.path.join(spelled, shim_name())),
+                            "control: the recorder is reachable through %s: %r" % (form, spelled))
+            path_value = os.pathsep.join([str(outside), self.real_git_dir()])
+            for label, module in both_copies():
+                with self.subTest(copy=label):
+                    resolve = self.need(module, label, "resolve_git")
+                    got = resolve(path_value, self.roots_of(module, label, self.wt1))
+                    self.assertTrue(got and _norm(got) == _norm(recorder),
+                                    "%s: %s: the recorder outside every tree, listed by its plain drive spelling first, IS the git "
+                                    "returned (the documented residual). Got %r" % (label, form, got))
+
+
+# -----------------------------------------------------------------------------------------------------
+# The stated residuals of the Trust boundary (Revision 7). Each row PASSES today and pins the limit.
+# -----------------------------------------------------------------------------------------------------
+class StatedResidualRevision7Tests(Revision7Case):
+
+    def residual_note(self, what):
+        return ("R7 residual %s: this row PINS A STATED LIMIT, not a goal (%s). A fix that covers it changes THIS ROW "
+                "DELIBERATELY, with the paragraph; an accidental change must fail here." % (what, TRUST_BOUNDARY))
+
+    def folders(self, module, label, project):
+        return {_norm(p) for p in self.need(module, label, "linked_worktrees")(str(project))}
+
+    def two_worktrees(self):
+        work = self.world(NAMES)
+        a, b = self.root / "a", self.root / "b"
+        git(work, "worktree", "add", "-q", "-b", "a-branch", str(a))
+        git(work, "worktree", "add", "-q", "-b", "b-branch", str(b))
+        return work, a, b
+
+    def test_R7_N1_R_a_deleted_or_redirected_gitdir_file_drops_that_worktree_from_the_set(self):
+        """N1. ``<common>/worktrees/b/gitdir`` names where linked worktree b lives. Deleted, or rewritten to name a
+        file elsewhere, b leaves the set that linked_worktrees(a) returns: a process that can edit git's internal
+        files can also edit the rules file, so the boundary lies there. BOUND: the main checkout and worktree a stay
+        in the set, so a widening of what is dropped turns this row red too."""
+        work, a, b = self.two_worktrees()
+        pointer = work / ".git" / "worktrees" / "b" / "gitdir"
+        self.assertTrue(pointer.is_file(), "control: git wrote the gitdir pointer of worktree b")
+        outside = Path(tempfile.mkdtemp(prefix="pnames-outside-")).resolve()
+        self.addCleanup(_rm_tree, outside)
+        (outside / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+        for label, module in both_copies():
+            self.assertIn(_norm(b), self.folders(module, label, a), "control: %s: before the pointer is changed b is in the set" % label)
+        pointer.unlink()
+        for step, edit in (("deleted", lambda: None), ("redirected to a file outside the fixture",
+                                                       lambda: pointer.write_text(str(outside / ".git"), encoding="utf-8"))):
+            edit()
+            for label, module in both_copies():
+                got = self.folders(module, label, a)
+                self.assertNotIn(_norm(b), got, "%s: gitdir %s: %s" % (label, step, self.residual_note("N1")))
+                self.assertIn(_norm(work), got, "%s: gitdir %s: BOUND: the main checkout stays in the set" % (label, step))
+                self.assertIn(_norm(a), got, "%s: gitdir %s: BOUND: worktree a stays in the set" % (label, step))
+
+    def test_R7_N2_R_a_common_folder_not_named_dot_git_leaves_the_main_checkout_out_of_the_set(self):
+        """N2. ``git init --separate-git-dir`` puts the common folder at <owned>/repo.git; the main checkout is found
+        only as the parent of a common folder named ``.git``, so linked_worktrees(<linked worktree>) omits it. It
+        needs a main-checkout folder on PATH, which C8's person rule already forbids. BOUND: the linked worktree and
+        the common folder stay in the set."""
+        owned = self.root / "separate"
+        owned.mkdir()
+        main, common, linked = owned / "main", owned / "repo.git", owned / "linked"
+        git(owned, "init", "-q", "-b", "master", "--separate-git-dir", str(common), str(main))
+        (main / "README.txt").write_text("fixture\n", encoding="utf-8")
+        git(main, "add", "-A")
+        git(main, "commit", "-q", "-m", "first")
+        git(main, "worktree", "add", "-q", "-b", "linked-branch", str(linked))
+        self.assertTrue((main / ".git").is_file(), "control: the main checkout holds a .git FILE (the git folder is elsewhere)")
+        for label, module in both_copies():
+            got = self.folders(module, label, linked)
+            self.assertNotIn(_norm(main), got, "%s: %s" % (label, self.residual_note("N2")))
+            self.assertIn(_norm(linked), got, "%s: BOUND: the linked worktree stays in the set" % label)
+            self.assertIn(_norm(common), got, "%s: BOUND: the common folder (repo.git) stays in the set" % label)
+
+    def test_R7_I1_R_a_submodules_superproject_is_not_in_the_set(self):
+        """I1 (informational, not provided). linked_worktrees(<super>/sub) has no way to name the superproject.
+        BOUND: sub and <super>/.git/modules/sub stay in the set."""
+        source = self.root / "subsource"
+        source.mkdir()
+        git(source, "init", "-q", "-b", "master")
+        (source / "lib.txt").write_text("library\n", encoding="utf-8")
+        git(source, "add", "-A")
+        git(source, "commit", "-q", "-m", "library")
+        sup = self.root / "super"
+        sup.mkdir()
+        git(sup, "init", "-q", "-b", "master")
+        (sup / "README.txt").write_text("super\n", encoding="utf-8")
+        git(sup, "add", "-A")
+        git(sup, "commit", "-q", "-m", "super")
+        proc = subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", str(source), "sub"],
+                              cwd=str(sup), capture_output=True, text=True, env=_GIT_ENV)
+        if proc.returncode != 0:
+            self.skipTest("git refused to add the submodule (exit %d): %s" % (proc.returncode, proc.stderr.strip()[:300]))
+        sub, modules = sup / "sub", sup / ".git" / "modules" / "sub"
+        self.assertTrue((sub / ".git").is_file() and modules.is_dir(), "control: a submodule checkout with its git folder under the superproject")
+        for label, module in both_copies():
+            got = self.folders(module, label, sub)
+            self.assertNotIn(_norm(sup), got, "%s: %s" % (label, self.residual_note("I1")))
+            self.assertIn(_norm(sub), got, "%s: BOUND: the submodule stays in the set" % label)
+            self.assertIn(_norm(modules), got, "%s: BOUND: its git folder .git/modules/sub stays in the set" % label)
+
+    def test_R7_C7_R_a_folder_under_the_working_folder_is_not_excluded_but_the_working_folder_itself_is(self):
+        """The working-folder residual (C7, Revision 7). The working folder is skipped by EQUALITY only. With the
+        working folder F a test-owned folder that is not a tree, a recorder at F\\tools\\git.exe IS returned; one in F
+        itself, listed first, is skipped. BOUND: a recorder in a fixture tree folder, listed after a folder of F that
+        holds no git, is still skipped, so a widening to 'F is a root' or a loosening of the tree rule turns this red."""
+        work, wt1, wt2 = self.linked_world()
+        folder = self.chdir_to("F")
+        recorder = self.plant(folder / "tools")
+        self.plant(folder)
+        self.plant(work / "tools-planted")
+        (folder / "bare").mkdir()
+        real = self.real_git_dir()
+        for label, module in both_copies():
+            resolve = self.need(module, label, "resolve_git")
+            roots = self.roots_of(module, label, wt1)
+            got = resolve(os.pathsep.join([str(folder / "tools"), real]), roots)
+            self.assertTrue(got and _norm(got) == _norm(recorder),
+                            "%s: a recorder in a folder UNDER the working folder is returned: %s Got %r"
+                            % (label, self.residual_note("working-folder"), got))
+            got = resolve(os.pathsep.join([str(folder), real]), roots)
+            self.assertEqual(_norm(got), _norm(self.git_exe_of(real)),
+                             "%s: a recorder in the working folder itself, listed first, is skipped by equality" % label)
+            got = resolve(os.pathsep.join([str(folder / "bare"), str(work / "tools-planted"), real]), roots)
+            self.assertEqual(_norm(got), _norm(self.git_exe_of(real)),
+                             "%s: BOUND: a recorder in a fixture tree folder (the main checkout), listed after a folder of F "
+                             "that holds no git, is still skipped" % label)
+
+    def git_exe_of(self, folder):
+        return os.path.join(folder, shim_name())
+
+    def test_R7_N5_R_a_compiled_helper_planted_in_the_installed_folder_decides_the_verdict_under_dash_I_dash_B(self):
+        """N5. ``-B`` stops Python WRITING bytecode, not reading it: an UNCHECKED_HASH .pyc planted at
+        <installed>/.claude/hooks/__pycache__/ is imported instead of the helper's source. That needs a process that
+        can write into the plugin's installed folder, which can edit the checker itself. BOUND: the same two files in
+        a fresh private folder with no __pycache__ (as the landing gate writes mark_m's copy) report names-removed and
+        run no stub, so the residual stays confined to the installed folder."""
+        import py_compile
+        marker = self.root / "stub-ran.txt"
+        stub = self.root / "stub-source" / "_protected_names.py"
+        stub.parent.mkdir()
+        stub.write_text("open(%r, 'a').write('stub\\n')\nEXIT_CODES = {'kept': 0}\n\n\ndef check(project, working_ref=None, "
+                        "default_ref=None, fetch=False):\n    return {'verdict': 'kept', 'missing': [], 'working_ref': '', "
+                        "'default_ref': '', 'fetched': None, 'reason': ''}\n" % str(marker), encoding="utf-8")
+        work = self.world(NAMES, NAMES[:1])
+
+        def layout(name):
+            base = self.root / name
+            (base / ".claude" / "scripts").mkdir(parents=True)
+            (base / ".claude" / "hooks").mkdir(parents=True)
+            shutil.copy2(str(CHECK), str(base / ".claude" / "scripts" / CHECK.name))
+            shutil.copy2(str(HELPER), str(base / ".claude" / "hooks" / HELPER.name))
+            return base
+
+        def run(base):
+            return subprocess.run([sys.executable, "-I", "-B", str(base / ".claude" / "scripts" / CHECK.name), "--project", str(work)],
+                                  capture_output=True, text=True, env=dict(_GIT_ENV), cwd=str(self.root), timeout=120)
+
+        installed = layout("installed")
+        pyc = installed / ".claude" / "hooks" / "__pycache__" / ("_protected_names.%s.pyc" % sys.implementation.cache_tag)
+        pyc.parent.mkdir()
+        py_compile.compile(str(stub), cfile=str(pyc), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+        proc = run(installed)
+        self.assertTrue(marker.exists() and proc.returncode == 0,
+                        "the planted .pyc in the installed folder is imported although the helper's source drops no stub: the "
+                        "stub ran and printed kept on a fixture that drops a name (exit %s, stdout=%r, stderr=%r). %s"
+                        % (proc.returncode, proc.stdout[:200], proc.stderr[-200:], self.residual_note("N5")))
+        marker.unlink()
+        fresh = layout("fresh-private-folder")
+        self.assertFalse((fresh / ".claude" / "hooks" / "__pycache__").exists(), "control: the fresh folder has no __pycache__")
+        proc = run(fresh)
+        self.assertEqual((proc.returncode, marker.exists()), (10, False),
+                         "BOUND: the same two files with no __pycache__ give names-removed (exit 10) and run no stub: the "
+                         "residual is confined to the installed folder. stdout=%r stderr=%r" % (proc.stdout[:200], proc.stderr[-200:]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
