@@ -619,6 +619,9 @@ if MODE.startswith("fail-cat:") and subcommand(args) == "cat-file" and any(o and
 if MODE.startswith("toplevel:") and subcommand(args) == "rev-parse" and "--show-toplevel" in args:
     sys.stdout.write(MODE[9:] + "\n")  # a planted git that answers `rev-parse --show-toplevel` with a decoy
     sys.exit(0)
+if MODE.startswith("fail-ls:") and subcommand(args) == "ls-tree" and "--full-tree" in args and any(c and c in args for c in MODE[8:].split(",")):
+    sys.stderr.write("fatal: unable to list the tree (simulated failure of the whole-tree listing of one named commit)\n")
+    sys.exit(128)
 if MODE == "ownership" and not any(a.startswith("safe.directory=") for a in args):
     sys.stderr.write("fatal: detected dubious ownership in repository (simulated: no safe.directory given)\n")
     sys.exit(128)
@@ -652,7 +655,8 @@ def make_git_shim(folder, log, mode="record"):
     a pass-through recorder except for the one call it names: ``hostile-gate`` (an isolated
     ``--no-replace-objects ... ls-tree`` answers nothing with exit 0, as gate 16's probe did);
     ``fail-cat:<oid>[,<oid>]`` (a ``cat-file`` naming one of those object ids exits 128);
-    ``toplevel:<path>`` (``rev-parse --show-toplevel`` answers ``<path>``). Skips the test where no
+    ``toplevel:<path>`` (``rev-parse --show-toplevel`` answers ``<path>``). Block 25 adds ``fail-ls:<commit>[,<commit>]``
+    (a ``ls-tree ... --full-tree`` naming one of those commits exits 128, as a failed whole-tree listing does). Skips the test where no
     executable can be built."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -1517,6 +1521,14 @@ class EqualCopiesTests(SecondRemedyCase):
             for text in inputs:
                 a, b = (fn(text) for fn in fns[name])
                 self.assertEqual(a, b, "%s(%r) is equal in the two copies" % (name, text))
+        # NAMED EDIT (#623 t25, L1; Revision 7 asked to "extend R6-EQ" and Revision 8 names the edit): is_device_path (C12) is
+        # compared in both copies over R7-N3-1's inputs, the device spellings and the spellings that are not device paths,
+        # so a one-copy change (MN3-isdev-l) and a change on the pipe form alone (MN3-isdev-l-pipe) turn THIS row red too.
+        is_device = [self.need(module, label, "is_device_path") for label, module in copies]
+        for text in DEVICE_SPELLINGS + NOT_DEVICE_SPELLINGS:
+            a, b = (fn(text) for fn in is_device)
+            self.assertEqual(a, b, "is_device_path(%r) is equal in the two copies (_protected_names gave %r, land_contract gave %r)"
+                             % (text, a, b))
 
 
 # -----------------------------------------------------------------------------------------------------
@@ -1627,7 +1639,7 @@ def _spelling_rows():
                 spelled = spelled_folder(self.excluded, kind)
                 self.assertEqual(comparable(spelled), comparable(str(self.excluded)) + expected_tail,
                                  "%s: R6-T4-1 string half, %s: comparable_path of %r equals the root's comparable path plus "
-                                 "\\x (steps 1 and 2 rewrite the string before realpath, so no share is touched)"
+                                 "\\x"
                                  % (label, kind, spelled))
         return test
 
@@ -1737,6 +1749,80 @@ class JunctionTests(PathSpellingCase):
         self.assertEqual((obj or {}).get("verdict"), "names-removed",
                          "the real git, after the junction entry, reaches the fixture's verdict. Result %r stderr=%r" % (obj, err[:200]))
         self.assertEqual(rc, 10)
+
+
+def short_path_name(path):
+    """The 8.3 short spelling of an existing ``path`` (GetShortPathNameW, which only READS), or ``None`` when this is not
+    Windows or the call fails. The volume setting that creates short names is never changed here."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    buf = ctypes.create_unicode_buffer(1024)
+    size = kernel.GetShortPathNameW(str(path), buf, 1024)
+    return buf.value if 0 < size < 1024 else None
+
+
+class RealpathRouteTests(PathSpellingCase):
+    """R8-G4-1 and R8-G4-2 (Revision 8, gate 21's finding G4, invariant C8): the two routes that ONLY ``realpath`` closes, in
+    both copies. A junction made OUTSIDE every root that leads INTO a root, and an 8.3 short name of a root. The written
+    spelling of such an entry lies outside the root, so only the resolved spelling can skip it. Removing ``realpath`` from
+    ``comparable_path`` in ONE copy turns R6-EQ red; removing it from BOTH copies at once (mutation MT4-s2-both) turned no
+    row red before these two. ``subst`` stays out of scope (the command is forbidden here)."""
+
+    def _junction(self, target, link):
+        """A junction ``link`` -> ``target``, both test-owned. Its cleanup removes the LINK only, before any target or root."""
+        try:
+            import _winapi  # noqa: WPS433 -- Windows only, as the row
+            _winapi.CreateJunction(str(target), str(link))
+        except (ImportError, AttributeError, OSError) as exc:
+            self.skipTest("a junction cannot be created here (%s: %s); R8-G4-1 cannot say anything" % (type(exc).__name__, exc))
+        self.addCleanup(lambda: os.rmdir(str(link)) if os.path.lexists(str(link)) else None)  # the link only, never its target
+        return link
+
+    def _outside(self, name):
+        folder = self.root / name
+        folder.mkdir()
+        return folder
+
+    def test_R8_G4_1_a_junction_made_outside_every_root_that_leads_into_a_root_is_skipped_in_both_copies(self):
+        owned = self._outside("o-outside-every-root")
+        link = self._junction(self.excluded / "x", owned / "J")
+        self.assertTrue(os.path.isfile(os.path.join(str(link), shim_name())),
+                        "control: the recorder inside the root is reachable through the junction %s" % link)
+        path_value = os.pathsep.join([str(link), os.path.dirname(self.git_exe)])
+        self.assert_real_git(path_value, [str(self.excluded)],
+                             "R8-G4-1: written outside the root (%s), resolved INSIDE it: only realpath sees it" % link)
+
+    def test_R8_G4_1_control_a_junction_made_outside_every_root_that_leads_to_a_folder_outside_every_root_is_returned(self):
+        """Without this the row above could pass because a junction is never followed at all."""
+        owned = self._outside("o-outside-every-root")
+        target = self._outside("recorder-outside-every-root")
+        planted = self.plant(target)
+        link = self._junction(target, owned / "J2")
+        path_value = os.pathsep.join([str(link), os.path.dirname(self.git_exe)])
+        for label, module in both_copies():
+            got = self.need(module, label, "resolve_git")(path_value, [str(self.excluded)])
+            self.assertTrue(got, "%s: control: a git was found" % label)
+            self.assertEqual(_norm(got), _norm(planted),
+                             "%s: control: the recorder reached through a junction that leads outside every root IS the git "
+                             "returned (the documented residual), so the row above proves realpath and not a broken fixture. "
+                             "Got %r" % (label, got))
+
+    def test_R8_G4_2_an_entry_spelled_through_the_roots_8_3_short_name_is_skipped_in_both_copies(self):
+        short = short_path_name(self.excluded)
+        if short is None or os.path.normcase(short) == os.path.normcase(str(self.excluded)):
+            self.skipTest("no component of %s has a short name on this volume (8.3 names are off here), so there is no 8.3 "
+                          "spelling of the root to test; R8-G4-1 alone carries MT4-s2-both. The volume setting is never changed."
+                          % self.excluded)
+        spelled = short + os.sep + "x"
+        self.assertTrue(os.path.isfile(os.path.join(spelled, shim_name())),
+                        "control: the recorder inside the root is reachable through the short spelling %s" % spelled)
+        self.assertNotEqual(os.path.normcase(spelled), os.path.normcase(str(self.excluded / "x")),
+                            "control: the spelling really differs from the long one")
+        path_value = os.pathsep.join([spelled, os.path.dirname(self.git_exe)])
+        self.assert_real_git(path_value, [str(self.excluded)],
+                             "R8-G4-2: %s is the root's x folder through its 8.3 short name: only realpath expands it" % spelled)
 
 
 class StatedResidualTests(PathSpellingCase):
