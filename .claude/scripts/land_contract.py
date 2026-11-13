@@ -2715,32 +2715,53 @@ class GitFailure(Exception):
 
 
 #: C8 (contract 2026-10-13, Revision 6), local copy of ``_protected_names``: this script never imports it.
-_PN_LONG_UNC_RE = re.compile(r"^\\\\[?]\\UNC\\", re.IGNORECASE)
-_PN_DEVICE_RE = re.compile(r"^\\\\[?.]\\")
+# C12 (Revision 7): in the first four characters "/" and "\" are the same character; the prefix is stripped
+# only before a drive letter and a colon, and "UNC\" is rewritten to "\\". Anything else is a device path.
+_PN_DEVICE_RE = re.compile(r"^[\\/]{2}[?.][\\/]")
+_PN_DRIVE_PREFIX_RE = re.compile(r"^[\\/]{2}[?.][\\/][A-Za-z]:")
+_PN_UNC_PREFIX_RE = re.compile(r"^[\\/]{2}[?.][\\/]UNC\\", re.IGNORECASE)
 _PN_ADMIN_SHARE_RE = re.compile(r"^\\\\([^\\]+)\\([A-Za-z])\$(?=\\|$)")
 
 
 def _pn_strip_prefixes(path: Any) -> str:
     """C8 steps 1 and 2: the ``\\\\?\\`` and ``\\\\.\\`` prefixes, and an own-computer drive share, as text."""
     text = str(path)
-    if _PN_LONG_UNC_RE.match(text):
+    if _PN_UNC_PREFIX_RE.match(text):
         text = "\\\\" + text[len("\\\\?\\UNC\\"):]
-    else:
-        text = _PN_DEVICE_RE.sub("", text, count=1)
+    elif _PN_DRIVE_PREFIX_RE.match(text):
+        text = text[4:]
     match = _PN_ADMIN_SHARE_RE.match(text)
     if match and match.group(1).lower() in ("localhost", "127.0.0.1", socket.gethostname().lower()):
         text = match.group(2) + ":" + text[match.end():]
     return text
 
 
+def is_device_path(path: Any) -> bool:
+    """C12: True for a path in the device namespace that is not a drive form or a long UNC form
+    (``\\\\.\\Volume{GUID}\\``, ``\\\\?\\GLOBALROOT\\``, ``\\\\.\\pipe\\``)."""
+    text = str(path)
+    return bool(_PN_DEVICE_RE.match(text)) and not _PN_DRIVE_PREFIX_RE.match(text) \
+        and not _PN_UNC_PREFIX_RE.match(text)
+
+
 def comparable_path(path: Any) -> str:
-    """C8's resolved spelling: steps 1 and 2, ``realpath``, steps 1 and 2 again, ``normcase``."""
-    return os.path.normcase(_pn_strip_prefixes(os.path.realpath(_pn_strip_prefixes(path))))
+    """C8's resolved spelling: steps 1 and 2, ``realpath``, steps 1 and 2 again, ``normcase``. A device path
+    (C12), as written or once resolved, is ``normcase`` of its text: no ``realpath``, no ``abspath``."""
+    text = str(path)
+    if is_device_path(text):
+        return os.path.normcase(text)
+    resolved = os.path.realpath(_pn_strip_prefixes(text))
+    if is_device_path(resolved):
+        return os.path.normcase(resolved)
+    return os.path.normcase(_pn_strip_prefixes(resolved))
 
 
 def written_path(path: Any) -> str:
     """C8's written spelling: steps 1, 2 and 5 with ``abspath`` for ``realpath`` (no link is followed)."""
-    return os.path.normcase(os.path.abspath(_pn_strip_prefixes(path)))
+    text = str(path)
+    if is_device_path(text):
+        return os.path.normcase(text)
+    return os.path.normcase(os.path.abspath(_pn_strip_prefixes(text)))
 
 
 def _pn_inside(folder: str, root: str) -> bool:
@@ -2813,13 +2834,18 @@ def resolve_git(path_value: Optional[str], excluded_roots: Optional[Sequence[Any
     roots: List[str] = []
     for root in (excluded_roots or []):
         if root:
-            roots.extend({written_path(root), comparable_path(root)})
+            spelled = {written_path(root), comparable_path(root)}
+            if any(is_device_path(s) for s in spelled):
+                return None  # C12: a device-path root cannot be compared, so the search is unverifiable
+            roots.extend(spelled)
     here = comparable_path(os.getcwd())
     for entry in (path_value or "").split(os.pathsep):
         entry = entry.strip().strip('"')
         if not entry or entry == "." or not os.path.isabs(entry):
             continue
         spellings = {written_path(entry), comparable_path(entry)}
+        if any(is_device_path(s) for s in spellings):
+            continue  # C12: a device-path entry is never compared and never the program
         if comparable_path(entry) == here or any(_pn_inside(s, root) for s in spellings for root in roots):
             continue
         candidate = os.path.join(entry, name)
@@ -2933,6 +2959,8 @@ def _git_lists_path(cwd: Any, ref: str, path: str) -> Optional[bool]:
             continue
         listed = entry.partition(b"\t")[2].decode("utf-8", errors="replace")
         parts = listed.split("/")
+        if "\\" in listed:
+            return True  # C11: any listed path holding a backslash counts, so the landing halts
         if listed == path or (len(parts) == len(wanted)
                               and all(_pn_component_matches(p, w) for p, w in zip(parts, wanted))):
             return True
@@ -3056,8 +3084,8 @@ def _p7_protected_names(wt: Path, mark_m: str, head: str, facts: Dict[str, Any],
                 return
             if states in (("found", "absent"), ("absent", "found")):
                 unverifiable("the Protected-name check cannot run: mark_m holds exactly one of the checker's two "
-                             "files (protected_names_check.py: %s, _protected_names.py: %s), a broken checker that "
-                             "would end with exit code 1 if it ran, so none is run" % states)
+                             "files (protected_names_check.py: %s, _protected_names.py: %s), so no checker is run"
+                             % states)
                 return
             if states == ("found", "found"):
                 # mark_m's own copy: whatever it holds is written as it is, as <tmp>/.claude/scripts/ and
