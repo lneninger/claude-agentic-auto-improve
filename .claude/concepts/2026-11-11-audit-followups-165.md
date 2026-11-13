@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-11-11
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-11-13, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/365, https://github.com/lneninger/claude-agentic-auto-improve/pull/367, https://github.com/lneninger/claude-agentic-auto-improve/pull/369, https://github.com/lneninger/claude-agentic-auto-improve/pull/371, https://github.com/lneninger/claude-agentic-auto-improve/pull/374, https://github.com/lneninger/claude-agentic-auto-improve/pull/377, https://github.com/lneninger/claude-agentic-auto-improve/pull/379, https://github.com/lneninger/claude-agentic-auto-improve/pull/381, https://github.com/lneninger/claude-agentic-auto-improve/pull/383, https://github.com/lneninger/claude-agentic-auto-improve/pull/386, https://github.com/lneninger/claude-agentic-auto-improve/pull/392, https://github.com/lneninger/claude-agentic-auto-improve/pull/394, https://github.com/lneninger/claude-agentic-auto-improve/pull/396, https://github.com/lneninger/claude-agentic-auto-improve/pull/401; 2 checklist items from review reports, 0 with no structured evidence; not performed: none; owner confirmed resolved: none
 **Revision:** 4 (2026-11-12). Remedy for the blocked t10 review (see Amendments). Q8 and Q9 answered; the seven Revision 3 critic WARNs addressed. Graph: nine implementation blocks, one review (10, blocked), one scope note, two remedy blocks (12, 13) and one re-review (14). Block 8 depends on 3, block 10 on 1-9, block 13 on 12, block 14 on 12 and 13, every other block on none.
 **Work Item Brief:** .claude/work-items/2026-11-11-165-audit-followups.md
 **Tracking issue:** #165
@@ -846,14 +847,14 @@ PRIOR_FINDINGS:
 
 ## Review checklist (filled in after implementation)
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [x] Implementation matches Data Shapes exactly — evidence: .claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md
+- [x] Reused Mechanisms are actually reused (no parallel implementations introduced) — evidence: .claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — not applicable (.claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md)
+- [ ] New vocabulary terms promoted to `VOCABULARY.md` — not applicable (.claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md)
+- [ ] Integration surfaces reflected on both backend and frontend sides — not applicable (.claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md)
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — not applicable (.claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md)
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — not applicable (.claude/reviews/2026-11-11-audit-followups-165/t14-re-review-fullstack-code-reviewer.md)
+- [x] `Status` flipped to `implemented`
 
 ---
 
