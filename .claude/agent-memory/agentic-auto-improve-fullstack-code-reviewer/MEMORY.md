@@ -1,1 +1,2 @@
+- [Parent-branch tip review traps](parent-branch-tip-review-traps.md) — re-run on tip; master merges break pins; unowned "outside my files" failures
 - [Worktree shell and probe habits](worktree-shell-and-probe-habits.md) — scratch scripts outside repo, background the slow scripts discover first, no concurrent hook suites
