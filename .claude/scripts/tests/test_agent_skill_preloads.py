@@ -86,45 +86,6 @@ class AgentSkillPreloadTests(unittest.TestCase):
         self.assertIn("`cloud-engineer`", text)
         self.assertNotIn("docker-master-goat", text)
 
-    @staticmethod
-    def _unshipped_area_names(text: str, shipped: set[str], not_shipped: tuple[str, ...]) -> list[str]:
-        """Agent-shaped backticked names in "Choose the agent by area" that the plugin does not ship."""
-        start = text.index("Choose the agent by area")
-        end = text.index("###", start)
-        names = re.findall(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`", text[start:end])
-        # A skill (`/sql-server-patterns`) is not an agent: only names without a leading slash count.
-        section = text[start:end]
-        names = [n for n in names if f"`/{n}`" not in section and f"/{n}`" not in section]
-        return sorted({n for n in names if n not in shipped or n in not_shipped})
-
-    def test_debug_area_routing_names_only_shipped_agents(self):
-        tests_dir = str(Path(__file__).resolve().parent)
-        scripts_dir = str(Path(__file__).resolve().parent.parent)
-        for p in (tests_dir, scripts_dir):
-            if p not in sys.path:
-                sys.path.append(p)
-        from test_plugin_text_scans import plugin_agent_names
-        from test_plugin_doctor import TestTheRealPluginTree
-        shipped = plugin_agent_names()
-        not_shipped = TestTheRealPluginTree.NOT_SHIPPED
-        text = (ROOT / "skills" / "debug" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertEqual(self._unshipped_area_names(text, shipped, not_shipped), [])
-        self.assertIn("`python-ai-developer`, or the project's own model-training agent if it declares one", text)
-        self.assertIn("`dotnet-backend-architect`, or the project's own ingestion agent if it declares one", text)
-
-    def test_debug_area_routing_control_catches_an_unshipped_name(self):
-        tests_dir = str(Path(__file__).resolve().parent)
-        scripts_dir = str(Path(__file__).resolve().parent.parent)
-        for p in (tests_dir, scripts_dir):
-            if p not in sys.path:
-                sys.path.append(p)
-        from test_plugin_text_scans import plugin_agent_names
-        from test_plugin_doctor import TestTheRealPluginTree
-        planted = "Choose the agent by area:\n\n- LLM pipeline → `llm-training-engineer`\n\n### next\n"
-        self.assertEqual(
-            self._unshipped_area_names(planted, plugin_agent_names(), TestTheRealPluginTree.NOT_SHIPPED),
-            ["llm-training-engineer"])
-
     def test_the_angular_agents_still_preload_their_skill(self):
         for name in ("angular-senior-dev", "ui-ux-designer"):
             self.assertIn("angular-ui-rules", _skills_entries(ROOT / "agents" / f"{name}.md"))
@@ -140,6 +101,46 @@ class AgentSkillPreloadTests(unittest.TestCase):
             (fake / "agents" / "bad.md").write_text("---\nname: bad\nskills:\n  - ghost\n---\nbody\n",
                                                     encoding="utf-8")
             self.assertEqual(unresolved_preloads(fake), ["bad.md: ghost"])
+
+
+class DebugAreaRoutingTests(unittest.TestCase):
+    """The /debug area routing names only shipped agents; the sys.path setup and the two imports run once."""
+
+    @classmethod
+    def setUpClass(cls):
+        tests_dir = str(Path(__file__).resolve().parent)
+        scripts_dir = str(Path(__file__).resolve().parent.parent)
+        for p in (tests_dir, scripts_dir):
+            if p not in sys.path:
+                sys.path.append(p)
+        from test_plugin_text_scans import plugin_agent_names
+        from test_plugin_doctor import TestTheRealPluginTree
+        cls.shipped_agent_names = staticmethod(plugin_agent_names)
+        cls.not_shipped = TestTheRealPluginTree.NOT_SHIPPED
+
+    @staticmethod
+    def _unshipped_area_names(text: str, shipped: set[str], not_shipped: tuple[str, ...]) -> list[str]:
+        """Agent-shaped backticked names in "Choose the agent by area" that the plugin does not ship."""
+        start = text.index("Choose the agent by area")
+        end = text.index("###", start)
+        names = re.findall(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`", text[start:end])
+        # A skill (`/sql-server-patterns`) is not an agent: only names without a leading slash count.
+        section = text[start:end]
+        names = [n for n in names if f"`/{n}`" not in section and f"/{n}`" not in section]
+        return sorted({n for n in names if n not in shipped or n in not_shipped})
+
+    def test_debug_area_routing_names_only_shipped_agents(self):
+        shipped = self.shipped_agent_names()
+        text = (ROOT / "skills" / "debug" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertEqual(self._unshipped_area_names(text, shipped, self.not_shipped), [])
+        self.assertIn("`python-ai-developer`, or the project's own model-training agent if it declares one", text)
+        self.assertIn("`dotnet-backend-architect`, or the project's own ingestion agent if it declares one", text)
+
+    def test_debug_area_routing_control_catches_an_unshipped_name(self):
+        planted = "Choose the agent by area:\n\n- LLM pipeline → `llm-training-engineer`\n\n### next\n"
+        self.assertEqual(
+            self._unshipped_area_names(planted, self.shipped_agent_names(), self.not_shipped),
+            ["llm-training-engineer"])
 
 
 if __name__ == "__main__":

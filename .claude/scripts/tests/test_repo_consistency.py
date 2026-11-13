@@ -19,6 +19,10 @@ Repository consistency scans (issue 80).
       A count directly after the word "retired" is a history figure, not a current count, and is skipped.
       No test asserts (a) == (b); each is compared only with its own oracle.
 
+  (5) Manifest description counts (issue 354): every "N skills / agents / subagents / hooks" in the four plugin
+      manifest descriptions equals its filesystem oracle (count_oracles), read at test time, and each
+      description keeps its nouns so the test proves it read a count.
+
 Every comparison lives in a helper that returns a list of violations. The real tests assert the list is empty;
 each positive control feeds the SAME helper a broken fixture and asserts it is non-empty.
 
@@ -656,6 +660,77 @@ class ReadmeCountPinTests(unittest.TestCase):
             self.assertEqual(count_oracles(root), {
                 "skills": 2, "agents": 1, "agreements": 1, "addons": 1, "hooks": 1, "helpers": 1,
                 "data_files": 1, "templates": 1, "references": 1})
+
+
+# --- (5) Manifest description counts (issue 354; contract 2026-11-13-audit-followups-165-chores, I-1) ---------------
+# Nouns each manifest's descriptions must state (so the pin proves it read a count). The marketplace's top-level
+# description has no count; the requirement is met by any description of the file.
+MANIFEST_REQUIRED_NOUNS = {
+    "plugin.json": ("skills",),
+    ".claude-plugin/plugin.json": ("skills", "agents", "hooks"),
+    ".claude-plugin/marketplace.json": ("skills", "agents", "hooks"),
+    ".cursor-plugin/plugin.json": ("skills", "subagents"),
+}
+MANIFEST_REMEDY = (
+    "Correct the description in the same pull request (numbers only). If this change sits on a parent branch "
+    "whose sub-tasks added or removed a skill or agent, the owner picks an exit: (i) recommended: hold this "
+    "pull request until that branch lands, then recount; (ii) otherwise merge the sync sub-task, each later "
+    "sub-task and the landing with `tests` red on this pin alone, each recording a finding that cites the "
+    "follow-up stub, then fix master with one single-block recount pull request. Stub: "
+    ".claude/concepts/followups/2026-11-13-manifest-counts-under-parent-branch.followup.md"
+)
+
+
+def manifest_noun_violations(descriptions: list[str], required: tuple[str, ...]) -> list[str]:
+    """Nouns in `required` that no description states as an 'N <noun>' claim."""
+    stated = {m.group(2).lower() for d in descriptions for m in _CLAIM_RE.finditer(d)}
+    return [f"no description states a count for '{n}'" for n in required if n not in stated]
+
+
+def manifest_violations(manifests: dict[str, dict], oracles: dict[str, int]) -> list[str]:
+    out = []
+    for rel, data in manifests.items():
+        descs = manifest_descriptions(data)
+        for d in descs:
+            out += [f"{rel}: {v}" for v in claim_violations(d, oracles)]
+        out += [f"{rel}: {v}" for v in manifest_noun_violations(descs, MANIFEST_REQUIRED_NOUNS[rel])]
+    return out
+
+
+class ManifestCountPinTests(unittest.TestCase):
+    """Real assertions read the four manifests and the filesystem (I-1); controls feed the same helpers."""
+
+    def test_manifest_description_counts_match_oracles(self):
+        manifests = {rel: json.loads(read(PLUGIN_ROOT / rel)) for rel in MANIFESTS}
+        violations = manifest_violations(manifests, count_oracles(PLUGIN_ROOT))
+        self.assertEqual(violations, [], "manifest description counts drifted from the tree. " + MANIFEST_REMEDY)
+
+    def test_every_manifest_keeps_its_nouns(self):
+        for rel in MANIFESTS:
+            with self.subTest(manifest=rel):
+                descs = manifest_descriptions(json.loads(read(PLUGIN_ROOT / rel)))
+                self.assertEqual(manifest_noun_violations(descs, MANIFEST_REQUIRED_NOUNS[rel]), [],
+                                 f"{rel} dropped a counted noun. " + MANIFEST_REMEDY)
+
+    def test_control_wrong_counts_and_dropped_nouns_are_reported(self):
+        oracles = {"skills": 34, "agents": 15, "hooks": 14}
+        ok = {".claude-plugin/plugin.json": {"description": "34 skills, 15 agents and 14 hooks that do things."}}
+        self.assertEqual(manifest_violations(ok, oracles), [])
+        for text in ("28 skills, 15 agents and 14 hooks", "34 skills, 14 agents and 14 hooks",
+                     "34 skills, 15 agents and 13 hooks", "34 skills, 15 agents and some hooks",
+                     "skills, agents and hooks"):
+            with self.subTest(text=text):
+                bad = {".claude-plugin/plugin.json": {"description": text}}
+                self.assertNotEqual(manifest_violations(bad, oracles), [])
+
+    def test_control_subagents_noun_reads_the_agent_oracle(self):
+        oracles = {"skills": 34, "agents": 15, "hooks": 14}
+        self.assertEqual(manifest_violations({".cursor-plugin/plugin.json": {
+            "description": "34 skills and 15 subagents"}}, oracles), [])
+        self.assertNotEqual(manifest_violations({".cursor-plugin/plugin.json": {
+            "description": "34 skills and 14 subagents"}}, oracles), [])
+        self.assertNotEqual(manifest_violations({".cursor-plugin/plugin.json": {
+            "description": "34 skills and some subagents"}}, oracles), [])
 
 
 if __name__ == "__main__":

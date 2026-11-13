@@ -705,6 +705,27 @@ def chat_tool_violations(section: str, agents: set[str], skills: set[str]) -> di
     add(5, ["/" + m.group(1) for m in _SLASH_COMMAND_RE.finditer(section) if m.group(1) not in skills])
     add(6, [m.group(0) for m in _HTTP_ROUTE_RE.finditer(section)])
     add(7, [m.group(0) for m in _DATED_SLUG_RE.finditer(section)] + [m.group(0) for m in _FEEDBACK_NOTE_RE.finditer(section)])
+    add(8, folder_paths(section))
+    return found
+
+
+# Rule 8 (contract 2026-11-13-audit-followups-165-chores): no folder path outside `.claude/`. A segment is one or more
+# word characters, `.` or `-`. A path starts where the previous character is not a segment character or `/` and ends
+# where the next one is not either (a sentence-ending `.` is not part of it). It fires with a final `/`, or with three
+# or more segments and no final `/`. A two-segment form with no final `/` (`frob/data`) does not fire: it cannot be told
+# from prose such as `and/or` (stated residual).
+_FOLDER_PATH_RE = re.compile(r"(?<![\w.\-/])(?:[\w.\-]+/)+[\w.\-]*(?![\w.\-/])")
+
+
+def folder_paths(section: str) -> list[str]:
+    found = []
+    for m in _FOLDER_PATH_RE.finditer(section):
+        path = m.group(0).rstrip(".")
+        segments = [s for s in path.split("/") if s]
+        if not segments or segments[0] == ".claude":
+            continue
+        if path.endswith("/") or len(segments) >= 3:
+            found.append(path)
     return found
 
 
@@ -771,6 +792,197 @@ class TestChatToolImpactSectionIsGeneric(unittest.TestCase):
         self.assertIn("Yes —", section)
         self.assertIn("No —", section)
         self.assertIn("Deferred", section)
+
+    def test_control_rule_8_a_folder_path_outside_dot_claude_fires(self):
+        for text in ("frob/train-data/synthetic/", "put it in `frob/data/`.", "the .frob/zed/ folder",
+                     "see frob/train-data/synthetic for the rest", "in frob/data/."):
+            self.assertIn(8, self.fires(text), text)
+
+    def test_control_rule_8_prose_slashes_and_dot_claude_paths_do_not_fire(self):
+        for text in ("UI/admin-only", "endpoint/event", "the `rest`/`docs` lists", "and/or", "frob/data",
+                     "under .claude/frob/", "in .claude/hooks/sentinel-paths.json", "the /design-first skill"):
+            self.assertNotIn(8, self.fires(text), text)
+
+
+def agent_item_7(text: str) -> str:
+    """Critic item 7: from the line that starts `7. **Integration surface omission` up to the next numbered item
+    (`8. **...`) or the next heading, whichever comes first ('' if absent)."""
+    m = re.search(r"(?m)^7\. \*\*Integration surface omission", text)
+    if not m:
+        return ""
+    rest = text[m.start():]
+    stop = re.search(r"(?m)^(?:\d+\. \*\*|#{1,6} )", rest[1:])
+    return rest[:stop.start() + 1] if stop else rest
+
+
+def reviewer_training_section(text: str) -> str:
+    return _section(text, "## LLM Training Data Maintenance", "\n## ")
+
+
+_TRAINING_PHRASE_RE = re.compile(r"(model-training agent or skill, if it has one)")
+_OPENING_PHRASE = "whatever the contract's `## Chat Tool Impact` answer is, or if the answer is missing"
+
+
+def template_training_phrase(template: str) -> str:
+    """The template's wording for the model-training agent ('' if absent), read when the test runs."""
+    m = _TRAINING_PHRASE_RE.search(template)
+    return m.group(1) if m else ""
+
+
+def reviewer_body(section: str) -> str:
+    """The section below its heading line; a heading-only section has an empty body."""
+    return section.split("\n", 1)[1] if "\n" in section else ""
+
+
+def reviewer_training_problems(section: str, phrase: str) -> list[str]:
+    """I-5 positive content: clauses (a), (b), (c), WARNING-only findings and the template's agent wording, all in the body."""
+    body = reviewer_body(section)
+    if not body.strip():
+        return ["the section has no body below its heading"]
+    out = [f"clause {c} is missing" for c in ("(a)", "(b)", "(c)") if c not in body]
+    if "WARNING" not in body:
+        out.append("the findings are not named WARNING")
+    if "never blocking" not in body:
+        out.append("the section does not say the findings are never blocking")
+    if "BLOCKER" in body:
+        out.append("the section names a BLOCKER; the findings are WARNING-only")
+    if not phrase:
+        out.append("the template's model-training agent wording was not found")
+    elif phrase not in body:
+        out.append(f"the template's wording {phrase!r} is missing")
+    return out
+
+
+def reviewer_opening_problems(section: str) -> list[str]:
+    """The limit phrase sits in the opening sentence, not in clause (c); (c) reads 'Otherwise raise nothing'."""
+    body = reviewer_body(section)
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    opening = lines[0] if lines else ""
+    clause_c = next((ln for ln in lines if ln.startswith("- **(c)")), "")
+    out = []
+    if _OPENING_PHRASE not in opening:
+        out.append("the opening sentence lacks the 'whatever the contract's ... answer is, or if the answer is missing' phrase")
+    if not clause_c:
+        out.append("clause (c) was not found")
+    else:
+        if _OPENING_PHRASE in clause_c:
+            out.append("clause (c) still carries the 'whatever ... answer is missing' phrase")
+        if not clause_c.startswith("- **(c) Otherwise raise nothing"):
+            out.append("clause (c) does not start 'Otherwise raise nothing'")
+        if "This also holds when no contract is under review." not in clause_c:
+            out.append("clause (c) lacks 'This also holds when no contract is under review.'")
+    return out
+
+
+def template_answer_heads(template: str) -> list[str]:
+    """The three answer heads of the template's Chat Tool Impact section, without the final period."""
+    return re.findall(r"(?m)^\d\.\s+\*\*(.+?)\.\*\*", chat_tool_section(template))
+
+
+def item_7_problems(item: str, heads: list[str]) -> list[str]:
+    out = [f"answer head not in item 7: {h!r}" for h in heads if h not in item]
+    for needed in ("BLOCKER", CHAT_TOOL_HEADING, "Why this section exists"):
+        if needed not in item:
+            out.append(f"item 7 lacks {needed!r}")
+    return out
+
+
+class TestAgentPassagesAreGeneric(unittest.TestCase):
+    """Rules 1-8 on the two agent passages that used to carry one project's text (contract 2026-11-13, I-3..I-5)."""
+    CRITIC = AGENTS / "contract-critic.md"
+    REVIEWER = AGENTS / "fullstack-code-reviewer.md"
+
+    def test_critic_item_7_is_found_and_names_no_consuming_projects_artefact(self):
+        item = agent_item_7(self.CRITIC.read_text(encoding="utf-8"))
+        self.assertTrue(item.strip(), "the scan must find critic item 7 (the line that starts `7. **Integration surface omission`)")
+        self.assertEqual(chat_tool_violations(item, plugin_agent_names(), skill_names()), {},
+                         "critic item 7 must name no source file, Phase label, hex id, non-plugin agent, non-skill slash "
+                         "command, HTTP route, dated contract slug, feedback note or folder path")
+
+    def test_reviewer_training_section_is_found_and_names_no_consuming_projects_artefact(self):
+        section = reviewer_training_section(self.REVIEWER.read_text(encoding="utf-8"))
+        self.assertTrue(reviewer_body(section).strip(),
+                        "the scan must find a non-empty body below the reviewer's `## LLM Training Data Maintenance` heading")
+        self.assertEqual(chat_tool_violations(section, plugin_agent_names(), skill_names()), {},
+                         "the reviewer section must name no source file, Phase label, hex id, non-plugin agent, non-skill "
+                         "slash command, HTTP route, dated contract slug, feedback note or folder path")
+
+    def test_reviewer_training_section_names_no_profile_slot_and_no_sentinel_file(self):
+        section = reviewer_training_section(self.REVIEWER.read_text(encoding="utf-8"))
+        self.assertTrue(reviewer_body(section).strip(),
+                        "the scan must find a non-empty body below the reviewer's `## LLM Training Data Maintenance` heading")
+        for banned in ("project-profile", "sentinel-paths"):
+            self.assertNotIn(banned, section, "I-5: the reviewer reads only the contract under review and the diff")
+
+    def test_reviewer_training_section_keeps_clauses_a_b_c_as_warnings_and_the_templates_agent_wording(self):
+        phrase = template_training_phrase((TEMPLATES / "concept-contract.md").read_text(encoding="utf-8"))
+        section = reviewer_training_section(self.REVIEWER.read_text(encoding="utf-8"))
+        self.assertEqual(reviewer_training_problems(section, phrase), [],
+                         "I-5: the reviewer section must keep clauses (a), (b), (c), WARNING-only findings (never "
+                         "BLOCKER) and the template's model-training agent wording")
+
+    def test_control_a_heading_only_or_blocker_reviewer_section_fails(self):
+        phrase = "frob-training agent or skill, if it has one"
+        good = ("## LLM Training Data Maintenance\n\nOpening.\n\n- **(a) One.** x\n- **(b) Two.** y\n- **(c) Otherwise raise nothing.** z\n\n"
+                "Both findings are WARNINGs, never blocking. Launch the project's " + phrase + ".\n")
+        self.assertEqual(reviewer_training_problems(good, phrase), [])
+        self.assertNotEqual(reviewer_training_problems("## LLM Training Data Maintenance\n", phrase), [])
+        self.assertNotEqual(reviewer_training_problems("## LLM Training Data Maintenance", phrase), [])
+        self.assertNotEqual(reviewer_training_problems(good.replace("never blocking", "a BLOCKER"), phrase), [])
+        self.assertNotEqual(reviewer_training_problems(good.replace(phrase, "some agent"), phrase), [])
+
+    def test_reviewer_limit_phrase_sits_in_the_opening_sentence_and_clause_c_is_otherwise_raise_nothing(self):
+        section = reviewer_training_section(self.REVIEWER.read_text(encoding="utf-8"))
+        self.assertEqual(reviewer_opening_problems(section), [],
+                         "the 'whatever the contract's `## Chat Tool Impact` answer is, or if the answer is missing' "
+                         "phrase belongs in the opening sentence; clause (c) reads 'Otherwise raise nothing. This "
+                         "also holds when no contract is under review.'")
+
+    def test_control_the_limit_phrase_inside_clause_c_fails(self):
+        good = ("## LLM Training Data Maintenance\n\nTake facts from the contract, " + _OPENING_PHRASE + ", and the diff.\n\n"
+                "- **(a) One.** x\n- **(c) Otherwise raise nothing.** This also holds when no contract is under review. Stated.\n")
+        self.assertEqual(reviewer_opening_problems(good), [])
+        bad = good.replace("contract, " + _OPENING_PHRASE + ", and", "contract and").replace(
+            "under review.", "under review, " + _OPENING_PHRASE + ".")
+        problems = reviewer_opening_problems(bad)
+        self.assertTrue(any("opening sentence lacks" in p for p in problems), problems)
+        self.assertTrue(any("clause (c) still carries" in p for p in problems), problems)
+        old_c = good.replace("- **(c) Otherwise raise nothing.** This also holds", "- **(c) Raise nothing.** It holds")
+        self.assertNotEqual(reviewer_opening_problems(old_c), [])
+
+    def test_control_item_7_is_read_to_the_next_numbered_item(self):
+        text = ("6. **Other.** a\n\n7. **Integration surface omission (BLOCKER if hit)** — first line.\n"
+                "   Second line names frob/train-data/synthetic/ here.\n\n8. **Next.** frob/other/place/ stays out.\n")
+        item = agent_item_7(text)
+        self.assertIn("Second line", item)
+        self.assertNotIn("Next.", item)
+        self.assertIn(8, chat_tool_violations(item, set(), set()))
+        self.assertEqual(agent_item_7("no such item"), "")
+
+    def test_critic_item_7_keeps_the_templates_answer_heads_and_points_at_its_authority(self):
+        heads = template_answer_heads((TEMPLATES / "concept-contract.md").read_text(encoding="utf-8"))
+        self.assertEqual(len(heads), 3, "the scan must read the template's three answer heads, got %r" % heads)
+        item = agent_item_7(self.CRITIC.read_text(encoding="utf-8"))
+        self.assertTrue(item.strip(), "the scan must find critic item 7")
+        self.assertEqual(item_7_problems(item, heads), [],
+                         "critic item 7 must quote the template's answer heads word for word, keep BLOCKER and "
+                         "`## Chat Tool Impact`, and cite the template's 'Why this section exists' as its precedent")
+
+    def test_control_item_7_with_the_old_answers_or_without_the_pointer_fails(self):
+        heads = ["Yes — this contract adds a chat tool", "No — this endpoint/event is UI-only or admin-only",
+                 "Deferred to a follow-up mini-phase"]
+        good = ("7. **Integration surface omission (BLOCKER if hit)** — `## Chat Tool Impact` is missing or not one of "
+                "`" + "`, `".join(heads) + "`? See the template's section, Why this section exists.")
+        self.assertEqual(item_7_problems(good, heads), [])
+        old = good.replace(heads[0], "Yes — declares schema")
+        self.assertNotEqual(item_7_problems(old, heads), [])
+        self.assertNotEqual(item_7_problems(good.replace("BLOCKER", "WARNING"), heads), [])
+        self.assertNotEqual(item_7_problems(good.replace("Why this section exists", "a precedent"), heads), [])
+
+    def test_control_template_answer_heads_are_read_from_a_fixture(self):
+        fixture = ("## Chat Tool Impact (x)\n\n1. **Yes — frob.** Declare.\n   - **Tool name** (a):\n"
+                   "2. **No — zed.** One line.\n3. **Deferred to later.** Name it.\n\n---\n")
+        self.assertEqual(template_answer_heads(fixture), ["Yes — frob", "No — zed", "Deferred to later"])
 
 
 _HEADING_BACKTICK_RE = re.compile(r"`([^`]+)`")
