@@ -628,8 +628,9 @@ class CodegraphAddonTests(AddonCase):
         guard = hashlib.sha256(af.source("codegraph", self.GUARD).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         self.assertIn(guard, af.released_hashes("codegraph")[self.GUARD],
                       msg="the cut-over guard's folded hash must be in released_sha256, so the next release reads it as released")
-        self.assertRegex(af.released_versions("codegraph")[self.GUARD][guard], r"^0\.17\.0$",
-                         msg="labelled with the version the landing raises the plugin to (check_version_bump.py --exact)")
+        self.assertRegex(af.released_versions("codegraph")[self.GUARD][guard], r"^0\.18\.0$",
+                         msg="labelled with the first release on master's first-parent line that shipped it (the landing "
+                             "raised the plugin to 0.18.0, not the 0.17.0 the contract had planned for)")
 
     @staticmethod
     def earliest_release_labels(hook: str) -> dict:

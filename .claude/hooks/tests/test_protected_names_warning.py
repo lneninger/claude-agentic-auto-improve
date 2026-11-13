@@ -865,5 +865,36 @@ class StepFiveSevenProjectChoiceTests(StepFiveSevenSecondRemedyCase):
                          "--project is still the current tree, not the decoy the recorder would have named")
 
 
+# =====================================================================================================
+# REVISION 7 (block 22, RED): the stated residual N6 of Revision 6, "Threat model for path spellings", "Trust
+# boundary". Step 5.7 starts ``py -3 -I -B`` by name, so the first ``py`` on PATH is the one that runs.
+# =====================================================================================================
+class StepFiveSevenInterpreterResidualTests(StepFiveSevenSecondRemedyCase):
+
+    def test_R7_N6_R_a_py_planted_in_the_linked_worktrees_venv_scripts_and_first_on_path_is_the_one_step_5_7_runs(self):
+        """N6. PINS A STATED LIMIT, not a goal (Revision 6, Threat model for path spellings, Trust boundary): Step 5.7's
+        block ends in ``py -3 -I -B <checker>``, resolved from PATH, so a ``py`` in the tree's own ``.venv/Scripts`` that
+        a person put first on PATH runs instead of the real one. It needs a pushed interpreter AND that folder first on
+        PATH, and it touches only the advisory Step 5.7: the landing gate runs sys.executable. A fix (for example
+        resolving ``py`` with ``type -P`` or refusing a PATH entry inside the tree) changes THIS ROW DELIBERATELY.
+        THIS ROW ONLY DETECTS NARROWING, it has no testable bound; the row that guards the gate's edge is R6-T6-1
+        (the step's interpreter flags) and, in test_land_contract.py, R5-B2-7 (which pins the gate's child as
+        sys.executable)."""
+        main, linked = self.linked_world()
+        plugin = self.root / "plugin"
+        self.plugin_with_checker(plugin)
+        planted = linked / ".venv" / "Scripts"
+        planted.mkdir(parents=True)
+        marker = self.root / "n6-planted-py-ran.txt"
+        verdict = json.dumps({"verdict": "kept", "missing": [], "working_ref": "", "default_ref": "", "fetched": None, "reason": ""})
+        (planted / "py").write_text("#!/bin/sh\necho ran >> \"%s\"\necho '%s'\nexit 0\n" % (str(marker).replace("\\", "/"), verdict),
+                                    encoding="utf-8", newline="\n")
+        args, proc = self.run_block(linked, plugin_root=plugin, project_dir=linked, path_prefix=(planted,))
+        self.assertTrue(marker.exists(),
+                        "N6 is a stated residual: a py in <linked worktree>/.venv/Scripts, first on PATH, is the one the block "
+                        "runs (Revision 6, Threat model for path spellings, Trust boundary); a fix changes this row on purpose. "
+                        "args seen by the recording py=%r stdout=%r stderr=%r" % (args, proc.stdout[-300:], proc.stderr[-300:]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

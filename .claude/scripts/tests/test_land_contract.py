@@ -4218,7 +4218,8 @@ class TestStageFailureAttributionReachesTheReport(StageCase):
 # (protected_names_check.py + _protected_names.py, written from ``git show <mark_m>:<path>`` into one new,
 # empty temporary folder and run there as a child process under ``py -3 -I -B``, 30-second limit), because a
 # parent branch must not be able to edit the code that judges it. Only when mark_m lacks the two files does it
-# use the INSTALLED plugin's copy (CLAUDE_PLUGIN_ROOT, then the newest plugin cache folder of the Claude home);
+# use the INSTALLED plugin's copy (CLAUDE_PLUGIN_ROOT, then the installed plugin folder (the installPath in
+# installed_plugins.json));
 # with neither, the verdict is unverifiable. The landing worktree's own tree is never a candidate.
 #
 # The verdict is read only from one JSON object on standard output whose verdict is in the closed set and whose
@@ -4434,8 +4435,20 @@ class TestStageProtectedNames(PnLandingCase):
         return report
 
     def test_a_default_branch_that_holds_the_script_but_not_its_helper_is_unverifiable(self):
-        files = self.real_checker()
-        self.assertUnverifiable({PN_CHECK: files[PN_CHECK]}, "the helper is missing", exit_code_in_detail=1)
+        # NAMED EDIT (#623 t22, L2): the gate runs nothing when mark_m holds exactly one of the checker's two files, so
+        # its detail can no longer claim an exit code that no process ever gave. This row drops exit_code_in_detail=1 and
+        # asserts three things: the detail names "exactly one of the checker's two files"; it claims no exit code 1; and
+        # no checker child started (a stub script that writes a marker stands in for the real script, so a started child
+        # leaves a mark).
+        marker = self.marker("half-present-child")
+        stub_script = pn_stub(PN_KEPT, 0, extra="open(%r, 'a').write('child\\n')" % str(marker))
+        report = self.assertUnverifiable({PN_CHECK: stub_script}, "the helper is missing")
+        detail = str(report.get("detail"))
+        self.assertIn("exactly one of the checker's two files", detail, "the detail says what is wrong with mark_m's copy")
+        self.assertNotRegex(detail, r"(?i)exit[^0-9]{0,20}1(?!\d)",
+                            "the detail claims no exit code: nothing ran, so 'would end with exit code 1 if it ran' is a claim about a "
+                            "process that never existed. Detail: %r" % detail)
+        self.assertEqual(self.marked("half-present-child"), [], "and no checker child was started")
 
     def test_a_helper_with_a_syntax_error_is_unverifiable(self):
         files = self.real_checker()
@@ -5192,6 +5205,179 @@ class TestStageProtectedNamesSecondRemedy(PnLandingCase):
         write_files(installed, self.real_checker(self.marker("installed"), "installed"))
         base = dict(base_checker, **{PN_RULES: pn_rules(PN_NAMES)})
         return installed, self.world(base, {PN_RULES: pn_rules(PN_NAMES[:1])}, subdir=subdir)
+
+
+# ===========================================================================
+# REVISION 7 (block 22, RED). The landing gate's rows for gate 20's findings N3 (a device path as a PATH entry, invariant
+# C12) and N4 (a backslash in a listing, invariant C11), and one documenting row for the stated residual L1 of Revision 6,
+# "Threat model for path spellings", "Trust boundary". Contract 2026-10-13-database-guard-names-in-rules-file, Revision 7.
+#
+# SAFETY (as block 18): every recorder and every fixture lives in a test-owned folder under the case's temporary root, PATH
+# and CLAUDE_PLUGIN_ROOT change only inside mock.patch.dict, and the working folder is restored by the stage. The volume
+# manager is only READ (GetVolumeNameForVolumeMountPointW and QueryDosDeviceW, through the hooks suite's device_forms).
+# A tree holding a backslash-named entry is built with read-tree, update-index --cacheinfo (core.protectNTFS=false) and
+# commit-tree only; the fixture repository's own configuration gets core.protectNTFS=false so that the landing worktree can
+# be checked out at all (the victim machine's setting the attack needs).
+# ===========================================================================
+PN_BACKSLASH_RULES = ".claude\\hooks\\db-destructive-guard.rules.json"
+
+
+def pn_backslash_tree(kit, commit, entries):
+    """The tree of ``commit`` plus ``{path: text}`` (a path may hold a backslash), written with a private index file:
+    nothing touches the disk but the objects of the fixture repository."""
+    main = kit.main
+    env = dict(_GIT_ENV, GIT_INDEX_FILE=str(Path(kit.tmp) / "backslash.index"))
+
+    def plumb(*args, data=None):
+        proc = _REAL_SUBPROCESS_RUN(["git", "-c", "core.ignorecase=false", "-c", "core.protectNTFS=false", *args],
+                                    cwd=str(main), capture_output=True, input=data, env=env)
+        if proc.returncode != 0:
+            raise AssertionError("fixture git %r failed: %s" % (args, proc.stderr.decode("utf-8", "replace")))
+        return proc.stdout.decode("utf-8", "replace").strip()
+
+    plumb("read-tree", commit)
+    for path, text in entries.items():
+        blob = plumb("hash-object", "-w", "--stdin", data=text.encode("utf-8"))
+        plumb("update-index", "--add", "--cacheinfo", "100644,%s,%s" % (blob, path))
+    return plumb("write-tree")
+
+
+class OutsideCwdStage(Stage):
+    """The stage, but the process's working folder is ``cwd_folder``: a test-owned folder that is outside every tree and
+    outside the fixture (the stock stage uses the folder that holds the trees)."""
+
+    cwd_folder = None
+
+    def run(self, **over):
+        args = {"contract": SLUG, "parent": PARENT, "project_root": str(self.kit.main),
+                "checkout": str(self.kit.main), "run_id": self.run_id,
+                "worktree": str(self.worktree), "dry_run": False}
+        args.update(over)
+        saved_cwd = os.getcwd()
+        saved_env = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        os.chdir(str(self.cwd_folder))
+        try:
+            with contextlib.ExitStack() as stack:
+                self.install(stack)
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                return self.lc.run_landing(args)
+        finally:
+            os.chdir(saved_cwd)
+            if saved_env is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_env
+
+
+class TestStageProtectedNamesThirdRemedy(PnLandingCase):
+
+    def kept_world(self, marker=None):
+        return TestStageProtectedNamesRemedy.kept_world(self, marker)
+
+    def recording_gate(self, stack):
+        return TestStageProtectedNamesRemedy.recording_gate(self, stack)
+
+    def with_path(self, *folders):
+        return mock.patch.dict(os.environ, {"PATH": os.pathsep.join([str(f) for f in folders] + [os.environ.get("PATH", "")])})
+
+    def recorder(self, folder, mode, log_name):
+        log = Path(self._tmp.name) / log_name
+        pn_hooks_tests().make_git_shim(folder, log, mode)
+        return log
+
+    def gate_calls_seen_by(self, log):
+        return [r["args"][:4] for r in pn_hooks_tests().read_shim_log(log) if r["args"][:1] == ["--no-replace-objects"]]
+
+    def listed(self, kit, ref):
+        return _REAL_SUBPROCESS_RUN(["git", "ls-tree", "-r", "-z", "--full-tree", ref], cwd=str(kit.main), capture_output=True,
+                                    env=_GIT_ENV).stdout.decode("utf-8", "replace").split("\0")
+
+    # -- C11 / N4 ---------------------------------------------------------------------------------------------------
+    def test_R7_N4_2_i_a_merged_head_holding_the_kept_file_and_a_backslash_named_entry_that_drops_a_name_halts_working_malformed(self):
+        """Gate 20 N4: a root entry named ``.claude\\hooks\\db-destructive-guard.rules.json`` beside the exact kept file
+        made the check read ``kept``, while a checkout with core.protectNTFS=false writes that entry over the guard's file."""
+        kit = Kit(Path(self._tmp.name), base_files=self.kept_world(), parent_files={"src/feature.py": "x = 1\n"})
+        git(kit.main, "config", "core.protectNTFS", "false")
+        tip = git(kit.main, "rev-parse", "refs/remotes/origin/%s" % PARENT)
+        pn_push_commit(kit, PARENT, pn_backslash_tree(kit, tip, {PN_BACKSLASH_RULES: pn_rules(PN_NAMES[:1])}), [tip], "backslash entry")
+        listed = [e.partition("\t")[2] for e in self.listed(kit, "origin/%s" % PARENT)]
+        self.assertIn(PN_RULES, listed, "control: the merged head holds the exact kept rules file")
+        self.assertIn(PN_BACKSLASH_RULES, listed, "control: and a root entry named with backslash separators")
+        report = Stage(self, kit).run()
+        self.assertHaltedAtP7(report, "protected-names-removed", "a backslash-named rules entry beside the kept file is malformed, not kept")
+        detail = str(report.get("detail"))
+        self.assertIn("working-malformed", detail, "the verdict is working-malformed")
+        self.assertIn("backslash-in-path", detail, "and the detail names the reason, backslash-in-path (Revision 7, C11)")
+
+    def test_R7_N4_2_ii_mark_m_and_the_merged_head_each_holding_only_a_backslash_named_entry_still_run_the_checker_and_halt(self):
+        """Guard row for the gate's alias-aware shortcut: with no exact rules file on either side, ``_git_lists_path`` must
+        answer True for a listing that holds a backslash (C11), so the checker child runs (as in R6-F4-1) and the head,
+        which drops a name, halts. The checker answers reference-malformed (the default side holds a backslash path)."""
+        kit = Kit(Path(self._tmp.name), base_files=self.real_checker(), parent_files={"src/feature.py": "x = 1\n"})
+        git(kit.main, "config", "core.protectNTFS", "false")
+        master_tip = git(kit.main, "rev-parse", "refs/remotes/origin/master")
+        parent_tip = git(kit.main, "rev-parse", "refs/remotes/origin/%s" % PARENT)
+        merged = pn_push_commit(kit, "master", pn_backslash_tree(kit, master_tip, {PN_BACKSLASH_RULES: pn_rules(PN_NAMES)}),
+                                [master_tip], "mark_m: a backslash-named rules entry only")
+        pn_push_commit(kit, PARENT, pn_backslash_tree(kit, parent_tip, {PN_BACKSLASH_RULES: pn_rules(PN_NAMES[:1])}),
+                       [parent_tip, merged], "head: the same entry, one name fewer")
+        for ref in ("origin/master", "origin/%s" % PARENT):
+            listed = [e.partition("\t")[2] for e in self.listed(kit, ref)]
+            self.assertIn(PN_BACKSLASH_RULES, listed, "control: %s holds the backslash-named entry" % ref)
+            self.assertNotIn(PN_RULES, listed, "control: and not the exact rules path")
+        with contextlib.ExitStack() as stack:
+            calls = self.recording_gate(stack)
+            report = Stage(self, kit).run()
+        self.assertTrue([c for c in calls if pn_is_checker_child(c)],
+                        "the checker child ran: the shortcut did not return early on 'no rules file at either commit'")
+        self.assertHaltedAtP7(report, "protected-names-removed", "a backslash path on the default branch is reference-malformed, not a skipped check")
+        self.assertIn("backslash-in-path", str(report.get("detail")), "the detail names the reason")
+
+    # -- C12 / N3 ---------------------------------------------------------------------------------------------------
+    def test_R7_N3_3_a_hostile_git_in_the_landing_worktree_reached_through_a_device_path_is_never_the_gates_git(self):
+        if os.name != "nt":
+            self.skipTest("device paths (\\\\.\\Volume{GUID}\\) exist only on Windows; R7-N3-1 still guards the rule")
+        kit_root = Path(self._tmp.name) / "n3-fixture"
+        kit_root.mkdir()
+        outside = Path(self._tmp.name) / "working-folder-outside-every-tree"
+        outside.mkdir()
+        kit = Kit(kit_root, base_files=self.kept_world(), parent_files={"src/feature.py": "x = 1\n", PN_RULES: pn_rules(PN_NAMES[:1])})
+        st = OutsideCwdStage(self, kit)
+        st.cwd_folder = outside
+        folder = Path(st.worktree).resolve() / "tools-planted"
+        log = self.recorder(folder, "hostile-gate", "planted-device.log")
+        try:
+            spelled = pn_hooks_tests().device_forms(folder)["dot-volume"]
+        except RuntimeError as exc:
+            self.skipTest("the volume of the fixture cannot be read (%s); R7-N3-1 still guards the rule" % exc)
+        self.assertTrue(os.path.isfile(os.path.join(spelled, pn_hooks_tests().shim_name())),
+                        "control: the recorder in the landing worktree is reachable through %r" % spelled)
+        with self.with_path(spelled):
+            report = st.run()
+        self.assertHaltedAtP7(report, "protected-names-removed",
+                              "a folder INSIDE the landing worktree spelled as \\\\.\\Volume{GUID}\\<tail> is never the gate's git "
+                              "(a hostile git answers the gate's tree listing with nothing and lands a narrowed head)")
+        self.assertEqual(self.gate_calls_seen_by(log), [], "the recorder never ran for the gate or its child (Revision 7, C12)")
+
+    # -- L1: a stated residual --------------------------------------------------------------------------------------
+    def test_R7_L1_R_a_stub_checker_in_the_folder_claude_plugin_root_names_decides_the_verdict_when_mark_m_has_none(self):
+        """L1. PINS A STATED LIMIT, not a goal (Revision 6, Threat model for path spellings, Trust boundary): the landing
+        trusts its launcher's environment. With CLAUDE_PLUGIN_ROOT at a folder holding a stub checker that prints kept and
+        mark_m lacking the checker, a head that drops a name passes P7 and the stub's marker appears. A fix changes THIS
+        ROW DELIBERATELY. THIS ROW ONLY DETECTS NARROWING, it has no testable bound; the row that guards the edge (which
+        installed copy runs, and that a cache folder never does) is R6-T5-1."""
+        installed = Path(self._tmp.name) / "stub-plugin-root"
+        marker = self.marker("l1")
+        write_files(installed, self.stub_checker(PN_KEPT, 0, extra="open(%r, 'a').write('l1\\n')" % str(marker)))
+        st = self.world({PN_RULES: pn_rules(PN_NAMES)}, {PN_RULES: pn_rules(PN_NAMES[:1])})
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": str(installed)}):
+            report = st.run()
+        self.assertOutcome(report, "landed",
+                           "L1 is a stated residual (Revision 6, Threat model for path spellings, Trust boundary): the stub the "
+                           "launcher's CLAUDE_PLUGIN_ROOT names says kept, so a head that drops a name lands; a fix changes this "
+                           "row on purpose")
+        self.assertEqual(self.marked("l1"), ["l1"], "and it is that stub that ran")
 
 
 if __name__ == "__main__":
