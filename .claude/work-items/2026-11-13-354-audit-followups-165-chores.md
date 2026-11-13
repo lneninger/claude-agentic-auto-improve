@@ -13,9 +13,9 @@ branch: feature/354-audit-followups-165-chores
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261113-infra-354-audit-followups-165
 north_stars: none
 contract: .claude/concepts/2026-11-13-audit-followups-165-chores.md
-pr: none
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/406
+issue_link: closes
+status: shipped
 created: 2026-11-13
 ---
 
