@@ -156,7 +156,7 @@ If `PRIOR_FINDINGS.contract_path` is missing on a contract-touching change, stil
 
 ### Integration map
 
-Before reviewing, check `.claude/registries/INTEGRATION.md` for the current backend-DTO↔frontend-model map. If the change touches a pairing listed there, verify both sides. If the change introduces a new pairing, flag that `fullstack-code-reviewer` needs to update `INTEGRATION.md` as part of its janitor duties.
+Before reviewing, check `.claude/registries/INTEGRATION.md`, where the project keeps one (without it, work from the code you investigated), for the current backend-DTO↔frontend-model map. If the change touches a pairing listed there, verify both sides. If the change introduces a new pairing, flag that `fullstack-code-reviewer` needs to update `INTEGRATION.md` as part of its janitor duties.
 
 ## Agent Communication Protocol
 

@@ -9,7 +9,7 @@
 **Tracking issue:** <optional — #<n>, the one issue that tracks this contract's follow-ups and its Not-performed disclosures>
 **Budget:** 12,000 tokens
 
-> **Protocol:** filled in by `data-architect`. Implementer agents (`dotnet-backend-architect`, `angular-senior-dev`, `ingestion-data-architect`, `senior-test-engineer`, `ui-ux-designer`) refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
+> **Protocol:** filled in by `data-architect`. Implementer agents (`dotnet-backend-architect`, `angular-senior-dev`, `senior-test-engineer`, `ui-ux-designer`, `python-ai-developer`, `cloud-engineer`) refuse to run unless `Status: approved` or `Status: implemented`. The `concept-gate.py` hook reads `Files to touch` to decide whether Edit/Write/MultiEdit is allowed.
 >
 > **Lifecycle:**
 > - `draft` — data-architect has drafted; user still has Open Questions to resolve. Hook BLOCKS.
@@ -215,23 +215,23 @@ If this contract has no frontend consumer in Integration Surfaces, write: `Not a
 
 ## Chat Tool Impact (REQUIRED when this contract adds or changes a REST endpoint or SignalR event)
 
-A REST endpoint / SignalR event does NOT automatically get a chat-tool wrapper — the LLM tool surface is a separate deliberate extension. This section forces the decision to be explicit so the next `/retrain-llm` cycle does not invent a tool shape to fill a silent gap.
+A REST endpoint / SignalR event does NOT automatically get a chat-tool wrapper: the LLM tool surface is a separate deliberate extension. This section forces the decision to be explicit, so the project's next model-training cycle does not invent a tool shape to fill a silent gap.
 
 **Answer one of the three:**
 
 1. **Yes — this contract adds a chat tool.** Declare the tool schema here:
-   - **Tool name** (snake_case, globally unique across `ChatToolDefinitions.cs`):
-   - **Arguments** (each field must map 1:1 to the backend request DTO; `format: "uuid"` for GUIDs; enums as `enum: ["Live", "Shadow"]` PascalCase strings matching `JsonStringEnumConverter` on the wire):
-   - **Tool-result JSON shape** (narrow — matching `create_strategy`/`update_strategy` precedent; NOT the full domain object):
-   - **Executor dispatch target** (`IXxxService.YyyAsync` — prefer a service seam so controller + executor share one orchestration path; see `feedback_service_layer_cannot_leak_exception_message_to_chat.md` for error-handling rules):
-   - **System-prompt announcement prose** (draft the paragraph that will land in `SystemPromptBuilder.cs`; include Live/Shadow defaults and any Phase-constrained semantics).
-   - **Sentinel files to touch** (always the whole chat-tool trio for a new chat tool): the tool-definition file, the tool-executor file and the system-prompt builder, all under the chat area of `backend.roots`. Their exact paths are the `rest`/`docs` sentinel lists in `.claude/hooks/sentinel-paths.json`. These trigger the project's model-retraining skill.
+   - **Tool name** (snake_case, globally unique across the project's chat-tool definitions):
+   - **Arguments** (each field must map 1:1 to the backend request DTO; `format: "uuid"` for GUIDs; enums as string values matching the wire serialization of the backend):
+   - **Tool-result JSON shape** (narrow, following the project's existing tools; NOT the full domain object):
+   - **Executor dispatch target** (a service method; prefer a service seam so the controller and the executor share one orchestration path, and follow the project's error-handling rules for what reaches the chat):
+   - **System-prompt announcement prose** (draft the paragraph that will land in the project's system-prompt file, including defaults and any constrained semantics).
+   - **Sentinel files to touch** (always the whole chat-tool trio for a new chat tool): the project's chat-tool definition, executor and system-prompt files (the `rest`/`docs` lists in `.claude/hooks/sentinel-paths.json`, where the project keeps one). These trigger the project's model-training agent or skill, if it has one.
 
 2. **No — this endpoint/event is UI-only or admin-only.** One-line justification (e.g. "admin-only surface — chat would bypass row-level auth", "UI-only destructive mutation where a typed chat call would be unsafe").
 
-3. **Deferred to a follow-up mini-phase.** Name the follow-up contract or todo item. The current contract MUST NOT ship synthetic training examples that invoke a non-existent tool — the `llm-training-engineer` is instructed to refuse data generation when this section is absent or set to "Deferred".
+3. **Deferred to a follow-up mini-phase.** Name the follow-up contract or todo item. The current contract MUST NOT ship synthetic training examples that invoke a non-existent tool; the project's model-training agent or skill, if it has one, is instructed to refuse data generation when this section is absent or set to "Deferred".
 
-**Why this section exists:** Phase A2 Strategy Learner (2026-04-21) added `POST /api/strategy-runs/{strategyId}/start-pair` + `runPairUpdate` SignalR event but OMITTED this section. The subsequent `/retrain-llm` cycle filled the gap by inventing a tool shape, producing adapter `5d9acc15` that would confidently hallucinate a non-existent API contract (`create_strategy` with `action: "start_pair"`). The adapter was archived DO NOT DEPLOY after `llm-contract-reviewer` audit. A separate mini-phase (`2026-04-23-a2-chat-tools-start-run-pair`) had to be written to properly add the `start_run_pair` tool. This section makes that class of omission impossible for future contracts.
+**Why this section exists:** a training cycle that runs against a contract with no chat-tool decision fills the gap by inventing a tool shape, and the resulting model hallucinates an API that does not exist. Making the decision explicit here makes that omission impossible.
 
 ---
 
@@ -452,7 +452,7 @@ PRIOR_FINDINGS:
   contract_status: approved
 ```
 
-### 3. Data pipeline (`ingestion-data-architect`) — if applicable
+### 3. Data pipeline (`dotnet-backend-architect`, or the project's own ingestion agent if it declares one) — if applicable
 
 **Depends on:** 1
 

@@ -568,7 +568,12 @@ check("sync: old literal '[<TYPE>] <bare title>' template is gone", "[<TYPE>] <b
       "old title template still present")
 
 flow = FLOW_SKILL.read_text(encoding="utf-8") if FLOW_SKILL.is_file() else ""
-check("sync: skills/flow/SKILL.md contains no:parent-issue", "no:parent-issue" in flow, "note not added")
+FLOW_REF = REPO / "skills" / "flow" / "references" / "open-sub-tasks.md"
+flow_ref = FLOW_REF.read_text(encoding="utf-8") if FLOW_REF.is_file() else ""
+check("sync: skills/flow/SKILL.md plus its open-sub-tasks reference contain no:parent-issue",
+      "no:parent-issue" in flow + flow_ref, "note not added")
+check("sync: the no:parent-issue note sits in the reference, which Step 2.7 loads", "no:parent-issue" in flow_ref,
+      "note missing from skills/flow/references/open-sub-tasks.md")
 
 doctor = DOCTOR.read_text(encoding="utf-8") if DOCTOR.is_file() else ""
 check("sync: plugin_doctor.py scaffold contains subIssue", "subIssue" in doctor, "scaffold lacks subIssue block")

@@ -1,5 +1,6 @@
 # Follow-up — Token efficiency and stale references found by the memory and cloud audit
 
+**Superseded by:** `.claude/concepts/2026-11-11-audit-followups-165.md`
 **Parent contract:** `.claude/concepts/2026-11-01-memory-client-and-cloud-engineering.md`
 **Derived from:** the parent contract's Appendix A (audit) and Appendix B (token efficiency). This stub did not come from an Adjacent Areas scan; the area map holds no areas.
 **Date:** 2026-11-01

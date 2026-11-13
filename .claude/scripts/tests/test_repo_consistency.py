@@ -482,5 +482,181 @@ class HookCountTests(unittest.TestCase):
         self.assertEqual(hook_command_count(cfg), 4)
 
 
+# --- (4) README tree and provider-table counts (issue 363; contract 2026-11-11-audit-followups-165, V9, Q1, Q2) -----
+# Count-claim oracle: each noun a README count can name maps to one filesystem measure. The skill measure and the
+# agent measure are separate; "subagents" is the Claude Code word for the agent files, so it reads the agent measure.
+# Q2: a hook data file is a `.json` file directly in .claude/hooks/ other than hooks.json.
+CLAUDE_DIR = PLUGIN_ROOT / ".claude"
+_ORACLE_NOUNS = (
+    ("working agreements", "agreements"), ("subagents", "agents"), ("skills", "skills"), ("agents", "agents"),
+    ("hooks", "hooks"), ("shared helper modules", "helpers"), ("generic data files", "data_files"),
+    ("document templates", "templates"), ("reference documents", "references"), ("add-ons", "addons"),
+)
+_CLAIM_RE = re.compile(
+    r"(?i)(?<![\w.])(\d+|" + "|".join(w for w in WORDS if w != "zero") + r")[ \t]+(?:[\w-]+[ \t]+){0,2}?("
+    + "|".join(re.escape(n) for n, _ in _ORACLE_NOUNS) + r")\b")
+_NOUN_MEASURE = dict(_ORACLE_NOUNS)
+# tree lines that must carry no number at all (Q1), keyed by (parent label, label)
+_NUMBER_FREE_LINES = (("hooks/", "tests/"), (".claude/", "scripts/"), ("scripts/", "tests/"))
+
+
+def count_oracles(root: Path) -> dict[str, int]:
+    """Filesystem oracle for each measure a README tree line or provider-table row can claim."""
+    claude = root / ".claude"
+    hooks = claude / "hooks"
+    return {
+        "skills": sum(1 for p in (root / "skills").glob("*/SKILL.md") if p.is_file()),
+        "agents": sum(1 for p in (root / "agents").glob("*.md") if p.is_file()),
+        "agreements": sum(1 for p in (claude / "agreements").glob("*.md") if p.is_file()),
+        "addons": sum(1 for p in (claude / "addons").glob("*/addon.json") if p.is_file()),
+        "hooks": hook_file_count(hooks),
+        "helpers": sum(1 for p in hooks.glob("_*.py") if p.is_file()),
+        "data_files": sum(1 for p in hooks.glob("*.json") if p.is_file() and p.name != "hooks.json"),
+        "templates": sum(1 for p in (claude / "templates").glob("*.md") if p.is_file()),
+        "references": sum(1 for p in (claude / "references").glob("*.md") if p.is_file()),
+    }
+
+
+def claim_violations(line: str, oracles: dict[str, int]) -> list[str]:
+    """Each 'N <noun>' claim on one line that differs from its oracle."""
+    out = []
+    for m in _CLAIM_RE.finditer(line):
+        tok = m.group(1).lower()
+        n = int(tok) if tok.isdigit() else WORDS[tok]
+        measure = _NOUN_MEASURE[m.group(2).lower()]
+        if n != oracles[measure]:
+            out.append(f"says '{re.sub(chr(32) + '+', ' ', m.group(0))}' ({n}) but the {measure} oracle is {oracles[measure]}")
+    return out
+
+
+def tree_block(readme: str) -> list[str]:
+    """Lines of the first fenced block under '## What is included'."""
+    m = re.search(r"^## What is included\s*\n```[^\n]*\n(.*?)^```", readme, re.M | re.S)
+    return m.group(1).splitlines() if m else []
+
+
+def provider_rows(readme: str) -> list[str]:
+    """Table rows under '### What each provider actually gets'."""
+    m = re.search(r"^### What each provider actually gets\s*\n(.*?)(?=^#{1,3} |\Z)", readme, re.M | re.S)
+    return [ln for ln in m.group(1).splitlines() if ln.startswith("|")] if m else []
+
+
+def tree_count_violations(lines: list[str], oracles: dict[str, int]) -> list[str]:
+    """Counts on tree lines must match the oracle; the Q1 lines must carry no number."""
+    out = []
+    stack: list[tuple[int, str]] = []  # (indent, label) of the enclosing lines
+    for ln in lines:
+        if not ln.strip():
+            continue
+        indent = len(ln) - len(ln.lstrip())
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        label = ln.split()[0]
+        parent = stack[-1][1] if stack else ""
+        stack.append((indent, label))
+        for v in claim_violations(ln, oracles):
+            out.append(f"tree line '{ln.strip()}': {v}")
+        if (parent, label) in _NUMBER_FREE_LINES and re.search(r"(?i)(?<![\w.])\d+(?![\w.])", ln[len(label) + indent:]):
+            out.append(f"tree line '{ln.strip()}' carries a number; Q1 keeps the {label} line number-free")
+    return out
+
+
+def provider_table_violations(rows: list[str], oracles: dict[str, int]) -> list[str]:
+    out = []
+    for ln in rows:
+        first_cell = ln.strip("|").split("|")[0]
+        out += [f"provider row '{first_cell.strip()}': {v}" for v in claim_violations(first_cell, oracles)]
+    return out
+
+
+_TREE_FIXTURE = """\
+skills/          34 generic skills
+.claude/
+  hooks/         14 generic hooks, a gate launcher, 8 shared helper modules, 5 generic data files
+    tests/       23 hook test suites
+  scripts/       workflow scripts
+    tests/       suites
+"""
+
+
+class ReadmeCountPinTests(unittest.TestCase):
+    """Real assertions read the README and the filesystem only; none reads a manifest (I-2)."""
+
+    def test_oracles_are_read(self):
+        for name, n in count_oracles(PLUGIN_ROOT).items():
+            self.assertGreater(n, 0, f"oracle {name} read nothing")
+
+    def test_tree_counts_match_oracles(self):
+        lines = tree_block(read(PLUGIN_ROOT / "README.md"))
+        self.assertTrue(lines, "no tree block under '## What is included'")
+        self.assertEqual(tree_count_violations(lines, count_oracles(PLUGIN_ROOT)), [])
+
+    def test_provider_table_counts_match_oracles(self):
+        rows = provider_rows(read(PLUGIN_ROOT / "README.md"))
+        self.assertTrue(rows, "no provider table under '### What each provider actually gets'")
+        self.assertEqual(provider_table_violations(rows, count_oracles(PLUGIN_ROOT)), [])
+
+    def test_every_oracle_is_claimed_in_the_tree_or_table(self):
+        readme = read(PLUGIN_ROOT / "README.md")
+        text = "\n".join(tree_block(readme) + provider_rows(readme))
+        claimed = {_NOUN_MEASURE[m.group(2).lower()] for m in _CLAIM_RE.finditer(text)}
+        self.assertEqual(claimed, set(count_oracles(PLUGIN_ROOT)), "a measure is never read from the README")
+
+    def test_control_wrong_tree_counts_are_reported(self):
+        oracles = {"skills": 34, "agents": 15, "agreements": 7, "addons": 3, "hooks": 14, "helpers": 8,
+                   "data_files": 5, "templates": 6, "references": 4}
+        clean = _TREE_FIXTURE.replace("23 hook test suites", "hook test suites")
+        self.assertEqual(tree_count_violations(clean.splitlines(), oracles), [])
+        for old, new in (("34 generic skills", "33 generic skills"), ("5 generic data files", "6 generic data files"),
+                         ("8 shared", "9 shared"), ("14 generic hooks", "twelve generic hooks")):
+            with self.subTest(change=new):
+                self.assertNotEqual(tree_count_violations(clean.replace(old, new).splitlines(), oracles), [])
+
+    def test_control_number_free_lines_reject_a_number(self):
+        oracles = {"skills": 34, "hooks": 14, "helpers": 8, "data_files": 5}
+        # the fixture's 'tests/ 23 hook test suites' line sits under hooks/, so only it is reported
+        v = tree_count_violations(_TREE_FIXTURE.splitlines(), oracles)
+        self.assertEqual(len(v), 1, v)
+        self.assertIn("23 hook test suites", v[0])
+        self.assertNotEqual(tree_count_violations([".claude/", "  scripts/       23 workflow scripts"], {}), [])
+        self.assertNotEqual(tree_count_violations(["  scripts/       x", "    tests/       36 suites"], {}), [])
+        self.assertEqual(tree_count_violations([".claude/", "  scripts/       workflow scripts",
+                                                "    tests/       suites"], {}), [])
+
+    def test_control_provider_rows_skill_agent_subagent_measures(self):
+        oracles = {"skills": 34, "agents": 15, "hooks": 14, "agreements": 7}
+        clean = ["| 34 skills | yes | yes | yes |", "| 15 agents | yes | yes | no |",
+                 "| 15 subagents | yes | yes | no |", "| 14 hooks | yes | no | no |",
+                 "| 7 working agreements, delivered by a hook | yes | no | no |"]
+        self.assertEqual(provider_table_violations(clean, oracles), [])
+        for row in ("| 33 skills | yes |", "| 14 agents | yes |", "| 14 subagents | yes |",
+                    "| fifteen skills | yes |", "| 13 hooks | yes |", "| 6 working agreements | yes |"):
+            with self.subTest(row=row):
+                self.assertNotEqual(provider_table_violations([row], oracles), [])
+
+    def test_control_manifest_shaped_description_string(self):
+        # a string shaped like a manifest description, fed to the same helper; no real manifest is read (I-2)
+        description = "28 skills, 14 agents and 17 enforcement hooks that put design first"
+        oracles = {"skills": 34, "agents": 15, "hooks": 14}
+        v = claim_violations(description, oracles)
+        self.assertEqual(len(v), 3, v)
+        self.assertEqual(claim_violations("34 skills, 15 agents and 14 hooks", oracles), [])
+
+    def test_control_oracle_reads_a_fixture_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel in ("skills/a/SKILL.md", "skills/b/SKILL.md", "agents/x.md", ".claude/hooks/h.py",
+                        ".claude/hooks/gate-launch.py", ".claude/hooks/_u.py", ".claude/hooks/hooks.json",
+                        ".claude/hooks/r.rules.json", ".claude/agreements/g.md", ".claude/addons/q/addon.json",
+                        ".claude/templates/t.md", ".claude/references/r.md"):
+                f = root / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("", encoding="utf-8")
+            (root / "skills" / "empty").mkdir()  # a folder with no SKILL.md is not a skill
+            self.assertEqual(count_oracles(root), {
+                "skills": 2, "agents": 1, "agreements": 1, "addons": 1, "hooks": 1, "helpers": 1,
+                "data_files": 1, "templates": 1, "references": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -112,13 +112,12 @@ This follows the pattern already used here: `/ship` shells out to `verify_issue_
 `/design-first` to `derive_area.py`. The script owns the rules. This file explains the result
 to a person and offers what to do next.
 
-**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — 760 cases over
+**The script is covered by tests** at `.claude/scripts/tests/test_pr_merged.py` — its cases cover
 identity, parsing, block classification, verdicts, records, releases, conflict detection, the
 Hand-Resolved Summary (including the unread-commit count and its single-fetch walk), the
 cross-repository pull-request path, the `GH_REPO` refusal, the Next Command and the Sub-Task
-Cycle, plus the records leftover sweep, the evidence rule and the re-run guard. Measured by running
-`py -3 .claude/scripts/tests/test_pr_merged.py` and reading its own
-`unittest` summary line: `Ran 760 tests ... OK` (exit code 0). They were mutation-probed: disabling the
+Cycle, plus the records leftover sweep, the evidence rule and the re-run guard. Run it with
+`py -3 .claude/scripts/tests/test_pr_merged.py`; its unittest summary line must end OK (exit code 0). They were mutation-probed: disabling the
 verification check, reading a missing dependency line as none, and counting scope notes as
 sub-tasks each turn the suite red.
 

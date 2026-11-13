@@ -1,0 +1,73 @@
+contract: 2026-11-11-audit-followups-165
+started_at: '2026-11-11T21:52:35.566438+00:00'
+sub_tasks:
+  t1-task-skill-worktree-text:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 355
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-355-t1-task-skill-worktree-text.md
+  t2-flow-step-2-7-reference-move:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 356
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-356-t2-flow-step-2-7-reference-move.md
+  t3-template-chat-tool-genericity:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 357
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-357-t3-template-chat-tool-genericity.md
+  t4-debug-routing-to-shipped-agents:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 358
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-358-t4-debug-routing-to-shipped-agents.md
+  t5-memory-pager-absent-config:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 359
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-359-t5-memory-pager-absent-config.md
+  t6-registry-reads-in-agents-and-design-first:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 360
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-360-t6-registry-reads-in-agents-and-design-first.md
+  t7-memory-boundary-review-leftovers:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 361
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-361-t7-memory-boundary-review-leftovers.md
+  t8-skill-test-count-text:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 362
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-362-t8-skill-test-count-text.md
+  t9-readme-counts-and-count-pins:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 363
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-363-t9-readme-counts-and-count-pins.md
+  t10-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 364
+    base: feature/165-audit-followups
+    brief: .claude/work-items/2026-11-11-364-t10-review.md
