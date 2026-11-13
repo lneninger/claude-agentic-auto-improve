@@ -5380,5 +5380,219 @@ class TestStageProtectedNamesThirdRemedy(PnLandingCase):
         self.assertEqual(self.marked("l1"), ["l1"], "and it is that stub that ran")
 
 
+# ===========================================================================
+# REVISION 8 (block 25, RED by mutation). Guard rows for gate 21's blocked report: G1 (the landing's alias-shortcut copy,
+# invariant C3), G2 (the landing's project-scope rule of C9) and G3 (a failed whole-tree listing of mark_m, C9). Every row
+# passes at M3: the code is right and only the guards were missing, so the proof that a row is a guard is the named mutation
+# (the pull request's "Mutation RED record"). Contract 2026-10-13-database-guard-names-in-rules-file, Revision 8.
+#
+# SAFETY (as block 22): every recorder, install folder and fixture lives in a test-owned folder under the case's temporary
+# root; PATH, CLAUDE_CONFIG_DIR and CLAUDE_PLUGIN_ROOT change only inside mock.patch.dict. The alias entries are built with
+# plumbing (read-tree, update-index --cacheinfo, commit-tree), so no alias spelling has to exist on the disk of this workstation
+# for the commits to hold it.
+# ===========================================================================
+def pn_install_record_scoped(config_dir, entries):
+    """installed_plugins.json under ``config_dir``: ``entries`` is a list of (scope, installPath, projectPath or None)."""
+    folder = Path(config_dir) / "plugins"
+    folder.mkdir(parents=True, exist_ok=True)
+    plugins = []
+    for scope, path, project in entries:
+        item = {"scope": scope, "installPath": str(path), "version": "0.19.0"}
+        if project is not None:
+            item["projectPath"] = str(project)
+        plugins.append(item)
+    (folder / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {"agentic-auto-improve@auto-improve": plugins}}, indent=2), encoding="utf-8")
+
+
+class TestStageProtectedNamesFourthRemedy(PnLandingCase):
+
+    def recording_gate(self, stack):
+        return TestStageProtectedNamesRemedy.recording_gate(self, stack)
+
+    def with_path(self, *folders):
+        return mock.patch.dict(os.environ, {"PATH": os.pathsep.join([str(f) for f in folders] + [os.environ.get("PATH", "")])})
+
+    def recorder(self, folder, mode, log_name):
+        log = Path(self._tmp.name) / log_name
+        pn_hooks_tests().make_git_shim(folder, log, mode)
+        return log
+
+    def listed(self, kit, ref):
+        raw = _REAL_SUBPROCESS_RUN(["git", "ls-tree", "-r", "-z", "--full-tree", ref], cwd=str(kit.main), capture_output=True,
+                                   env=_GIT_ENV).stdout.decode("utf-8", "replace").split("\0")
+        return [e.partition("\t")[2] for e in raw if e]
+
+    def alias_only_world(self, alias, subdir):
+        """mark_m and the merged head each hold ONLY ``alias`` of the rules file (no exact path, no other file of it), and the
+        head holds one name fewer. The checker files are on mark_m (so mark_m's own copy runs)."""
+        root = Path(self._tmp.name) / subdir
+        root.mkdir()
+        kit = Kit(root, base_files=self.real_checker(), parent_files={"src/feature.py": "x = 1\n"})
+        git(kit.main, "config", "core.protectNTFS", "false")
+        master_tip = git(kit.main, "rev-parse", "refs/remotes/origin/master")
+        parent_tip = git(kit.main, "rev-parse", "refs/remotes/origin/%s" % PARENT)
+        merged = pn_push_commit(kit, "master", pn_backslash_tree(kit, master_tip, {alias: pn_rules(PN_NAMES)}), [master_tip],
+                                "mark_m: the alias only")
+        pn_push_commit(kit, PARENT, pn_backslash_tree(kit, parent_tip, {alias: pn_rules(PN_NAMES[:1])}), [parent_tip, merged],
+                       "head: the same alias, one name fewer")
+        return kit
+
+    # -- G1 / C3: the shortcut's own copy of the alias rule, one row per class of alias ---------------------------------
+    def alias_classes(self):
+        """The shapes come from the hooks suite's own tables (loaded by path, never copied): the classes of the alias rule the
+        shortcut's copy must keep. ``ascii-control`` is an ordinary letter-case alias: it holds under every mutation of the
+        copy, so a red subtest elsewhere comes from the mutation and not from a broken fixture."""
+        hooks = pn_hooks_tests()
+        alias, uni = hooks.ALIAS_SHAPES, hooks.UNICODE_SHAPES
+        pick = lambda table, *prefixes: {k: v for k, v in table.items() if k.startswith(prefixes)}  # noqa: E731
+        return [
+            ("explicit-family", pick(uni, "U+0130", "U+212A")),
+            ("non-ascii-fold", pick(uni, "U+0131", "U+017F")),
+            ("short-name", pick(alias, "an 8.3 shape")),
+            ("trailing-dot-or-space", pick(alias, "a trailing dot", "a trailing space")),
+            ("ascii-control", pick(alias, "the hooks folder in another letter case")),
+        ]
+
+    def test_R8_G1_1_mark_m_and_the_head_each_holding_only_an_alias_of_every_class_still_run_the_checker_and_halt(self):
+        """G1 (C3), end to end, one subtest per alias shape of every class. The shortcut 'no rules file at either commit' must
+        be alias-aware in its OWN copy of the rule: it must not return early, the checker child runs, and the head (which drops
+        a name) halts as reference-malformed. R6-F4-1 covers one ASCII shape only. Mutations it guards: MB3-l-fold (U+0130),
+        MB3-l-ascii (U+0130, U+212A, U+0131, U+017F), MB3-l-short (the 8.3 shapes), MB3-l-dot (the trailing shapes)."""
+        total = 0
+        for klass, shapes in self.alias_classes():
+            self.assertTrue(shapes, "control: the hooks suite's tables hold shapes of the class %s" % klass)
+            for label, alias in shapes.items():
+                total += 1
+                with self.subTest(alias_class=klass, shape=label):
+                    kit = self.alias_only_world(alias, "g1-%d" % total)
+                    for ref in ("origin/master", "origin/%s" % PARENT):
+                        listed = self.listed(kit, ref)
+                        self.assertIn(alias, listed, "control: %s holds the alias (%s)" % (ref, label))
+                        self.assertNotIn(PN_RULES, listed, "control: and not the exact rules path")
+                    with contextlib.ExitStack() as stack:
+                        st = Stage(self, kit)
+                        calls = self.recording_gate(stack)
+                        report = st.run()
+                    self.assertTrue([c for c in calls if pn_is_checker_child(c)],
+                                    "%s (%s): the checker child ran: the shortcut did not return early on 'no rules file at "
+                                    "either commit' although both commits hold an alias of the rules path" % (klass, label))
+                    self.assertHaltedAtP7(report, "protected-names-removed",
+                                          "%s (%s): an alias on the default branch is reference-malformed, not a skipped check"
+                                          % (klass, label))
+                    self.assertIn("reference-malformed", str(report.get("detail")), "%s (%s): the verdict is reference-malformed" % (klass, label))
+
+    def test_R8_G1_2_the_landings_copy_of_the_alias_rule_equals_the_helpers_over_the_full_shape_tables(self):
+        """G1 (C3), the equality form: land_contract._pn_component_matches equals _protected_names._component_matches, and
+        land_contract._git_lists_path equals is_rules_alias over the same paths (the exact path is the one difference: the
+        shortcut answers True for it, is_rules_alias answers False because it is not an ALIAS). Names at M3 are used as they are."""
+        hooks = pn_hooks_tests()
+        helper = pn_load_by_path("_t25_helper_under_test", SCRIPTS_DIR.parent / "hooks" / "_protected_names.py")
+        lc = self.mod()
+        component = self.fn("_pn_component_matches")
+        lists_path = self.fn("_git_lists_path")
+        aliases = list(hooks.ALIAS_SHAPES.values()) + list(hooks.UNICODE_SHAPES.values())
+        not_aliases = [".claude/hookss/db-destructive-guard.rules.json", ".claude/hooks/db-destructive-guard.rules.jsons",
+                       ".claudex/hooks/db-destructive-guard.rules.json", "README.txt", "src/hooks/db-destructive-guard.rules.json"]
+        wanted = PN_RULES.split("/")
+        for path in aliases + not_aliases + [PN_RULES]:
+            parts = path.split("/")
+            if len(parts) == len(wanted):
+                for part, want in zip(parts, wanted):
+                    self.assertEqual(component(part, want), helper._component_matches(part, want),
+                                     "_pn_component_matches(%r, %r) is equal in the two copies (land_contract gave %r)"
+                                     % (part, want, component(part, want)))
+            listing = mock.Mock(returncode=0, stdout=("100644 blob %s\t%s\0" % ("0" * 40, path)).encode("utf-8"))
+            with mock.patch.object(lc, "_pn_git", return_value=listing):
+                got = lists_path(Path(self._tmp.name), "ref", PN_RULES)
+            self.assertEqual(got, path == PN_RULES or helper.is_rules_alias(path),
+                             "_git_lists_path agrees with is_rules_alias for the listed path %r (land_contract gave %r)" % (path, got))
+        for path in aliases:
+            self.assertTrue(helper.is_rules_alias(path), "control: the helper reads %r as an alias, so the equality is not over "
+                                                         "an all-False table" % path)
+
+    # -- G2 / C9: the landing's project-scope rule ----------------------------------------------------------------------
+    def g2_world(self, subdir=""):
+        """mark_m lacks the checker, the head drops a name; two install folders whose real checkers each leave a marker."""
+        st = self.world({PN_RULES: pn_rules(PN_NAMES)}, {PN_RULES: pn_rules(PN_NAMES[:1])}, subdir=subdir)
+        installs = {}
+        for name in ("user", "project"):
+            folder = Path(self._tmp.name) / ("install-" + name + (("-" + subdir) if subdir else ""))
+            write_files(folder, self.real_checker(self.marker(name), name))
+            installs[name] = folder
+        return st, installs, Path(self._tmp.name) / "claude-config-g2"
+
+    def run_with_record(self, st, cfg):
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(cfg)}), contextlib.ExitStack() as stack:
+            os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
+            calls = self.recording_gate(stack)
+            report = st.run()
+        return report, calls
+
+    def test_R8_G2_1_a_user_scope_entry_is_used_before_a_project_scope_entry_of_the_main_checkout(self):
+        """G2 (C9): the user copy's marker appears and the project copy's does not. Guards MT7-l-first."""
+        st, installs, cfg = self.g2_world()
+        pn_install_record_scoped(cfg, [("project", installs["project"], st.kit.main), ("user", installs["user"], None)])
+        report, calls = self.run_with_record(st, cfg)
+        self.assertHaltedAtP7(report, "protected-names-removed", "the chosen copy is a real checker, and the head drops a name")
+        self.assertEqual(self.marked("user"), ["user"], "the user-scope entry's installPath runs although a project-scope entry names the main checkout")
+        self.assertEqual(self.marked("project"), [], "and the project-scope entry's copy never runs")
+
+    def test_R8_G2_2_with_only_a_project_scope_entry_for_the_main_checkout_it_is_used_from_a_linked_worktree(self):
+        """G2 (C9): Claude Code records the MAIN checkout as projectPath, and the landing runs in a linked worktree of it.
+        Guards MT7-l-wt (matched against the landing worktree) and MT7-l-none (the project-scope fallback dropped)."""
+        st, installs, cfg = self.g2_world()
+        self.assertNotEqual(norm(st.worktree), norm(st.kit.main), "control: the landing worktree is not the main checkout")
+        pn_install_record_scoped(cfg, [("project", installs["project"], st.kit.main)])
+        report, calls = self.run_with_record(st, cfg)
+        self.assertHaltedAtP7(report, "protected-names-removed", "the project-scope copy judges the head, which drops a name")
+        self.assertEqual(self.marked("project"), ["project"], "and it is the project-scope entry's copy that ran")
+        self.assertEqual(self.marked("user"), [], "no other copy ran")
+
+    def test_R8_G2_3_control_with_only_a_project_scope_entry_for_an_unrelated_folder_nothing_runs(self):
+        """G2 control: the reading is unverifiable and no copy runs. It holds under every mutation of the rule, so the red of
+        the two rows above comes from the mutation and not from a broken fixture."""
+        st, installs, cfg = self.g2_world()
+        unrelated = Path(self._tmp.name) / "some-other-project"
+        unrelated.mkdir()
+        pn_install_record_scoped(cfg, [("project", installs["project"], unrelated)])
+        report, calls = self.run_with_record(st, cfg)
+        self.assertHaltedAtP7(report, "unverifiable", "no entry names this project's main checkout, so no installed copy is found")
+        self.assertEqual((self.marked("user"), self.marked("project")), ([], []), "no copy ran")
+        self.assertEqual([c for c in calls if pn_is_checker_child(c)], [], "and no checker child was started")
+
+    # -- G3 / C9: a failed whole-tree listing of mark_m ------------------------------------------------------------------
+    def g3_world(self, mode_for):
+        installed = Path(self._tmp.name) / "installed-plugin-g3"
+        write_files(installed, self.real_checker(self.marker("installed"), "installed"))
+        st = self.world({PN_RULES: pn_rules(PN_NAMES)}, {PN_RULES: pn_rules(PN_NAMES[:1])})
+        mark_m = git(st.kit.main, "rev-parse", "refs/remotes/origin/master")
+        folder = Path(self._tmp.name) / "failing-listing-bin"
+        log = self.recorder(folder, mode_for(mark_m), "failing-listing.log")
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": str(installed)}), self.with_path(folder), \
+                contextlib.ExitStack() as stack:
+            calls = self.recording_gate(stack)
+            report = st.run()
+        return report, calls, log, mark_m
+
+    def test_R8_G3_1_a_failed_whole_tree_listing_of_mark_m_is_unverifiable_and_the_installed_copy_never_runs(self):
+        """G3 (C9): the installed copy runs only when mark_m's whole-tree listing SUCCEEDED and holds neither file. Guards
+        MT10-list (a failed listing read as 'absent'). R6-T10-1 fails only the cat-file read, never the listing."""
+        report, calls, log, mark_m = self.g3_world(lambda sha: "fail-ls:" + sha)
+        failed = [r for r in pn_hooks_tests().read_shim_log(log) if "ls-tree" in r["args"] and mark_m in r["args"]]
+        self.assertTrue(failed, "control: the recorder saw the listing of mark_m it was told to fail")
+        self.assertHaltedAtP7(report, "unverifiable", "a listing that failed is not 'mark_m lacks the checker'")
+        self.assertEqual(self.marked("installed"), [], "the installed copy never runs")
+        self.assertEqual([c for c in calls if pn_is_checker_child(c)], [], "and no checker child was started at all")
+
+    def test_R8_G3_1_control_the_same_fixture_with_the_listing_succeeding_runs_the_installed_copy(self):
+        """G3 control: no checker files at mark_m and a listing that works, so the installed copy runs and halts the removal."""
+        report, calls, log, mark_m = self.g3_world(lambda sha: "record")
+        self.assertTrue([r for r in pn_hooks_tests().read_shim_log(log) if "ls-tree" in r["args"] and mark_m in r["args"]],
+                        "control: the recorder saw the listing of mark_m, and let it succeed")
+        self.assertHaltedAtP7(report, "protected-names-removed", "mark_m lacks the checker, so the installed copy judges the head")
+        self.assertEqual(self.marked("installed"), ["installed"], "and it is the installed copy that ran")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -866,6 +866,30 @@ class StepFiveSevenProjectChoiceTests(StepFiveSevenSecondRemedyCase):
 
 
 # =====================================================================================================
+# REVISION 8 (block 25, RED by mutation): gate 21's finding M1 (invariant C10). R6-T8-2 sees only a bare ``git`` call
+# (an exported function named git stands in for "a git first on PATH"), so ``env -u GIT_DIR -u GIT_WORK_TREE git
+# rev-parse --show-toplevel`` and ``command git rev-parse ...`` slip past it (mutation MT8-path). C10 is itself a
+# statement about the text of Step 5.7: it "runs no program to choose the project". So this row pins the text.
+# =====================================================================================================
+class StepFiveSevenBlockTextTests(WarningCase):
+
+    def test_R8_M1_1_step_5_7s_bash_block_holds_no_rev_parse_and_no_show_toplevel(self):
+        """R8-M1-1 (C10). The block is cut exactly as StepBlockCase cuts it (``step_bash_block()``: the first bash block of
+        Step 5.7). The two tokens are searched whatever wraps the call (``env -u ..``, ``command git``, an absolute path to
+        git). Known limit, stated in Revision 8 decision 3: a project chooser written with another program (for example
+        ``git worktree list``) would not be caught here; review has to find it. R6-T8-1 and R6-T8-2 stay the behaviour
+        rows for the plain form."""
+        block = step_bash_block()
+        self.assertIsNotNone(block, "control: Step 5.7 holds a bash block, so there is a text to search")
+        self.assertIn("protected_names_check.py", block, "control: it is the block that starts the checker, not another one")
+        for token in ("rev-parse", "--show-toplevel"):
+            self.assertNotIn(token, block,
+                             "C10: Step 5.7 runs no program to choose the project, so its bash block holds no %r (found in the "
+                             "cut block; the project is the nearest folder holding a .git entry, found by a shell loop, then "
+                             "$CLAUDE_PROJECT_DIR)" % token)
+
+
+# =====================================================================================================
 # REVISION 7 (block 22, RED): the stated residual N6 of Revision 6, "Threat model for path spellings", "Trust
 # boundary". Step 5.7 starts ``py -3 -I -B`` by name, so the first ``py`` on PATH is the one that runs.
 # =====================================================================================================
