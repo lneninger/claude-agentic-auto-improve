@@ -204,32 +204,52 @@ def _decode_path(raw):
 # ---------------------------------------------------------------------------
 #: C8 (contract 2026-10-13, Revision 6): a leading ``\\?\UNC\``, ``\\?\`` or ``\\.\``, and an administrative
 #: drive share ``\\<host>\<letter>$`` reached through this computer.
-_LONG_UNC_RE = re.compile(r"^\\\\[?]\\UNC\\", re.IGNORECASE)
-_DEVICE_RE = re.compile(r"^\\\\[?.]\\")
+#: C12 (Revision 7): in the first four characters ``/`` and ``\`` are the same character; the prefix is stripped
+#: only before a drive letter and a colon, and ``UNC\`` is rewritten to ``\\``. Anything else is a device path.
+_DEVICE_RE = re.compile(r"^[\\/]{2}[?.][\\/]")
+_DRIVE_PREFIX_RE = re.compile(r"^[\\/]{2}[?.][\\/][A-Za-z]:")
+_UNC_PREFIX_RE = re.compile(r"^[\\/]{2}[?.][\\/]UNC\\", re.IGNORECASE)
 _ADMIN_SHARE_RE = re.compile(r"^\\\\([^\\]+)\\([A-Za-z])\$(?=\\|$)")
 
 
 def _strip_prefixes(path):
     """C8 steps 1 and 2: the ``\\\\?\\`` and ``\\\\.\\`` prefixes, and an own-computer drive share, as text."""
     text = str(path)
-    if _LONG_UNC_RE.match(text):
+    if _UNC_PREFIX_RE.match(text):
         text = "\\\\" + text[len("\\\\?\\UNC\\"):]
-    else:
-        text = _DEVICE_RE.sub("", text, count=1)
+    elif _DRIVE_PREFIX_RE.match(text):
+        text = text[4:]
     match = _ADMIN_SHARE_RE.match(text)
     if match and match.group(1).lower() in ("localhost", "127.0.0.1", socket.gethostname().lower()):
         text = match.group(2) + ":" + text[match.end():]
     return text
 
 
+def is_device_path(path):
+    """C12: True for a path in the device namespace that is not a drive form or a long UNC form
+    (``\\\\.\\Volume{GUID}\\``, ``\\\\?\\GLOBALROOT\\``, ``\\\\.\\pipe\\``)."""
+    text = str(path)
+    return bool(_DEVICE_RE.match(text)) and not _DRIVE_PREFIX_RE.match(text) and not _UNC_PREFIX_RE.match(text)
+
+
 def comparable_path(path):
-    """C8's resolved spelling: steps 1 and 2, ``realpath``, steps 1 and 2 again, ``normcase``."""
-    return os.path.normcase(_strip_prefixes(os.path.realpath(_strip_prefixes(path))))
+    """C8's resolved spelling: steps 1 and 2, ``realpath``, steps 1 and 2 again, ``normcase``. A device path
+    (C12), as written or once resolved, is ``normcase`` of its text: no ``realpath``, no ``abspath``."""
+    text = str(path)
+    if is_device_path(text):
+        return os.path.normcase(text)
+    resolved = os.path.realpath(_strip_prefixes(text))
+    if is_device_path(resolved):
+        return os.path.normcase(resolved)
+    return os.path.normcase(_strip_prefixes(resolved))
 
 
 def written_path(path):
     """C8's written spelling: steps 1, 2 and 5 with ``abspath`` for ``realpath`` (no link is followed)."""
-    return os.path.normcase(os.path.abspath(_strip_prefixes(path)))
+    text = str(path)
+    if is_device_path(text):
+        return os.path.normcase(text)
+    return os.path.normcase(os.path.abspath(_strip_prefixes(text)))
 
 
 def _norm(path):
@@ -251,13 +271,18 @@ def resolve_git(path_value, excluded_roots):
     roots = []
     for root in (excluded_roots or []):
         if root:
-            roots.extend({written_path(root), comparable_path(root)})
+            spelled = {written_path(root), comparable_path(root)}
+            if any(is_device_path(s) for s in spelled):
+                return None  # C12: a device-path root cannot be compared, so the search is unverifiable
+            roots.extend(spelled)
     here = comparable_path(os.getcwd())
     for entry in (path_value or "").split(os.pathsep):
         entry = entry.strip().strip('"')
         if not entry or entry == "." or not os.path.isabs(entry):
             continue
         spellings = {written_path(entry), comparable_path(entry)}
+        if any(is_device_path(s) for s in spellings):
+            continue  # C12: a device-path entry is never compared and never the program
         if comparable_path(entry) == here or any(_inside(s, root) for s in spellings for root in roots):
             continue
         candidate = os.path.join(entry, name)
@@ -433,8 +458,9 @@ def _branch_name_only(project):
 
 
 def read_rules(project, commit, rules_rel):
-    """``(listed, data, aliases, copies)`` of ``commit``: whether it holds ``rules_rel`` byte for byte, that
-    file's bytes, every listed path that is a rules-path alias, and how many times the exact path is listed.
+    """``(listed, data, aliases, copies, backslashed)`` of ``commit``: whether it holds ``rules_rel`` byte for
+    byte, that file's bytes, every listed path that is a rules-path alias, how many times the exact path is
+    listed, and every listed path that holds a ``\\`` (C11, Revision 7).
     The whole tree is listed once from the root with no pathspec; the blob is read by the object id from that
     listing. With ``copies`` above one (a duplicate entry of the file or of a folder on its path) nothing is
     read: ``data`` is ``None`` and the caller reports the side as malformed (``duplicate-entry``). Raises
@@ -445,25 +471,28 @@ def read_rules(project, commit, rules_rel):
     exact = rules_rel.encode("utf-8")
     oids = []
     aliases = []
+    backslashed = []
     for entry in out.split(b"\0"):
         if not entry:
             continue
         meta, _tab, raw = entry.partition(b"\t")
+        if b"\\" in raw:
+            backslashed.append(_decode_path(raw))  # C11: any path holding a backslash makes the side malformed
         if raw == exact:
             fields = meta.split()
             oids.append(fields[2].decode("ascii") if len(fields) == 3 else "")
         elif is_rules_alias(_decode_path(raw), rules_rel):
             aliases.append(_decode_path(raw))
     if not oids:
-        return False, None, aliases, 0
+        return False, None, aliases, 0, backslashed
     if len(oids) > 1:
-        return True, None, aliases, len(oids)
+        return True, None, aliases, len(oids), backslashed
     if not oids[0]:
         raise GitFailure("git ls-tree gave no object id for %s:%s" % (commit, rules_rel))
     code, blob = git(project, ["cat-file", "blob", oids[0]])
     if code != 0:
         raise GitFailure("git cat-file failed for %s:%s (exit %d)" % (commit, rules_rel, code))
-    return True, blob, aliases, 1
+    return True, blob, aliases, 1, backslashed
 
 
 def commit_date(project, commit):
@@ -505,10 +534,13 @@ def _disk_aliases(project, rules_rel):
     """Rules-path aliases of the working copy: the whole index (``git ls-files -z --full-name``) and the
     directory listing of the project root and of each folder on the path."""
     aliases = []
+    backslashed = []
     code, out = git(project, ["ls-files", "-z", "--full-name"])
     if code != 0:
         raise GitFailure("git ls-files failed (exit %d)" % code)
     for raw in out.split(b"\0"):
+        if raw and b"\\" in raw:
+            backslashed.append(_decode_path(raw))  # C11
         if raw and is_rules_alias(_decode_path(raw), rules_rel):
             aliases.append(_decode_path(raw))
     wanted = rules_rel.split("/")
@@ -527,7 +559,7 @@ def _disk_aliases(project, rules_rel):
     for folder, differs in level:
         if differs:
             aliases.append(os.path.relpath(folder, str(project)).replace("\\", "/"))
-    return aliases
+    return aliases, backslashed
 
 
 def check(project, working_ref=None, default_ref=None, fetch=False, rules_rel=RULES_REL):
@@ -627,14 +659,20 @@ def _check(project, working_ref, default_ref, fetch, rules_rel):
         return _result(verdict, reason, code, missing, working_label, default_commit, fetched,
                        default_branch, default_date)
 
-    listed, default_bytes, default_aliases, default_copies = read_rules(project, default_commit, rules_rel)  # may raise GitFailure
+    listed, default_bytes, default_aliases, default_copies, default_backslashed = read_rules(
+        project, default_commit, rules_rel)  # may raise GitFailure
     working_copies = 0
     if working_commit is not None:
-        _wl, working_bytes, working_aliases, working_copies = read_rules(project, working_commit, rules_rel)
+        _wl, working_bytes, working_aliases, working_copies, working_backslashed = read_rules(
+            project, working_commit, rules_rel)
     else:
         working_bytes = _read_working_disk(project, rules_rel)
-        working_aliases = _disk_aliases(project, rules_rel)
+        working_aliases, working_backslashed = _disk_aliases(project, rules_rel)
     working = read_names(working_bytes)
+    if working_backslashed:
+        working = {"state": "malformed", "names": [],
+                   "reason": "backslash-in-path: the tree lists a path holding a backslash: %s"
+                             % ", ".join(repr(a) for a in working_backslashed[:3])}
     if working_aliases:
         working = {"state": "malformed", "names": [],
                    "reason": "a path that is an alias of the rules file exists beside it: %s"
@@ -643,6 +681,9 @@ def _check(project, working_ref, default_ref, fetch, rules_rel):
         working = {"state": "malformed", "names": [],
                    "reason": "duplicate-entry: the rules path is listed %d times in the tree" % working_copies}
 
+    if default_backslashed:
+        return done("reference-malformed", "backslash-in-path: the default branch lists a path holding a "
+                    "backslash: %s" % ", ".join(repr(a) for a in default_backslashed[:3]))
     if default_copies > 1:
         return done("reference-malformed", "duplicate-entry: the default branch lists the rules path %d times"
                     % default_copies)
