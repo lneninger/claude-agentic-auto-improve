@@ -3,7 +3,8 @@
 **Parent contract:** `.claude/concepts/2026-11-11-audit-followups-165.md`
 **Derived from:** owner decision Q9 (2026-11-12) on the t10 review findings, not an Adjacent Areas scan (the area map is empty)
 **Date:** 2026-11-12
-**Status:** stub
+**Status:** superseded
+**Superseded by:** `.claude/concepts/2026-11-13-audit-followups-165-chores.md` (issue #354)
 **Estimated scope:** trivial
 **Issue:** #354
 

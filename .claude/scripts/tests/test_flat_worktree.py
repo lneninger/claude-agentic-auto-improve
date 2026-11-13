@@ -859,5 +859,120 @@ class TaskSkillWorktreeTextTests(unittest.TestCase):
                              "flat_worktree.py in Step 1.5")
 
 
+# --- Step 5c names the worktree's path one way (issue 354, contract 2026-11-13-audit-followups-165-chores, I-6) ----
+# One name, <plan path>: the plan's `path` from Step 1.5, read from the plan and never rebuilt from the folder name.
+FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)^```", re.MULTILINE | re.DOTALL)
+PLAN_PATH = "<plan path>"
+WT = "<wt>"
+REBUILT = ".claude/worktrees/<"
+
+
+def step_5c_problems(section: str) -> list:
+    """Violations of the Step 5c pin; an empty list means the section meets all four assertions."""
+    out = []
+    if not section.strip():
+        return ["Step 5c was not found"]
+    if WT in section:
+        out.append("`<wt>` still appears in Step 5c (prose or command)")
+    if REBUILT in section:
+        out.append("`.claude/worktrees/<` still appears in Step 5c: the path is rebuilt from a folder name")
+    blocks = FENCE_RE.findall(section)
+    if len(blocks) != 3:
+        out.append(f"Step 5c holds {len(blocks)} fenced blocks, expected the three command blocks")
+    for i, block in enumerate(blocks, 1):
+        if PLAN_PATH not in block:
+            out.append(f"command block {i} does not name {PLAN_PATH}")
+    bullet = next((ln for ln in section.splitlines() if ln.startswith("- **Every folder OUTSIDE the repo")), "")
+    if not bullet:
+        out.append("the bullet that starts 'Every folder OUTSIDE the repo' was not found")
+    elif PLAN_PATH not in bullet:
+        out.append(f"the 'Every folder OUTSIDE the repo' bullet does not name {PLAN_PATH}")
+    rule = next((ln for ln in section.splitlines() if ln.startswith("**Name the directory")), "")
+    if not rule:
+        out.append("the line that starts '**Name the directory' was not found")
+    else:
+        for needed in ("60 characters", "`-2` to `-9`", "Step 1.5"):
+            if needed not in rule:
+                out.append(f"the folder-name line lacks {needed!r}")
+    return out
+
+
+def made_up_5c(path_name: str = PLAN_PATH, second_block: str = None, bullet_name: str = None,
+               rule_line: str = None, prose: str = "") -> str:
+    """A made-up 5c; the defaults meet every assertion, each argument breaks one."""
+    second = second_block if second_block is not None else f'code -n "{path_name}/frob.code-workspace"'
+    bullet = bullet_name if bullet_name is not None else path_name
+    rule = rule_line if rule_line is not None else (
+        "**Name the directory `<YYYYMMDD>-<action>-<slug>`**, cut at a hyphen to at most 60 characters, with "
+        "`-2` to `-9` added when the name is taken; the path is the plan's `path` from Step 1.5.")
+    return (f"### 5c. Branch + parallel worktree\n\n{rule}\n\n{prose}\n"
+            f"```bash\ngit -C {path_name} rev-parse HEAD\n```\n\n"
+            f"```bash\n{second}\n```\n\n"
+            f"- **Every folder OUTSIDE the repo must be absolute**, unlike the ones inside {bullet}.\n\n"
+            f"```bash\nfrob-check {path_name}\n```\n\n### 5d. Record it\n")
+
+
+class Step5cWorktreePathTests(unittest.TestCase):
+    """The real skill's Step 5c; each control feeds step_5c_problems a made-up 5c that must fail one assertion."""
+
+    def test_control_a_5c_that_meets_all_four_assertions_passes(self):
+        self.assertEqual(step_5c_problems(section_5c(made_up_5c() + "tail")), [])
+
+    def test_control_prose_naming_wt_fails_the_no_wt_assertion(self):
+        problems = step_5c_problems(made_up_5c(prose="Open `.claude/worktrees/<wt>/` in a window."))
+        self.assertTrue(any("<wt>" in p for p in problems), problems)
+
+    def test_control_a_block_naming_neither_name_fails_the_presence_assertion(self):
+        problems = step_5c_problems(made_up_5c(second_block='code -n "frob.code-workspace"'))
+        self.assertTrue(any("command block 2" in p for p in problems), problems)
+
+    def test_control_a_bullet_naming_neither_name_fails_the_bullet_assertion(self):
+        problems = step_5c_problems(made_up_5c(bullet_name="the folder"))
+        self.assertTrue(any("OUTSIDE the repo' bullet" in p for p in problems), problems)
+
+    def test_control_a_folder_name_line_that_drops_the_cut_or_the_suffix_fails(self):
+        no_cut = ("**Name the directory `<YYYYMMDD>-<action>-<slug>`**, with `-2` to `-9` added when the name is "
+                  "taken; the path is the plan's `path` from Step 1.5.")
+        no_suffix = ("**Name the directory `<YYYYMMDD>-<action>-<slug>`**, cut at a hyphen to at most 60 characters; "
+                     "the path is the plan's `path` from Step 1.5.")
+        self.assertTrue(any("60 characters" in p for p in step_5c_problems(made_up_5c(rule_line=no_cut))))
+        self.assertTrue(any("`-2` to `-9`" in p for p in step_5c_problems(made_up_5c(rule_line=no_suffix))))
+
+    def real_section(self) -> str:
+        section = section_5c(TASK_SKILL.read_text(encoding="utf-8"))
+        self.assertTrue(section, msg="fixture sanity: the 5c section is found in the skill")
+        return section
+
+    def assert_no_problem_like(self, needle: str, msg: str):
+        problems = [p for p in step_5c_problems(self.real_section()) if needle in p]
+        self.assertEqual(problems, [], msg=msg)
+
+    def test_control_a_rebuilt_path_under_worktrees_fails_the_one_name_assertion(self):
+        for prose in ("Open `.claude/worktrees/<folder>/` in a window.", "Use .claude/worktrees/<slug>/x."):
+            problems = step_5c_problems(made_up_5c(prose=prose))
+            self.assertTrue(any(".claude/worktrees/<" in p for p in problems), problems)
+        self.assertEqual(step_5c_problems(made_up_5c(prose="The folder lives under .claude/worktrees/ (ignored).")), [])
+
+    def test_step_5c_names_no_wt_anywhere(self):
+        self.assert_no_problem_like("`<wt>`", "I-6: Step 5c names the worktree's path <plan path> only, never <wt>")
+
+    def test_step_5c_never_rebuilds_the_path_under_worktrees(self):
+        self.assert_no_problem_like(".claude/worktrees/<", "I-6: Step 5c never rebuilds the path from the folder name")
+
+    def test_step_5c_names_plan_path_in_each_of_the_three_command_blocks(self):
+        self.assert_no_problem_like("fenced blocks", "Step 5c holds the three command blocks")
+        self.assert_no_problem_like("command block", f"every command block of Step 5c must name {PLAN_PATH}")
+
+    def test_step_5c_names_plan_path_in_the_outside_the_repo_bullet(self):
+        self.assert_no_problem_like("OUTSIDE the repo", "the 'Every folder OUTSIDE the repo' bullet must name <plan path>")
+
+    def test_step_5c_folder_name_line_keeps_the_cut_the_suffix_and_the_plan_reference(self):
+        self.assert_no_problem_like("folder-name line", "I-6: the folder-name line keeps the cut, `-2` to `-9` and Step 1.5")
+        self.assert_no_problem_like("'Name the directory", "the folder-name line must be found")
+
+    def test_step_5c_as_a_whole_has_no_problem(self):
+        self.assertEqual(step_5c_problems(self.real_section()), [], msg="I-6: Step 5c meets every assertion")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
