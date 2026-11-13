@@ -165,17 +165,13 @@ For every file reviewed:
 
 ## LLM Training Data Maintenance
 
-When reviewing code that modifies domain-impacting files, flag a WARNING if training data was not updated:
+Take every fact for this check from the contract under review and the diff, and nothing else, whatever the contract's `## Chat Tool Impact` answer is, or if the answer is missing. Do not work out for yourself which file plays which role in the project's chat-tool surface.
 
-- [ ] If `ChatToolDefinitions.cs` was modified: synthetic training examples exist for new/changed tools in `python/training-data/synthetic/`
-- [ ] If `SystemPromptBuilder.cs` was modified: training data covers new fields/indicators/contexts
-- [ ] If `ChatToolExecutor.cs` was modified: tool execution examples match new handler signatures
-- [ ] If condition fields/resolvers were added: strategy-creation examples use the new fields
-- [ ] If strategy execution types changed: examples cover the new execution type
-- [ ] If watchlist/screener logic changed: examples cover the new capabilities
-- [ ] If scheduling/backtest logic changed: examples cover the new behavior
+- **(a) The contract names the files.** When the diff touches a file that the contract names as the project's chat-tool definition, executor or system-prompt file (in any section; the "Sentinel files to touch" line of a `## Chat Tool Impact` answer of "Yes" is one such place), raise a WARNING if neither the diff nor the contract covers training examples for the change.
+- **(b) The contract names none, but has an endpoint or event.** When the contract names no such file but its `## Integration Surfaces` names a REST endpoint or SignalR event, raise one WARNING that asks the author whether a changed file is one of those three files and, if so, whether training examples need an update.
+- **(c) Otherwise raise nothing.** This also holds when no contract is under review. Stating this limit is deliberate: the reviewer does not guess.
 
-**Flag as WARNING** (not blocking) — the `llm-training-engineer` agent should be launched to generate the missing data.
+Both findings are WARNINGs, never blocking. Suggest launching the project's model-training agent or skill, if it has one, to produce the missing examples.
 
 ## Multi-File Review Protocol
 

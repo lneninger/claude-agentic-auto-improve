@@ -3,7 +3,8 @@
 **Parent contract:** `.claude/concepts/2026-11-11-audit-followups-165.md`
 **Derived from:** noticed by the data-architect while verifying the template's "Chat Tool Impact" defect; not an Adjacent Areas scan (`.claude/area-mapping.json` holds no areas)
 **Date:** 2026-11-11
-**Status:** stub
+**Status:** superseded
+**Superseded by:** `.claude/concepts/2026-11-13-audit-followups-165-chores.md` (issue #354)
 **Estimated scope:** small
 **Issue:** #354
 

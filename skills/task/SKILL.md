@@ -439,7 +439,7 @@ Naming is identical for both shapes. Follows this repo's convention (`feature/rb
 4. **Git refuses to check out one branch in two worktrees.** One worktree per work item, and the directory name follows the convention below so `git worktree list` reads as a dated, classified list of in-flight items.
 5. **The stash stack is shared across worktrees.** A `git stash` in one tree is visible in all of them — never use the stash to move work between them.
 
-**Name the directory `<YYYYMMDD>-<action>-<slug>`** — written `<wt>` in the commands below. Both prefixes are required:
+**Name the directory `<YYYYMMDD>-<action>-<slug>`**, cut at a hyphen to at most 60 characters, with `-2` to `-9` added when the name is taken. Because of that cut and suffix, never rebuild the path from the folder name: `<plan path>` in the commands below is the plan's `path` from Step 1.5, read from the plan. Both prefixes are required:
 
 - **`<YYYYMMDD>`** — the date the worktree is cut, no separators (e.g. `20260822`). This is what makes `.claude/worktrees/` sort chronologically and makes a tree that has been sitting abandoned for weeks obvious on sight.
 - **`<action>`** — the main action the item performs: `feature`, `bug`, `infra` (others where none of those fit). Classify the *work*, not the file types it touches — a bug whose fix happens to add a migration is still `bug`.
@@ -464,7 +464,7 @@ If the two SHAs differ, the worktree was seeded from the wrong ref. Remove it an
 **Open the worktree in its own VS Code window.** The repository's `<project.name>.code-workspace` file — `project.name` is a slot in `.claude/project-profile.md` — is git-tracked, so the worktree checkout already placed a correct copy at the worktree root. Open **that** copy, never the parent tree's:
 
 ```bash
-code -n ".claude/worktrees/<wt>/<project.name>.code-workspace"
+code -n "<plan path>/<project.name>.code-workspace"
 ```
 
 `-n` forces a **new** window instead of reusing the current one, so the parent tree's window stays open beside it — which is the entire point of a parallel worktree.
@@ -472,14 +472,14 @@ code -n ".claude/worktrees/<wt>/<project.name>.code-workspace"
 **The copy works untouched, and there is an invariant that keeps it that way.** VS Code resolves each `folders[].path` against the directory holding the workspace file, so:
 
 - **Every folder INSIDE the repo is relative on purpose** — the repository root `.` and the `frontend.root-container` slot's directory among them. They follow whichever tree the file sits in, so in a worktree they resolve to *that* worktree. Never make these absolute; that is what would pin every copy back to the parent tree.
-- **Every folder OUTSIDE the repo must be absolute.** A relative `../sibling` resolves from `<repo>/.claude/worktrees/<wt>/`, where `..` is `.claude/worktrees/` — not the repo's parent. It silently renders as a missing folder. This is a real bug that was fixed on 2026-08-22: a sibling folder written as `../<sibling>` had to become its full absolute path.
+- **Every folder OUTSIDE the repo must be absolute.** A relative `../sibling` resolves from `<plan path>/`, where `..` is `.claude/worktrees/` — not the repo's parent. It silently renders as a missing folder. This is a real bug that was fixed on 2026-08-22: a sibling folder written as `../<sibling>` had to become its full absolute path.
 
 VS Code does **not** do variable substitution in `folders[].path`, so absolute is the only mechanism available for the outside-the-repo case. **Never hand-edit the workspace file inside a worktree** — it is tracked, so the edit rides along in every commit and pollutes the PR diff with machine-local paths. If a copy is wrong, fix the root file and let the correction reach worktrees through master.
 
 Verify a new tree's copy resolves before handing it off:
 
 ```bash
-py -3 -c "import json,pathlib,sys; h=pathlib.Path(sys.argv[1]); ws=json.load(open(next(h.glob('*.code-workspace')),encoding='utf-8')); [print(('OK   ' if (p if (p:=pathlib.Path(f['path'])).is_absolute() else h/p).exists() else 'BROKEN '), f['path']) for f in ws['folders']]" ".claude/worktrees/<wt>"
+py -3 -c "import json,pathlib,sys; h=pathlib.Path(sys.argv[1]); ws=json.load(open(next(h.glob('*.code-workspace')),encoding='utf-8')); [print(('OK   ' if (p if (p:=pathlib.Path(f['path'])).is_absolute() else h/p).exists() else 'BROKEN '), f['path']) for f in ws['folders']]" "<plan path>"
 ```
 
 **Lifecycle.** After `/ship` merges the PR, nothing is run by hand: Delivery cleanup (`cleanup_delivered.py`, run on every `/pr-merged` and `/advance` call) removes the worktrees and merged branches of a delivered work item. An abandoned worktree that was never delivered is removed with `git worktree remove <path>` alone, never with git's worktree `prune`.
