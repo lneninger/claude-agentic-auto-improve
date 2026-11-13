@@ -1,0 +1,26 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/401
+number: 401
+head_ref: feature/165-audit-followups
+base_ref: master
+base_is_default: true
+commit: 9b61b4af1438e67932baa822c95fa28ad79be324
+merged_at: '2026-11-13T10:00:03Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-13T11:42:22.578417+00:00'
+blocks_recorded: []
+blocks_already_recorded:
+- t1-task-skill-worktree-text
+- t2-flow-step-2-7-reference-move
+- t3-template-chat-tool-genericity
+- t4-debug-routing-to-shipped-agents
+- t5-memory-pager-absent-config
+- t6-registry-reads-in-agents-and-design-first
+- t7-memory-boundary-review-leftovers
+- t8-skill-test-count-text
+- t9-readme-counts-and-count-pins
+- t10-review
+- t12-review-remedy-f1-and-f2
+- t13-keep-rule-for-an-unavailable-outcome
+- t14-re-review

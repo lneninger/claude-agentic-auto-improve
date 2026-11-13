@@ -67,3 +67,6 @@ L: more than ten files across skills, an agent, a template, a hook, four manifes
 
 ## Routing
 non-trivial → /design-first (one block per skill file, per the stub's suggestion)
+
+## Run log
+- 2026-11-13: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/365, https://github.com/lneninger/claude-agentic-auto-improve/pull/367, https://github.com/lneninger/claude-agentic-auto-improve/pull/369, https://github.com/lneninger/claude-agentic-auto-improve/pull/371, https://github.com/lneninger/claude-agentic-auto-improve/pull/374, https://github.com/lneninger/claude-agentic-auto-improve/pull/377, https://github.com/lneninger/claude-agentic-auto-improve/pull/379, https://github.com/lneninger/claude-agentic-auto-improve/pull/381, https://github.com/lneninger/claude-agentic-auto-improve/pull/383, https://github.com/lneninger/claude-agentic-auto-improve/pull/386, https://github.com/lneninger/claude-agentic-auto-improve/pull/392, https://github.com/lneninger/claude-agentic-auto-improve/pull/394, https://github.com/lneninger/claude-agentic-auto-improve/pull/396, https://github.com/lneninger/claude-agentic-auto-improve/pull/401); contract 2026-11-11-audit-followups-165 flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed: none
