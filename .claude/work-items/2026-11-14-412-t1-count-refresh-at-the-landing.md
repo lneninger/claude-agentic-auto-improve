@@ -15,9 +15,9 @@ north_stars: inherited from .claude/work-items/2026-11-14-405-manifest-counts-la
 contract: .claude/concepts/2026-11-14-manifest-counts-landing-refresh.md
 parent_issue: 405
 base: feature/405-landing-time-manifest-count-refresh
-pr: pending
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/414
+issue_link: deferred
+status: shipped
 created: 2026-11-14
 ---
 
