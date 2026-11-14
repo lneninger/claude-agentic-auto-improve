@@ -44,6 +44,7 @@ import io
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import stat
@@ -53,6 +54,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 CLAUDE_DIR = Path(__file__).resolve().parents[2]
 HELPER = CLAUDE_DIR / "hooks" / "_protected_names.py"
@@ -1531,6 +1533,26 @@ class EqualCopiesTests(SecondRemedyCase):
                              % (text, a, b))
 
 
+    def test_R6_EQ_J_the_two_copies_resolve_a_junction_to_a_long_named_folder_to_equal_results(self):
+        """W2 (Revision 9): R6-EQ's inputs hold no link, so removing ``realpath`` from ONE copy (MT4-s2-h or MT4-s2-l) turned no row
+        red in the comparison. A junction ``O\\j`` -> the long-named ``O\\long-target`` (``O`` outside every root) makes the two
+        copies differ the moment one stops following links. The junction is a fixture: it is never skipped."""
+        if os.name != "nt":
+            self.skipTest("a junction exists only on Windows")
+        owned = self.root / "o-outside-every-root"
+        real_sub = owned / "a-rather-long-target-folder-name" / "sub"
+        real_sub.mkdir(parents=True)
+        link = _junction_or_fail(self, owned / "a-rather-long-target-folder-name", owned / "j")
+        copies = both_copies()
+        fns = [self.need(module, label, "comparable_path") for label, module in copies]
+        self.assertTrue(_local_spelling(link).endswith("a-rather-long-target-folder-name"),
+                        "control: the junction %s really leads to the long-named folder" % link)
+        for text in (str(link), str(link / "sub")):
+            a, b = (fn(text) for fn in fns)
+            self.assertEqual(a, b, "comparable_path(%r) is equal in the two copies (_protected_names gave %r, land_contract gave %r)"
+                             % (text, a, b))
+
+
 # -----------------------------------------------------------------------------------------------------
 # C7 / T3: the PATH walk from a linked worktree (the checker child, disk mode and --working-ref mode)
 # -----------------------------------------------------------------------------------------------------
@@ -1811,7 +1833,10 @@ class RealpathRouteTests(PathSpellingCase):
 
     def test_R8_G4_2_an_entry_spelled_through_the_roots_8_3_short_name_is_skipped_in_both_copies(self):
         short = short_path_name(self.excluded)
-        if short is None or os.path.normcase(short) == os.path.normcase(str(self.excluded)):
+        if short is None:
+            import ctypes  # noqa: WPS433 -- Windows only: short_path_name returns None here only on Windows
+            self.skipTest("the short-name call failed: %s" % ctypes.get_last_error())
+        if os.path.normcase(short) == os.path.normcase(str(self.excluded)):
             self.skipTest("no component of %s has a short name on this volume (8.3 names are off here), so there is no 8.3 "
                           "spelling of the root to test; R8-G4-1 alone carries MT4-s2-both. The volume setting is never changed."
                           % self.excluded)
@@ -1844,6 +1869,237 @@ class StatedResidualTests(PathSpellingCase):
                              "%s: R6-T4-R pins the stated residual of the Revision 6 threat model (another address of this "
                              "computer is not recognised). If a rule now covers it, change this row on purpose and say so in "
                              "that paragraph. comparable_path gave %r against the root %r" % (label, inner, outer))
+
+
+# -----------------------------------------------------------------------------------------------------
+# Block 27 (Revision 9, gate 26's findings G5, G6, W2): the link and spelling rows. Each row is TWO methods, -h (the helper,
+# _protected_names.py) and -l (land_contract.py), so a one-copy mutation names its copy.
+# -----------------------------------------------------------------------------------------------------
+def _local_spelling(path):
+    """The local drive spelling of ``path`` for comparing a returned program (Revision 9, decision 6). ``_norm`` keeps a
+    ``\\\\?\\`` prefix and spells a share link as ``\\\\localhost\\C$\\...``, so it cannot be used here. This has its own
+    regular expressions and never imports or calls either copy, so a mutation of a copy cannot change it."""
+    text = os.path.realpath(str(path))
+    text = re.sub(r"^\\\\\?\\UNC\\", r"\\\\", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\\\\[?.]\\(?=[A-Za-z]:)", "", text)
+    hosts = "|".join(re.escape(h) for h in ("localhost", "127.0.0.1", socket.gethostname()))
+    text = re.sub(r"^\\\\(?:%s)\\([A-Za-z])\$(?=\\|$)" % hosts, r"\1:", text, flags=re.IGNORECASE)
+    return os.path.normcase(text)
+
+
+def _drive_and_tail(path):
+    """(``C:``, ``C``, the folder tail without its leading and trailing backslash) of an absolute local path."""
+    drive, tail = os.path.splitdrive(str(path))
+    return drive, drive[:1], tail.strip("\\")
+
+
+def _junction_or_fail(case, target, link):
+    """A junction ``link`` -> ``target``, both test-owned. A junction that cannot be made is a fixture failure, never a skip: a
+    skip would leave the row's mutation guarded by nothing. The cleanup removes the LINK only, before any target or root."""
+    try:
+        import _winapi  # noqa: WPS433 -- Windows only, as the row
+        _winapi.CreateJunction(str(target), str(link))
+    except (ImportError, AttributeError, OSError) as exc:
+        case.fail("fixture failure: a junction %s -> %s cannot be created here (%s: %s)"
+                  % (link, target, type(exc).__name__, exc))
+    case.addCleanup(lambda: os.rmdir(str(link)) if os.path.lexists(str(link)) else None)  # the link only, never its target
+    return link
+
+
+class LinkSpellingTests(PathSpellingCase):
+    """R9-G5-* (C8, step 3 of ``comparable_path``) and R9-G6-* (C8, the written spelling), each in BOTH copies. Mutations
+    MT4-s3-h/-l/-both turn the G5 rows' -h/-l/both methods red and MRV-wp-h/-l/-both do the same for the G6 rows. Each control
+    is green at M4 and under the same mutation: the spelling under test reaches the planted program when no root contains it."""
+
+    def setUp(self):
+        super().setUp()
+        self.owned = self.root / "o-outside-every-root"
+        self.owned.mkdir()
+        self.planted_log = self.root / "planted-recorder.log"
+
+    def _plant_recorder(self, folder):
+        """The suite's planted git (``make_git_shim``, mode ``planted``) in ``folder``; the local path it was made at."""
+        return make_git_shim(folder, self.planted_log, mode="planted")
+
+    def _path_value(self, entry):
+        return os.pathsep.join([str(entry), os.path.dirname(self.git_exe)])
+
+    def _assert_returns_real_git(self, label, got, why):
+        self.assertIsNotNone(got, "%s: %s: a git was found (the real one, last on PATH)" % (label, why))
+        self.assertEqual(_local_spelling(got), _local_spelling(self.git_exe),
+                         "%s: %s: the entry lies inside the root once C8 is applied, so it is skipped and the real git is "
+                         "returned, not %r" % (label, why, got))
+
+    def _assert_returns_planted(self, label, got, planted, why):
+        self.assertIsNotNone(got, "%s: control: %s: a git was found" % (label, why))
+        self.assertEqual(_local_spelling(got), _local_spelling(planted),
+                         "%s: control: %s: the spelling under test reaches the planted program when no root contains it. "
+                         "Got %r" % (label, why, got))
+
+    def _fake_realpath(self, spelled_link, answer):
+        """A realpath that answers ``answer`` for ``spelled_link`` and calls the real function for every other input."""
+        real = os.path.realpath
+        calls = []
+        wanted = os.path.normcase(os.path.abspath(str(spelled_link)))
+
+        def fake(path, *args, **kwargs):
+            text = os.fspath(path)
+            calls.append(text)
+            if os.path.normcase(os.path.abspath(text)) == wanted:
+                return answer
+            return real(path, *args, **kwargs)
+        return fake, calls
+
+    def _symlink_or_skip(self, target, link):
+        try:
+            os.symlink(str(target), str(link), target_is_directory=True)
+        except (OSError, NotImplementedError, AttributeError) as exc:
+            self.skipTest("no symbolic-link privilege (%s: %s)" % (type(exc).__name__, exc))
+        self.addCleanup(lambda: os.rmdir(str(link)) if os.path.lexists(str(link)) else None)  # the link only, never its target
+
+    # -- G5: step 3 of comparable_path ------------------------------------------------------------------
+    def _g5_1(self, label):
+        module = dict(both_copies())[label]
+        resolved_root = os.path.realpath(str(self.excluded))
+        _, letter, tail = _drive_and_tail(resolved_root)
+        link = self.owned / "L"
+        self._plant_recorder(link)
+        answer = "\\\\localhost\\%s$\\%s\\x" % (letter, tail)
+        fake, calls = self._fake_realpath(link, answer)
+        with mock.patch("os.path.realpath", fake):
+            comparable = self.need(module, label, "comparable_path")(str(link))
+            got = self.need(module, label, "resolve_git")(self._path_value(link), [resolved_root])
+        self.assertTrue(any(os.path.normcase(os.path.abspath(c)) == os.path.normcase(str(link)) for c in calls),
+                        "%s: R9-G5-1: control: the patched realpath was called with %s (it is not bypassed)" % (label, link))
+        self.assertEqual(comparable, os.path.normcase(resolved_root + "\\x"),
+                         "%s: R9-G5-1: realpath answered %s for %s; step 3 of comparable_path strips the prefix, so the "
+                         "root's x folder through the admin share has the root's drive spelling" % (label, answer, link))
+        self._assert_returns_real_git(label, got, "R9-G5-1: the link resolves to the root's x folder through the admin share")
+
+    def _g5_1c(self, label):
+        module = dict(both_copies())[label]
+        resolved_root = os.path.realpath(str(self.excluded))
+        _, letter, tail = _drive_and_tail(os.path.realpath(str(self.owned)))
+        link = self.owned / "L"
+        planted = self._plant_recorder(link)
+        fake, calls = self._fake_realpath(link, "\\\\localhost\\%s$\\%s\\y" % (letter, tail))
+        with mock.patch("os.path.realpath", fake):
+            got = self.need(module, label, "resolve_git")(self._path_value(link), [resolved_root])
+        self._assert_returns_planted(label, got, planted, "R9-G5-1C: the link resolves outside every root through the share")
+
+    def _g5_2(self, label):
+        module = dict(both_copies())[label]
+        _, letter, tail = _drive_and_tail(os.path.realpath(str(self.excluded)))
+        self._plant_recorder(self.excluded / "x")
+        link = self.owned / "L"
+        self._symlink_or_skip("\\\\localhost\\%s$\\%s\\x" % (letter, tail), link)
+        if not os.path.isfile(os.path.join(str(link), shim_name())):
+            self.skipTest("admin share not reachable through a link")
+        got = self.need(module, label, "resolve_git")(self._path_value(link), [str(self.excluded)])
+        self._assert_returns_real_git(label, got, "R9-G5-2: a symbolic link to the root's x folder through the admin share")
+
+    def _g5_2c(self, label):
+        module = dict(both_copies())[label]
+        _, letter, tail = _drive_and_tail(os.path.realpath(str(self.owned)))
+        planted = self._plant_recorder(self.owned / "y")
+        link = self.owned / "L2"
+        self._symlink_or_skip("\\\\localhost\\%s$\\%s\\y" % (letter, tail), link)
+        if not os.path.isfile(os.path.join(str(link), shim_name())):
+            self.skipTest("admin share not reachable through a link")
+        got = self.need(module, label, "resolve_git")(self._path_value(link), [str(self.excluded)])
+        self._assert_returns_planted(label, got, planted, "R9-G5-2C: a symbolic link to a folder outside every root through the share")
+
+    # -- G6: the written spelling ---------------------------------------------------------------------
+    def _g6_fixture(self):
+        out = self.owned / "out"
+        planted = self._plant_recorder(out)
+        _junction_or_fail(self, out, self.excluded / "nm")
+        return planted
+
+    def _g6_1(self, label):
+        module = dict(both_copies())[label]
+        self._g6_fixture()
+        drive, _, tail = _drive_and_tail(self.excluded)
+        entry = "\\\\?\\%s\\%s\\nm" % (drive, tail)
+        got = self.need(module, label, "resolve_git")(self._path_value(entry), [str(self.excluded)])
+        self._assert_returns_real_git(label, got, "R9-G6-1: the junction %s\\nm leads out, but the entry is WRITTEN inside the root "
+                                                   "with a long prefix, so only the written spelling skips it" % self.excluded)
+
+    def _g6_1c(self, label):
+        module = dict(both_copies())[label]
+        planted = self._g6_fixture()
+        drive, _, tail = _drive_and_tail(self.owned)
+        entry = "\\\\?\\%s\\%s\\out" % (drive, tail)
+        got = self.need(module, label, "resolve_git")(self._path_value(entry), [str(self.excluded)])
+        self._assert_returns_planted(label, got, planted, "R9-G6-1C: the long-prefix entry names the folder outside every root")
+
+    def _g6_2(self, label):
+        module = dict(both_copies())[label]
+        self._g6_fixture()
+        _, letter, tail = _drive_and_tail(self.excluded)
+        entry = "\\\\localhost\\%s$\\%s\\nm" % (letter, tail)
+        if not os.path.isfile(os.path.join(entry, shim_name())):
+            self.skipTest("admin share not reachable")
+        got = self.need(module, label, "resolve_git")(self._path_value(entry), [str(self.excluded)])
+        self._assert_returns_real_git(label, got, "R9-G6-2: the junction reached through the admin share, written inside the root")
+
+    def _g6_2c(self, label):
+        module = dict(both_copies())[label]
+        planted = self._g6_fixture()
+        _, letter, tail = _drive_and_tail(self.owned)
+        entry = "\\\\localhost\\%s$\\%s\\out" % (letter, tail)
+        if not os.path.isfile(os.path.join(entry, shim_name())):
+            self.skipTest("admin share not reachable")
+        got = self.need(module, label, "resolve_git")(self._path_value(entry), [str(self.excluded)])
+        self._assert_returns_planted(label, got, planted, "R9-G6-2C: the share entry names the folder outside every root")
+
+    def test_R9_G5_1_a_link_resolving_to_the_root_through_a_share_is_skipped_h(self):
+        self._g5_1("_protected_names")
+
+    def test_R9_G5_1_a_link_resolving_to_the_root_through_a_share_is_skipped_l(self):
+        self._g5_1("land_contract")
+
+    def test_R9_G5_1_control_a_link_resolving_outside_every_root_through_a_share_is_returned_h(self):
+        self._g5_1c("_protected_names")
+
+    def test_R9_G5_1_control_a_link_resolving_outside_every_root_through_a_share_is_returned_l(self):
+        self._g5_1c("land_contract")
+
+    def test_R9_G5_2_a_symbolic_link_to_the_root_through_the_admin_share_is_skipped_h(self):
+        self._g5_2("_protected_names")
+
+    def test_R9_G5_2_a_symbolic_link_to_the_root_through_the_admin_share_is_skipped_l(self):
+        self._g5_2("land_contract")
+
+    def test_R9_G5_2_control_a_symbolic_link_outside_every_root_through_the_admin_share_is_returned_h(self):
+        self._g5_2c("_protected_names")
+
+    def test_R9_G5_2_control_a_symbolic_link_outside_every_root_through_the_admin_share_is_returned_l(self):
+        self._g5_2c("land_contract")
+
+    def test_R9_G6_1_a_long_prefix_entry_written_inside_the_root_over_a_junction_is_skipped_h(self):
+        self._g6_1("_protected_names")
+
+    def test_R9_G6_1_a_long_prefix_entry_written_inside_the_root_over_a_junction_is_skipped_l(self):
+        self._g6_1("land_contract")
+
+    def test_R9_G6_1_control_a_long_prefix_entry_outside_every_root_is_returned_h(self):
+        self._g6_1c("_protected_names")
+
+    def test_R9_G6_1_control_a_long_prefix_entry_outside_every_root_is_returned_l(self):
+        self._g6_1c("land_contract")
+
+    def test_R9_G6_2_a_share_entry_written_inside_the_root_over_a_junction_is_skipped_h(self):
+        self._g6_2("_protected_names")
+
+    def test_R9_G6_2_a_share_entry_written_inside_the_root_over_a_junction_is_skipped_l(self):
+        self._g6_2("land_contract")
+
+    def test_R9_G6_2_control_a_share_entry_outside_every_root_is_returned_h(self):
+        self._g6_2c("_protected_names")
+
+    def test_R9_G6_2_control_a_share_entry_outside_every_root_is_returned_l(self):
+        self._g6_2c("land_contract")
 
 
 # -----------------------------------------------------------------------------------------------------
