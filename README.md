@@ -54,16 +54,29 @@ see [Known limitations](#known-limitations) before mixing them.
 - **A delivery chain you start with one command.** `/flow` carries a request through intake, a design contract that you approve, test-first implementation, adversarial review, verification, a commit and a draft pull request. It stops only where a person has to decide.
 - **Gates that run in every Claude Code session.** The plugin registers them itself: the concept gate (no edit to a non-trivial file without an approved contract), the main-checkout guard, the architecture guard, the two database guards and the end-of-turn Changed-file check. See [What the plugin's hooks do](#what-the-plugins-hooks-do).
 - **Working agreements.** Standing rules about how the assistant works with you, delivered when a session starts. See [Working agreements](#working-agreements).
-- **Skills and agents.** The stages of the chain, the reviewers, the implementers and the one-time setup skills. See [What is included](#what-is-included).
+- **Skills and agents.** The stages of the chain, the reviewers, the implementers and the one-time setup skills. See [Plugin resources](#plugin-resources).
 - **A project history record.** Registries, concept contracts and work item briefs, committed in your repository. See [The Project history record](#the-project-history-record).
 - **Optional add-ons.** Stack-specific or stricter checks that you install per project. See [Managing optional add-ons and retired hooks](#managing-optional-add-ons-and-retired-hooks).
 - **Optional memory client and cloud engineering.** Both stay off until your project profile switches them on. See [Memory client and cloud engineering](#memory-client-and-cloud-engineering).
 
 ## Installation
 
-Installing the plugin has two parts, and both are on this page, in order. First you install it through your provider, which delivers the plugin's skills, agents and hooks. Then you finish the setup inside your project, which creates the files that describe *your* repository. When the checklist at the end of [Complete the installation in your project](#complete-the-installation-in-your-project) is ticked, you are ready to run `/flow`. You need nothing else from this README to get there.
+Installing the plugin has two parts, and both are on this page, in order. First you install it through your provider, which delivers the plugin's skills, agents and hooks. Then you run the install skills in your project: one is required and creates the files that describe *your* repository, and the others are conditional or optional. When the checklist at the end of this section is ticked, you are ready to run `/flow`. You need nothing else from this README to get there.
 
 This is the **plugin route**. Copying the assets into your repository instead is **vendoring**, a separate procedure described in [Quick start in a new project (vendoring)](#quick-start-in-a-new-project-vendoring). Do not combine the two.
+
+The section runs in this order: [Prerequisites](#prerequisites), [Install the plugin](#install-the-plugin), [Complete the installation with the install skills](#complete-the-installation-with-the-install-skills), [Verify the installation](#verify-the-installation), [Start using the plugin](#start-using-the-plugin), and the [completion checklist](#installation-is-complete-when).
+
+### Prerequisites
+
+| Requirement | Needed for | Detail |
+|---|---|---|
+| A supported provider | Everything | Claude Code gets the skills, the agents and the hooks. Cursor gets the skills and the agents, with no hooks. OpenAI Codex gets the skills only. See [What each provider actually gets](#what-each-provider-actually-gets) |
+| A git repository | `/flow` | The chain creates a worktree, commits and pushes, so run it in a git repository. A file with no `.git`, `CLAUDE.md`, `package.json`, `pyproject.toml` or `*.sln` anywhere on its path is outside every project, and the concept gate does not judge it |
+| A Python launcher | The hooks (Claude Code) and every script the skills run | The plugin's hook entries launch `py -3`, the Windows Python launcher. On macOS and Linux a plugin install cannot start them: see the platform note in [Verify the installation](#verify-the-installation). This repository states no minimum Python version |
+| The GitHub CLI (`gh`), signed in | Passing an issue number to `/flow`, and the draft pull request | Check with `gh auth status`; sign in with `gh auth login`. A free-text request works for intake without it |
+| The CodeGraph MCP server | The `codegraph` add-on only | The install skill refuses with `codegraph-mcp-not-configured` when the server is missing, has no command or url, or is listed as disabled. It does not check that the server is running |
+| Your own project | Every install skill | Run them in your project, not in the plugin's own checkout, where they refuse with `plugin-source-checkout` |
 
 ### Install the plugin
 
@@ -90,16 +103,18 @@ does not load a plugin's skills into the session that installed it.
 Run `/add-plugin` and give it this repository. Cursor reads the root `plugin.json`
 (the vendor-neutral Agent Plugins manifest) and `.cursor-plugin/plugin.json` beside it.
 
-### Complete the installation in your project
+### Complete the installation with the install skills
 
-The provider install gives you the plugin. It does not know your repository. These five steps finish the job. Follow them in order, in the project where you will use the plugin.
+The provider install gives you the plugin. It does not know your repository. The repository holds exactly five skills whose names end in `-install`, found by listing `skills/`. One is required. The others depend on what your project is or what you want. Run them in your project, in the order below.
 
-#### Step 1: Know what the install gave you and what stays yours
+Each install skill follows one pattern: it previews and writes nothing, shows you the exact change, asks before it writes, and writes only after your yes. How many questions it asks differs, and each skill's table below says which. A refusal always means nothing was changed. Each add-on install skill has a paired uninstall skill (see [Managing optional add-ons and retired hooks](#managing-optional-add-ons-and-retired-hooks)). The uninstall skills end in `-uninstall`, so they are not part of this sequence.
+
+#### What the install gave you and what stays yours
 
 | Layer | What it holds | Where it lives | Who keeps it current |
 |---|---|---|---|
 | **Plugin-owned** | The skills (the slash commands), the agents, the hooks and their registration, the working agreements, the scripts, the templates, the references and the Universal tier of the registries | The provider's plugin cache. For Claude Code that is `~/.claude/plugins/cache/auto-improve/agentic-auto-improve/<version>/`. It is **not** inside your repository | The plugin. A new version replaces it (see [Updating an installed plugin](#updating-an-installed-plugin)) |
-| **Project-owned** | `.claude/project-profile.md`, `.claude/area-mapping.json`, `.claude/work-item-conventions.json` and `.claude/.project-tokens.json`; your registries' project tier, your concept contracts (`.claude/concepts/`) and your work item briefs (`.claude/work-items/`) | Your repository's `.claude/` folder. Commit these files | You. Step 3 creates and fills them |
+| **Project-owned** | `.claude/project-profile.md`, `.claude/area-mapping.json`, `.claude/work-item-conventions.json` and `.claude/.project-tokens.json`; your registries' project tier, your concept contracts (`.claude/concepts/`) and your work item briefs (`.claude/work-items/`) | Your repository's `.claude/` folder. Commit these files | You. `/auto-improve-finish-install` creates and fills them |
 | **Optional add-ons** | Opt-in checks and rule documents | Files copied into your project, plus rows in your `.claude/settings.json` | You, through each add-on's own install and uninstall skills (see [Managing optional add-ons and retired hooks](#managing-optional-add-ons-and-retired-hooks)) |
 
 Three things follow from that table.
@@ -110,15 +125,65 @@ Three things follow from that table.
 
 Hooks are Claude Code only in this release. Cursor and OpenAI Codex receive the skills (and, on Cursor, the agents), not the hooks. [What each provider actually gets](#what-each-provider-actually-gets) has the full table.
 
-#### Step 2: Start a new session
+#### Start a new session
 
-Claude Code reads hook registrations once, when a session starts. A session that was already open during the install does not run the plugin's hooks. Start **one** new session in your project after installing, and run Step 3 in it. Step 3 writes project files only and registers nothing under a plugin install, so you need no second restart after it.
+Claude Code reads hook registrations once, when a session starts. A session that was already open during the install does not run the plugin's hooks. Start **one** new session in your project after installing, and run `/auto-improve-finish-install` in it. That skill writes project files only and registers nothing under a plugin install, so you need no second restart after it. The add-on install skills that write hook rows need a new session of their own.
 
 - **Claude Code:** start a new session after `/plugin install`.
 - **OpenAI Codex:** start a new session after installing from `/plugins`. Codex does not load a plugin's skills into the session that installed it. Codex runs no hooks, so nothing else needs a restart.
-- **Cursor:** this repository does not document or test Cursor's session behaviour. If `/auto-improve-finish-install` is not offered after the install, start a new session before Step 3. Cursor runs no hooks either.
+- **Cursor:** this repository does not document or test Cursor's session behaviour. If `/auto-improve-finish-install` is not offered after the install, start a new session before `/auto-improve-finish-install`. Cursor runs no hooks either.
 
-#### Step 3: Complete the project setup with `/auto-improve-finish-install`
+#### The install skills at a glance
+
+| Skill | Classification | Run it when | Needs first | Asks you | Next |
+|---|---|---|---|---|---|
+| `/auto-improve-finish-install` | **Required** | Once per project, first, in the new session | The plugin installed and loaded | Yes: one scaffolding question, then one confirmation per stage | The conditional and optional skills you want, then [Verify](#verify-the-installation) |
+| `/auto-improve-database-guard-install` | **Conditional**: your project has a database | After the required skill, by convention. It does not read the profile | The plugin installed | Yes: the names to protect, and a separate yes or no on a first install | A person runs the printed server-trigger line |
+| `/auto-improve-angular-tailwind-install` | **Optional**: Angular plus Tailwind projects | After the required skill | A project profile with a `review.documents` row, which the required skill writes | Yes: one confirmation, and which stylesheet | Build once if you added the stylesheet snippet |
+| `/auto-improve-codegraph-install` | **Optional** | Any time after the plugin install | The CodeGraph MCP server configured | Yes: one confirmation | Start a new session |
+| `/auto-improve-strict-shell-gate-install` | **Optional** | Any time after the plugin install | Nothing beyond the plugin | Yes: one confirmation, after it tells you what it gets wrong | Start a new session |
+
+**Why these classes.** Only `/auto-improve-finish-install` is required, because without a project profile the agents have no slot to read. `/auto-improve-database-guard-install` is conditional: it matters only when your project has a database, and skipping it leaves every database protected, which is strict but safe. The three add-on skills are optional. Each adds a capability you may choose, and none is enabled by default.
+
+**The order.**
+
+```
+install the plugin  ->  start a new session
+  |
+  +-- /auto-improve-finish-install              required, first
+        |
+        +-- /auto-improve-database-guard-install     conditional: the project has a database
+        +-- /auto-improve-angular-tailwind-install   optional: needs the profile the required skill writes
+        +-- /auto-improve-codegraph-install          optional: needs the CodeGraph MCP server
+        +-- /auto-improve-strict-shell-gate-install  optional
+  |
+  verify the installation  ->  /flow
+```
+
+- **Only one dependency exists.** `/auto-improve-angular-tailwind-install` needs the profile that `/auto-improve-finish-install` writes. The other three do not read the profile, so they could run earlier. Run them after the required skill anyway, so that one setup pass is finished before you add things.
+- **The three branches are independent of each other.** Choose by your project: a database, Angular and Tailwind, a CodeGraph server, or a wish for the early shell block.
+- **Run them one at a time.** `/auto-improve-codegraph-install` and `/auto-improve-strict-shell-gate-install` both write `.claude/settings.json`, and every add-on apply carries a plan hash that covers the settings bytes (the angular-tailwind one too, although it normally writes nothing there). Finish one skill before you start the next, or the second apply is refused as `changed-since-preview`.
+- **Answers you give.** The required skill asks the most: the scaffolding question, the profile table and any `needs-answer` slot, the project files and the tokens. The others each ask for one confirmation, plus the choices noted in the table.
+
+#### `/auto-improve-finish-install` (required)
+
+##### What it does, attribute by attribute
+
+| Attribute | Detail |
+|---|---|
+| Skill | `/auto-improve-finish-install` |
+| Classification | Required |
+| Purpose | Finishes what the plugin cannot copy for you: the project profile, the three files built from it, and the hook registration check (or, for a vendored copy, the registration itself) |
+| When to execute | Once per project, first, in the new session from [Start a new session](#start-a-new-session) |
+| Prerequisites | The plugin installed and loaded. Your project's folder, not the plugin's checkout |
+| Actions | Optional scaffolding by the doctor, then three stages: the project profile, the project files, and the hooks |
+| Files affected | The doctor's scaffold (listed below), `.claude/project-profile.md`, `.claude/area-mapping.json`, the `prTitle.map` and `prTitle.order` entries of `.claude/work-item-conventions.json`, `.claude/.project-tokens.json`. `.claude/settings.json` only for a vendored copy |
+| Confirmation | Yes: one scaffolding question, one confirmation for the profile table, one for the project files and tokens, a separate yes or no on the token narrowing, and, for a vendored copy only, one for the `settings.json` change |
+| Expected result | A profile with no placeholder slot, the three project files, the scaffold folders and templates, and a readiness report for the hooks |
+| Next step | The conditional and optional install skills you want, then [Verify the installation](#verify-the-installation) |
+| What it does not do | Install any add-on, name your protected databases (that is `/auto-improve-database-guard-install`), write `settings.json` under a plugin install, or set up the sync configuration (vendoring step 6) |
+
+##### How it runs
 
 ```
 /auto-improve-finish-install
@@ -142,11 +207,11 @@ It leaves `.claude/settings.json` alone.
 |---|---|---|
 | **1. Project profile** | Fills the placeholder slots of `.claude/project-profile.md` from evidence in your repository. Each slot is `inferred` (a marker was found), `needs-answer` (the script will not guess), `kept-authored` (you already wrote it) or `none-found` (it becomes `none`) | One confirmation of the whole table. It asks only about the `needs-answer` slots: the theme polarity of each frontend root, the safety-critical roots, which candidate folders are auth roots, and whether each local agent is an implementer, a review gate or neither |
 | **2. Project files** | From the profile, proposes `.claude/area-mapping.json`, the `prTitle.map` and `prTitle.order` entries of `.claude/work-item-conventions.json`, and `.claude/.project-tokens.json` | The diff for each file. The tokens to keep: only a token you name is ever written. A separate yes or no when the token list is still empty, because filling it changes how shared memory items are scoped. Any file you want skipped |
-| **3. Hooks** | Plugin install: prints a readiness report and writes nothing. Vendored copy: shows the `settings.json` change as a diff and writes it, with a backup, only after your yes | Under a plugin install, nothing. [Step 4](#step-4-verify-the-installation) explains the report |
+| **3. Hooks** | Plugin install: prints a readiness report and writes nothing. Vendored copy: shows the `settings.json` change as a diff and writes it, with a backup, only after your yes | Under a plugin install, nothing. [Verify the installation](#verify-the-installation) explains the report |
 
 The profile matters even under a plugin install. A generic agent cites a profile slot by name rather than a literal path, so every slot must be present, and an empty slot reads `none`. The profile is the only file you must author for the agents to be correct, and this skill drafts it for you.
 
-**It never guesses and never overwrites.** A slot you wrote, and a step-3 file you wrote, are never changed. If your value differs from what the script would propose, the skill shows both and leaves yours. Declining at any question writes nothing. Before Stage 2 replaces a file, it copies the old one into a backup folder under `.claude/cache/finish-install/` and prints the path. (Stage 1 rewrites only the placeholder slots of the profile, bound to the plan hash, and takes no backup. A vendored Stage 3 backs up `settings.json` beside it as `settings.json.bak-<UTC stamp>`.) If your `.gitignore` does not cover `.claude/cache/`, add it.
+**It never guesses and never overwrites.** A slot you wrote, and an area map, conventions or tokens file you wrote, are never changed. If your value differs from what the script would propose, the skill shows both and leaves yours. Declining at any question writes nothing. Before Stage 2 replaces a file, it copies the old one into a backup folder under `.claude/cache/finish-install/` and prints the path. (Stage 1 rewrites only the placeholder slots of the profile, bound to the plan hash, and takes no backup. A vendored Stage 3 backs up `settings.json` beside it as `settings.json.bak-<UTC stamp>`.) If your `.gitignore` does not cover `.claude/cache/`, add it.
 
 **You can run it again safely.** A second run changes nothing: authored slots and files stay as they are, and nothing is rewritten when everything is already present.
 
@@ -161,11 +226,97 @@ The profile matters even under a plugin install. A generic agent cites a profile
 
 **Commit what it created.** The registries, contracts and briefs are your project's design history, and the profile files are the team's shared configuration. Commit them. Never delete, gitignore or bypass the registries.
 
-**If your project has a database,** also run `/auto-improve-database-guard-install`. It finds the database names in your tracked configuration files, shows each with the file and line that names it, asks which to protect, and appends only those names to the guard's rules file. Until you do, the plugin's database guards treat every database as protected. That is strict on purpose, and naming your databases narrows it, so the skill asks a separate yes or no before it does. It never removes a name, and it prints the server-trigger line for a person to run.
+#### `/auto-improve-database-guard-install` (conditional)
 
-#### Step 4: Verify the installation
+Run it when your project has a database. Skip it, and the plugin's database guards treat every database as protected.
 
-Registration belongs to the plugin, so verifying only reads. Nothing here asks you to register a hook.
+| Attribute | Detail |
+|---|---|
+| Skill | `/auto-improve-database-guard-install` |
+| Classification | Conditional: your project has a database |
+| Purpose | Tells the database guards which databases in this project are protected. No copy of the guard names a database, so this puts your real names into the project's rules file |
+| When to execute | After `/auto-improve-finish-install`, by convention. It does not read the project profile, so the order is not enforced |
+| Prerequisites | The plugin installed. Tracked configuration files that use the `Database=` or `Initial Catalog=` connection-string form let it propose names. Otherwise you name them |
+| Actions | Finds database names and shows each with the file and line that names it. Leaves out names with a disposable suffix and `tempdb`. Asks which to protect, and whether a Testing-environment database exists (added only when you name it). Previews. On a first install it says plainly that the guard then stops writes only to the listed databases, and asks a separate yes or no. Appends the names. Prints the server-trigger line and its install command |
+| Files affected | `protected_databases` in `.claude/hooks/db-destructive-guard.rules.json`. A new file takes the names and the template's comment keys only. It never edits a `.sql` file, never runs a database command, and never removes, reorders or respells a name |
+| Confirmation | Yes: one confirmation of the names, and on a first install a second, separate yes or no for the narrowing |
+| Expected result | The names are in the rules file's working copy. They become the protected default-branch list once a pull request carrying them merges. After that no branch can shorten the list, because the Protected-name check compares each rules file with the default branch's |
+| Next step | A person runs the printed install command once per workstation, from PowerShell or cmd. The skill never runs it. Commit the rules file and merge it by pull request |
+
+#### `/auto-improve-angular-tailwind-install` (optional)
+
+Run it for Angular plus Tailwind projects. It installs no hook.
+
+| Attribute | Detail |
+|---|---|
+| Skill | `/auto-improve-angular-tailwind-install` |
+| Classification | Optional: suits only Angular plus Tailwind projects |
+| Purpose | Gives the project the Angular, Angular Material, Tailwind and UI-pattern rule documents that the architecture guard cites and the agents read |
+| When to execute | After `/auto-improve-finish-install` |
+| Prerequisites | A project profile with a `review.documents` row. Without one, the install stops with `profile-slot-missing` and writes nothing, not even the documents |
+| Actions | Previews, then copies four documents, appends their paths to the profile's `review.documents` slot, and, when you name a global stylesheet with `--stylesheet`, appends the scroll-edge snippet. It starts no program on any prompt, writes no hook file, and writes no row in a normal install |
+| Files affected | `.claude/references/angular-tailwind/` (four documents), the `review.documents` slot of `.claude/project-profile.md`, the stylesheet you name, and the helper `.claude/hooks/_project_paths.py` when the project lacks it. `.claude/settings.json` only when an old advisor row has to be retired: that takes two runs with a new session between them |
+| Confirmation | Yes: one confirmation after the preview. It also asks which stylesheet, offering the candidates it finds |
+| Expected result | The four documents are in place and listed in the profile. Running it again finds nothing left to write |
+| Next step | No new session is needed. If you added the snippet, run your project's build once, because Tailwind 4's `@apply` in it is checked by your build, not by the install |
+
+#### `/auto-improve-codegraph-install` (optional)
+
+Run it when you want a CodeGraph call to come first.
+
+| Attribute | Detail |
+|---|---|
+| Skill | `/auto-improve-codegraph-install` |
+| Classification | Optional |
+| Purpose | Blocks a source `Read`, `Grep` or `Glob` until CodeGraph has been used in the same turn (an `mcp__codegraph__*` tool call, a plain `codegraph` command, or a subagent dispatch), and lets reads through when CodeGraph is provably unavailable |
+| When to execute | Any time after the plugin install. It is independent of the other install skills |
+| Prerequisites | The CodeGraph MCP server configured, in your project's `.mcp.json` or your Claude configuration, and not disabled. The skill uses the plugin's installer only, so a plugin install is required |
+| Actions | Checks the server first. Previews the files, the exact `settings.json` diff and the permission entry. Copies the hook file, writes two rows, adds `mcp__codegraph__*` to `permissions.allow`, and offers to run `codegraph init -i` when there is no index. On an older install it updates unedited hook files in place and retires the old tracker and reset hooks in two runs |
+| Files affected | `.claude/hooks/codegraph-first-guard.py`, the helpers `_project_paths.py` and `_error_log.py` when missing, and `.claude/settings.json` (two rows and the permission entry), after a timestamped backup |
+| Confirmation | Yes: one confirmation, plus the offer to build an index, plus a new-session question when it retires old hooks |
+| Expected result | In a new session, a source read before any CodeGraph call is blocked with the guard's banner. Running it again changes nothing |
+| Next step | Start a new session. `addon --name codegraph --check` and `/verify-before-done` Step 5.8 can confirm the install later |
+
+#### `/auto-improve-strict-shell-gate-install` (optional)
+
+Run it only if you want the early block and accept its false alarms.
+
+| Attribute | Detail |
+|---|---|
+| Skill | `/auto-improve-strict-shell-gate-install` |
+| Classification | Optional |
+| Purpose | Reads each shell command before it runs and blocks a write into a source file that no approved contract covers |
+| When to execute | Any time after the plugin install. It is independent of the other install skills |
+| Prerequisites | Nothing beyond the plugin. It judges a write against your approved concept contracts |
+| Actions | Tells you plainly what it gets wrong before it asks: it can misread a command (it read `--stat` as the file written in `sed -i` followed by `git diff --stat`), it cannot see what a program such as `python` or `node` writes, and it costs a program start on every shell command. Then it previews, copies the hook and its helpers, and writes one row |
+| Files affected | `.claude/hooks/bash-gate.py`, the helpers `_project_paths.py`, `_shell_write_targets.py` and `.claude/scripts/_contract_index.py` when missing, and `.claude/settings.json` (one `PreToolUse` row on `Bash`), after a timestamped backup |
+| Confirmation | Yes: one confirmation, after you have heard the limits |
+| Expected result | In a new session, a shell command that writes to an uncovered source file is blocked. The Changed-file check stays on whatever you decide |
+| Next step | Start a new session |
+
+#### Review what the skills change
+
+- **Preview, then one yes.** Every install skill runs its script in preview mode first, and shows you the files it would copy, the exact diff, and any notes. Declining writes nothing.
+- **Plan hash.** The apply must carry the preview's plan hash. If anything moved in between, the apply is refused as `changed-since-preview` and you see a fresh preview. A refusal changes nothing.
+- **No overwrite of your edits.** An install skill never overwrites a file you edited, and never edits `settings.json` by hand. The one replacement is an unedited copy of an older release, which the `codegraph` install saves as `<hook>.bak-<UTC stamp>` first. Its backups are written as `settings.json.bak-<UTC stamp>`; add `.claude/settings.json.bak-*` to your `.gitignore`.
+- **Commit what they create.** The files an install skill writes are part of your project. Review the diff and commit them.
+- **Deeper detail.** The preview, the launcher rows, the helper files and the safety rules of the three add-on skills are in [Installing an add-on](#installing-an-add-on) and [Uninstalling an add-on](#uninstalling-an-add-on).
+
+### Verify the installation
+
+Verifying only reads. Check the project configuration first, then the hooks, then each optional skill you ran. Nothing here asks you to register a hook or overwrites your configuration.
+
+#### Project configuration
+
+Run `/auto-improve-finish-install` again. It is safe: it changes nothing that exists. Its doctor check lists what is still missing and, when nothing is, says so and asks nothing. By hand, look for these:
+
+- `.claude/project-profile.md` with no placeholder slot left (an empty slot reads `none`);
+- `.claude/area-mapping.json`, `.claude/work-item-conventions.json` and `.claude/.project-tokens.json`;
+- the folders `.claude/concepts/`, `.claude/work-items/`, `.claude/north-stars/` and `.claude/orchestrator/results/`, the template `.claude/templates/concept-contract.md`, and the registries under `.claude/registries/`.
+
+A profile that still has placeholder slots, a Stage 2 note such as `profile-has-placeholders`, or a file reported as `scaffold-missing` means initialization is incomplete. Run the required skill again and answer the questions you declined: see "If setup is incomplete" under [`/auto-improve-finish-install`](#auto-improve-finish-install-required).
+
+#### Hooks
 
 **On Claude Code,** run `/auto-improve-finish-install` again, which is safe, and read its hooks stage. Under a plugin install the stage gives you a readiness report, and the skill reads it out in plain words. Behind it are these fields. A healthy report shows:
 
@@ -192,7 +343,20 @@ Registration belongs to the plugin, so verifying only reads. Nothing here asks y
 
 **On Cursor and Codex,** hooks do not exist, so there is nothing to register or verify. `/auto-improve-finish-install` runs Stages 1 and 2 in full. Its hooks stage answers `provider-has-no-hooks` and writes nothing.
 
-#### Step 5: Start using the plugin
+#### Optional installs
+
+- **Every skill you ran:** run it again. Its preview should find nothing left to write (files `present` or `keep-existing`, no row to add).
+- **`/auto-improve-codegraph-install`:** `auto_improve_finish_install.py addon --name codegraph --check` is a read-only check of the permission entry and of hook freshness. It exits `0` when clean, `1` with findings, and `2` when it could not check.
+- **Any add-on:** `plugin_doctor.py --drift` compares the installed add-on files with the plugin's. It reads and never writes.
+- **Behaviour:** an add-on that registers a hook only acts in a new session. See each skill's "Expected result" above.
+
+#### Missing dependencies, duplicates and failures
+
+- **A missing dependency shows up as a named refusal:** `codegraph-mcp-not-configured` (no CodeGraph server), `profile-slot-missing` (no profile with a `review.documents` row), `project-hook-launcher-missing` (the project's hooks folder lacks the launcher), `plugin-source-checkout` (wrong folder). Each leaves everything unchanged.
+- **A duplicate registration** is reported by the hooks stage (`duplicate-vendored-registration`, or `install-mode-both`). Remove the registration on one side.
+- **An install that stopped half-way** writes hook files first and rows last, so the worst case is a file with no row, which does nothing. Run the skill again. For the rest, see [Recovery and troubleshooting](#recovery-and-troubleshooting) and the symptom table in [Troubleshooting](#troubleshooting).
+
+### Start using the plugin
 
 `/flow` is the front door. Give it an issue number, a link, or a sentence describing the work:
 
@@ -208,23 +372,286 @@ It runs the chain in order and pauses only where a person has to decide. The fir
 4. **Build and check.** Failing tests come first, then the code, then reviewer agents and the verification run.
 5. **Commit and pull request.** It asks before it commits and before it pushes. The pull request is a draft.
 
-No further setup is needed if Steps 1 to 4 are done, with one exception. If you pass an issue number, or want the draft pull request opened, the GitHub CLI must be installed and signed in (`gh auth status`; `gh auth login` if it is not). A free-text request works for intake without it. For work split across several sub-tasks, see [When a contract has several sub-tasks](#when-a-contract-has-several-sub-tasks).
+No further setup is needed if the install skills and the verification above are done, with one exception. If you pass an issue number, or want the draft pull request opened, the GitHub CLI must be installed and signed in (`gh auth status`; `gh auth login` if it is not). A free-text request works for intake without it. For work split across several sub-tasks, see [When a contract has several sub-tasks](#when-a-contract-has-several-sub-tasks).
 
-#### Installation is complete when
+### Installation is complete when
 
 - [ ] You installed the plugin through your provider and started a new session afterwards (Claude Code and Codex).
-- [ ] `/auto-improve-finish-install` finished Stages 1 and 2: `.claude/project-profile.md` has no placeholder slot left (an empty slot reads `none`), and `.claude/area-mapping.json`, `.claude/work-item-conventions.json` and `.claude/.project-tokens.json` exist.
-- [ ] The doctor's scaffold exists: `.claude/registries/`, `.claude/concepts/`, `.claude/work-items/` and `.claude/templates/concept-contract.md`. You committed the files.
-- [ ] Claude Code only: the hooks stage reported `mode: plugin` and `ready: true` with no failed check, and your `.claude/settings.json` registers none of the plugin's hooks.
+- [ ] **Required:** `/auto-improve-finish-install` finished Stages 1 and 2. `.claude/project-profile.md` has no placeholder slot left, and `.claude/area-mapping.json`, `.claude/work-item-conventions.json` and `.claude/.project-tokens.json` exist.
+- [ ] The doctor's scaffold exists (`.claude/registries/`, `.claude/concepts/`, `.claude/work-items/`, `.claude/templates/concept-contract.md`) and you committed the files.
+- [ ] **Conditional:** if your project has a database, you ran `/auto-improve-database-guard-install`, or you chose to keep every database protected.
+- [ ] **Optional:** for each of `/auto-improve-angular-tailwind-install`, `/auto-improve-codegraph-install` and `/auto-improve-strict-shell-gate-install` that you chose, the skill finished and a second run finds nothing left to write. Skills you did not choose are not part of the checklist.
+- [ ] Claude Code only: the hooks stage reported `mode: plugin` and `ready: true` with no failed check, and your `.claude/settings.json` registers none of the plugin's hooks. The only hook rows in it are your own and those of add-ons you chose.
 - [ ] Claude Code only: in a new session, an edit to a source file with no approved contract was blocked.
 - [ ] If you will pass issue numbers or open pull requests: `gh auth status` succeeds.
-- [ ] If your project has a database: you ran `/auto-improve-database-guard-install`, or you chose to keep every database protected.
 
-On Cursor and Codex the hooks items (the fourth and fifth) do not apply. When every item that applies is ticked, run `/flow`.
+On Cursor and Codex the hooks items (the sixth and seventh) do not apply. When every item that applies is ticked, run `/flow`.
 
-### Updating an installed plugin
+## Plugin resources
+
+What the plugin delivers once it is installed. The installation journey is complete without this section: read it to learn what you now have. It does not repeat the installation procedure, and links back to it. The folder tree of the repository is under [What is included](#what-is-included).
+
+### Skills
+
+A skill is a packaged set of instructions that you invoke as a slash command, or that another skill calls. They fall into four kinds by purpose. The catalogue below lists every skill by intent.
+
+| Kind | What it is for | Where it is documented in full |
+|---|---|---|
+| **Installation** (`*-install`) | Finish and extend the install in your project | [Complete the installation with the install skills](#complete-the-installation-with-the-install-skills) |
+| **Operational** | Carry work through the delivery chain | The chain diagrams below and [Using the chain day to day](#using-the-chain-day-to-day) |
+| **Specialized** | Domain knowledge that agents and skills load when the work needs it | Each skill's own `SKILL.md` |
+| **Maintenance** | Keep the registries, contracts, direction records and add-ons healthy | Each skill's own `SKILL.md` |
+
+**Installation skills.** `/auto-improve-finish-install` (required), `/auto-improve-database-guard-install` (conditional), `/auto-improve-angular-tailwind-install`, `/auto-improve-codegraph-install` and `/auto-improve-strict-shell-gate-install` (optional). Their full procedure, classification and order are in [Complete the installation with the install skills](#complete-the-installation-with-the-install-skills). This catalogue never replaces that section.
+
+**Operational skills: the delivery chain.**
+
+| Skill | What it does |
+|---|---|
+| `/flow` | Runs the whole chain in one invocation and pauses only where you must decide. The front door |
+| `/task` | Intake: turns an issue or a request into a work item brief, grades it, sizes it and opens a worktree |
+| `/design-first` | Produces the concept contract, resolves its open questions with you, and hands off with the contract as input |
+| `/tdd-first` | Writes failing tests first, confirms the red state, then has the implementer make them pass |
+| `/debug` | Four-phase debugging: reproduce, isolate, hypothesize, verify, before any fix is written |
+| `/verify-before-done` | Runs the verification gauntlet before anything is called done |
+| `/git-commit` | Commits staged changes safely, after verification, in the project's style |
+| `/ship` | Turns a finished work item into a pull request that GitHub links back to its issue |
+| `/advance` | Moves a contract forward by exactly one step, then stops |
+| `/pr-merged` | Closes one sub-task once its pull request merges, and works out what that releases |
+
+**Specialized capabilities.**
+
+| Skill | What it does |
+|---|---|
+| `/sql-server-patterns` | Injects SQL Server schema-design knowledge (partitioning, hierarchy modelling, SARGability, compression, temporal tables) before a schema is written |
+| `/cloud-engineering` | Cloud and infrastructure knowledge for Azure, AWS and Google Cloud with Terraform, Bicep, Docker and Kubernetes. Active only when `cloud.providers` is set |
+| `/website-design` | The design foundation for any page: theme polarity, the token bridge, contrast, keyboard and ARIA rules |
+| `/application-design` | The data-dense product-screen layer on top of the foundation: density, metric cards, badges, skeletons, real-time values |
+| `/angular-ui-rules` | The short Angular, Material and Tailwind rule list keyed by Rule ID, preloaded by the Angular agents. A rule skill, not a stage |
+| `/unit-testing` | How to write, run and report tests here, including the rule that every resource a test run creates is removed |
+| `/plan-questions` | A question-quality rubric for the questions asked in plan mode |
+
+**Maintenance skills.**
+
+| Skill | What it does |
+|---|---|
+| `/north-star` and `/north-star-review` | Capture a direction-setting thought as a north-star file, and review every active one against the live code |
+| `/list-contracts` | Shows every concept contract grouped by status and highlights what needs your action |
+| `/contract-accuracy` and `/critique-now` | Inspect the contract-critic accuracy-skip system, and run the critic on an approved or skipped contract on demand |
+| `/cross-impact` | Prints the top adjacent areas, with score breakdowns, for a contract or a list of files |
+| `/journal-add` and `/validate-registries` | Append a lesson to the journal, and scan the registries for dead references and structure problems |
+| `/promote-ui-rule` | Promotes a recurring UI mistake from the journal into an automated guard rule, behind a gate |
+| `/auto-improve-angular-tailwind-uninstall`, `/auto-improve-codegraph-uninstall`, `/auto-improve-strict-shell-gate-uninstall` | Remove an add-on. See [Uninstalling an add-on](#uninstalling-an-add-on) |
+
+#### Chain diagrams and setup notes
+
+A skill or agent that mentions a skill owned by another plugin follows the rule in
+[CONTRIBUTING.md](CONTRIBUTING.md) → "Referencing another plugin's skill".
+
+`auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
+skill, run once per project after the plugin is installed (see
+[Complete the installation with the install skills](#complete-the-installation-with-the-install-skills)). Its name carries the plugin's name
+because you may have several plugins installed. The three `auto-improve-*-install` add-on skills
+after it are not stages either: each installs one opt-in add-on, and its paired
+`auto-improve-*-uninstall` skill removes it (see [Managing optional add-ons and retired hooks](#managing-optional-add-ons-and-retired-hooks)).
+`auto-improve-database-guard-install` is a one-time setup skill too: it appends your project's own
+database names to the database guard's rules file (`protected_databases`), never removes one, and
+prints the server-trigger line for a person to run.
+`angular-ui-rules` is a rule skill, not a stage: the Angular agents preload it.
+
+The rest form one chain, and each stage hands the next a written artefact rather than a memory
+of the conversation:
+
+```
+/flow   the front door. Runs everything below, pausing only where you must decide.
+  |
+  +-- /task               Work Item Brief    .claude/work-items/
+  +-- /design-first       concept contract   .claude/concepts/   (you approve it)
+  +-- /tdd-first          failing tests first
+  +-- reviewers           adversarial critique
+  +-- /verify-before-done build, tests, drift    (blocks the word "done")
+  +-- /git-commit         the commits
+  +-- /ship               pull request, and a closing link GitHub actually resolved
+```
+
+When a contract declares more than one sub-task, the middle of that chain iterates
+instead of running straight through. Each sub-task ends in a pull request somebody
+has to merge, so it moves one step at a time:
+
+```
+/advance      start what is ready, open a pull request, stop
+(you merge)   the only step in the whole chain a machine cannot take
+/pr-merged    confirm with GitHub, record it, say what that released
+              -> /advance again
+```
+
+Neither half loops. A person merging is what joins them.
+
+### Agents
+
+An agent is a specialist the assistant dispatches for one kind of work. The plugin's agents are dispatched as `agentic-auto-improve:<name>`, and the bare name is for a project that carries its own `.claude/agents/<name>.md`. Skills dispatch them at fixed points in the chain, so you rarely invoke one yourself. You can also ask for one by name, for example a code review. Cursor receives the agents, and OpenAI Codex does not.
+
+| Agent | Responsibility | Dispatched when |
+|---|---|---|
+| `data-architect` | Designs the data and mechanism model and writes the concept contract. Never writes production code | `/design-first`, first on any non-trivial task |
+| `contract-critic` | Attacks the draft contract before you see it | `/design-first`, before approval |
+| `senior-test-engineer` | Writes the failing tests first. Never writes production code | `/tdd-first` |
+| `dotnet-backend-architect`, `angular-senior-dev`, `python-ai-developer` | Implementers. They write production code after a failing test exists | `/tdd-first` and `/flow` pick the implementer your project installs. `/flow` names these three, and a project may add its own |
+| `fullstack-code-reviewer` | Adversarial review of production code, and janitor of the registries | After implementation, from `/flow` |
+| `test-strategy-critic` | Judges whether the tests are worth having | After the tests are written, from `/flow` |
+| `security-auditor`, `migration-safety-reviewer`, `api-contract-reviewer`, `sql-performance-reviewer` | Domain reviewers for authentication, migrations, API contracts and queries | When the diff touches their ground |
+| `ui-ux-designer` | Visual design, layout and accessibility of the Angular frontend | For UI work |
+| `registry-scout` | Returns only the registry entries that bear on a task, from the generated digest | When an agent needs registry context without reading it all |
+| `cloud-engineer` | Cloud and infrastructure work. Never runs a live-changing command; writes it out for you to run | Only when `cloud.providers` is set |
+
+The contract is authoritative for the implementers: they do not redesign data shapes, and a disagreement with the contract goes to you.
+
+### Hooks
+
+A hook is a program that Claude Code runs on an event, and its exit code can stop the action. Hooks are Claude Code only in this release.
+
+- **Default hooks** are registered by the plugin's own `hooks.json` and run in every session that starts while the plugin is enabled. Most gate an edit or a shell command. A few only add text or a reminder. [What the plugin's hooks do](#what-the-plugins-hooks-do) lists each one, its event, its matcher and whether it blocks.
+- **Automatic behaviour:** the concept gate, the main-checkout guard, the architecture guard, the database guards and the end-of-turn Changed-file check need nothing from you after the install.
+- **Opt-in hooks** come only from add-ons you install: the code-search-first guard (`codegraph`) and the strict shell gate (`strict-shell-gate`). See [Managing optional add-ons and retired hooks](#managing-optional-add-ons-and-retired-hooks).
+- **Validating actual execution.** A readiness report proves the hooks are ready to load, not that your session loaded them. The proof is the first-session test in [Verify the installation](#verify-the-installation): an edit with no approved contract is blocked.
+
+#### File accounting and registration
+
+concept-gate, architecture-guard, db-destructive-guard,
+db-research-readonly-guard, memory-pager, working-agreements, post-edit-dispatcher, and the
+four checks the dispatcher runs: integration-check, critic-verdict-tracker,
+contract-status-watcher, journal-post-approval-tracker. Since 0.9.8 also plan-question-advisor
+and stop-dispatcher. Since 0.18.4 also protected-names-warning. That is fourteen hook files. The
+Changed-file check the Stop dispatcher runs
+is not a hook file: it is the script
+`.claude/scripts/concept_changed_check.py`. Beside the hook files
+sit the gate launcher `gate-launch.py` and the shared helpers `_error_log.py`, `_gate_launch.py`,
+`_memory_common.py`, `_project_paths.py`, `_main_checkout_guard.py`, `_shell_write_targets.py`
+(the shell parser the guard reads write targets with), `_protected_names.py` (the Protected-name
+check's logic) and
+`_inprocess_hook.py` (the dispatchers' in-process runner), and the generic data files
+`architecture-guard.rules.json`, `architecture-guard.exceptions.json`,
+`integration-check.rules.json`,
+`db-destructive-guard.rules.json` and `working-agreements.rules.json`.
+
+All fourteen hook files are accounted for in `.claude/hooks/hooks.json`, which the Claude
+manifest references: nine are registered there directly (`concept-gate.py` through the gate
+launcher), four are named in the post-edit dispatcher's constant list and one
+(`protected-names-warning.py`) in the Stop dispatcher's list, which also names the Changed-file
+check script.
+That makes thirteen registrations: the nine files registered directly make nine entries, plus
+two more for `db-destructive-guard.py` (three matchers in all), one more for
+`db-research-readonly-guard.py` (two matchers) and one more for the gate launcher (two matchers),
+while the four post-edit checks share one dispatcher row. The file plus those lists are the single registration point:
+adding a hook without adding it to one of them ships a file nothing runs, and a test
+(INV-8 in `test_plugin_manifests.py`) fails on it.
+
+**A hook keeps its per-project settings in a `<hook-name>.rules.json` file beside it**, so the
+hook body names no project. Those files ship as templates carrying deliberately fictional
+placeholder values. They are not safe defaults, and a guard is only as correct as the file you
+replace them with. A hook running from the plugin reads your project's copy in
+`<project>/.claude/hooks/` first, and the advisory hooks fall back to the template. The database
+guards never fall back to it (see [What the plugin's hooks do](#what-the-plugins-hooks-do)).
+
+**The fail direction is per hook and is stated in each rules file.** A hook that BLOCKS
+fails **closed** when its rules file is missing or empty: `db-destructive-guard.py` with no
+protected database names treats every database as protected. A hook that only WARNS may fail
+soft: `integration-check.py` with no markers warns about nothing.
+Never copy the soft choice to a guard that blocks.
+
+### Working agreements
+
+A working agreement is one standing rule about how the assistant works with you, written in
+plain words in its own markdown file. When a session opens, `working-agreements.py` reads
+the files and hands their text to the assistant before its first reply. The plugin ships seven
+in `.claude/agreements/`: plain language, one worktree per change, shared repository changes
+through pull requests, one-line commands for the user, stop means stop,
+recommendations instead of question batches, and use the project history record. The
+seventh tells the assistant that the registries and the concept contracts are the project's
+memory and design history, to be read and used, and that a central memory system, when a
+project switches one on, only supplements them (see
+[Memory client and cloud engineering](#memory-client-and-cloud-engineering)).
+
+- **Add your own** by writing a markdown file in your project's `.claude/agreements/`. The
+  first line is a level-one heading, and some text follows it. Project files arrive after the
+  shipped ones and are labelled "from this project". Every line of a project agreement is
+  shown quoted, so project text cannot pose as a shipped section.
+- **You cannot replace a shipped one.** A project file with the same name as a shipped file
+  is skipped, and the skip is logged.
+- **Project instructions and skill gates win.** The assistant is told that your project's own
+  instructions, and any skill step that requires asking you, win over every agreement.
+- **A size limit applies.** `working-agreements.rules.json` sets it, 9000 characters by
+  default, counted in UTF-16 units as the host counts. Whole agreements are dropped, project
+  ones first. The closing line names at most three dropped agreements with their paths, then
+  gives a count per folder; the log names every dropped agreement. The shipped plain-language
+  agreement is never dropped. A project file that links outside its folder, or is larger than
+  four times the limit, is skipped without being read in full.
+- **One dispatch rule travels with the opening paragraph.** `working-agreements.rules.json`
+  carries a `dispatch_rule` text: a subagent the plugin ships is dispatched as
+  `agentic-auto-improve:<name>`, and the bare name is for a project that carries its own
+  `.claude/agents/<name>.md`. Empty or missing, it adds nothing.
+- **Plugin installs only.** A vendored copy of the hook prints nothing in this version.
+- **Guidance, not a check.** Nothing blocks when an agreement is ignored. A new agreement
+  takes effect in the next session. Switch the hook off with `CLAUDE_WORKING_AGREEMENTS=off`.
+
+### MCP integrations
+
+The plugin ships no MCP server and no `.mcp.json`. It works with three MCP servers that you configure yourself, and each is optional.
+
+| Integration | Role | Dependency and configuration |
+|---|---|---|
+| **CodeGraph** | The code-search-first guard asks CodeGraph a question before a source read | Needed only by the `codegraph` add-on. The server must be named `codegraph` and configured in your project's `.mcp.json` or your Claude configuration. The install adds `mcp__codegraph__*` to `permissions.allow` |
+| **Central Memory System** | Retrieves past engineering knowledge at design time, and captures confirmed lessons after delivery | Off until the `memory.*` slots of your project profile switch it on. Called from the main session only, never from a subagent. See [Memory client and cloud engineering](#memory-client-and-cloud-engineering) |
+| **Cloud-management server** | None yet | The `cloud.mcp-server` profile slot exists, but no adapter reads it and nothing calls it |
+
+### Project configuration
+
+These files describe your repository, so the plugin cannot ship them. The install skills create and fill them, as the installation section shows.
+
+| File or folder | Purpose | Created by |
+|---|---|---|
+| `.claude/project-profile.md` | The slots the agents read by name: roots, theme polarity, review documents, implementers, review gates, memory and cloud settings. The only file you must author | The doctor scaffolds it. `/auto-improve-finish-install` fills it |
+| `.claude/area-mapping.json` | Maps changed paths to areas for the contract-critic accuracy system | The doctor scaffolds it. The required skill proposes it |
+| `.claude/work-item-conventions.json` | Issue and pull request title conventions shared by `/task` and `/ship`. Its `contractLanding` block starts empty, and your project fills it in before a parent branch can land | The doctor scaffolds it. The required skill proposes `prTitle.map` and `prTitle.order` |
+| `.claude/.project-tokens.json` | Project-name tokens that the sync and the memory sharing rule keep out of shared material | The doctor scaffolds it. The required skill proposes tokens, and writes only those you name |
+| `.claude/registries/`, `.claude/concepts/`, `.claude/work-items/`, `.claude/north-stars/`, `.claude/orchestrator/results/` | The project history record: registries, contracts, briefs, direction thoughts and completion records | The doctor |
+| `.claude/hooks/db-destructive-guard.rules.json` | The databases the guards protect | `/auto-improve-database-guard-install` |
+| `.claude/agreements/` | Your own working agreements, shown after the shipped ones | You |
+| `.claude/hook-registration-profile.json` | The hook rows you expect, for the registration check | `record-registrations`. See [Checking your hook registrations](#checking-your-hook-registrations) |
+| `.claude/settings.json` | Your hooks and the rows of add-ons you installed. Holds none of the plugin's hooks | You, and the add-on install skills |
+
+### Scripts and templates are not optional
+
+The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, the skills that run
+scripts cite them in `.claude/scripts/`, and every concept contract is a copy of
+`templates/concept-contract.md`. The contract sub-task loop is the newest of these:
+`pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
+both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
+`scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
+unfilled `implementers` slot would otherwise walk into. The finish-install script,
+`auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
+and `scripts/tests/test_auto_improve_finish_install.py` holds its 601 cases. `scripts/tests/test_script_path_resolution.py` is the
+182-check suite for the two-layer path resolver. Shipping the resolver without its suite
+would ship the part that can be wrong and leave behind the part that would say so.
+
+## Updating an installed plugin
 
 This section covers the **plugin**. Add-ons you installed in a project are updated separately (see [Updating an installed add-on](#updating-an-installed-add-on)), because a plugin update never touches them.
+
+Three jobs can follow a release, and they are separate. Do only the ones you need.
+
+| Job | What it changes | When you need it | How |
+|---|---|---|---|
+| **Update the plugin** | The plugin-owned assets in the provider's cache | When a new version is released | The commands below, then a new session |
+| **Re-run project initialization** | Your profile and project files, only where they are still placeholders | Rarely: when a release adds a profile slot, or you declined a question earlier | `/auto-improve-finish-install`. It is safe to repeat |
+| **Update an installed add-on** | The add-on files and rows already copied into your project | Only if you installed that add-on and want its newer files | [Updating an installed add-on](#updating-an-installed-add-on) |
+
+**Do you have to re-run any install skill after a plugin update? No, not by default.** The implementation does not require it. A plugin update does not touch your project, so `/auto-improve-finish-install`, `/auto-improve-database-guard-install` and the add-on skills stay as you left them. Re-run one only for a stated reason:
+
+- `/auto-improve-finish-install`: a release added a profile slot (its preview lists it under `rows-to-add`).
+- `/auto-improve-codegraph-install`: you want the newer guard. `/verify-before-done` Step 5.8 reports a project whose codegraph hook is older than the plugin's.
+- `/auto-improve-database-guard-install`: only to add database names, which is not an update.
+- The other add-on skills: see [Updating an installed add-on](#updating-an-installed-add-on).
 
 **Claude Code.** A merged change reaches a running session only when the plugin's version number
 changes. Sessions run the hooks from the versioned install cache, at
@@ -247,12 +674,11 @@ copy. (For maintainers: the version is declared in five places, and all five mus
 **After the update:**
 
 - **Start a new session.** Hooks are read when a session starts, so the running session keeps the old ones.
-- **Your project configuration is not regenerated.** A plugin update replaces plugin-owned assets in the cache. Your profile, your step-3 files, your registries, contracts and briefs stay exactly as they are.
-- **You do not have to run `/auto-improve-finish-install` again.** Running it is safe, because it changes nothing that you wrote. It is useful when a release adds a profile slot: its preview lists any row your profile lacks (`rows-to-add`), and it never changes a slot you wrote.
+- **Your project configuration is not regenerated.** A plugin update replaces plugin-owned assets in the cache. Your profile, your area map, conventions and tokens files, your registries, contracts and briefs stay exactly as they are.
 - **Add-ons stay as they were.** Their files and `settings.json` rows were copied into your project, and the plugin update does not rewrite them.
 - **Validate the update.** Search the cache folder (not the marketplace clone) for the new version's folder. Then run `/auto-improve-finish-install` and read its hooks stage: a failed `version-matches-marketplace` check means the installed copy and the marketplace clone differ.
 
-### Managing optional add-ons and retired hooks
+## Managing optional add-ons and retired hooks
 
 This section is the reference for the whole life of an add-on: choosing one, installing it, updating it, removing it, and recovering when something goes wrong. It also keeps the history of the hooks that were retired, and says which of them can be brought back.
 
@@ -267,7 +693,7 @@ Four kinds of hook exist, and the difference matters when you read a `settings.j
 | **Retired hooks** (disabled) | `angular-tailwind-advisor.py`, `codegraph-turn-tracker.py` and `codegraph-turn-reset.py` | Nothing. No install copies or registers them | The files still ship in the add-on folders. Only a project with an older install still carries them |
 | **Removed** | `plain-language-guard.py` (removed in 0.9.20) | Nothing | Gone. [Removed in 0.9.20](#change-notes-by-version) says how to take out a vendored copy |
 
-#### Available add-ons
+### Available add-ons
 
 | Add-on | Assets / hook files | Functionality | Why it is opt-in | Install command | Uninstall command |
 |---|---|---|---|---|---|
@@ -284,9 +710,9 @@ Notes that apply to all three:
 - **`codegraph` in detail.** The install stops with a plain message (`codegraph-mcp-not-configured`) when the CodeGraph MCP server is not configured, has no command or url, or is listed as disabled. It does not check that the server is running. See [When CodeGraph is unavailable](#when-codegraph-is-unavailable) below.
 - **`strict-shell-gate` in detail.** Its reasons to stay opt-in are measured. The parser read `--stat` as the file written in `sed -i` followed by `git diff --stat`, and blocked a correct command. It sees only the command line, so it cannot see what `python script.py` or `node build.js` writes. The Changed-file check, which stays on whatever you decide, catches those writes after the fact. Choose this add-on only if you want the early block and accept the false alarms.
 
-#### Installing an add-on
+### Installing an add-on
 
-1. **Choose.** Use the table above. Each add-on stands alone, and none installs another. Before an add-on that writes to the project profile (`angular-tailwind`), finish [Step 3](#step-3-complete-the-project-setup-with-auto-improve-finish-install) of the installation, or the install stops with `profile-slot-missing` and writes nothing.
+1. **Choose.** Use the table above. Each add-on stands alone, and none installs another. Before an add-on that writes to the project profile (`angular-tailwind`), run [`/auto-improve-finish-install`](#auto-improve-finish-install-required) first, or the install stops with `profile-slot-missing` and writes nothing.
 2. **Invoke its install skill** from your project, for example `/auto-improve-strict-shell-gate-install`. The skill finds the installer script itself. `codegraph` uses the plugin's copy only, because a vendored installer can be older than the hooks it manages. The other two look for a vendored copy in your project first and then for the plugin's.
 3. **Read the preview.** The skill runs `auto_improve_finish_install.py addon --name <add-on> --project .`, which writes nothing, and shows you in plain words: each file it would copy and the action for it (`copy`, `present`, `update` or `keep-existing`); the exact `unified-diff` of `.claude/settings.json` and how many rows it adds; the profile change and the stylesheet change, for `angular-tailwind`; the permission entry, for `codegraph`; any notes; and that the add-on has no kill switch. For `strict-shell-gate` it first reads you what it gets wrong. It then asks **one** question. A no writes nothing.
 4. **What your yes approves.** Exactly the bytes in that preview, and no more. The apply carries the preview's plan hash, so if a file or the plugin's copy changed since you looked, the apply is refused as `changed-since-preview` and you see a new preview.
@@ -298,14 +724,14 @@ Notes that apply to all three:
 
 Refusals leave everything as it was. The ones you may meet: `addon-file-differs` (a file of the add-on exists in your project and differs; compare it with the plugin's copy, then follow [Recovery and troubleshooting](#recovery-and-troubleshooting)), `disabled-hook-present`, `changed-since-preview`, `write-failed` (for example `.claude/settings.json` is a symbolic link; edit the file the link points to by hand, or replace the link with a real folder), `project-hook-launcher-missing` and `addon-unknown`.
 
-#### Updating an installed add-on
+### Updating an installed add-on
 
 A plugin update does not change the add-on files in your project, and the add-on skills do not update themselves. How an add-on is updated depends on the add-on.
 
 - **`codegraph`:** re-run `/auto-improve-codegraph-install`. A hook file that is an unedited copy of an older release is saved as `<hook>.bak-<UTC stamp>` and replaced. A missing row is added. A row is never rewritten: when a registered row differs from the manifest's (its `if`), `addon --name codegraph --check` reports `addon-row-outdated`, and the route is `/auto-improve-codegraph-uninstall` and then the install again. `addon --name codegraph --check` and `/verify-before-done` Step 5.8 name an outdated hook. Moving a project from a release before 0.17.0 takes two runs with a new session between them; see [Retired hooks and restoration](#retired-hooks-and-restoration). A project that records its hook registrations must re-record them afterwards (see [Checking your hook registrations](#checking-your-hook-registrations)), because the row count can change.
 - **`strict-shell-gate` and `angular-tailwind`:** the plugin keeps no list of their earlier releases, so a file in your project that differs from the plugin's copy is refused as `addon-file-differs`. Compare it with the plugin's copy and move any edits of yours over. Then run the uninstall skill, which keeps a file that differs. Remove the old file by hand and run the install skill again. For `strict-shell-gate`, start a new session after the uninstall and before you delete the file, because the open session still holds the row, and a row whose file is missing stops every shell command.
 
-#### Uninstalling an add-on
+### Uninstalling an add-on
 
 Run the add-on's uninstall skill, for example `/auto-improve-codegraph-uninstall`. It runs `auto_improve_finish_install.py addon-remove --name <add-on>`. It previews every row, file and profile entry it would change, asks **once**, and writes only after your yes. The safety rules are these:
 
@@ -323,7 +749,7 @@ Run the add-on's uninstall skill, for example `/auto-improve-codegraph-uninstall
 
 If `settings.json` is too irregular to edit safely, the skill refuses (`malformed-settings` or `unexpected-settings-shape`), writes nothing, and names the file. Remove the add-on's rows by hand, then run the skill again.
 
-#### Retired hooks and restoration
+### Retired hooks and restoration
 
 **What happened, in order.**
 
@@ -354,7 +780,7 @@ For one project, the quick route is `/auto-improve-codegraph-uninstall` and a ne
 
 Until step B has run, `plugin_doctor.py --drift` reports the leftover files as `disabled-hook-installed`. They do nothing. The install is refused as `disabled-hook-present` (nothing written) when a row for a retired hook is in `.claude/settings.local.json`, or when step A finds an edited copy of a hook whose row it would remove. Run the add-on's uninstall skill in those cases, because it keeps an edited file.
 
-#### Recovery and troubleshooting
+### Recovery and troubleshooting
 
 **Which situation are you in?**
 
@@ -371,7 +797,7 @@ Until step B has run, `plugin_doctor.py --drift` reports the leftover files as `
 
 The scripts never overwrite a file that differs and never rewrite a row, so none of these routes silently replaces your configuration.
 
-##### Ways out when a hook cannot run
+#### Ways out when a hook cannot run
 
 In normal operation the uninstall skill is the way out. When an add-on's hook cannot run, its row
 has to come out of `.claude/settings.json` by hand. Which route works depends on which hook fails.
@@ -388,7 +814,7 @@ The table describes rows in the earlier form, which name the file directly. A la
 | `codegraph-turn-reset.py` is missing (a project still on 0.16.x, before step A of the 0.17.0 upgrade) | with a launcher row, a warning on `UserPromptSubmit`; with a plain row written before the launcher, Python's error, so every prompt is blocked | edit `.claude/settings.json` outside the session, in an editor, or run `/auto-improve-codegraph-install` in a new session |
 | `codegraph-turn-tracker.py` is missing (the same projects) | an error after each CodeGraph call; its marker is not read by a 0.17.0 guard, so nothing else changes | as for a missing `codegraph-first-guard.py` |
 
-##### When CodeGraph is unavailable
+#### When CodeGraph is unavailable
 
 A session with no `mcp__codegraph__*` tool is not a failure of the hook. Since 0.15.2 the guard
 lets the read through when it can prove CodeGraph is unavailable (no index, no configured server,
@@ -401,7 +827,7 @@ or `codegraph init -i`.
 
 > **This section is for vendoring. It is not how you install the plugin.** If you installed the
 > plugin through a provider, do not follow these steps: your procedure is
-> [Complete the installation in your project](#complete-the-installation-in-your-project).
+> [Complete the installation with the install skills](#complete-the-installation-with-the-install-skills).
 > Following both would put plugin-owned files in your repository and register the plugin's hooks
 > twice.
 >
@@ -415,12 +841,14 @@ absent, and your project keeps them. The two routes differ like this:
 |---|---|---|
 | How the assets arrive | Through the provider's plugin mechanism. Skills, agents and hooks stay in the plugin cache | You copy them into your repository's `.claude/` |
 | Hooks | Registered by the plugin's own `hooks.json`. Your `settings.json` registers none of them | You register them in `.claude/settings.json`. `/auto-improve-finish-install` shows the exact change and writes it after your yes |
-| Project configuration | `/auto-improve-finish-install` | The same skill, after the copy steps below |
+| Project configuration | `/auto-improve-finish-install`, then the conditional and optional install skills you choose | The same skill, after the copy steps below |
 | Who maintains the files | The plugin. A new version replaces its assets | Your project, locally. You can edit them in place and sync them back (see [Ownership and direction](#ownership-and-direction)) |
 | Updates | [Updating an installed plugin](#updating-an-installed-plugin) | Your sync workflow, configured in `.claude/.sync-config.json` (see step 6 and [CONTRIBUTING.md](CONTRIBUTING.md)) |
 | What not to do | Copy plugin-owned files into your project, or register the plugin's hooks by hand | Register a hook that a plugin install also registers (it would run twice), or point a hook command at this checkout (see step 5) |
 
 The two routes are not yet reconciled; see [Known limitations](#known-limitations) before mixing them.
+
+**The install skills and a vendored copy.** The three add-on install skills find their installer script themselves. The `codegraph` install and uninstall skills use the plugin's copy only, because a vendored installer can be older than the hooks it manages, so they need a plugin install. The other two look for a vendored copy in your project first and then for the plugin's. `/auto-improve-finish-install` is the same skill under both routes: for a vendored copy its hooks stage shows the `settings.json` change and writes it after your yes.
 
 1. **Copy the trees.** Copy the root-level `skills` and `agents` directories, and
    `.claude/hooks`, `scripts`, `templates` and `references`, into your project's
@@ -531,7 +959,7 @@ direction rule. The one-way rule that used to guard agents protected the wrong d
 this repository's own copies carry a consuming project's names, so a one-way pull pushed
 that contamination downstream into every other consuming project.
 
-## Configuration and reference
+## Configuration and advanced usage
 
 Reference material for the plugin you installed above: what each hook does and which environment variable switches it off, release notes, the project hook launcher, the development workflow, what each provider gets, and the known limitations. You do not need any of it to install the plugin.
 
@@ -1377,160 +1805,6 @@ holds one completion record per finished sub-task and is the durable evidence, w
 `state/` holds the working position and can be rebuilt from the records. Commit the
 first; ignore the second.
 
-### Agents
-
-data-architect, contract-critic, fullstack-code-reviewer, senior-test-engineer,
-test-strategy-critic, migration-safety-reviewer, security-auditor,
-sql-performance-reviewer, api-contract-reviewer, ui-ux-designer,
-dotnet-backend-architect, angular-senior-dev, python-ai-developer, registry-scout,
-cloud-engineer.
-
-### Skills
-
-flow, task, design-first, tdd-first, advance, pr-merged, verify-before-done,
-git-commit, ship, debug, north-star, north-star-review, list-contracts,
-contract-accuracy, critique-now, cross-impact, journal-add, plan-questions,
-validate-registries, promote-ui-rule, sql-server-patterns, auto-improve-finish-install,
-auto-improve-database-guard-install, auto-improve-angular-tailwind-install, auto-improve-angular-tailwind-uninstall,
-auto-improve-codegraph-install, auto-improve-codegraph-uninstall,
-auto-improve-strict-shell-gate-install, auto-improve-strict-shell-gate-uninstall,
-angular-ui-rules, unit-testing, application-design, website-design, cloud-engineering.
-
-A skill or agent that mentions a skill owned by another plugin follows the rule in
-[CONTRIBUTING.md](CONTRIBUTING.md) → "Referencing another plugin's skill".
-
-`auto-improve-finish-install` is not a stage of the chain below. It is a one-time setup
-skill, run once per project after the plugin is installed (see
-[Complete the installation in your project](#complete-the-installation-in-your-project)). Its name carries the plugin's name
-because you may have several plugins installed. The three `auto-improve-*-install` add-on skills
-after it are not stages either: each installs one opt-in add-on, and its paired
-`auto-improve-*-uninstall` skill removes it (see [Managing optional add-ons and retired hooks](#managing-optional-add-ons-and-retired-hooks)).
-`auto-improve-database-guard-install` is a one-time setup skill too: it appends your project's own
-database names to the database guard's rules file (`protected_databases`), never removes one, and
-prints the server-trigger line for a person to run.
-`angular-ui-rules` is a rule skill, not a stage: the Angular agents preload it.
-
-The rest form one chain, and each stage hands the next a written artefact rather than a memory
-of the conversation:
-
-```
-/flow   the front door. Runs everything below, pausing only where you must decide.
-  |
-  +-- /task               Work Item Brief    .claude/work-items/
-  +-- /design-first       concept contract   .claude/concepts/   (you approve it)
-  +-- /tdd-first          failing tests first
-  +-- reviewers           adversarial critique
-  +-- /verify-before-done build, tests, drift    (blocks the word "done")
-  +-- /git-commit         the commits
-  +-- /ship               pull request, and a closing link GitHub actually resolved
-```
-
-When a contract declares more than one sub-task, the middle of that chain iterates
-instead of running straight through. Each sub-task ends in a pull request somebody
-has to merge, so it moves one step at a time:
-
-```
-/advance      start what is ready, open a pull request, stop
-(you merge)   the only step in the whole chain a machine cannot take
-/pr-merged    confirm with GitHub, record it, say what that released
-              -> /advance again
-```
-
-Neither half loops. A person merging is what joins them.
-
-### Hooks
-
-concept-gate, architecture-guard, db-destructive-guard,
-db-research-readonly-guard, memory-pager, working-agreements, post-edit-dispatcher, and the
-four checks the dispatcher runs: integration-check, critic-verdict-tracker,
-contract-status-watcher, journal-post-approval-tracker. Since 0.9.8 also plan-question-advisor
-and stop-dispatcher. Since 0.18.4 also protected-names-warning. That is fourteen hook files. The
-Changed-file check the Stop dispatcher runs
-is not a hook file: it is the script
-`.claude/scripts/concept_changed_check.py`. Beside the hook files
-sit the gate launcher `gate-launch.py` and the shared helpers `_error_log.py`, `_gate_launch.py`,
-`_memory_common.py`, `_project_paths.py`, `_main_checkout_guard.py`, `_shell_write_targets.py`
-(the shell parser the guard reads write targets with), `_protected_names.py` (the Protected-name
-check's logic) and
-`_inprocess_hook.py` (the dispatchers' in-process runner), and the generic data files
-`architecture-guard.rules.json`, `architecture-guard.exceptions.json`,
-`integration-check.rules.json`,
-`db-destructive-guard.rules.json` and `working-agreements.rules.json`.
-
-All fourteen hook files are accounted for in `.claude/hooks/hooks.json`, which the Claude
-manifest references: nine are registered there directly (`concept-gate.py` through the gate
-launcher), four are named in the post-edit dispatcher's constant list and one
-(`protected-names-warning.py`) in the Stop dispatcher's list, which also names the Changed-file
-check script.
-That makes thirteen registrations: the nine files registered directly make nine entries, plus
-two more for `db-destructive-guard.py` (three matchers in all), one more for
-`db-research-readonly-guard.py` (two matchers) and one more for the gate launcher (two matchers),
-while the four post-edit checks share one dispatcher row. The file plus those lists are the single registration point:
-adding a hook without adding it to one of them ships a file nothing runs, and a test
-(INV-8 in `test_plugin_manifests.py`) fails on it.
-
-**A hook keeps its per-project settings in a `<hook-name>.rules.json` file beside it**, so the
-hook body names no project. Those files ship as templates carrying deliberately fictional
-placeholder values. They are not safe defaults, and a guard is only as correct as the file you
-replace them with. A hook running from the plugin reads your project's copy in
-`<project>/.claude/hooks/` first, and the advisory hooks fall back to the template. The database
-guards never fall back to it (see above).
-
-**The fail direction is per hook and is stated in each rules file.** A hook that BLOCKS
-fails **closed** when its rules file is missing or empty: `db-destructive-guard.py` with no
-protected database names treats every database as protected. A hook that only WARNS may fail
-soft: `integration-check.py` with no markers warns about nothing.
-Never copy the soft choice to a guard that blocks.
-
-### Working agreements
-
-A working agreement is one standing rule about how the assistant works with you, written in
-plain words in its own markdown file. When a session opens, `working-agreements.py` reads
-the files and hands their text to the assistant before its first reply. The plugin ships seven
-in `.claude/agreements/`: plain language, one worktree per change, shared repository changes
-through pull requests, one-line commands for the user, stop means stop,
-recommendations instead of question batches, and use the project history record. The
-seventh tells the assistant that the registries and the concept contracts are the project's
-memory and design history, to be read and used, and that a central memory system, when a
-project switches one on, only supplements them (see
-[Memory client and cloud engineering](#memory-client-and-cloud-engineering)).
-
-- **Add your own** by writing a markdown file in your project's `.claude/agreements/`. The
-  first line is a level-one heading, and some text follows it. Project files arrive after the
-  shipped ones and are labelled "from this project". Every line of a project agreement is
-  shown quoted, so project text cannot pose as a shipped section.
-- **You cannot replace a shipped one.** A project file with the same name as a shipped file
-  is skipped, and the skip is logged.
-- **Project instructions and skill gates win.** The assistant is told that your project's own
-  instructions, and any skill step that requires asking you, win over every agreement.
-- **A size limit applies.** `working-agreements.rules.json` sets it, 9000 characters by
-  default, counted in UTF-16 units as the host counts. Whole agreements are dropped, project
-  ones first. The closing line names at most three dropped agreements with their paths, then
-  gives a count per folder; the log names every dropped agreement. The shipped plain-language
-  agreement is never dropped. A project file that links outside its folder, or is larger than
-  four times the limit, is skipped without being read in full.
-- **One dispatch rule travels with the opening paragraph.** `working-agreements.rules.json`
-  carries a `dispatch_rule` text: a subagent the plugin ships is dispatched as
-  `agentic-auto-improve:<name>`, and the bare name is for a project that carries its own
-  `.claude/agents/<name>.md`. Empty or missing, it adds nothing.
-- **Plugin installs only.** A vendored copy of the hook prints nothing in this version.
-- **Guidance, not a check.** Nothing blocks when an agreement is ignored. A new agreement
-  takes effect in the next session. Switch the hook off with `CLAUDE_WORKING_AGREEMENTS=off`.
-
-### Scripts and templates are not optional
-
-The design-first agent runs `cross_area_scan.py` and `derive_area.py` by path, thirteen skills
-cite scripts in `.claude/scripts/`, and every concept contract is a copy of
-`templates/concept-contract.md`. The contract sub-task loop is the newest of these:
-`pr_merged.py` holds every rule about sub-tasks, dependencies, records and readiness, and
-both `/advance` and `/pr-merged` call it rather than reimplementing it. Its suite is
-`scripts/tests/test_pr_merged.py`, 761 cases including the placeholder trap that an
-unfilled `implementers` slot would otherwise walk into. The finish-install script,
-`auto_improve_finish_install.py`, follows the same pattern: every rule lives in the script,
-and `scripts/tests/test_auto_improve_finish_install.py` holds its 601 cases. `scripts/tests/test_script_path_resolution.py` is the
-182-check suite for the two-layer path resolver. Shipping the resolver without its suite
-would ship the part that can be wrong and leave behind the part that would say so.
-
 ## Memory client and cloud engineering
 
 Two optional capabilities. Each is **off until a project switches it on** in its project
@@ -1692,7 +1966,7 @@ destructive-operation guards apply to those commands unchanged.
 
 ## Using the chain day to day
 
-You start the chain with `/flow`; see [Step 5 of the installation](#step-5-start-using-the-plugin). The sections below cover what happens when a contract has several sub-tasks, what the chain refuses to do, and how to let the doctor create what is missing.
+You start the chain with `/flow`; see [Start using the plugin](#start-using-the-plugin). The sections below cover what happens when a contract has several sub-tasks, what the chain refuses to do, and how to let the doctor create what is missing.
 
 ### When a contract has several sub-tasks
 
@@ -1927,6 +2201,29 @@ follow-up for the sync tool, which lives outside this repository
 (`.claude/concepts/followups/2026-11-04-sync-tool-registry-layout-gate.followup.md`). The sync
 tool's file lists must also include the new modules.
 
+## Troubleshooting
+
+Find your symptom, investigate in the order given, and follow the link for the full recovery. Every route below leaves your configuration as it was unless it says otherwise.
+
+| Symptom | Investigation |
+|---|---|
+| `/flow`, or any `/auto-improve-*` skill, is unavailable | Is the plugin installed and enabled? Did you start a new session after installing ([Start a new session](#start-a-new-session))? Codex does not load a plugin's skills into the session that installed it. On Cursor, start a new session if the skill is not offered |
+| The hooks do not seem to run | Run `/auto-improve-finish-install` and read its hooks stage. "Ready to load" is not "live", so run the first-session test in [Verify the installation](#verify-the-installation). Check `disable-all-hooks`, and start a new session |
+| A hook runs twice | The hook is registered by the plugin and by your `settings.json`. Remove the registration on one side. See the table in [Verify the installation](#verify-the-installation) |
+| No hook starts on macOS or Linux | The cached `hooks.json` launches `py -3`. A plugin install cannot fix this, and an edit to the cache is lost at the next update. See the platform note in [Verify the installation](#verify-the-installation) |
+| An edit is refused | In a main checkout, the main-checkout guard refuses it: run `/task` or enter a worktree. Elsewhere, the concept gate blocks a non-trivial file that no approved contract covers: run `/design-first` |
+| A database command is blocked | The database guards fail closed. With no rules file, every database is protected. Run `/auto-improve-database-guard-install` to name your databases. A disposable suffix is the intended way to run a destructive command |
+| An install skill refuses | Read its `code`. Nothing was changed. `addon-file-differs`, `disabled-hook-present`, `profile-slot-missing`, `codegraph-mcp-not-configured` and `project-hook-launcher-missing` are explained in [Installing an add-on](#installing-an-add-on) and [Recovery and troubleshooting](#recovery-and-troubleshooting) |
+| Setup is incomplete, or `scaffold-missing` appears | Run `/auto-improve-finish-install` again and answer the questions you declined. See "If setup is incomplete" under [`/auto-improve-finish-install`](#auto-improve-finish-install-required) |
+| Every prompt, shell command or read is blocked after you removed a hook file | A row points at a missing script. Use the table under [Ways out when a hook cannot run](#ways-out-when-a-hook-cannot-run) |
+| The CodeGraph guard blocks reads | See [When CodeGraph is unavailable](#when-codegraph-is-unavailable). Repeat the identical blocked call once, or run `/auto-improve-codegraph-uninstall` and start a new session |
+| `/task` or `/ship` cannot reach GitHub | Run `gh auth status`, and `gh auth login` if you are signed out. Intake can still run on free text |
+| An update did not take effect | The plugin's version number must change, and you must start a new session. See [Updating an installed plugin](#updating-an-installed-plugin) |
+| A hook registration check fails | See [Checking your hook registrations](#checking-your-hook-registrations) |
+| The registries report `pending` or `stale-sync` | See [Moving a project onto registry layout 2](#moving-a-project-onto-registry-layout-2) |
+| Your own `settings.json` backup is needed | Copy `.claude/settings.json.bak-<UTC stamp>` over `.claude/settings.json`. The skill printed the command as its `rollback` line |
+| Everything is blocked and you cannot get in | Start Claude Code with `claude --settings '{"disableAllHooks": true}'`, repair the project, then start a normal session |
+
 ## Useful plugins
 
 Other Claude Code plugins that work well beside this one. None is required. Each row gives
@@ -1964,3 +2261,4 @@ withdrawn and five test suites were added without the counts following either mo
 `auto_improve_finish_install.py`, and every inventory count in this file was recounted from
 the tree rather than incremented. See [Known limitations](#known-limitations) for what that
 release does not yet cover.
+
