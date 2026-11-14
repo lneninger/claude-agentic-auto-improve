@@ -1,0 +1,17 @@
+contract: 2026-11-14-manifest-counts-landing-refresh
+started_at: '2026-11-14T20:05:48.913770+00:00'
+sub_tasks:
+  t1-count-refresh-at-the-landing:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 412
+    base: feature/405-landing-time-manifest-count-refresh
+    brief: .claude/work-items/2026-11-14-412-t1-count-refresh-at-the-landing.md
+  t2-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 413
+    base: feature/405-landing-time-manifest-count-refresh
+    brief: .claude/work-items/2026-11-14-413-t2-review.md
