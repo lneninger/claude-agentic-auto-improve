@@ -1,0 +1,20 @@
+status: completed
+commit: 8c3643e8fa1b9f80fa507fc811ae7b2c3c5b3a67
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/414
+merged_at: '2026-11-14T22:58:20Z'
+verified: github
+sub_issue_closed: closed
+hand_resolved:
+  files: []
+  merge_commits: 0
+  commits_inspected: 2
+  commits_unread: 0
+base_ref: feature/405-landing-time-manifest-count-refresh
+base_is_default: false
