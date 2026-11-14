@@ -682,5 +682,507 @@ class ParentModeFunctionTests(unittest.TestCase):
             force_rmtree(tmp)
 
 
+# ===========================================================================
+# Manifest counts (contract 2026-11-14-manifest-counts-landing-refresh).
+#
+# The count rule, the Count verdict, the Landing count refresh (--raise / --exact with --manifest-counts), the
+# version-free --counts mode, and the Count deferral predicate. Process runs inside a throwaway repository, like
+# the version modes above, so a missing flag is an assertion about an exit code, never an AttributeError.
+# ===========================================================================
+def counted_tree(skills, agents, hooks):
+    """Tracked files that give exactly these counts (plus files the rules must NOT count)."""
+    files = {}
+    for i in range(skills):
+        files["skills/s%d/SKILL.md" % i] = "s\n"
+    for i in range(agents):
+        files["agents/a%d.md" % i] = "a\n"
+    for i in range(hooks):
+        files[".claude/hooks/h%d.py" % i] = "h\n"
+    files[".claude/hooks/_helper.py"] = "helper\n"
+    files[".claude/hooks/gate-launch.py"] = "launcher\n"
+    files[".claude/hooks/hooks.json"] = "{}\n"
+    return files
+
+
+def counted_manifests(version, skills, agents, hooks, overrides=None):
+    """The four manifests with count claims. ``overrides`` maps a manifest name to a description, or to raw file
+    text when the value starts with ``RAW:``."""
+    overrides = overrides or {}
+    descriptions = {
+        "plugin.json": "Protocol: %d skills that put design first." % skills,
+        ".claude-plugin/plugin.json": "Protocol: %d skills, %d agents and %d hooks that put design first."
+                                      % (skills, agents, hooks),
+        ".cursor-plugin/plugin.json": "Protocol: %d skills and %d subagents that put design first." % (skills, agents),
+    }
+    descriptions[".claude-plugin/marketplace.json"] = descriptions[".claude-plugin/plugin.json"]
+    descriptions.update({k: v for k, v in overrides.items() if not v.startswith("RAW:")})
+
+    def one(desc):
+        return json.dumps({"name": "x", "version": version, "description": desc}, indent=2) + "\n"
+
+    files = {name: one(descriptions[name]) for name in ("plugin.json", ".claude-plugin/plugin.json",
+                                                         ".cursor-plugin/plugin.json")}
+    files[".claude-plugin/marketplace.json"] = json.dumps(
+        {"name": "m", "version": version, "description": "A marketplace.",
+         "plugins": [{"name": "x", "version": version, "description": descriptions[".claude-plugin/marketplace.json"]}]},
+        indent=2) + "\n"
+    files.update({k: v[len("RAW:"):] for k, v in overrides.items() if v.startswith("RAW:")})
+    return files
+
+
+class CountsWorldMixin:
+    """A parent branch feature/p whose tracked tree holds ``tree`` counts and whose manifests claim ``claims``."""
+
+    def counts_world(self, tree=(4, 3, 3), claims=(3, 2, 2), master="0.11.3", head_version="0.10.0", overrides=None):
+        repo = VersionRepo(self, master)
+        repo.branch("feature/p")
+        (repo.work / "skills" / "a" / "SKILL.md").unlink()
+        repo.write(counted_tree(*tree))
+        repo.write(counted_manifests(head_version, *claims, overrides=overrides))
+        repo.commit("parent branch: counted tree and manifests")
+        return repo
+
+    def on_disk(self, repo):
+        return {n: (repo.work / n).read_bytes() for n in cvb.MANIFESTS}
+
+    def head(self, repo):
+        return _git(repo.work, "rev-parse", "HEAD")
+
+    def subject(self, repo):
+        return _git(repo.work, "log", "-1", "--format=%s")
+
+    def commits(self, repo):
+        return int(_git(repo.work, "rev-list", "--count", "HEAD"))
+
+
+class CountRuleTests(unittest.TestCase):
+    """The three path rules over a path list: case-sensitive (D2), one segment, never disk or git."""
+
+    def need(self, name):
+        self.assertTrue(hasattr(cvb, name), "check_version_bump.%s does not exist yet" % name)
+        return getattr(cvb, name)
+
+    def test_d2_the_rule_is_case_sensitive(self):
+        count = self.need("measure_count")
+        self.assertEqual(count("skills", ["skills/a/skill.md"]), 0, "skill.md is not SKILL.md")
+        self.assertEqual(count("skills", ["skills/a/SKILL.md"]), 1, "control: SKILL.md counts")
+        self.assertEqual(count("hooks", [".claude/hooks/X.PY"]), 0, "X.PY is not a .py file")
+        self.assertEqual(count("hooks", [".claude/hooks/x.py"]), 1, "control: x.py counts")
+        self.assertEqual(count("agents", ["agents/a.MD"]), 0, "a.MD is not a .md file")
+        self.assertEqual(count("agents", ["agents/a.md"]), 1, "control: a.md counts")
+
+    def test_nested_misnamed_and_excluded_paths_do_not_count(self):
+        count = self.need("measure_count")
+        self.assertEqual(count("skills", ["skills/a/b/SKILL.md", "skills/SKILL.md", "skills//SKILL.md",
+                                          "skills/a/README.md", "xskills/a/SKILL.md"]), 0)
+        self.assertEqual(count("agents", ["agents/sub/a.md", "agents/a.txt", "xagents/a.md"]), 0)
+        self.assertEqual(count("hooks", [".claude/hooks/_helper.py", ".claude/hooks/gate-launch.py",
+                                         ".claude/hooks/tests/t.py", ".claude/hooks/hooks.json",
+                                         ".claude/other/x.py"]), 0)
+
+    def test_the_rule_counts_each_path_once_and_rejects_an_unknown_measure(self):
+        count = self.need("measure_count")
+        self.assertEqual(count("skills", ["skills/a/SKILL.md", "skills/a/SKILL.md", "skills/b/SKILL.md"]), 2)
+        with self.assertRaises(ValueError):
+            count("agreements", [])
+
+    def test_the_measure_roots_are_one_shared_constant_each(self):
+        self.assertEqual((self.need("SKILLS_ROOT"), self.need("AGENTS_ROOT"), self.need("HOOKS_ROOT")),
+                         ("skills/", "agents/", ".claude/hooks/"))
+
+
+class NonDefaultBaseTests(unittest.TestCase):
+    """I-6: one base comparison, and the Count deferral built on the parent predicate."""
+
+    DEFAULT = "master"
+    TASK = "task/demo/t1"
+
+    def need(self, name):
+        self.assertTrue(hasattr(cvb, name), "check_version_bump.%s does not exist yet" % name)
+        return getattr(cvb, name)
+
+    def test_is_non_default_base(self):
+        f = self.need("is_non_default_base")
+        self.assertIs(f("feature/p", "master"), True)
+        self.assertIs(f("master", "master"), False)
+        self.assertIs(f(None, "master"), True, "an absent base is not the default")
+
+    def test_is_parent_mode_is_unchanged_over_its_rows(self):
+        for head, base, expected in ((self.TASK, "origin/feature/p", True), (self.TASK, "origin/master", False),
+                                     (self.TASK, None, True), ("fix/demo", "origin/feature/p", False),
+                                     ("task/demo", None, False), ("", None, False)):
+            with self.subTest(head=head, base=base):
+                self.assertIs(cvb.is_parent_mode(head, base, "origin/master"), expected)
+
+    def test_the_deferral_rows(self):
+        f = self.need("count_pin_deferred")
+        rows = (
+            (self.TASK, "feature/p", True, "a sub-task head into the parent"),
+            (self.TASK, "master", False, "a task head into the default branch"),
+            (self.TASK, None, True, "a task head with no base (a local run)"),
+            ("feature/x", "feature/p", True, "a hand-named head into a non-default base"),
+            ("feature/x", "master", False, "any head into the default branch"),
+            ("feature/x", None, False, "a non-task head with no base"),
+            ("fix/y", "master", False, "a single block into the default branch"),
+        )
+        for head, base, expected, why in rows:
+            with self.subTest(why=why):
+                self.assertIs(f(head, base, self.DEFAULT), expected, why)
+
+    def test_an_unknown_default_branch_never_defers(self):
+        f = self.need("count_pin_deferred")
+        for default in ("", " ", "\t\n", None):
+            for head in (self.TASK, "feature/x", ""):
+                for base in (None, "feature/p", "master", ""):
+                    with self.subTest(default=default, head=head, base=base):
+                        self.assertIs(f(head, base, default), False,
+                                      "I-6 guard: with no default branch known the pin is full, whatever the head and base")
+
+    def test_the_predicate_spells_neither_the_task_pattern_nor_the_comparison(self):
+        import ast
+        import inspect
+        import textwrap
+        function = ast.parse(textwrap.dedent(inspect.getsource(self.need("count_pin_deferred")))).body[0]
+        if ast.get_docstring(function) is not None:
+            function.body = function.body[1:]  # the code, not its docstring
+        code = ast.unparse(function)
+        self.assertNotIn("TASK_HEAD", code)
+        self.assertNotIn("!=", code)
+        self.assertNotIn("==", code)
+        self.assertIn("is_parent_mode", code)
+        self.assertIn("is_non_default_base", code)
+
+
+class ModifierGrammarTests(unittest.TestCase, CountsWorldMixin):
+    """I-5: --manifest-counts rides on --raise or --exact only; --counts is its own mode."""
+
+    def test_manifest_counts_is_refused_without_raise_or_exact(self):
+        repo = self.counts_world()
+        for args in (["--manifest-counts"], ["--manifest-counts", "--counts"],
+                     ["--manifest-counts", "--default-branch", "master"]):
+            with self.subTest(args=args):
+                code, out = repo.run(*args)
+                self.assertEqual(code, 2, "got: %s" % out)
+                self.assertIn("--manifest-counts", out)
+                self.assertNotIn("unrecognized arguments", out, "the refusal comes from the check, not argparse")
+
+    def test_counts_is_mutually_exclusive_with_the_other_modes(self):
+        repo = self.counts_world()
+        for other in ("--raise", "--exact"):
+            with self.subTest(other=other):
+                code, out = repo.run("--counts", other, "--default-branch", "master")
+                self.assertEqual(code, 2, "argparse refuses two modes: %s" % out)
+                self.assertIn("not allowed with", out)
+
+
+class LandingCountRefreshTests(unittest.TestCase, CountsWorldMixin):
+    """--raise --manifest-counts: the version and the counts in one commit, numbers only, all or nothing."""
+
+    RAISE = ("--raise", "--manifest-counts", "--default-branch", "master")
+
+    def test_each_noun_is_rewritten_from_the_tree(self):
+        repo = self.counts_world(tree=(4, 3, 3), claims=(3, 2, 2))
+        code, out = repo.run(*self.RAISE)
+        self.assertEqual(code, 0, "got: %s" % out)
+        expected = counted_manifests("0.12.0", 4, 3, 3)
+        for name in cvb.MANIFESTS:
+            with self.subTest(manifest=name):
+                self.assertEqual((repo.work / name).read_text(encoding="utf-8"), expected[name],
+                                 "skills, agents, subagents and hooks claims follow the tree; the version is raised")
+        self.assertEqual(versions_on_disk(repo.work), ["0.12.0"] * 5)
+
+    def test_every_byte_outside_the_numbers_is_unchanged(self):
+        # irregular layout: tabs, key order, escaped non-ASCII letters, a trailing space, no final newline; and a
+        # second manifest that holds the same kind of letters raw (UTF-8), the other spelling the refresh can locate
+        raw = ('{"version" :\t"0.10.0", "keywords": ["a" , "b"],\n'
+               '  "description"  : "Caf\\u00e9 \\u2014 3 skills, 2 agents and 2 hooks that do things. \\u00fc",\n'
+               '"x":   [1,2,3]}  ')
+        raw_utf8 = '{"name":"x",\t"version" :"0.10.0",\n"description":"Caf\u00e9 \u2014 3 skills and 2 subagents \u00fc"}\n'
+        repo = self.counts_world(overrides={".claude-plugin/plugin.json": "RAW:" + raw,
+                                            ".cursor-plugin/plugin.json": "RAW:" + raw_utf8})
+        before = self.on_disk(repo)
+        code, out = repo.run(*self.RAISE)
+        self.assertEqual(code, 0, "got: %s" % out)
+        after = self.on_disk(repo)
+        for name in cvb.MANIFESTS:
+            with self.subTest(manifest=name):
+                self.assertEqual(re.sub(rb"\d+", b"#", after[name]), re.sub(rb"\d+", b"#", before[name]),
+                                 "only number characters differ, whatever the layout")
+        changed = after[".claude-plugin/plugin.json"].decode("utf-8")
+        self.assertIn("4 skills, 3 agents and 3 hooks", changed)
+        self.assertIn('"x":   [1,2,3]}  ', changed, "the unrelated arrays keep their digits")
+        self.assertTrue(changed.startswith('{"version" :\t"0.12.0", "keywords"'))
+        self.assertIn("Caf\\u00e9 \\u2014 4 skills", changed, "the escapes stay escapes")
+        cursor = after[".cursor-plugin/plugin.json"].decode("utf-8")
+        self.assertIn("Café — 4 skills and 3 subagents ü", cursor, "and the raw letters stay raw")
+
+    def test_a_spelled_count_is_written_as_the_word_for_the_new_value(self):
+        repo = self.counts_world(tree=(4, 3, 3), claims=(3, 2, 2), overrides={
+            "plugin.json": "Protocol: three skills that put design first.",
+            ".claude-plugin/plugin.json": "Protocol: Three skills, TWO agents and two hooks that put design first.",
+        })
+        code, out = repo.run(*self.RAISE)
+        self.assertEqual(code, 0, "got: %s" % out)
+        self.assertIn("four skills", (repo.work / "plugin.json").read_text(encoding="utf-8"))
+        text = (repo.work / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        self.assertIn("Four skills, THREE agents and three hooks", text, "the word keeps its case")
+
+    def test_a_claim_that_is_already_true_is_left_alone(self):
+        repo = self.counts_world(tree=(3, 2, 2), claims=(3, 2, 2))
+        code, out = repo.run(*self.RAISE)
+        self.assertEqual(code, 0, "got: %s" % out)
+        expected = counted_manifests("0.12.0", 3, 2, 2)
+        self.assertEqual({n: (repo.work / n).read_text(encoding="utf-8") for n in cvb.MANIFESTS}, expected)
+
+    def test_the_three_commit_messages(self):
+        # version and counts
+        repo = self.counts_world(tree=(4, 3, 3), claims=(3, 2, 2))
+        self.assertEqual(repo.run(*self.RAISE)[0], 0)
+        self.assertEqual(self.subject(repo), "chore: raise the plugin version to 0.12.0 and refresh the manifest counts at the landing")
+        # version only: no count changed
+        repo = self.counts_world(tree=(3, 2, 2), claims=(3, 2, 2))
+        self.assertEqual(repo.run(*self.RAISE)[0], 0)
+        self.assertEqual(self.subject(repo), "chore: raise the plugin version to 0.12.0 at the landing")
+        # counts only: the version is already raised
+        repo = self.counts_world(tree=(4, 3, 3), claims=(3, 2, 2))
+        self.assertEqual(repo.run("--raise", "--default-branch", "master")[0], 0, "plain raise first")
+        self.assertEqual(versions_on_disk(repo.work), ["0.12.0"] * 5)
+        before = self.commits(repo)
+        code, out = repo.run(*self.RAISE)
+        self.assertEqual(code, 0, "got: %s" % out)
+        self.assertEqual(self.commits(repo), before + 1)
+        self.assertEqual(self.subject(repo), "chore: refresh the manifest counts at the landing")
+
+    def test_a_second_run_changes_nothing(self):
+        repo = self.counts_world()
+        self.assertEqual(repo.run(*self.RAISE)[0], 0)
+        head, bytes_ = self.head(repo), self.on_disk(repo)
+        code, out = repo.run(*self.RAISE)
+        self.assertEqual(code, 0, "got: %s" % out)
+        self.assertEqual((self.head(repo), self.on_disk(repo)), (head, bytes_), "no new commit, no new byte")
+        self.assertEqual(repo.run("--exact", "--manifest-counts", "--default-branch", "master")[0], 0)
+
+    def test_without_the_flag_the_counts_stay_stale(self):
+        repo = self.counts_world(tree=(4, 3, 3), claims=(3, 2, 2))
+        code, out = repo.run("--raise", "--default-branch", "master")
+        self.assertEqual(code, 0, "got: %s" % out)
+        self.assertEqual({n: (repo.work / n).read_text(encoding="utf-8") for n in cvb.MANIFESTS},
+                         counted_manifests("0.12.0", 3, 2, 2), "today's raise writes the version fields only")
+        self.assertEqual(self.subject(repo), "chore: raise the plugin version to 0.12.0 at the landing")
+
+
+class CountRefusalTests(unittest.TestCase, CountsWorldMixin):
+    """Each Count refusal: named in the output, exit 1 (description) or 2 (read), nothing written, nothing committed."""
+
+    def refuse(self, reason, code_wanted, repo, args=("--raise", "--manifest-counts", "--default-branch", "master")):
+        before, head = self.on_disk(repo), self.head(repo)
+        code, out = repo.run(*args)
+        self.assertEqual(code, code_wanted, "got: %s" % out)
+        self.assertIn("count refresh refused (%s)" % reason if "--raise" in args else "(%s)" % reason, out)
+        self.assertNotIn("unrecognized arguments", out)
+        self.assertEqual(self.on_disk(repo), before, "no manifest was written")
+        self.assertEqual(self.head(repo), head, "nothing was committed")
+        return out
+
+    def test_count_missing(self):
+        repo = self.counts_world(overrides={".claude-plugin/plugin.json": "Protocol: 3 skills and some agents and 2 hooks."})
+        out = self.refuse("count-missing", 1, repo)
+        self.assertIn(".claude-plugin/plugin.json", out)
+        self.assertIn("agents", out)
+
+    def test_count_unrefreshable_noun(self):
+        repo = self.counts_world(overrides={
+            ".claude-plugin/plugin.json": "Protocol: 3 skills, 2 agents, 2 hooks and 3 add-ons."})
+        out = self.refuse("count-unrefreshable-noun", 1, repo)
+        self.assertIn("add-ons", out)
+
+    def test_count_unwritable(self):
+        repo = self.counts_world(tree=(21, 3, 3), claims=(20, 2, 2), overrides={
+            "plugin.json": "Protocol: twenty skills that put design first."})
+        out = self.refuse("count-unwritable", 1, repo)
+        self.assertIn("plugin.json", out)
+
+    def test_count_reader_disagreement(self):
+        repo = self.counts_world(overrides={
+            ".claude-plugin/plugin.json": "Protocol: 3 skills, 2 agents and 2 hooks; it retired 6 hooks."})
+        self.refuse("count-reader-disagreement", 1, repo)
+
+    def test_the_hook_files_noun_is_read_by_one_reader_only(self):
+        repo = self.counts_world(overrides={
+            ".claude-plugin/plugin.json": "Protocol: 3 skills, 2 agents and 2 hooks, 14 hook files."})
+        self.refuse("count-reader-disagreement", 1, repo)
+
+    def test_description_not_located(self):
+        # an upper-case hex escape is neither of the two spellings json.dumps would write
+        raw = ('{"name": "x", "version": "0.10.0",\n  "description": "Caf\\u00E9: 3 skills, 2 agents and 2 hooks."}\n')
+        repo = self.counts_world(overrides={".claude-plugin/plugin.json": "RAW:" + raw})
+        self.refuse("description-not-located", 1, repo)
+
+    def test_oracle_empty(self):
+        repo = self.counts_world(tree=(4, 3, 0), claims=(3, 2, 2))
+        self.refuse("oracle-empty", 2, repo)
+
+    def test_oracle_unreadable(self):
+        import contextlib
+        import io
+        from unittest import mock
+        repo = self.counts_world()
+        before, head = self.on_disk(repo), self.head(repo)
+        out = io.StringIO()
+        cwd = os.getcwd()
+        os.chdir(str(repo.work))
+        self.addCleanup(os.chdir, cwd)
+        error = subprocess.CalledProcessError(128, ["git", "ls-tree"], stderr="fatal")
+        with mock.patch.object(cvb, "tree_paths", side_effect=error), contextlib.redirect_stdout(out):
+            code = cvb.main(["--raise", "--manifest-counts", "--default-branch", "master"])
+        self.assertEqual(code, 2, out.getvalue())
+        self.assertIn("count refresh refused (oracle-unreadable)", out.getvalue())
+        self.assertEqual((self.on_disk(repo), self.head(repo)), (before, head))
+
+    def test_an_unreadable_manifest_exits_2_and_writes_nothing(self):
+        repo = self.counts_world(overrides={".cursor-plugin/plugin.json": "RAW:{not json"})
+        before, head = self.on_disk(repo), self.head(repo)
+        code, out = repo.run("--raise", "--manifest-counts", "--default-branch", "master")
+        self.assertEqual(code, 2, "got: %s" % out)
+        self.assertIn("VERSION BUMP", out)
+        self.assertNotIn("unrecognized arguments", out)
+        self.assertEqual((self.on_disk(repo), self.head(repo)), (before, head))
+
+    def test_one_refusal_blocks_the_other_manifests_too(self):
+        # plugin.json is refreshable, the cursor manifest is not: all or nothing
+        repo = self.counts_world(overrides={".cursor-plugin/plugin.json": "Protocol: 3 skills and some subagents."})
+        self.refuse("count-missing", 1, repo)
+
+    def test_the_same_refusals_stop_counts_and_exact_with_the_same_exit_codes(self):
+        cases = (
+            ("count-missing", 1, {".claude-plugin/plugin.json": "Protocol: 4 skills and some agents and 3 hooks."}, (4, 3, 3)),
+            ("count-unrefreshable-noun", 1, {".claude-plugin/plugin.json": "Protocol: 4 skills, 3 agents, 3 hooks, 3 add-ons."}, (4, 3, 3)),
+            ("oracle-empty", 2, {}, (4, 3, 0)),
+        )
+        for reason, code_wanted, overrides, tree in cases:
+            for args in (("--counts",), ("--exact", "--manifest-counts", "--default-branch", "master")):
+                with self.subTest(reason=reason, args=args):
+                    repo = self.counts_world(tree=tree, claims=tree, head_version="0.12.0", overrides=overrides)
+                    before, head = self.on_disk(repo), self.head(repo)
+                    code, out = repo.run(*args)
+                    self.assertEqual(code, code_wanted, "got: %s" % out)
+                    self.assertIn(reason, out)
+                    self.assertEqual((self.on_disk(repo), self.head(repo)), (before, head), "nothing is ever written")
+
+
+class CountsModeTests(unittest.TestCase, CountsWorldMixin):
+    """--counts: HEAD's manifests against HEAD's tree. No version, no base, no origin ref, no write."""
+
+    def test_true_counts_exit_0_and_stale_counts_exit_1(self):
+        repo = self.counts_world(tree=(3, 2, 2), claims=(3, 2, 2))
+        code, out = repo.run("--counts")
+        self.assertEqual(code, 0, "got: %s" % out)
+        self.assertNotIn("unrecognized arguments", out)
+        repo = self.counts_world(tree=(4, 2, 2), claims=(3, 2, 2))
+        before = self.on_disk(repo)
+        code, out = repo.run("--counts")
+        self.assertEqual(code, 1, "one skill more than the description says: %s" % out)
+        self.assertIn("3", out)
+        self.assertIn("skills", out)
+        self.assertEqual(self.on_disk(repo), before, "--counts writes nothing")
+
+    def test_it_passes_on_a_default_branch_checkout_that_holds_true_counts(self):
+        repo = VersionRepo(self, "0.11.3")  # master itself: no feature branch, no raise
+        (repo.work / "skills" / "a" / "SKILL.md").unlink()
+        repo.write(counted_tree(3, 2, 2))
+        repo.write(counted_manifests("0.11.3", 3, 2, 2))
+        repo.commit("true counts on the default branch")
+        code, out = repo.run("--counts")
+        self.assertEqual(code, 0, "baseline recording runs this step on master: %s" % out)
+
+    def test_it_reads_no_version_no_base_and_no_origin_ref(self):
+        repo = self.counts_world(tree=(3, 2, 2), claims=(3, 2, 2), head_version="not-a-version")
+        _git(repo.work, "remote", "remove", "origin")
+        code, out = repo.run("--counts", "--default-branch", "no-such-branch", "--base", "origin/none")
+        self.assertEqual(code, 0, "got: %s" % out)
+
+    def test_it_reads_the_committed_head_not_the_working_tree(self):
+        repo = self.counts_world(tree=(3, 2, 2), claims=(3, 2, 2))
+        repo.write(counted_manifests("0.10.0", 99, 99, 99))  # uncommitted edit
+        code, out = repo.run("--counts")
+        self.assertEqual(code, 0, "HEAD holds true counts: %s" % out)
+
+    def test_a_tracked_deletion_not_yet_committed_does_not_change_the_listing(self):
+        repo = self.counts_world(tree=(3, 2, 2), claims=(3, 2, 2))
+        (repo.work / "skills" / "s0" / "SKILL.md").unlink()
+        code, out = repo.run("--counts")
+        self.assertEqual(code, 0, "the tree listing is HEAD's: %s" % out)
+
+
+class ExactWithCountsTests(unittest.TestCase, CountsWorldMixin):
+    """--exact --manifest-counts: the exit is the higher of the version exit and the count exit."""
+
+    def pair(self, version_exit, count_exit):
+        tree = (4, 3, 0) if count_exit == 2 else (4, 3, 3)
+        claims = (3, 3, 3) if count_exit == 1 else (4, 3, 3)
+        version = "0.12.0" if version_exit == 0 else "0.11.3"
+        repo = self.counts_world(tree=tree, claims=claims, head_version=version)
+        default = "no-such-branch" if version_exit == 2 else "master"
+        return repo.run("--exact", "--manifest-counts", "--default-branch", default)
+
+    def test_every_pair_gives_the_higher_code(self):
+        for version_exit in (0, 1, 2):
+            for count_exit in (0, 1, 2):
+                with self.subTest(version=version_exit, counts=count_exit):
+                    code, out = self.pair(version_exit, count_exit)
+                    self.assertEqual(code, max(version_exit, count_exit), "got: %s" % out)
+                    self.assertNotIn("unrecognized arguments", out)
+
+    def test_both_verdicts_are_printed(self):
+        code, out = self.pair(1, 1)
+        self.assertEqual(code, 1)
+        self.assertIn("landing version must be exactly 0.12.0", out)
+        self.assertRegex(out, r"(?i)3 skills")
+
+
+class LandingCountPlanTests(unittest.TestCase):
+    """The pure planner behind --raise, --counts and --exact: one Count verdict (I-4)."""
+
+    MANIFEST = json.dumps({"version": "1.0.0", "description": "Protocol: 3 skills, 2 agents and 2 hooks."}, indent=2)
+
+    def need(self, name):
+        self.assertTrue(hasattr(cvb, name), "check_version_bump.%s does not exist yet" % name)
+        return getattr(cvb, name)
+
+    def texts(self, description):
+        text = json.dumps({"version": "1.0.0", "description": description}, indent=2)
+        return {".claude-plugin/plugin.json": text}
+
+    def test_a_true_description_gives_an_empty_plan(self):
+        plan = self.need("plan_counts")(self.texts("Protocol: 3 skills, 2 agents and 2 hooks."),
+                                        {"skills": 3, "agents": 2, "hooks": 2})
+        self.assertEqual((plan.refusals, plan.mismatches, plan.rewrites), ([], [], []))
+
+    def test_a_stale_description_is_rewritten_and_reported(self):
+        plan = self.need("plan_counts")(self.texts("Protocol: 3 skills, 2 agents and 2 hooks."),
+                                        {"skills": 5, "agents": 2, "hooks": 2})
+        self.assertEqual(plan.refusals, [])
+        self.assertEqual(len(plan.mismatches), 1)
+        self.assertIn("5 skills, 2 agents and 2 hooks", plan.texts[".claude-plugin/plugin.json"])
+        self.assertEqual(plan.rewrites, [(".claude-plugin/plugin.json", "skills", 3, 5)])
+
+    def test_the_exit_code_of_a_plan(self):
+        plan_counts, code = self.need("plan_counts"), self.need("count_exit_code")
+        measures = {"skills": 3, "agents": 2, "hooks": 2}
+        self.assertEqual(code(plan_counts(self.texts("3 skills, 2 agents and 2 hooks"), measures)), 0)
+        self.assertEqual(code(plan_counts(self.texts("4 skills, 2 agents and 2 hooks"), measures)), 1, "equality failure")
+        self.assertEqual(code(plan_counts(self.texts("3 skills and 2 hooks"), measures)), 1, "count-missing")
+        self.assertEqual(code(plan_counts(self.texts("3 skills, 2 agents and 2 hooks"), dict(measures, hooks=0))), 2,
+                         "oracle-empty is a read refusal")
+        self.assertEqual(code(plan_counts(self.texts("3 skills, 2 agents and 2 hooks"), None, "no listing")), 2,
+                         "oracle-unreadable is a read refusal")
+
+    def test_a_plan_reports_every_refusal_it_finds(self):
+        plan = self.need("plan_counts")(self.texts("Protocol: 3 skills, 2 agents, 3 add-ons and some hooks."),
+                                        {"skills": 3, "agents": 2, "hooks": 2})
+        self.assertEqual({r.reason for r in plan.refusals}, {"count-unrefreshable-noun", "count-missing"})
+        self.assertEqual({r.kind for r in plan.refusals}, {"description"})
+
+
 if __name__ == "__main__":
     unittest.main()

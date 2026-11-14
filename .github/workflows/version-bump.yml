@@ -30,4 +30,10 @@ jobs:
       - name: Version-bump check tests, including the registries guard
         run: python3 .claude/scripts/tests/test_check_version_bump.py
       - name: Repository consistency tests (CI wiring, version-raise wording, README hook count)
+        # The manifest count pin reads the pull request context: into a non-default base it only checks that the
+        # counts are refreshable. The refs are pull-request-controlled text, so they travel through env:, never run:.
+        env:
+          MANIFEST_PIN_BASE_REF: ${{ github.base_ref }}
+          MANIFEST_PIN_HEAD_REF: ${{ github.head_ref }}
+          MANIFEST_PIN_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: python3 .claude/scripts/tests/test_repo_consistency.py

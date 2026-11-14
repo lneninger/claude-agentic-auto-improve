@@ -3,7 +3,8 @@
 **Parent contract:** `.claude/concepts/2026-11-13-audit-followups-165-chores.md`
 **Derived from:** noticed by the data-architect while designing the manifest drift test; not an Adjacent Areas scan (`.claude/area-mapping.json` holds no areas)
 **Date:** 2026-11-13
-**Status:** stub
+**Status:** superseded
+**Superseded by:** `.claude/concepts/2026-11-14-manifest-counts-landing-refresh.md` (issue #405)
 **Estimated scope:** small
 **Issue:** #405
 
