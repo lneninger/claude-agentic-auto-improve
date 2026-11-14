@@ -62,7 +62,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import _claude_paths  # noqa: E402
 import pr_merged  # noqa: E402
-from check_version_bump import MANIFESTS  # noqa: E402  -- the one list of version files
+from check_version_bump import MANIFESTS, mask_count_numbers  # noqa: E402  -- the version files, the claim reader
 
 # ---------------------------------------------------------------------------
 # Closed sets
@@ -1202,12 +1202,16 @@ def merge_union(base: str, ours: str, theirs: str, entry_key: str) -> Dict[str, 
     return {"ok": True, "text": "\n".join(merged) + trailing, "reason": ""}
 
 
-def merge_version_fields(base: str, ours: str, theirs: str) -> Dict[str, Any]:
+def merge_version_fields(base: str, ours: str, theirs: str, counts_derived: bool = False) -> Dict[str, Any]:
     """Resolve a manifest conflict whose every region differs only in lines carrying ``"version"`` (R-3).
 
     Outside every region the merge is git's own; inside one, the default branch's side (``theirs``) is
     taken, and the later raise rewrites those lines. A region whose two sides also differ in any other
     line is not admissible: ``ok`` is False and nobody picks a side blindly.
+
+    ``counts_derived`` (``contractLanding.manifestCounts``, I-9): the two sides may also differ in the numbers of
+    count claims on ``"description"`` lines (read by the script's own claim reader); the default branch's side is
+    taken and the Landing count refresh rewrites those numbers. A differing word is still not admissible.
     """
     try:
         segments = _split_merge_file(_merge_file_text(base, ours, theirs))
@@ -1221,7 +1225,14 @@ def merge_version_fields(base: str, ours: str, theirs: str) -> Dict[str, Any]:
             continue
         saw_region = True
         other = lambda lines: [ln for ln in lines if '"version"' not in ln]  # noqa: E731
-        if other(seg["ours"]) != other(seg["theirs"]):
+        if counts_derived:
+            masked = lambda lines: [mask_count_numbers(ln) if '"description"' in ln else ln  # noqa: E731
+                                    for ln in other(lines)]
+            if masked(seg["ours"]) != masked(seg["theirs"]):
+                return {"ok": False, "text": "",
+                        "reason": "a conflict region differs in a line other than a version line or the numbers "
+                                  "of a description's count claims"}
+        elif other(seg["ours"]) != other(seg["theirs"]):
             return {"ok": False, "text": "", "reason": "a conflict region differs in a line other than a version line"}
         merged.extend(seg["theirs"])
     if not saw_region:
@@ -2340,7 +2351,7 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     # second run changes nothing. Under `landing: manual` P1 has already ended the run (R-4).
     phase("p7b")
     if (config or {}).get("versionRaise") is True:
-        failure = _p7b_version_raise(wt, default)
+        failure = _p7b_version_raise(wt, default, (config or {}).get("manifestCounts") is True)
         if failure:
             facts["p7b_version_raise_failed"] = True
             details["version-raise-failed"] = failure
@@ -2624,7 +2635,8 @@ def _p7_merge(args: Dict[str, Any], wt: Path, default: str, mark_m: str, mark_p:
                     return contract_diff, [], resolved
             elif cls == "version-fields":
                 base_t, ours_t, theirs_t = (_blob(wt, ":%d:%s" % (n, path)) for n in (1, 2, 3))
-                merged = merge_version_fields(base_t or "", ours_t, theirs_t) \
+                merged = merge_version_fields(base_t or "", ours_t, theirs_t,
+                                              counts_derived=(config or {}).get("manifestCounts") is True) \
                     if ours_t is not None and theirs_t is not None else \
                     {"ok": False, "reason": "one side deleted the file"}
                 if not merged["ok"]:
@@ -3134,11 +3146,18 @@ def _p7_protected_names(wt: Path, mark_m: str, head: str, facts: Dict[str, Any],
             else (result.get("reason") or "the rules file cannot be read"))
 
 
-def _p7b_version_raise(wt: Path, default: str) -> Optional[str]:
-    """Run ``check_version_bump.py --raise`` then ``--exact`` in the landing worktree; None, or why it failed."""
+def _p7b_version_raise(wt: Path, default: str, counts: bool = False) -> Optional[str]:
+    """Run ``check_version_bump.py --raise`` then ``--exact`` in the landing worktree; None, or why it failed.
+
+    ``counts`` (``contractLanding.manifestCounts is True``) adds ``--manifest-counts`` to both runs: the raise
+    also refreshes the counts in the manifest descriptions from the tree, in the same commit (the Landing count
+    refresh), and ``--exact`` then checks every count. A Count refusal exits non-zero and is a ``version-raise-failed``
+    halt that names the reason in its detail.
+    """
     script = SCRIPTS_DIR / "check_version_bump.py"
     for mode in ("--raise", "--exact"):
-        rc, out = _run([sys.executable, "-B", str(script), mode, "--default-branch", default], cwd=wt, timeout=120)
+        flags = [mode, "--manifest-counts"] if counts else [mode]
+        rc, out = _run([sys.executable, "-B", str(script), *flags, "--default-branch", default], cwd=wt, timeout=120)
         if rc != 0:
             return "check_version_bump.py %s failed (exit %s): %s" % (mode, rc, out)
     return None

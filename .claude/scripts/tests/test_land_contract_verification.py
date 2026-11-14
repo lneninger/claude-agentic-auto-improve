@@ -489,11 +489,31 @@ class RealProjectConfigTests(VerCase):
         steps = self.steps()
         self.assertTrue(steps, "the block configures verification steps")
         self.assertEqual([s.get("id") for s in steps],
-                         ["version-bump", "loop-script-tests", "hook-registration-tests", "hook-tests"],
+                         ["version-bump", "manifest-counts", "loop-script-tests", "hook-registration-tests",
+                          "hook-tests"],
                          "the configured steps changed: a new or renamed step needs a measured_minutes "
                          "entry too, then update this list")
         self.assertEqual(_timeout_shortfalls(steps), [],
                          "timeout_minutes must be >= measured_minutes * %s" % TIMEOUT_HEADROOM_FACTOR)
+
+    def test_the_manifest_counts_step_runs_the_version_free_counts_mode(self):
+        step = next((s for s in self.steps() if s.get("id") == "manifest-counts"), None)
+        self.assertIsNotNone(step, "manifest-counts is configured (contract 2026-11-14, Extension Point 3)")
+        self.assertEqual(step.get("command"), ["py", "-3", ".claude/scripts/check_version_bump.py", "--counts"])
+        self.assertEqual((step.get("results") or {}).get("format"), "exit-code")
+
+    def test_no_step_runs_exact_or_raise_because_baseline_recording_runs_every_step_on_the_default_branch(self):
+        # V11: --exact exits 1 on any tree not at origin/<default> minor + 1, and --raise commits. Either would make
+        # `--record-baseline` refuse, or change the checkout it measures.
+        for step in self.steps():
+            with self.subTest(step=step.get("id")):
+                command = [str(c) for c in (step.get("command") or [])]
+                self.assertNotIn("--exact", command)
+                self.assertNotIn("--raise", command)
+                self.assertNotIn("--manifest-counts", command, "that modifier rides on --exact or --raise only")
+
+    def test_the_conventions_switch_for_the_landing_count_refresh_is_on(self):
+        self.assertIs(self.block.get("manifestCounts"), True, "contractLanding.manifestCounts")
 
     def test_generated_drift_is_the_last_step_and_lists_the_three_sentinel_keys(self):
         steps = self.steps()

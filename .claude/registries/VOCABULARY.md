@@ -162,6 +162,10 @@
 
 - **Token proposal** *(2026-11-11, issue #21)* — a string the finish-install script found in one of four closed sources (`project-name`, `frontend-app`, `database`, `source-prefix`) and offers for the project-name token list, with its evidence. A found string that meets an exclusion rule (`invalid-text`, `system-database`, `too-short`, `generic-word`, `template-name`, `disposable-database`, `in-plugin-text`) is listed separately with that reason and is never proposed. Only the operator's explicit `--token` puts a string into the list, and a proposal is never written on its own. Named "proposal", not "candidate", so it cannot be confused with a memory **Capture candidate**. Introduced by `.claude/concepts/2026-11-11-finish-install-step3-proposals.md`.
 
+- **Landing count refresh** *(2026-11-14, issue #405)* — the rewrite of the skill, agent and hook counts in the plugin manifest descriptions that the landing makes from the tree, in the same commit as the **Landing version raise**. It changes only the number in each count. It is turned on by `contractLanding.manifestCounts`. Under `landing: manual` the operator makes it.
+
+- **Count deferral** *(2026-11-14, issue #405)* — on a pull request whose base is not the default branch, the manifest count pin checks only that every count can be refreshed. Equality with the tree is judged on the pull request that reaches the default branch, which the **Landing count refresh** makes true.
+
 ## Project tier
 
 This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `VOCABULARY/<domain>.md`.

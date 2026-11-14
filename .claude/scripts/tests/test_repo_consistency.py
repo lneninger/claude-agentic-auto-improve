@@ -31,13 +31,38 @@ Run: py -3 .claude/scripts/tests/test_repo_consistency.py
 
 from __future__ import annotations
 
+import itertools
 import json
+import os
 import re
+import shutil
+import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
+# The count rule, the claim reader and the noun table live once, in the shipped script (contract
+# 2026-11-14-manifest-counts-landing-refresh, I-1). This file lists the disk and imports the rest.
+sys.path.insert(0, str(PLUGIN_ROOT / ".claude" / "scripts"))
+import check_version_bump as cvb  # noqa: E402
+from check_version_bump import (  # noqa: E402
+    AGENTS_ROOT,
+    HOOKS_ROOT,
+    SKILLS_ROOT,
+    WORDS,
+    _CLAIM_RE,
+    _COUNT_RE,
+    _NOUN_MEASURE,
+    _NUM,
+    _counts,
+    manifest_descriptions,
+    measure_count,
+)
+from check_version_bump import MANIFEST_COUNT_NOUNS as MANIFEST_REQUIRED_NOUNS  # noqa: E402
 WORKFLOWS = PLUGIN_ROOT / ".github" / "workflows"
 
 REQUIRED_TESTS = (
@@ -69,14 +94,6 @@ MANIFESTS = (
 # Surfaces that must state a hook count (so the scan is proven to have read one).
 MANIFESTS_WITH_COUNT = (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json")
 
-WORDS = {w: i for i, w in enumerate(
-    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
-    "sixteen seventeen eighteen nineteen twenty".split())}
-_NUM = r"(\d+|" + "|".join(w for w in WORDS if w != "zero") + r")"
-# <number> [up to three words] hooks | hook files. The noun is exact so "9 hook test suites" never matches.
-# A gap word may not itself be a digit string or a spelled number, so the number taken is the one nearest the noun.
-_GAP_WORD = r"(?!(?:\d|(?:" + "|".join(w for w in WORDS if w != "zero") + r")\b))\w+"
-_COUNT_RE = re.compile(r"(?i)(?<![\w.])" + _NUM + r"[ \t]+(?:" + _GAP_WORD + r"[ \t]+){0,3}?(?:hooks|hook files)\b(?!/)")
 # <number> registrations (measure b)
 _REG_RE = re.compile(r"(?i)(?<![\w.])" + _NUM + r"\s+registrations\b")
 
@@ -91,20 +108,17 @@ def hook_command_count(config: dict) -> int:
     return sum(len(g.get("hooks", [])) for groups in config["hooks"].values() for g in groups)
 
 
+def disk_paths(directory: Path, root: str) -> list[str]:
+    """Every file under ``directory``, recursively (``is_file()``, names as stored), as the script's measure
+    ``root`` joined with the name relative to ``directory``: the listing the shared count rule is given."""
+    if not directory.is_dir():
+        return []
+    return [root + p.relative_to(directory).as_posix() for p in directory.rglob("*") if p.is_file()]
+
+
 def hook_file_count(hooks_dir: Path) -> int:
-    """Measure (a), hook files: *.py files directly in hooks_dir, not starting with '_', minus gate-launch.py."""
-    return sum(1 for p in hooks_dir.glob("*.py")
-               if p.is_file() and not p.name.startswith("_") and p.name != "gate-launch.py")
-
-
-def _counts(regex: re.Pattern, text: str) -> list[tuple[str, int]]:
-    found = []
-    for m in regex.finditer(text):
-        if re.search(r"(?i)retired\s+$", text[max(0, m.start() - 12):m.start()]):
-            continue
-        tok = m.group(1).lower()
-        found.append((re.sub(r"\s+", " ", m.group(0)), int(tok) if tok.isdigit() else WORDS[tok]))
-    return found
+    """Measure (a), hook files: the shared rule over the files on disk under hooks_dir."""
+    return measure_count("hooks", disk_paths(hooks_dir, HOOKS_ROOT))
 
 
 def readme_counts(text: str) -> list[tuple[str, int]]:
@@ -127,14 +141,6 @@ def stale_registrations(text: str, expected_entries: int) -> list[str]:
     """Violations of measure (b): 'N registrations' that differ from the hooks.json command-entry count."""
     return [f"says '{t}' ({n}) but hooks.json has {expected_entries} command entries"
             for t, n in registration_counts(text) if n != expected_entries]
-
-
-def manifest_descriptions(data: dict) -> list[str]:
-    out = [data["description"]] if isinstance(data.get("description"), str) else []
-    for p in data.get("plugins", []) or []:
-        if isinstance(p, dict) and isinstance(p.get("description"), str):
-            out.append(p["description"])
-    return out
 
 
 HOOKS_DIR = PLUGIN_ROOT / ".claude" / "hooks"
@@ -394,6 +400,9 @@ class HookCountTests(unittest.TestCase):
                          "README states a stale registration count")
 
     def test_manifest_descriptions_state_the_real_hook_count(self):
+        # V3 pin, contract 2026-11-14 (I-4, I-6, I-7): noun presence always; equality with the tree on a full pin;
+        # on a deferred pin (a pull request into a non-default base) only "the counts can be refreshed".
+        deferred = current_pin()[1]
         expected = expected_hook_count()
         for rel in MANIFESTS:
             with self.subTest(manifest=rel):
@@ -404,8 +413,13 @@ class HookCountTests(unittest.TestCase):
                 if rel in MANIFESTS_WITH_COUNT:
                     self.assertTrue(any(readme_counts(d) for d in descs),
                                     f"no hook count read in {rel} descriptions")
+                if deferred:
+                    continue
                 for d in descs:
                     self.assertEqual(stale_counts(d, expected), [], f"{rel} description has a stale hook count")
+        if deferred:
+            self.assertEqual(refresh_refusals(manifest_texts(), count_measures(PLUGIN_ROOT)), [],
+                             "the manifest counts cannot be refreshed. " + MANIFEST_REMEDY)
 
     def test_provider_table_row_is_among_scanned_occurrences(self):
         readme = read(PLUGIN_ROOT / "README.md")
@@ -491,15 +505,6 @@ class HookCountTests(unittest.TestCase):
 # agent measure are separate; "subagents" is the Claude Code word for the agent files, so it reads the agent measure.
 # Q2: a hook data file is a `.json` file directly in .claude/hooks/ other than hooks.json.
 CLAUDE_DIR = PLUGIN_ROOT / ".claude"
-_ORACLE_NOUNS = (
-    ("working agreements", "agreements"), ("subagents", "agents"), ("skills", "skills"), ("agents", "agents"),
-    ("hooks", "hooks"), ("shared helper modules", "helpers"), ("generic data files", "data_files"),
-    ("document templates", "templates"), ("reference documents", "references"), ("add-ons", "addons"),
-)
-_CLAIM_RE = re.compile(
-    r"(?i)(?<![\w.])(\d+|" + "|".join(w for w in WORDS if w != "zero") + r")[ \t]+(?:[\w-]+[ \t]+){0,2}?("
-    + "|".join(re.escape(n) for n, _ in _ORACLE_NOUNS) + r")\b")
-_NOUN_MEASURE = dict(_ORACLE_NOUNS)
 # tree lines that must carry no number at all (Q1), keyed by (parent label, label)
 _NUMBER_FREE_LINES = (("hooks/", "tests/"), (".claude/", "scripts/"), ("scripts/", "tests/"))
 
@@ -509,8 +514,8 @@ def count_oracles(root: Path) -> dict[str, int]:
     claude = root / ".claude"
     hooks = claude / "hooks"
     return {
-        "skills": sum(1 for p in (root / "skills").glob("*/SKILL.md") if p.is_file()),
-        "agents": sum(1 for p in (root / "agents").glob("*.md") if p.is_file()),
+        "skills": measure_count("skills", disk_paths(root / "skills", SKILLS_ROOT)),
+        "agents": measure_count("agents", disk_paths(root / "agents", AGENTS_ROOT)),
         "agreements": sum(1 for p in (claude / "agreements").glob("*.md") if p.is_file()),
         "addons": sum(1 for p in (claude / "addons").glob("*/addon.json") if p.is_file()),
         "hooks": hook_file_count(hooks),
@@ -663,22 +668,99 @@ class ReadmeCountPinTests(unittest.TestCase):
 
 
 # --- (5) Manifest description counts (issue 354; contract 2026-11-13-audit-followups-165-chores, I-1) ---------------
-# Nouns each manifest's descriptions must state (so the pin proves it read a count). The marketplace's top-level
-# description has no count; the requirement is met by any description of the file.
-MANIFEST_REQUIRED_NOUNS = {
-    "plugin.json": ("skills",),
-    ".claude-plugin/plugin.json": ("skills", "agents", "hooks"),
-    ".claude-plugin/marketplace.json": ("skills", "agents", "hooks"),
-    ".cursor-plugin/plugin.json": ("skills", "subagents"),
-}
+# The nouns each manifest's descriptions must state (MANIFEST_REQUIRED_NOUNS, so the pin proves it read a count) are
+# imported from the shipped script. The marketplace's top-level description has no count; the requirement is met by
+# any description of the file.
 MANIFEST_REMEDY = (
-    "Correct the description in the same pull request (numbers only). If this change sits on a parent branch "
-    "whose sub-tasks added or removed a skill or agent, the owner picks an exit: (i) recommended: hold this "
-    "pull request until that branch lands, then recount; (ii) otherwise merge the sync sub-task, each later "
-    "sub-task and the landing with `tests` red on this pin alone, each recording a finding that cites the "
-    "follow-up stub, then fix master with one single-block recount pull request. Stub: "
-    ".claude/concepts/followups/2026-11-13-manifest-counts-under-parent-branch.followup.md"
+    "Into the default branch, correct the numbers in the description in this pull request (numbers only). On a "
+    "parent branch, the landing refreshes them from the tree, so leave them: this pin only checks there that they "
+    "can be refreshed. Contract: .claude/concepts/2026-11-14-manifest-counts-landing-refresh.md"
 )
+
+
+# --- Pin context (contract 2026-11-14-manifest-counts-landing-refresh, I-6 and I-7) ---------------------------------
+# On a pull request into a non-default base the pin checks only that the counts are refreshable (Count deferral);
+# the pull request that reaches the default branch is judged in full. Strict when in doubt, and never silent.
+PIN_ENV_VARS = ("MANIFEST_PIN_HEAD_REF", "MANIFEST_PIN_BASE_REF", "MANIFEST_PIN_DEFAULT_BRANCH")
+ORIGIN_PREFIX = "refs/remotes/origin/"
+
+
+class PinContext(NamedTuple):
+    """head, base, default branch (bare branch names, or None) and where they came from (env / git / none)."""
+    head: Optional[str]
+    base: Optional[str]
+    default: Optional[str]
+    source: str
+
+
+def _git_text(*args: str) -> str:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=True,
+                          cwd=str(PLUGIN_ROOT)).stdout.strip()
+
+
+def resolve_pin_context(environ, git_reader=_git_text) -> PinContext:
+    """``env``: all three MANIFEST_PIN_* variables set and non-empty. ``git``: none of the three set; the head and
+    the default branch from git, the base unknown. ``none``: any other case (one or two set, or a git failure)."""
+    head, base, default = (environ.get(name) for name in PIN_ENV_VARS)
+    if head and base and default:
+        return PinContext(head, base, default, "env")
+    if head is None and base is None and default is None:
+        try:
+            head_git = git_reader("rev-parse", "--abbrev-ref", "HEAD")
+            default_git = git_reader("symbolic-ref", ORIGIN_PREFIX + "HEAD")
+        except (subprocess.CalledProcessError, OSError):
+            return PinContext(None, None, None, "none")
+        if default_git.startswith(ORIGIN_PREFIX):
+            default_git = default_git[len(ORIGIN_PREFIX):]
+        return PinContext(head_git, None, default_git, "git")
+    return PinContext(head, base, default, "none")
+
+
+def pin_deferred(ctx: PinContext) -> bool:
+    """Source ``none`` is never deferred (the predicate is not even called); otherwise the shared predicate decides,
+    and its own guard keeps an empty or blank default branch full."""
+    return ctx.source != "none" and cvb.count_pin_deferred(ctx.head, ctx.base, ctx.default)
+
+
+def pin_line(ctx: PinContext) -> str:
+    return "manifest count pin: %s (source %s, head %s, base %s, default %s)" % (
+        "deferred" if pin_deferred(ctx) else "full", ctx.source, ctx.head, ctx.base, ctx.default)
+
+
+_PIN: Optional[tuple] = None
+
+
+def current_pin() -> tuple:
+    """(context, deferred) for this run, resolved once; prints the one I-7 line so a stale variable never defers unseen."""
+    global _PIN
+    if _PIN is None:
+        ctx = resolve_pin_context(os.environ)
+        _PIN = (ctx, pin_deferred(ctx))
+        print(pin_line(ctx))
+    return _PIN
+
+
+def manifest_texts() -> dict[str, str]:
+    return {rel: read(PLUGIN_ROOT / rel) for rel in MANIFESTS}
+
+
+def count_measures(root: Path) -> dict[str, int]:
+    """The skills, agents and hooks measures, read from the disk."""
+    oracles = count_oracles(root)
+    return {measure: oracles[measure] for measure in cvb.COUNT_MEASURES}
+
+
+def refresh_refusals(texts: dict[str, str], measures: dict[str, int]) -> list[str]:
+    """What stops the landing's refresh from rewriting these descriptions: the script's own refusals."""
+    return [f"{r.manifest}: {r.reason}: {r.detail}" for r in cvb.plan_counts(texts, measures).refusals]
+
+
+def manifest_pin_problems(texts: dict[str, str], measures: dict[str, int], deferred: bool) -> list[str]:
+    """The one judgement of the pin: a deferred pin asks that the refresh plan has no refusal; a full pin also asks
+    that every claim equals its measure."""
+    plan = cvb.plan_counts(texts, measures)
+    problems = [f"{r.manifest}: {r.reason}: {r.detail}" for r in plan.refusals]
+    return problems if deferred else problems + plan.mismatches
 
 
 def manifest_noun_violations(descriptions: list[str], required: tuple[str, ...]) -> list[str]:
@@ -701,11 +783,19 @@ class ManifestCountPinTests(unittest.TestCase):
     """Real assertions read the four manifests and the filesystem (I-1); controls feed the same helpers."""
 
     def test_manifest_description_counts_match_oracles(self):
-        manifests = {rel: json.loads(read(PLUGIN_ROOT / rel)) for rel in MANIFESTS}
-        violations = manifest_violations(manifests, count_oracles(PLUGIN_ROOT))
-        self.assertEqual(violations, [], "manifest description counts drifted from the tree. " + MANIFEST_REMEDY)
+        # V3 pin, contract 2026-11-14 (I-4, I-6, I-7). Full: every claim equals the tree (as before) AND the refresh
+        # plan has no refusal. Deferred (a pull request into a non-default base): the refresh plan has no refusal.
+        deferred = current_pin()[1]
+        texts = manifest_texts()
+        if not deferred:
+            manifests = {rel: json.loads(text) for rel, text in texts.items()}
+            violations = manifest_violations(manifests, count_oracles(PLUGIN_ROOT))
+            self.assertEqual(violations, [], "manifest description counts drifted from the tree. " + MANIFEST_REMEDY)
+        self.assertEqual(refresh_refusals(texts, count_measures(PLUGIN_ROOT)), [],
+                         "the manifest counts cannot be refreshed by the landing. " + MANIFEST_REMEDY)
 
     def test_every_manifest_keeps_its_nouns(self):
+        # noun presence is asserted in both modes (V3 pin)
         for rel in MANIFESTS:
             with self.subTest(manifest=rel):
                 descs = manifest_descriptions(json.loads(read(PLUGIN_ROOT / rel)))
@@ -731,6 +821,307 @@ class ManifestCountPinTests(unittest.TestCase):
             "description": "34 skills and 14 subagents"}}, oracles), [])
         self.assertNotEqual(manifest_violations({".cursor-plugin/plugin.json": {
             "description": "34 skills and some subagents"}}, oracles), [])
+
+
+# --- (6) The listing differences of the moved count rule (contract 2026-11-14-manifest-counts-landing-refresh, I-1) ---
+# The rule never reads disk or git, so a row over one path list cannot show a difference between the two listings.
+# Each row below builds a throwaway git repository and asserts the number on BOTH sides: the script's `tree_paths`
+# (what `--counts` and the landing read) and this file's disk wrappers (what the local pin reads).
+_GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+_GIT_ENV.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.test", GIT_COMMITTER_NAME="t",
+                GIT_COMMITTER_EMAIL="t@example.test", GIT_CONFIG_NOSYSTEM="1",
+                GIT_CEILING_DIRECTORIES=str(Path(tempfile.gettempdir()).resolve().parent))
+
+
+def _fixture_git(cwd: Path, *args: str, stdin: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    proc = subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "core.quotePath=true",
+                           "-c", "commit.gpgsign=false", *args], cwd=str(cwd), capture_output=True, text=True,
+                          input=stdin, env=_GIT_ENV)
+    if check and proc.returncode != 0:
+        raise AssertionError(f"fixture git {args!r} failed: {proc.stderr}")
+    return proc
+
+
+def _force_rmtree(path: Path) -> None:
+    """Git object files are read-only on Windows: clear the flag and retry."""
+    def retry(func, target, _error):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(str(path), onexc=retry)
+    else:
+        shutil.rmtree(str(path), onerror=retry)
+
+
+class CountListingDifferenceTests(unittest.TestCase):
+    """D1, D3 and D4 of I-1 live in the two listings, so each row builds a repository and reads both."""
+
+    def repo(self) -> Path:
+        root = Path(tempfile.mkdtemp(prefix="count-listing-"))
+        self.addCleanup(_force_rmtree, root)
+        _fixture_git(root, "init", "-q")
+        return root
+
+    def write(self, root: Path, rel: str, text: str = "x\n") -> None:
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8", newline="\n")
+
+    def commit(self, root: Path) -> None:
+        _fixture_git(root, "add", "-A")
+        _fixture_git(root, "commit", "-q", "-m", "fixture")
+
+    def index_only(self, root: Path, mode: str, rel: str) -> bool:
+        """Add ``rel`` to the index without a file on disk; False (with the reason printed) when git refuses."""
+        blob = _fixture_git(root, "hash-object", "-w", "--stdin", stdin="x\n").stdout.strip()
+        proc = _fixture_git(root, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{rel}", check=False)
+        if proc.returncode != 0:
+            print(f"[skip] git refuses the path {rel!r}: {proc.stderr.strip()}")
+            return False
+        return True
+
+    def test_d1_an_untracked_or_ignored_skill_counts_on_disk_but_not_in_the_tree_listing(self):
+        root = self.repo()
+        self.write(root, ".gitignore", "skills/ignored/\n")
+        self.write(root, "skills/committed/SKILL.md")
+        self.commit(root)
+        self.write(root, "skills/untracked/SKILL.md")
+        self.write(root, "skills/ignored/SKILL.md")
+        self.assertEqual(measure_count("skills", cvb.tree_paths(str(root))), 1, "HEAD lists the committed skill only")
+        self.assertEqual(count_oracles(root)["skills"], 3, "the disk lists all three")
+
+    def test_d3_a_symlink_entry_counts_in_the_tree_listing_but_a_symlink_to_a_directory_not_on_disk(self):
+        root = self.repo()
+        self.write(root, "README.md")
+        _fixture_git(root, "add", "-A")
+        self.assertTrue(self.index_only(root, "120000", ".claude/hooks/x.py"), "git accepts a symlink entry")
+        _fixture_git(root, "commit", "-q", "-m", "fixture")
+        self.assertEqual(measure_count("hooks", cvb.tree_paths(str(root))), 1, "git lists the mode-120000 entry")
+        disk = Path(tempfile.mkdtemp(prefix="count-symlink-"))
+        self.addCleanup(_force_rmtree, disk)
+        (disk / "target-dir").mkdir()
+        try:
+            os.symlink(str(disk / "target-dir"), str(disk / "x.py"), target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            reason = f"the OS refuses os.symlink ({exc})"
+            print(f"[skip] {reason}")
+            self.skipTest(reason)
+        self.assertEqual(hook_file_count(disk), 0, "is_file() follows the link to a directory: not a file")
+
+    def test_d4_a_non_ascii_or_quote_segment_is_counted_from_the_tree_listing_byte_exact(self):
+        root = self.repo()
+        self.write(root, "skills/café/SKILL.md")
+        _fixture_git(root, "add", "-A")
+        # a quote cannot be written on disk; the index-only entry is skipped (reason printed) where git refuses it
+        # (git for Windows does, to protect NTFS), and CI (Linux) runs it
+        with_quote = self.index_only(root, "100644", 'skills/q"x/SKILL.md')
+        _fixture_git(root, "commit", "-q", "-m", "fixture")
+        listed = cvb.tree_paths(str(root))
+        self.assertIn("skills/café/SKILL.md", listed)
+        if with_quote:
+            self.assertIn('skills/q"x/SKILL.md', listed)
+        self.assertEqual(measure_count("skills", listed), 2 if with_quote else 1, "the rule counts each byte-exact path")
+        # the other side: without -z git quotes them, and the rule would miss them
+        quoted = _fixture_git(root, "ls-tree", "-r", "--name-only", "HEAD").stdout.splitlines()
+        self.assertEqual(measure_count("skills", quoted), 0, f"a quoted listing counts nothing: {quoted}")
+        self.assertEqual(count_oracles(root)["skills"], 1, "the disk holds only the on-disk non-ASCII skill")
+
+    def test_d4_a_backslash_segment_is_counted_from_the_tree_listing(self):
+        root = self.repo()
+        self.write(root, "README.md")
+        _fixture_git(root, "add", "-A")
+        if not self.index_only(root, "100644", "skills/b\\x/SKILL.md"):
+            self.skipTest("git refuses a path holding a backslash")
+        _fixture_git(root, "commit", "-q", "-m", "fixture")
+        listed = cvb.tree_paths(str(root))
+        self.assertEqual(listed.count("skills/b\\x/SKILL.md"), 1)
+        self.assertEqual(measure_count("skills", listed), 1)
+        quoted = _fixture_git(root, "ls-tree", "-r", "--name-only", "HEAD").stdout.splitlines()
+        self.assertEqual(measure_count("skills", quoted), 0, f"a quoted listing counts nothing: {quoted}")
+
+
+# --- (7) The manifest pin by route (contract 2026-11-14-manifest-counts-landing-refresh, I-6, I-7; Extension Point 4) -----
+MEASURES_34_15_14 = {"skills": 34, "agents": 15, "hooks": 14}
+
+
+def counted_texts(claude_description: str = "34 skills, 15 agents and 14 hooks that put design first.",
+                  plugin_description: str = "34 skills that put design first.",
+                  cursor_description: str = "34 skills and 15 subagents that put design first.") -> dict[str, str]:
+    """The four manifests as file text, with the descriptions given."""
+    def one(description: str) -> str:
+        return json.dumps({"name": "x", "version": "1.0.0", "description": description}, indent=2) + "\n"
+    return {"plugin.json": one(plugin_description), ".claude-plugin/plugin.json": one(claude_description),
+            ".cursor-plugin/plugin.json": one(cursor_description),
+            ".claude-plugin/marketplace.json": json.dumps(
+                {"name": "m", "version": "1.0.0", "description": "A marketplace.",
+                 "plugins": [{"name": "x", "version": "1.0.0", "description": claude_description}]}, indent=2) + "\n"}
+
+
+def fake_git(head: str = "task/demo/t1-a", origin_head: str = "refs/remotes/origin/master"):
+    def reader(*args: str) -> str:
+        if args[:2] == ("rev-parse", "--abbrev-ref"):
+            return head
+        if args[0] == "symbolic-ref":
+            return origin_head
+        raise AssertionError(f"unexpected git call {args!r}")
+    return reader
+
+
+def pin_env(head: str, base: str, default: str) -> dict[str, str]:
+    return dict(zip(PIN_ENV_VARS, (head, base, default)))
+
+
+class ManifestPinRouteTests(unittest.TestCase):
+    """One row per route into delivery, each with where it is enforced. The decision is `pin_deferred` over the
+    resolved context; the judgement is `manifest_pin_problems`."""
+
+    SUBTASK = "task/2026-11-14-demo/t1-count-refresh"
+
+    def decide(self, environ: dict[str, str], reader=None) -> tuple[PinContext, bool]:
+        ctx = resolve_pin_context(environ, reader or fake_git())
+        return ctx, pin_deferred(ctx)
+
+    # --- routes through the CI `tests` job (env source) ---
+    def test_route_single_block_into_the_default_branch_is_the_full_pin(self):  # CI tests
+        ctx, deferred = self.decide(pin_env("fix/recount", "master", "master"))
+        self.assertEqual((ctx.source, deferred), ("env", False))
+        stale = counted_texts(claude_description="33 skills, 15 agents and 14 hooks that put design first.")
+        self.assertNotEqual(manifest_pin_problems(stale, MEASURES_34_15_14, deferred), [],
+                            "a stale count into the default branch fails the full pin (equality)")
+        self.assertNotEqual(manifest_pin_problems(
+            counted_texts(claude_description="34 skills, 15 agents, 14 hooks and 3 add-ons."),
+            MEASURES_34_15_14, deferred), [], "and so does a description the landing could not refresh (refusal)")
+
+    def test_route_sub_task_task_head_into_the_parent_is_deferred(self):  # CI tests
+        ctx, deferred = self.decide(pin_env(self.SUBTASK, "feature/405-parent", "master"))
+        self.assertEqual((ctx.source, deferred), ("env", True))
+
+    def test_route_sync_sub_task_into_the_parent_is_deferred(self):  # CI tests
+        _ctx, deferred = self.decide(pin_env("task/2026-11-14-demo/t2-sync-master", "feature/405-parent", "master"))
+        self.assertTrue(deferred)
+
+    def test_route_hand_named_head_into_a_non_default_base_is_deferred(self):  # CI tests
+        _ctx, deferred = self.decide(pin_env("fix/remedy-for-the-review", "feature/405-parent", "master"))
+        self.assertTrue(deferred)
+
+    def test_route_this_contracts_own_landing_pull_request_is_the_full_pin(self):  # CI tests, I-10
+        # The landing pull request is the parent branch into master. Master's old config runs plain --raise/--exact and
+        # no manifest-counts step, so the descriptions stay true only because no counted file is touched.
+        _ctx, deferred = self.decide(pin_env("feature/405-landing-time-manifest-count-refresh", "master", "master"))
+        self.assertFalse(deferred)
+
+    def test_route_a_later_landing_pull_request_into_master_is_the_full_pin(self):  # CI tests; P7b + P8 made it true
+        _ctx, deferred = self.decide(pin_env("feature/406-next-contract", "master", "master"))
+        self.assertFalse(deferred)
+
+    def test_route_manual_landing_is_the_full_pin(self):  # CI tests; the CLAUDE.md commands refresh the numbers
+        _ctx, deferred = self.decide(pin_env("feature/manual-landing", "master", "master"))
+        self.assertFalse(deferred)
+
+    def test_route_a_task_head_into_the_default_branch_is_the_full_pin(self):  # CI tests
+        _ctx, deferred = self.decide(pin_env(self.SUBTASK, "master", "master"))
+        self.assertFalse(deferred, "parent mode is for a non-default base only")
+
+    # --- local runs (git source) ---
+    def test_route_local_run_git_source_task_head_no_base_is_deferred(self):
+        ctx, deferred = self.decide({}, fake_git(head=self.SUBTASK))
+        self.assertEqual((ctx.source, ctx.base, ctx.default, deferred), ("git", None, "master", True))
+
+    def test_route_local_run_git_source_other_head_is_the_full_pin(self):
+        for head in ("feature/x", "master", "HEAD"):
+            with self.subTest(head=head):
+                ctx, deferred = self.decide({}, fake_git(head=head))
+                self.assertEqual((ctx.source, deferred), ("git", False))
+
+    def test_a_git_failure_is_source_none_and_the_full_pin(self):
+        def failing(*_args):
+            raise subprocess.CalledProcessError(128, ["git"])
+        ctx, deferred = self.decide({}, failing)
+        self.assertEqual((ctx.source, deferred), ("none", False))
+
+    # --- strict when in doubt ---
+    def test_one_or_two_variables_set_is_source_none_and_the_full_pin(self):
+        values = dict(zip(PIN_ENV_VARS, (self.SUBTASK, "feature/405-parent", "master")))
+        for size in (1, 2):
+            for combo in itertools.combinations(PIN_ENV_VARS, size):
+                with self.subTest(set=combo):
+                    ctx, deferred = self.decide({k: values[k] for k in combo}, fake_git(head=self.SUBTASK))
+                    self.assertEqual((ctx.source, deferred), ("none", False),
+                                     "a partial context never defers, and never falls back to git")
+
+    def test_a_variable_set_but_empty_is_source_none(self):
+        ctx, deferred = self.decide(pin_env(self.SUBTASK, "feature/405-parent", ""))
+        self.assertEqual((ctx.source, deferred), ("none", False))
+
+    def test_an_empty_or_blank_default_branch_never_defers_whatever_the_head_and_base(self):
+        for default in ("", " ", "\t", None):
+            for head in (self.SUBTASK, "feature/x", "fix/y"):
+                for base in (None, "feature/405-parent", "master", "origin/master"):
+                    with self.subTest(default=default, head=head, base=base):
+                        self.assertIs(cvb.count_pin_deferred(head, base, default), False,
+                                      "asserted on the predicate itself (the I-6 guard)")
+        ctx, deferred = self.decide(pin_env(self.SUBTASK, "feature/405-parent", " "))
+        self.assertEqual((ctx.source, deferred), ("env", False), "a blank default through the environment is full too")
+
+    def test_the_pin_line_says_which_mode_and_where_the_context_came_from(self):
+        ctx = PinContext(self.SUBTASK, "feature/405-parent", "master", "env")
+        self.assertEqual(pin_line(ctx), f"manifest count pin: deferred (source env, head {self.SUBTASK}, "
+                                        "base feature/405-parent, default master)")
+        self.assertEqual(pin_line(PinContext("fix/x", "master", "master", "env")),
+                         "manifest count pin: full (source env, head fix/x, base master, default master)")
+        self.assertTrue(pin_line(PinContext("a", None, None, "none")).startswith("manifest count pin: full (source none"))
+
+    # --- the judgement itself ---
+    def test_a_deferred_pin_accepts_stale_numbers_a_full_pin_does_not(self):
+        stale = counted_texts(claude_description="28 skills, 15 agents and 14 hooks that put design first.")
+        self.assertEqual(manifest_pin_problems(stale, MEASURES_34_15_14, deferred=True), [])
+        self.assertNotEqual(manifest_pin_problems(stale, MEASURES_34_15_14, deferred=False), [])
+        self.assertEqual(manifest_pin_problems(counted_texts(), MEASURES_34_15_14, deferred=False), [], "control")
+
+    def test_the_deferred_pin_fails_a_description_with_its_noun_removed(self):
+        for text in ("34 skills and 15 agents that put design first.", "skills, agents and hooks"):
+            with self.subTest(description=text):
+                problems = manifest_pin_problems(counted_texts(claude_description=text), MEASURES_34_15_14, True)
+                self.assertTrue(any("count-missing" in p for p in problems), problems)
+
+    def test_the_full_pin_fails_on_3_add_ons_and_on_14_hook_files(self):
+        for text, reason in (("34 skills, 15 agents, 14 hooks and 3 add-ons that put design first.",
+                              "count-unrefreshable-noun"),
+                             ("34 skills, 15 agents and 14 hook files that put design first.",
+                              "count-reader-disagreement")):
+            for deferred in (False, True):
+                with self.subTest(description=text, deferred=deferred):
+                    problems = manifest_pin_problems(counted_texts(claude_description=text), MEASURES_34_15_14, deferred)
+                    self.assertTrue(any(reason in p for p in problems), problems)
+
+    def test_an_unreadable_listing_or_an_empty_measure_is_a_refusal_in_both_modes(self):
+        for measures in (dict(MEASURES_34_15_14, hooks=0),):
+            for deferred in (False, True):
+                problems = manifest_pin_problems(counted_texts(), measures, deferred)
+                self.assertTrue(any("oracle-empty" in p for p in problems), problems)
+
+    def test_the_real_manifests_have_an_empty_refusal_list(self):  # U-4: master's descriptions are refreshable as written
+        self.assertEqual(refresh_refusals(manifest_texts(), count_measures(PLUGIN_ROOT)), [])
+
+    # --- the CI wiring (Extension Point 4) ---
+    def test_the_tests_job_hands_the_pull_request_context_to_the_pin_through_env(self):
+        text = read(WORKFLOWS / "version-bump.yml")
+        steps: list[list[str]] = []
+        for ln in job_block(text, CI_JOB):
+            if _indent(ln) == 6 and ln.lstrip().startswith("- "):
+                steps.append([ln])
+            elif steps:
+                steps[-1].append(ln)
+        homes = [s for s in steps if any("test_repo_consistency.py" in ln and "run:" in ln for ln in s)]
+        self.assertEqual(len(homes), 1, "exactly one step runs test_repo_consistency.py")
+        step = "\n".join(homes[0])
+        wanted = {"MANIFEST_PIN_BASE_REF": "github.base_ref", "MANIFEST_PIN_HEAD_REF": "github.head_ref",
+                  "MANIFEST_PIN_DEFAULT_BRANCH": "github.event.repository.default_branch"}
+        self.assertEqual(set(wanted), set(PIN_ENV_VARS), "the names the test reads are the names the workflow sets")
+        for name, expression in wanted.items():
+            self.assertRegex(step, rf"(?m)^\s+{name}:\s*\$\{{\{{\s*{re.escape(expression)}\s*\}}\}}\s*$")
+        run_line = next(ln for ln in homes[0] if "run:" in ln)
+        self.assertNotIn("${{", run_line, "nothing is interpolated in run:")
 
 
 if __name__ == "__main__":

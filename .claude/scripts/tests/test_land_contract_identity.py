@@ -1225,6 +1225,102 @@ class TestP7bVersionRaise(StageCase):
                                  "contractLanding.versionRaise is off: the landing leaves the version alone")
 
 
+# ===========================================================================
+# Contract 2026-11-14-manifest-counts-landing-refresh, Extension Point 2: with contractLanding.manifestCounts on,
+# P7b passes --manifest-counts to both runs, so the landing head carries the version AND the counts of the tree it
+# lands, in one commit, and --exact --manifest-counts accepts it. A Count refusal is a version-raise-failed halt that
+# names the reason. The default branch and the parent branch hold the same version, so P7 merges nothing here.
+# ===========================================================================
+def counted_description(skills, agents, hooks, tail="that put design first"):
+    return "Protocol: %d skills, %d agents and %d hooks %s." % (skills, agents, hooks, tail)
+
+
+def counted_manifests_at(version, skills, agents, hooks, claude_description=None):
+    """The four manifests claiming these counts; ``claude_description`` replaces the .claude-plugin one."""
+    claude = claude_description or counted_description(skills, agents, hooks)
+
+    def one(description):
+        return json.dumps({"name": "x", "version": version, "description": description}, indent=2) + "\n"
+
+    return {"plugin.json": one("Protocol: %d skills that put design first." % skills),
+            ".claude-plugin/plugin.json": one(claude),
+            ".cursor-plugin/plugin.json": one("Protocol: %d skills and %d subagents that put design first."
+                                              % (skills, agents)),
+            ".claude-plugin/marketplace.json": json.dumps(
+                {"name": "m", "version": version, "description": "A marketplace.",
+                 "plugins": [{"name": "x", "version": version, "description": claude}]}, indent=2) + "\n"}
+
+
+def counted_tree_files(skills, agents, hooks):
+    files = {"skills/s%d/SKILL.md" % i: "s\n" for i in range(skills)}
+    files.update({"agents/a%d.md" % i: "a\n" for i in range(agents)})
+    files.update({".claude/hooks/h%d.py" % i: "h\n" for i in range(hooks)})
+    files[".claude/hooks/_helper.py"] = "helper\n"
+    return files
+
+
+class TestP7bManifestCounts(StageCase):
+
+    def landing(self, *, manifestCounts=True, claude_description=None, subdir="k"):
+        """The base tree holds 3 skills, 2 agents and 2 hooks and says so; the parent branch adds one skill."""
+        folder = Path(self._tmp.name) / subdir
+        folder.mkdir()
+        base_files = dict(counted_manifests_at("0.11.3", 3, 2, 2))
+        base_files.update(counted_tree_files(3, 2, 2))
+        base_files[".claude/scripts/check_version_bump.py"] = _VBUMP_SCRIPT.read_text(encoding="utf-8")
+        cfg = landing_config(steps=[STEP_CLEAN])
+        cfg["versionRaise"] = True
+        if manifestCounts is not None:
+            cfg["manifestCounts"] = manifestCounts
+        parent_files = dict(SRC_CHANGE)
+        parent_files["skills/added/SKILL.md"] = "added\n"
+        if claude_description is not None:
+            parent_files[".claude-plugin/plugin.json"] = counted_manifests_at(
+                "0.11.3", 3, 2, 2, claude_description)[".claude-plugin/plugin.json"]
+        kit = Kit(folder, config=cfg, base_files=base_files, parent_files=parent_files)
+        st = Stage(self, kit)
+        self.isolated = isolated_git_env(folder)
+        with mock.patch.dict(os.environ, self.isolated):
+            return st, st.run()
+
+    def check(self, st, *flags):
+        proc = _REAL_SUBPROCESS_RUN([sys.executable, "-B", str(_VBUMP_SCRIPT), *flags, "--default-branch", "master"],
+                                    cwd=str(st.worktree), capture_output=True, text=True,
+                                    env=dict(os.environ, **self.isolated))
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+    def manifests(self, st):
+        return {name: (Path(st.worktree) / name).read_text(encoding="utf-8") for name in _MANIFEST_NAMES}
+
+    def test_a_parent_branch_that_added_a_skill_lands_with_the_refreshed_count(self):
+        st, report = self.landing()
+        self.assertEqual(report["outcome"], "landed", "fixture sanity: %s %s" % (report["outcome"], report["detail"]))
+        self.assertEqual(self.manifests(st), counted_manifests_at("0.12.0", 4, 2, 2),
+                         "the raise and the refresh: 0.12.0, and 4 skills from the tree the landing lands")
+        code, out = self.check(st, "--exact", "--manifest-counts")
+        self.assertEqual(code, 0, "the landing's own check accepts the head. got: %s" % out)
+        self.assertEqual(git(st.worktree, "log", "-1", "--format=%s"),
+                         "chore: raise the plugin version to 0.12.0 and refresh the manifest counts at the landing",
+                         "one commit holds both")
+        self.assertEqual(git(st.worktree, "status", "--porcelain"), "", "committed, not left in the tree")
+
+    def test_a_refusal_halts_version_raise_failed_naming_the_reason_and_pushes_nothing(self):
+        st, report = self.landing(claude_description=counted_description(3, 2, 2, "and 3 add-ons"))
+        self.assertEqual(report["outcome"], "version-raise-failed",
+                         "an unrefreshable description halts: %s %s" % (report["outcome"], report["detail"]))
+        self.assertIn("count-unrefreshable-noun", report["detail"], "the halt names the Count refusal")
+        self.assertEqual(st.count("git_push"), 0, "nothing is pushed after a halt")
+        self.assertEqual(st.count("gh_pr_merge"), 0)
+
+    def test_positive_control_with_the_key_off_or_absent_the_counts_are_left_alone(self):
+        for label, value in (("key absent", None), ("key off", False)):
+            with self.subTest(case=label):
+                st, report = self.landing(manifestCounts=value, subdir="counts-" + label.replace(" ", "-"))
+                self.assertEqual(report["outcome"], "landed", "%s %s" % (report["outcome"], report["detail"]))
+                self.assertEqual(self.manifests(st), counted_manifests_at("0.12.0", 3, 2, 2),
+                                 "versionRaise raises the version only: the stale count stays, as today")
+
+
 class TestFeedersPassUnfilteredBriefs(StageCase):
     """L-3: the landing's P1 reads the parent brief through the one selector, whatever its contract: field holds."""
 

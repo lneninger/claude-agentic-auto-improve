@@ -5594,5 +5594,70 @@ class TestStageProtectedNamesFourthRemedy(PnLandingCase):
         self.assertEqual(self.marked("installed"), ["installed"], "and it is the installed copy that ran")
 
 
+# ===========================================================================
+# Contract 2026-11-14-manifest-counts-landing-refresh, Extension Point 3: the `manifest-counts` P8 step runs
+# `check_version_bump.py --counts`. Baseline recording runs every step twice on a default-branch checkout and
+# refuses on an exit-code step that is not 0 (V11), so the step must pass on the default branch. Real script, real
+# git, no mock: the step is what the landing runs.
+# ===========================================================================
+_COUNTS_SCRIPT = Path(__file__).resolve().parent.parent / "check_version_bump.py"
+
+
+def _counted_checkout(root, skills, claimed):
+    """A default-branch checkout: ``skills`` skills, 2 agents, 2 hooks; manifests claim ``claimed`` skills."""
+    files = {}
+    for i in range(skills):
+        files["skills/s%d/SKILL.md" % i] = "s\n"
+    files.update({"agents/a0.md": "a\n", "agents/a1.md": "a\n", ".claude/hooks/h0.py": "h\n",
+                  ".claude/hooks/h1.py": "h\n", ".claude/hooks/_helper.py": "h\n"})
+    plain = json.dumps({"name": "x", "version": "0.11.3",
+                        "description": "Protocol: %d skills, 2 agents and 2 hooks that do things." % claimed},
+                       indent=2) + "\n"
+    cursor = json.dumps({"name": "x", "version": "0.11.3",
+                         "description": "Protocol: %d skills and 2 subagents that do things." % claimed},
+                        indent=2) + "\n"
+    only_skills = json.dumps({"name": "x", "version": "0.11.3",
+                              "description": "Protocol: %d skills that do things." % claimed}, indent=2) + "\n"
+    market = json.dumps({"name": "m", "version": "0.11.3", "description": "A marketplace.",
+                         "plugins": [{"name": "x", "version": "0.11.3",
+                                      "description": "Protocol: %d skills, 2 agents and 2 hooks that do things."
+                                                     % claimed}]}, indent=2) + "\n"
+    files.update({"plugin.json": only_skills, ".claude-plugin/plugin.json": plain,
+                  ".cursor-plugin/plugin.json": cursor, ".claude-plugin/marketplace.json": market})
+    write_files(root, files)
+    git(root, "init", "-q")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "default branch")
+
+
+class TestRunRecordingManifestCounts(LandCase):
+
+    STEP = {"id": "manifest-counts", "command": [sys.executable, "-B", str(_COUNTS_SCRIPT), "--counts"],
+            "results": {"format": "exit-code"}, "timeout_minutes": 5}
+
+    def record(self, skills, claimed):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            repo = Path(tmp) / "default-branch"
+            repo.mkdir()
+            _counted_checkout(repo, skills, claimed)
+            out_path = Path(tmp) / "test-baseline.json"
+            result = self.fn("run_recording")({"verification": {"steps": [dict(self.STEP)]}, "emulators": []},
+                                              cwd=repo, results_dir=Path(tmp) / "res", out_path=out_path,
+                                              commit=sha40("c"))
+            return result, out_path.exists()
+
+    def test_the_step_passes_on_a_default_branch_whose_counts_are_true_so_the_recording_succeeds(self):
+        result, written = self.record(skills=3, claimed=3)
+        self.assertEqual(result["outcome"], "baseline-recorded",
+                         "the step runs twice on the default branch and exits 0 both times: %s" % (result,))
+        self.assertTrue(written, "the baseline file is written")
+
+    def test_the_step_is_red_on_a_default_branch_whose_counts_drifted_and_names_itself(self):
+        result, written = self.record(skills=4, claimed=3)
+        self.assertEqual(result["outcome"], "environment-failure", "a step that fails on master refuses the recording")
+        self.assertIn("manifest-counts", result["detail"], "and the detail names the step")
+        self.assertFalse(written, "nothing is written")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
