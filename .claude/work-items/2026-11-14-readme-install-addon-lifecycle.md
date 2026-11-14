@@ -13,9 +13,9 @@ branch: feature/readme-install-addon-lifecycle
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261114-feature-readme-install-addon-lifecycle
 north_stars: none
 contract: none
-pr: none
-issue_link: unknown
-status: clarified
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/409
+issue_link: none
+status: shipped
 created: 2026-11-14
 ---
 
