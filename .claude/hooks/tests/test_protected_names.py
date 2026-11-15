@@ -1970,7 +1970,8 @@ class LinkSpellingTests(PathSpellingCase):
             comparable = self.need(module, label, "comparable_path")(str(link))
             got = self.need(module, label, "resolve_git")(self._path_value(link), [resolved_root])
         self.assertTrue(any(os.path.normcase(os.path.abspath(c)) == os.path.normcase(str(link)) for c in calls),
-                        "%s: R9-G5-1: control: the patched realpath was called with %s (it is not bypassed)" % (label, link))
+                        "%s: R9-G5-1: comparable_path consulted the patched realpath for %s; that resolve_git consulted it is "
+                        "proven by the real-git assertion below" % (label, link))
         self.assertEqual(comparable, os.path.normcase(resolved_root + "\\x"),
                          "%s: R9-G5-1: realpath answered %s for %s; step 3 of comparable_path strips the prefix, so the "
                          "root's x folder through the admin share has the root's drive spelling" % (label, answer, link))
@@ -2052,6 +2053,52 @@ class LinkSpellingTests(PathSpellingCase):
             self.skipTest("admin share not reachable")
         got = self.need(module, label, "resolve_git")(self._path_value(entry), [str(self.excluded)])
         self._assert_returns_planted(label, got, planted, "R9-G6-2C: the share entry names the folder outside every root")
+
+    # -- Block 29 (Revision 10, gate 28's finding G7): the forward-slash drive prefix on the written spelling (C8, C12) --
+    def _g7_entry(self, prefix, folder, last):
+        """``<prefix>/<drive>/<folder tail with forward slashes>/<last>``, for example ``//?/C:/Users/.../nm``."""
+        drive, _, tail = _drive_and_tail(folder)
+        return "%s/%s/%s/%s" % (prefix, drive, tail.replace("\\", "/"), last)
+
+    def _g7_skipped(self, label, prefix, row):
+        module = dict(both_copies())[label]
+        self._g6_fixture()
+        entry = self._g7_entry(prefix, self.excluded, "nm")
+        got = self.need(module, label, "resolve_git")(self._path_value(entry), [str(self.excluded)])
+        self._assert_returns_real_git(label, got, "%s: the entry is written inside the root behind a forward-slash %s/ drive "
+                                                   "prefix, so the written spelling skips it" % (row, prefix))
+
+    def _g7_control(self, label, prefix, row):
+        module = dict(both_copies())[label]
+        planted = self._g6_fixture()
+        entry = self._g7_entry(prefix, self.owned, "out")
+        got = self.need(module, label, "resolve_git")(self._path_value(entry), [str(self.excluded)])
+        self._assert_returns_planted(label, got, planted, "%s: the forward-slash %s/ entry names the folder outside every root"
+                                     % (row, prefix))
+
+    def test_R10_G7_1_a_forward_slash_question_mark_drive_entry_written_inside_the_root_over_a_junction_is_skipped_h(self):
+        self._g7_skipped("_protected_names", "//?", "R10-G7-1")
+
+    def test_R10_G7_1_a_forward_slash_question_mark_drive_entry_written_inside_the_root_over_a_junction_is_skipped_l(self):
+        self._g7_skipped("land_contract", "//?", "R10-G7-1")
+
+    def test_R10_G7_1_control_a_forward_slash_question_mark_drive_entry_outside_every_root_is_returned_h(self):
+        self._g7_control("_protected_names", "//?", "R10-G7-1C")
+
+    def test_R10_G7_1_control_a_forward_slash_question_mark_drive_entry_outside_every_root_is_returned_l(self):
+        self._g7_control("land_contract", "//?", "R10-G7-1C")
+
+    def test_R10_G7_2_a_forward_slash_dot_drive_entry_written_inside_the_root_over_a_junction_is_skipped_h(self):
+        self._g7_skipped("_protected_names", "//.", "R10-G7-2")
+
+    def test_R10_G7_2_a_forward_slash_dot_drive_entry_written_inside_the_root_over_a_junction_is_skipped_l(self):
+        self._g7_skipped("land_contract", "//.", "R10-G7-2")
+
+    def test_R10_G7_2_control_a_forward_slash_dot_drive_entry_outside_every_root_is_returned_h(self):
+        self._g7_control("_protected_names", "//.", "R10-G7-2C")
+
+    def test_R10_G7_2_control_a_forward_slash_dot_drive_entry_outside_every_root_is_returned_l(self):
+        self._g7_control("land_contract", "//.", "R10-G7-2C")
 
     def test_R9_G5_1_a_link_resolving_to_the_root_through_a_share_is_skipped_h(self):
         self._g5_1("_protected_names")
