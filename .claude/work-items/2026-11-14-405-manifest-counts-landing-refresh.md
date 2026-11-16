@@ -13,9 +13,9 @@ branch: feature/405-landing-time-manifest-count-refresh
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261114-infra-405-manifest-counts-landing-refresh
 north_stars: none
 contract: .claude/concepts/2026-11-14-manifest-counts-landing-refresh.md
-pr: pending
-issue_link: unknown
-status: designing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/427
+issue_link: closes
+status: shipped
 created: 2026-11-14
 ---
 
