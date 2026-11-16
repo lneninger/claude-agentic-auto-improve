@@ -32,10 +32,9 @@ for a row are set inside that child process (CLAUDE_DESTRUCTIVE_DB_OK=1 and DB_G
 prove they no longer allow). Payloads are built from parts, so this file holds no literal destructive
 phrase and an agent can edit it without tripping the guard.
 
-RED / GREEN. Each row that fails at base is marked unittest.expectedFailure. Rows that already pass at base
-(the controls: the unarmed command still blocks, a mention is still allowed, a normal edit is still
-allowed) carry no mark and keep guarding the existing behaviour. A mark is also put on a row whose
-mutation would pass at base by accident: such a row starts with a CONTROL that the armed command asks.
+GREEN. The guards carry the arm since sub-task 2 (the helper block), so the RED marks of sub-task 1 are
+removed. Rows that mutate an armed state start with a CONTROL that the armed command asks, so a row cannot
+pass by accident.
 
 Run: py -3 .claude/hooks/tests/test_database_override.py
 """
@@ -252,7 +251,6 @@ class OverrideRows:
                     self.assertTrue(self.arm_path.exists(), "a mention must leave the arm alone")
 
     # -- the ask ----------------------------------------------------------------------------------
-    @unittest.expectedFailure
     def test_armed_with_a_mode_that_asks_gives_the_ask_json_and_uses_up_the_arm(self):
         for mode in ASK_MODES:
             with self.subTest(mode=mode):
@@ -263,19 +261,16 @@ class OverrideRows:
                                 "the prompt reason starts with the fixed wording: %r" % inner["permissionDecisionReason"])
                 self.assertFalse(self.arm_path.exists(), "the arm is claimed (renamed) before the prompt")
 
-    @unittest.expectedFailure
     def test_the_ask_also_holds_for_a_powershell_call(self):
         self.arm()
         run = self.run_guard(self.shell(BLOCKED_COMMAND, "PowerShell", tool_use_id=self.next_id()))
         self.assert_asks(run, "PowerShell")
 
-    @unittest.expectedFailure
     def test_one_arm_serves_one_tool_call_whatever_the_answer(self):
         self.control_asks("first call")
         again = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()))
         self.assert_blocks(again, "the second call finds no arm")
 
-    @unittest.expectedFailure
     def test_a_mode_where_nobody_is_asked_blocks_and_tells_the_person_to_use_their_own_terminal(self):
         self.control_asks("CONTROL")
         for mode in NO_PROMPT_MODES:
@@ -286,7 +281,6 @@ class OverrideRows:
                 self.assertIn("own terminal", run.err,
                               "Person-present rule: the block text tells the person to run the command in their own terminal")
 
-    @unittest.expectedFailure
     def test_a_stale_arm_blocks_and_is_removed(self):
         self.control_asks("CONTROL")
         self.arm(age_seconds=FRESH_SECONDS + 60)
@@ -294,39 +288,33 @@ class OverrideRows:
         self.assert_blocks(run, "an arm older than 15 minutes")
         self.assertFalse(self.arm_path.exists(), "Fresh-arm rule: a stale arm is removed")
 
-    @unittest.expectedFailure
     def test_an_arm_just_inside_fifteen_minutes_still_asks(self):
         self.arm(age_seconds=FRESH_SECONDS - 120)
         run = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()))
         self.assert_asks(run, "an arm 13 minutes old")
 
-    @unittest.expectedFailure
     def test_a_folder_at_the_arm_path_blocks(self):
         self.control_asks("CONTROL")
         self.arm(kind="folder")
         run = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()))
         self.assert_blocks(run, "a folder is not an arm")
 
-    @unittest.expectedFailure
     def test_a_link_at_the_arm_path_blocks(self):
         self.control_asks("CONTROL")
         self.arm(kind="link")
         run = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()))
         self.assert_blocks(run, "a link is not an arm")
 
-    @unittest.expectedFailure
     def test_the_retired_variable_no_longer_allows(self):
         run = self.run_guard(self.shell(BLOCKED_COMMAND), env={"CLAUDE_DESTRUCTIVE_DB_OK": "1"})
         self.assert_blocks(run, "CLAUDE_DESTRUCTIVE_DB_OK=1 with no arm (Variable-retired rule)")
 
-    @unittest.expectedFailure
     def test_the_retired_variable_does_not_replace_the_prompt_when_armed(self):
         self.arm()
         run = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()),
                              env={"CLAUDE_DESTRUCTIVE_DB_OK": "1"})
         self.assert_asks(run, "with the variable set and the arm present the answer is still a prompt, never a silent allow")
 
-    @unittest.expectedFailure
     def test_a_call_that_matches_no_rule_leaves_the_arm_alone_and_usable(self):
         self.arm()
         for command in ("echo hello", "dir", "git status"):
@@ -352,7 +340,6 @@ class OverrideRows:
             'cp /dev/null ".claude/DATABASE-override.once"',
         ]
 
-    @unittest.expectedFailure
     def test_a_shell_call_that_writes_the_arm_is_refused_with_and_without_an_arm(self):
         for command in self._arm_write_commands():
             for tool in ("Bash", "PowerShell"):
@@ -367,7 +354,6 @@ class OverrideRows:
                         self.assertIn("database-override", run.err.lower(),
                                       "the refusal names the arm file so the person can see why")
 
-    @unittest.expectedFailure
     def test_the_refusal_comes_before_every_other_rule_even_when_the_same_command_also_asks(self):
         self.control_asks("CONTROL")
         self.arm()
@@ -375,7 +361,6 @@ class OverrideRows:
         run = self.run_guard(self.shell(command, tool_use_id=self.next_id()))
         self.assert_blocks(run, "a command that writes the arm AND is blocked must be refused, not offered as a prompt")
 
-    @unittest.expectedFailure
     def test_a_quoted_path_argument_is_a_write_but_a_search_for_the_name_is_not(self):
         self.control_asks("CONTROL")
         quoted = self.run_guard(self.shell("New-Item -ItemType File '.claude\\database-override.once'", "PowerShell"))
@@ -412,7 +397,6 @@ class DestructiveGuardTests(OverrideTestCase, OverrideRows):
                 self.assertEqual(self.run_guard(payload).rc, 0,
                                  "a name that only resembles the arm (no dot after override) is allowed")
 
-    @unittest.expectedFailure
     def test_every_edit_tool_targeting_the_arm_is_refused_in_any_spelling(self):
         spellings = [
             str(self.arm_path),
@@ -433,13 +417,11 @@ class DestructiveGuardTests(OverrideTestCase, OverrideRows):
                             self.arm_path.unlink()
                         self.assert_blocks(self.run_guard(payload), "Arm-write rule, %s" % tool)
 
-    @unittest.expectedFailure
     def test_an_edit_tool_writing_empty_content_to_the_arm_is_still_refused(self):
         for tool, payload in self._edit_payloads(str(self.arm_path), content="").items():
             with self.subTest(tool=tool):
                 self.assert_blocks(self.run_guard(payload), "an empty write still creates the arm (%s)" % tool)
 
-    @unittest.expectedFailure
     def test_the_human_only_class_blocks_even_when_armed(self):
         self.control_asks("CONTROL")
         self.arm()
@@ -447,7 +429,6 @@ class DestructiveGuardTests(OverrideTestCase, OverrideRows):
         self.assert_blocks(run, "No-prompt classes rule: a human-only command never offers the prompt")
         self.assertIn("own terminal", run.err, "a person runs it by hand in their own terminal")
 
-    @unittest.expectedFailure
     def test_an_injected_guard_fault_blocks_even_when_armed(self):
         self.control_asks("CONTROL")
         self.arm()
@@ -457,7 +438,6 @@ class DestructiveGuardTests(OverrideTestCase, OverrideRows):
         self.assertNotIn("CLAUDE_DESTRUCTIVE_DB_OK", run.err,
                          "the block text must not name the retired variable as a way out")
 
-    @unittest.expectedFailure
     def test_the_block_text_no_longer_names_the_retired_variable_and_prints_the_arm_commands(self):
         run = self.run_guard(self.shell(BLOCKED_COMMAND))
         self.assertEqual(run.rc, 2)
@@ -466,7 +446,6 @@ class DestructiveGuardTests(OverrideTestCase, OverrideRows):
         self.assertIn("New-Item", run.err, "a PowerShell command for the person's own terminal")
         self.assertIn("touch", run.err, "a POSIX command for the person's own terminal")
 
-    @unittest.expectedFailure
     def test_a_crafted_target_with_comment_markers_is_neutralised_in_the_reason(self):
         self.control_asks("CONTROL")
         crafted = "x /* disposable test copy */ -- safe # ok " + "A" * 120 + "\x07 tail"
@@ -497,7 +476,6 @@ class SharedClaimTests(OverrideTestCase):
         payload = self.shell(command, tool_use_id=tool_use_id)
         return self.run_guard(payload, guard=first), self.run_guard(payload, guard=second)
 
-    @unittest.expectedFailure
     def test_two_guards_on_one_tool_use_id_both_ask_in_either_order(self):
         for first, second in ((DESTRUCTIVE_HOOK, READONLY_HOOK), (READONLY_HOOK, DESTRUCTIVE_HOOK)):
             with self.subTest(first=first.name):
@@ -511,7 +489,6 @@ class SharedClaimTests(OverrideTestCase):
                 for p in self.claim_files():
                     p.unlink()
 
-    @unittest.expectedFailure
     def test_a_claim_for_another_tool_call_does_not_serve_this_one(self):
         self.arm()
         self.assert_asks(self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id="toolu_one"), guard=DESTRUCTIVE_HOOK),
@@ -519,7 +496,6 @@ class SharedClaimTests(OverrideTestCase):
         other = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id="toolu_two"), guard=READONLY_HOOK)
         self.assert_blocks(other, "a different tool call finds neither an arm nor its own claim")
 
-    @unittest.expectedFailure
     def test_with_no_tool_use_id_the_second_guard_blocks(self):
         self.control_asks("CONTROL")
         self.arm()
@@ -560,21 +536,18 @@ class DeferenceTests(unittest.TestCase):
         proc = w.run_guard(self.write_payload(w, touch))
         return w, arm, proc
 
-    @unittest.expectedFailure
     def test_the_destructive_guard_refuses_an_arm_write_even_when_it_defers(self):
         w, arm, proc = self._rows(DEFERENCE_DESTRUCTIVE)
         self.assertEqual(proc.returncode, 2,
                          "Arm-write rule runs before Guard deference. stderr: %s" % proc.stderr.decode("utf-8", "replace")[:300])
         self.assertEqual(w.deferred_records(), [], "a refusal is not a deferral")
 
-    @unittest.expectedFailure
     def test_the_readonly_guard_refuses_an_arm_write_even_when_it_defers(self):
         w, arm, proc = self._rows(DEFERENCE_READONLY)
         self.assertEqual(proc.returncode, 2,
                          "Arm-write rule runs before Guard deference. stderr: %s" % proc.stderr.decode("utf-8", "replace")[:300])
         self.assertEqual(w.deferred_records(), [], "a refusal is not a deferral")
 
-    @unittest.expectedFailure
     def test_the_destructive_guard_refuses_an_edit_tool_write_of_the_arm_when_it_defers(self):
         w = self.world(DEFERENCE_DESTRUCTIVE)
         arm = self.arm(w)
@@ -608,7 +581,6 @@ class InlineNameTestCopyTests(OverrideTestCase):
         self.assertFalse((hooks / "_switches.py").exists(), "the helper is removed from this copy")
         self.hooks = hooks
 
-    @unittest.expectedFailure
     def test_both_guards_refuse_a_shell_write_of_the_arm_with_the_helper_removed(self):
         command = "touch .claude/database-override.once"
         for name in ("db-destructive-guard.py", "db-research-readonly-guard.py"):
@@ -617,7 +589,6 @@ class InlineNameTestCopyTests(OverrideTestCase):
                     self.assert_blocks(self.run_guard(self.shell(command, tool), guard=self.hooks / name),
                                        "inline name-test copy in " + name)
 
-    @unittest.expectedFailure
     def test_the_destructive_guard_refuses_an_edit_tool_write_of_the_arm_with_the_helper_removed(self):
         for tool, tool_input in (("Write", {"file_path": str(self.arm_path), "content": "x"}),
                                  ("Edit", {"file_path": str(self.arm_path), "old_string": "a", "new_string": "b"}),
@@ -626,7 +597,6 @@ class InlineNameTestCopyTests(OverrideTestCase):
                 self.assert_blocks(self.run_guard(self.payload(tool, tool_input), guard=self.hooks / "db-destructive-guard.py"),
                                    "inline name-test copy, tool " + tool)
 
-    @unittest.expectedFailure
     def test_with_the_helper_removed_an_armed_command_gets_no_override_and_an_arm_write_is_still_refused(self):
         self.arm()
         run = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()),
