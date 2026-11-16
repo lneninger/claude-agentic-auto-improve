@@ -85,9 +85,10 @@
     ]
   },
   "contractLanding": {
-    "$comment": "This project's landing gate. land_contract.py runs each step in its own landing checkout of the parent branch, after merging the default branch into it, and merges nothing unless every step exits 0. Every step reads its result from the exit code alone, so no result file is written into the tree. The hook-registration-tests step runs the plugin-owned Hook registration check's own suite (.claude/scripts/tests/test_check_hook_registrations.py). .claude/scripts/tests/test_land_contract_verification.py is the test that reads these steps, so a step added, renamed or reordered here is checked there. The hook-tests step runs each hook test file directly, because two of them are script-style and fail unittest discovery at import. test_gate_cost.py is left out on purpose: it is a timing measurement that needs a production-sized contracts folder named by an environment variable, not a correctness check. versionRaise turns on the landing's version raise (P7b): a sub-task pull request never raises the plugin version, and the landing raises it once, minor + 1, after the default branch is merged in.",
-    "timeoutMeasurement": "Each step carries measured_minutes, the duration of one full run of that step's command on the reference Windows workstation, measured 2026-11-03 (issue 213), when test_pr_merged.py held 744 tests. test_land_contract_verification.py fails when a step's timeout_minutes is below measured_minutes times 1.5, so re-measure and update both numbers together when a suite grows.",
+    "$comment": "This project's landing gate. land_contract.py runs each step in its own landing checkout of the parent branch, after merging the default branch into it, and merges nothing unless every step exits 0. Every step reads its result from the exit code alone, so no result file is written into the tree. The hook-registration-tests step runs the plugin-owned Hook registration check's own suite (.claude/scripts/tests/test_check_hook_registrations.py). .claude/scripts/tests/test_land_contract_verification.py is the test that reads these steps, so a step added, renamed or reordered here is checked there. The hook-tests step runs each hook test file directly, because two of them are script-style and fail unittest discovery at import. test_gate_cost.py is left out on purpose: it is a timing measurement that needs a production-sized contracts folder named by an environment variable, not a correctness check. versionRaise turns on the landing's version raise (P7b): a sub-task pull request never raises the plugin version, and the landing raises it once, minor + 1, after the default branch is merged in. manifestCounts (needs versionRaise) makes that raise also refresh the skill, agent and hook counts in the manifest descriptions from the tree, in the same commit, and lets R-3 accept a manifest conflict that differs only in those numbers. The manifest-counts step runs check_version_bump.py --counts, which reads no version; a step must pass on the default branch because baseline recording runs every step there twice, so no step may run --exact or --raise.",
+    "timeoutMeasurement": "Each step carries measured_minutes, the duration of one full run of that step's command on the reference Windows workstation, measured 2026-11-03 (issue 213), when test_pr_merged.py held 744 tests. test_land_contract_verification.py fails when a step's timeout_minutes is below measured_minutes times 1.5, so re-measure and update both numbers together when a suite grows. The manifest-counts step was measured on 2026-11-14 (issue 405): one run of check_version_bump.py --counts took 0.68 seconds, recorded as 0.02 minutes.",
     "versionRaise": true,
+    "manifestCounts": true,
     "verification": {
       "steps": [
         {
@@ -95,6 +96,13 @@
           "command": ["py", "-3", ".claude/scripts/check_version_bump.py"],
           "results": { "format": "exit-code" },
           "measured_minutes": 0.05,
+          "timeout_minutes": 5
+        },
+        {
+          "id": "manifest-counts",
+          "command": ["py", "-3", ".claude/scripts/check_version_bump.py", "--counts"],
+          "results": { "format": "exit-code" },
+          "measured_minutes": 0.02,
           "timeout_minutes": 5
         },
         {

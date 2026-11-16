@@ -563,5 +563,65 @@ class TestP7VersionFieldConflicts(LandCase):
                         "only MANIFESTS paths get the version-fields rule")
 
 
+# ===========================================================================
+# Contract 2026-11-14-manifest-counts-landing-refresh, I-9: with contractLanding.manifestCounts on, R-3 also accepts
+# a conflict region whose sides differ only in the numbers of count claims on "description" lines (the default
+# branch's side is taken and the raise rewrites those numbers). With the key off today's rule holds.
+# ===========================================================================
+COUNTED_BASE = ('{\n  "name": "x",\n  "version": "0.10.0",\n  "description": "Protocol: 3 skills, 2 agents and 2 hooks'
+                ' that sing.",\n  "other": 1\n}\n')
+
+
+def counted(version, skills, tail="that sing"):
+    return COUNTED_BASE.replace('"0.10.0"', '"%s"' % version).replace(
+        "3 skills, 2 agents and 2 hooks that sing", "%d skills, 2 agents and 2 hooks %s" % (skills, tail))
+
+
+class TestP7CountDerivedConflicts(LandCase):
+    """The same fixture as the version-field rows; only the configuration and the manifests differ."""
+
+    conflict = TestP7VersionFieldConflicts.conflict
+    CONFIG = {"versionRaise": True, "manifestCounts": True, "unionPaths": [], "regenerators": []}
+
+    def merge(self, parent, default):
+        return self.conflict(parent, default, base=COUNTED_BASE)
+
+    def test_a_version_plus_description_region_is_accepted_with_the_key_on(self):
+        result = self.merge(counted("0.10.1", 4), counted("0.11.0", 5))
+        self.assertFalse(result["facts"].get("p7_unresolvable_conflict"),
+                         "the sides differ in a version line and in the number of a count claim: %r" % (result["details"],))
+        text = (result["repo"] / "plugin.json").read_text(encoding="utf-8")
+        self.assertIn('"version": "0.11.0"', text, "the default branch's version line is taken")
+        self.assertIn("5 skills, 2 agents and 2 hooks that sing", text, "and its description, which the raise rewrites")
+        self.assertEqual(len(result["parents"]), 3, "and the merge is committed (two parents)")
+
+    def test_the_same_region_is_refused_with_the_key_off(self):
+        self.CONFIG = {"versionRaise": True, "unionPaths": [], "regenerators": []}
+        result = self.merge(counted("0.10.1", 4), counted("0.11.0", 5))
+        self.assertTrue(result["facts"].get("p7_unresolvable_conflict"),
+                        "without manifestCounts a description line that differs halts, as today")
+        self.assertIn("plugin.json", str(result["details"].get("unresolvable-conflict")))
+        self.assertEqual(result["merging"], "", "and the merge was aborted")
+
+    def test_a_non_number_word_that_differs_is_refused_with_the_key_on(self):
+        result = self.merge(counted("0.10.1", 4, "that dance"), counted("0.11.0", 5, "that sing"))
+        self.assertTrue(result["facts"].get("p7_unresolvable_conflict"),
+                        "a differing word is not a count: nobody picks a side blindly")
+        self.assertEqual(result["merging"], "", "and the merge was aborted")
+
+    def test_a_description_line_that_is_not_a_count_claim_is_refused_with_the_key_on(self):
+        parent = counted("0.10.1", 3).replace('"other": 1', '"other": 2')
+        default = counted("0.11.0", 5)
+        self.assertTrue(self.merge(parent, default)["facts"].get("p7_unresolvable_conflict"),
+                        "only description lines may differ in numbers; another key may not")
+
+    def test_the_pure_merge_masks_numbers_on_description_lines_only(self):
+        merge = self.fn("merge_version_fields")
+        ok = merge(COUNTED_BASE, counted("0.10.1", 4), counted("0.11.0", 5), counts_derived=True)
+        self.assertTrue(ok["ok"], ok["reason"])
+        self.assertFalse(merge(COUNTED_BASE, counted("0.10.1", 4), counted("0.11.0", 5))["ok"], "off by default")
+        self.assertIn("5 skills", ok["text"])
+
+
 if __name__ == "__main__":
     unittest.main()
