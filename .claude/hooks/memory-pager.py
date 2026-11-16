@@ -21,7 +21,7 @@ Reliability invariants (Layer 2):
       same state are no-ops
 
 Bypass:
-    CLAUDE_MEMORY_PAGER=off   -- disable for a session
+    "memory_pager": "off" in .claude/switches.local.json   -- disable (switch file)
 """
 
 from __future__ import annotations
@@ -40,6 +40,11 @@ except Exception:
     def log_event(*args, **kwargs):
         return
 
+try:  # switch files (fail-soft: a missing helper means every switch is at its default)
+    import _switches as _sw  # type: ignore
+except Exception:
+    _sw = None
+
 try:
     import _memory_common as mc  # type: ignore
     _DEPS_OK = True
@@ -47,10 +52,17 @@ except Exception:  # pragma: no cover - fail-soft import
     _DEPS_OK = False
 
 
-def is_disabled() -> bool:
-    return os.environ.get("CLAUDE_MEMORY_PAGER", "").lower() in {
-        "off", "0", "false", "no"
-    }
+def is_disabled(project=None) -> bool:
+    """True when the ``memory_pager`` switch is off (fail-soft: a missing helper means on)."""
+    if _sw is None:
+        return False
+    try:
+        if _sw.switch("memory_pager", project) == "off":
+            _sw.off_notice("memory_pager", hook="memory-pager", project=project)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def run() -> int:

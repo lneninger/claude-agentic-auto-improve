@@ -31,19 +31,23 @@ NOT_INSTALLED = (
 
 
 class Result:
-    def __init__(self, returncode: int, stderr: str, project: Path):
+    def __init__(self, returncode: int, stderr: str, project: Path, stdout: str = ""):
         self.returncode = returncode
         self.stderr = stderr
         self.project = project
+        self.stdout = stdout
 
 
 def doc_path(project: Path, name: str) -> Path:
     return project / ".claude" / "references" / "angular-tailwind" / name
 
 
-def run(rel: str, content: str, installed: tuple[str, ...] = ()) -> Result:
+def run(rel: str, content: str, installed: tuple[str, ...] = (), switches: dict | None = None) -> Result:
     with tempfile.TemporaryDirectory(prefix="archguard_msg_") as tmp:
         project = Path(tmp).resolve()
+        if switches is not None:  # a switch lives in the project's Local switch file, never in the environment
+            (project / ".claude").mkdir(parents=True, exist_ok=True)
+            (project / ".claude" / "switches.local.json").write_text(json.dumps(switches), encoding="utf-8")
         for name in installed:
             p = doc_path(project, name)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +61,7 @@ def run(rel: str, content: str, installed: tuple[str, ...] = ()) -> Result:
             [sys.executable, str(GUARD)], input=json.dumps(payload), capture_output=True,
             text=True, encoding="utf-8", errors="replace", cwd=str(REPO_ROOT), env=env, timeout=60,
         )
-        return Result(proc.returncode, proc.stderr, project)
+        return Result(proc.returncode, proc.stderr, project, proc.stdout)
 
 
 def html(content: str, installed: tuple[str, ...] = ()) -> Result:
@@ -231,6 +235,30 @@ class StickyTests(unittest.TestCase):
     def test_sticky_with_variant_blocks(self):
         r = html('<div class="p-2 md:sticky top-4"></div>\n')
         self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class ArchitectureGuardSwitchTests(unittest.TestCase):
+    """The ``architecture_guard`` switch: one on row and one off row, each writing the file in a temp project."""
+
+    BAD = '<div style="color: red"></div>\n'
+
+    def test_on_in_the_switch_file_keeps_the_guard_blocking(self):
+        r = run("src/x.component.html", self.BAD, switches={"architecture_guard": "on"})
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("[inline-style] T-001 line 1", r.stderr)
+        self.assertNotIn("systemMessage", r.stdout, "an on guard shows no off notice")
+
+    def test_off_in_the_switch_file_lets_the_edit_through_and_tells_the_person(self):
+        r = run("src/x.component.html", self.BAD, switches={"architecture_guard": "off"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("T-001", r.stderr)
+        self.assertIn("architecture_guard", r.stderr, "Visible-off rule: one stderr line names the switch")
+
+    def test_the_block_text_names_the_file_and_the_key_not_a_variable(self):
+        r = run("src/x.component.html", self.BAD)
+        self.assertIn("architecture_guard", r.stderr)
+        self.assertIn("switches.local.json", r.stderr)
+        self.assertNotIn("CLAUDE_ARCH_GUARD", r.stderr)
 
 
 class MapHeadingTests(unittest.TestCase):

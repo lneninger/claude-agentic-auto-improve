@@ -32,8 +32,8 @@ A person adding such a read defeats this scan; the review of the pull request is
 The scan is proved by two positive controls that plant CLAUDE_MADE_UP_SWITCH and an alias of
 os.environ, so a scanner that stopped finding reads would fail loudly instead of passing empty.
 
-ROWS THAT FAIL AT BASE are marked unittest.expectedFailure. Block 5 (ordinary switches) removes the mark
-from the literal-read row, block 6 (documents) from the text and table rows.
+ROWS THAT FAIL AT BASE are marked unittest.expectedFailure. Block 5 (ordinary switches) removed the mark
+from the literal-read row; block 6 (documents) removes it from the text and table rows.
 
 Run: py -3 .claude/scripts/tests/test_switch_env_scan.py
 """
@@ -425,7 +425,6 @@ class ShippedEnvironmentReads(unittest.TestCase):
     def setUpClass(cls):
         cls.findings = scan_shipped()
 
-    @unittest.expectedFailure  # base: retired switch variables are still read; block 5 removes the mark
     def test_every_literal_read_names_a_host_platform_or_test_only_variable(self):
         bad = sorted({(f.file, f.line, f.name) for f in self.findings
                       if f.kind == "literal" and f.name not in ALLOWED_LITERAL_NAMES})

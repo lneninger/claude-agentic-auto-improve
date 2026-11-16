@@ -24,7 +24,7 @@ Hook contract (Claude Code):
     stderr: free-form diagnostic (not shown to Claude unless exit != 0)
 
 Bypass:
-    CLAUDE_ACCURACY_TRACKER=off  -- disable the hook for a session
+    "accuracy_tracker": "off" in .claude/switches.local.json  -- disable the hook (switch file)
 """
 
 from __future__ import annotations
@@ -63,6 +63,11 @@ except Exception:
     def log_event(*args, **kwargs):
         return
 
+try:  # switch files (fail-soft: a missing helper means every switch is at its default)
+    import _switches as _sw  # type: ignore
+except Exception:
+    _sw = None
+
 try:
     from derive_area import derive_areas  # type: ignore
     from accuracy_update import record_clean, record_failure  # type: ignore
@@ -78,10 +83,17 @@ VERDICT_PATTERN = re.compile(
 )
 
 
-def is_disabled() -> bool:
-    return os.environ.get("CLAUDE_ACCURACY_TRACKER", "").lower() in {
-        "off", "0", "false", "no"
-    }
+def is_disabled(project=None) -> bool:
+    """True when the ``accuracy_tracker`` switch is off (fail-soft: a missing helper means on)."""
+    if _sw is None:
+        return False
+    try:
+        if _sw.switch("accuracy_tracker", project) == "off":
+            _sw.off_notice("accuracy_tracker", hook="critic-verdict-tracker", project=project)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def extract_target_path(tool_input: dict) -> Path | None:

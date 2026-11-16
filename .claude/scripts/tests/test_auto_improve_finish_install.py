@@ -61,7 +61,7 @@ ReadinessReport (plan_hooks / readiness_report on a plugin install)
                                                .claude-plugin/plugin.json "hooks" field resolves)
            "interpreter-found": bool, "hooks-compile": bool, "compile-failures": [str],
            "disable-all-hooks": bool, "duplicate-vendored-registration": bool,
-           "kill-switches": [env var names], "database-guard-rules":
+           "switches": [Switch readings] | "unavailable", "database-guard-rules":
            "absent-fail-closed"|"template-placeholders"|"configured",
            "not-verifiable": [str], "code-search-first-note": str,
            "mode": "plugin", "verdict": str,
@@ -255,9 +255,9 @@ assert len(list(_entries())) == 17 and len(HOOK_FILES) == 16
 GATE_SUPPORT_FILES = ["concept-gate.py", "_gate_launch.py", "_main_checkout_guard.py", "_project_paths.py"]
 
 _HOOK_SOURCES = {
-    "concept-gate.py": 'import os\nos.environ.get("CLAUDE_CONCEPT_GATE", "")\nos.environ.get("CLAUDE_PROJECT_DIR")\n',
+    "concept-gate.py": 'import os\nos.environ.get("CLAUDE_PROJECT_DIR")\n',
     "bash-gate.py": 'import os\n',
-    "architecture-guard.py": 'import os\nos.environ.get("CLAUDE_ARCH_GUARD", "")\n',
+    "architecture-guard.py": 'import os\n',
 }
 
 
@@ -2969,11 +2969,35 @@ class TestReadiness(Base):
         self.assertEqual(self.report().get("database-guard-rules"), "configured",
                          msg="one real database name is enough: the rules are the project's own")
 
-    def test_kill_switches_are_read_from_the_hook_sources_without_the_project_dir(self):
+    def test_the_switches_field_lists_every_catalog_key_reads_the_local_file_and_replaces_kill_switches(self):
         self.install_plugin()
-        names = self.need(self.report(), "kill-switches")
-        self.assertEqual(set(names), {"CLAUDE_CONCEPT_GATE", "CLAUDE_ARCH_GUARD"},
-                         msg="environ.get(CLAUDE_...) in the hook sources, CLAUDE_PROJECT_DIR excluded")
+        r = self.report()
+        rows = self.need(r, "switches")
+        self.assertNotIn("kill-switches", r, msg="the readiness report no longer carries kill-switches")
+        self.assertEqual({row["key"] for row in rows},
+                         {"concept_gate", "pinned_contract", "architecture_guard", "accuracy_tracker",
+                          "integration_check", "memory_pager", "working_agreements", "plan_question_advisor",
+                          "contract_index"},
+                         msg="one Switch reading per catalog key")
+        self.assertEqual({row["source"] for row in rows}, {"default"}, msg="no switch file: every key is a default")
+        # a value written in the project's Local switch file shows with its source
+        (self.project / ".claude").mkdir(parents=True, exist_ok=True)
+        (self.project / ".claude" / "switches.local.json").write_text(
+            json.dumps({"architecture_guard": "off"}), encoding="utf-8")
+        rows = {row["key"]: row for row in self.need(self.report(), "switches")}
+        self.assertEqual(rows["architecture_guard"]["value"], "off")
+        self.assertEqual(rows["architecture_guard"]["source"], "switches.local.json")
+        self.assertEqual(rows["concept_gate"]["value"], "on", msg="a key the file does not name stays at its default")
+
+    def test_the_switches_field_is_unavailable_without_the_helper_and_names_nine_keys_on_the_real_install(self):
+        self.install_plugin()
+        with mock.patch.dict(sys.modules, {"_switches": None}):
+            self.assertEqual(self.need(self.report(), "switches"), "unavailable",
+                             msg="a scripts folder without the hooks folder reports unavailable, never an error")
+        self.install_plugin(install_path=SCRIPT_ROOT)
+        r = fi.readiness_report(self.project, claude_home=self.home, plugin_root=SCRIPT_ROOT, platform="win32")
+        self.assertEqual(len(self.need(r, "switches", "the Switch readings")), 9,
+                         msg="the report names the nine keys of the helper's catalog")
 
     def test_the_env_scan_finds_a_planted_variable_and_skips_the_excluded_ones_positive_control(self):
         planted = 'import os\nos.environ.get("CLAUDE_PLANTED_X")\nos.getenv("CLAUDE_PROJECT_DIR")\n'
@@ -2981,17 +3005,6 @@ class TestReadiness(Base):
                          msg="POSITIVE CONTROL: the INV-12 scan re-implementation sees a planted "
                              "variable and drops CLAUDE_PROJECT_DIR")
         self.assertEqual(env_vars_read_by(["x = 1\n"]), set(), msg="and finds nothing where there is nothing")
-
-    def test_the_reported_environment_variables_equal_the_inv12_scan_of_the_real_hook_sources(self):
-        self.install_plugin(install_path=SCRIPT_ROOT)
-        sources = [p.read_text(encoding="utf-8", errors="replace")
-                   for p in sorted((SCRIPT_ROOT / ".claude/hooks").glob("*.py"))]
-        expected = env_vars_read_by(sources)
-        self.assertGreater(len(expected), 5, msg="the real hooks read many CLAUDE_* variables")
-        r = fi.readiness_report(self.project, claude_home=self.home, plugin_root=SCRIPT_ROOT, platform="win32")
-        self.assertEqual(set(self.need(r, "kill-switches", "the variables read from the hook sources")),
-                         expected,
-                         msg="the report agrees with the scan test_plugin_manifests.py INV-12 runs")
 
     def test_database_guard_rules_state_takes_all_three_values(self):
         self.install_plugin()

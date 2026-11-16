@@ -1256,10 +1256,11 @@ for _name, _expected_hooks in EXPECTED_ADDON_HOOKS.items():
               "prerequisites: %r" % _data.get(af.KEY_PREREQUISITES))
     if _name == "strict-shell-gate":
         _helper_names = [pathlib.PurePosixPath(h.replace("\\", "/")).name for h in _data.get(af.KEY_HELPERS) or []]
-        check("strict-shell-gate: the helpers are _project_paths.py, _shell_write_targets.py and "
-              ".claude/scripts/_contract_index.py",
+        check("strict-shell-gate: the helpers are _project_paths.py, _shell_write_targets.py, _switches.py, "
+              "_error_log.py and .claude/scripts/_contract_index.py (bash-gate reads the contract_index switch)",
               sorted(h.replace("\\", "/") for h in _data.get(af.KEY_HELPERS) or []) == sorted([
                   ".claude/hooks/_project_paths.py", ".claude/hooks/_shell_write_targets.py",
+                  ".claude/hooks/_switches.py", ".claude/hooks/_error_log.py",
                   ".claude/scripts/_contract_index.py"]), "helpers %r" % (_data.get(af.KEY_HELPERS),))
 
 # K-1 to K-3 (angular-tailwind followups contract, Kill-switch removal). No shipped add-on has a kill switch.
@@ -1317,8 +1318,9 @@ with tempfile.TemporaryDirectory(prefix="k2-control-") as _k2_name:
     check("K-2 control: a planted os.environ.get(\"CLAUDE_SKIP_CG\") is caught by the env-var scan",
           bool(removed_switch_read_problems(_k2)))
 _concept_gate_text = (ROOT / ".claude" / "hooks" / "concept-gate.py").read_text(encoding="utf-8")
-check("K-3: concept-gate.py still reads CLAUDE_CONCEPT_GATE",
-      re.search(r"environ\.get\(\s*[\"']CLAUDE_CONCEPT_GATE[\"']", _concept_gate_text) is not None)
+check("K-3: concept-gate.py reads the concept_gate switch through the helper and no environment variable",
+      re.search(r"_sw\.switch\(\s*[\"']concept_gate[\"']", _concept_gate_text) is not None
+      and re.search(r"environ\.get\(\s*[\"']CLAUDE_CONCEPT_GATE[\"']", _concept_gate_text) is None)
 
 check("the add-on manifests together name exactly the five add-on hook files and the advisor's former name "
       "(installed, disabled or former) that hooks.json must never register",

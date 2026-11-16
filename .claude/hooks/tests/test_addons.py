@@ -766,6 +766,15 @@ class StrictShellGateAddonTests(AddonCase):
         self.assertIn(".claude/hooks/_project_paths.py", helpers, msg="and _project_paths.py: " + repr(helpers))
         self.assertIn(".claude/scripts/_contract_index.py", helpers,
                       msg="and the contract index, into the project's scripts folder: " + repr(helpers))
+        self.assertIn(".claude/hooks/_switches.py", helpers,
+                      msg="and the switch helper, because bash-gate reads the contract_index switch: " + repr(helpers))
+        self.assertIn(".claude/hooks/_error_log.py", helpers,
+                      msg="and the error log the switch helper reports through: " + repr(helpers))
+
+    def test_the_install_copies_the_switch_helper_and_the_error_log_into_the_project(self):
+        for name in ("_switches.py", "_error_log.py"):
+            self.assertTrue((self.project / ".claude" / "hooks" / name).is_file(),
+                            msg="fixture: the install copied %s (a helper)" % name)
 
 
 class PlanQuestionAdvisorTests(unittest.TestCase):
@@ -774,6 +783,12 @@ class PlanQuestionAdvisorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="planq-"))
         self.addCleanup(__import__("shutil").rmtree, self.dir, True)
+
+    def _write_switch(self, value) -> None:
+        """The advisor's switch lives in the project's Local switch file (here the project is ``self.dir``)."""
+        folder = self.dir / ".claude"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "switches.local.json").write_text(json.dumps({"plan_question_advisor": value}), encoding="utf-8")
 
     def _run(self, transcript_text: str):
         hook = HOOKS_DIR / "plan-question-advisor.py"
@@ -801,6 +816,19 @@ class PlanQuestionAdvisorTests(unittest.TestCase):
         self.assertNotIn(".claude/skills", flat,
                          msg="nor the same folder spelled out: an expanded home path (%s) or a bare "
                              ".claude/skills pointer" % str(self.dir).replace("\\", "/"))
+
+    def test_the_on_switch_keeps_the_reminder(self):
+        self._write_switch("on")
+        run = self._run('{"text": "Plan mode is active"}\n')
+        self.assertEqual(run.rc, 0, msg=run.describe())
+        self.assertTrue(run.out.strip(), msg="plan_question_advisor on: plan mode still gets the reminder: " + run.describe())
+
+    def test_the_off_switch_silences_the_reminder_and_says_so_on_stderr(self):
+        self._write_switch("off")
+        run = self._run('{"text": "Plan mode is active"}\n')
+        self.assertEqual(run.rc, 0, msg=run.describe())
+        self.assertEqual(run.out.strip(), "", msg="plan_question_advisor off: nothing is injected: " + run.describe())
+        self.assertIn("plan_question_advisor", run.err, msg="Visible-off rule: one stderr line names the switch")
 
     def test_outside_plan_mode_it_says_nothing(self):
         in_plan = self._run('{"text": "Plan mode is active"}\n')

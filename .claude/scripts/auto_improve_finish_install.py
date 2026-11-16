@@ -1142,6 +1142,28 @@ def _scan_env_vars(hooks_dir: Path) -> List[str]:
     return sorted(found - _ENV_EXCLUDED)
 
 
+#: The report value when the switch helper cannot be loaded (a vendored scripts folder without the hooks folder).
+SWITCHES_UNAVAILABLE = "unavailable"
+
+
+def _switch_readings(project: Path) -> Any:
+    """The Switch readings for the install's project: one row per catalog key (key, value, source, problems).
+
+    The helper lives in the hooks folder beside this scripts folder and is imported fail-soft, after
+    ``_claude_paths`` has put that folder on the import path. A copy of the scripts without it reports
+    ``unavailable``; ``VENDORED_FILES`` does not change because the import is optional."""
+    try:
+        import _claude_paths  # noqa: F401  -- puts the sibling hooks folder on sys.path
+        import _switches
+        readings = _switches.effective_switches(project)
+        return [{"key": r.key, "value": r.value, "source": r.source, "problems": list(r.problems)}
+                for r in readings.values()]
+    except (ImportError, SystemExit, AttributeError):
+        return SWITCHES_UNAVAILABLE
+    except Exception:  # noqa: BLE001 -- a report field never fails the report
+        return SWITCHES_UNAVAILABLE
+
+
 #: What to run while the database guard's rules name no real database (the rules state is ``absent-fail-closed`` or
 #: ``template-placeholders``): the skill that appends the project's own database names.
 DB_RULES_NEXT_STEP = ("The database guard has no list of this project's own databases yet. Run "
@@ -1238,7 +1260,7 @@ def _readiness(project: Path, home: Path, verdict: Result, platform: str) -> Res
         "launchers": launchers, "hooks-compile": not failures, "compile-failures": failures,
         "disable-all-hooks": disabled, "duplicate-vendored-registration": duplicate,
         "checks": [{"name": n, "ok": ok} for n, ok in checks],
-        "kill-switches": _scan_env_vars(install / ".claude" / "hooks"),
+        "switches": _switch_readings(project),
         "gates": sorted({r.file for r in regs if r.event == "PreToolUse"}),
         "database-guard-rules": _db_rules_state(install),
         "not-verifiable": list(NOT_VERIFIABLE), "code-search-first-note": CODE_SEARCH_NOTE,

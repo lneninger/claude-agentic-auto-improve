@@ -6,6 +6,8 @@
   "helpers": [
     ".claude/hooks/_project_paths.py",
     ".claude/hooks/_shell_write_targets.py",
+    ".claude/hooks/_switches.py",
+    ".claude/hooks/_error_log.py",
     ".claude/scripts/_contract_index.py"
   ],
   "registrations": [

@@ -23,9 +23,9 @@ Contract status lifecycle:
     archived     -> NOT honored (skipped during lookup, like it doesn't exist)
     superseded-by: <path> -> NOT honored; pointer only
 
-Bypass:
-    CLAUDE_CONCEPT_GATE=off        -- disable the hook for a session
-    CLAUDE_ACTIVE_CONTRACT=<path>  -- pin a specific approved contract
+Bypass (switch files, read through _switches.py; no environment variable):
+    "concept_gate": "off"          -- in .claude/switches.local.json: disable the hook
+    "pinned_contract": "<path>"    -- in .claude/switches.local.json: pin a specific approved contract
 """
 
 from __future__ import annotations
@@ -86,6 +86,12 @@ if _USE_SHARED_PARSER:
     except Exception:
         _ci_make = _ci_status = _ci_covers = _ci_extract = _ci_cover_fn = None
         _ci_cf_file = _ci_file = None
+
+# Switch files (fail-soft): a missing helper means every switch is at its default.
+try:
+    import _switches as _sw
+except Exception:  # pragma: no cover - hooks must never crash a tool call
+    _sw = None
 
 HOME = Path.home()
 try:  # project-local .claude first, global second
@@ -237,17 +243,55 @@ def log(msg: str) -> None:
     print(f"[concept-gate] {msg}", file=sys.stderr)
 
 
-def bypass_env() -> bool:
-    """Hard bypass via environment variable."""
-    return os.environ.get("CLAUDE_CONCEPT_GATE", "").lower() in {"off", "0", "false", "no"}
+def bypass_env(project=None) -> bool:
+    """Hard bypass: the ``concept_gate`` switch is off (``project`` names the tree whose files are read)."""
+    if _sw is None:
+        return False
+    try:
+        return _sw.switch("concept_gate", project) == "off"
+    except Exception:
+        return False
 
 
-def pinned_contract() -> Path | None:
-    """Operator-pinned contract path for the current session."""
-    pinned = os.environ.get("CLAUDE_ACTIVE_CONTRACT", "").strip()
+def _switch_snapshot(project=None) -> dict | None:
+    """Every switch reading, from ONE lookup of the switch files (a lookup costs several milliseconds, so the
+    gate's own run takes one, not three). ``None`` when the helper is missing or fails."""
+    if _sw is None:
+        return None
+    try:
+        return _sw.effective_switches(project)
+    except Exception:
+        return None
+
+
+def _snapshot_value(snapshot: dict | None, key: str, default: str) -> str:
+    try:
+        return snapshot[key].value if snapshot is not None and key in snapshot else default
+    except Exception:
+        return default
+
+
+def pinned_contract(project=None, _snapshot: dict | None = None) -> Path | None:
+    """Operator-pinned contract path: the ``pinned_contract`` switch (a relative pin resolves against the project)."""
+    if _sw is None:
+        return None
+    try:
+        if _snapshot is not None:
+            pinned = _snapshot_value(_snapshot, "pinned_contract", "").strip()
+        else:
+            pinned = _sw.switch("pinned_contract", project).strip()
+    except Exception:
+        return None
     if not pinned:
         return None
     p = Path(os.path.expanduser(pinned))
+    if not p.is_absolute():
+        try:
+            base = _sw._project_root(project)
+        except Exception:
+            base = None
+        if base is not None:
+            p = base / p
     return p if p.exists() else None
 
 
@@ -530,6 +574,23 @@ _CI_VARIANT = None
 _CI_TRIED = False
 
 
+#: The ``contract_index`` value main() read from the one switch lookup of this run (``None``: not read yet).
+_INDEX_MODE: str | None = None
+
+
+def _apply_index_mode() -> None:
+    """Read the ``contract_index`` switch and hand it to the index, once per process (fail-soft)."""
+    try:
+        setter = getattr(_ci_mod, "set_mode", None)
+        if setter is not None and _sw is not None:
+            # main() has already read every switch once and left the value here; a caller that imports this
+            # file (the Changed-file check) reaches this point with no main(), and reads the switch itself.
+            value = _INDEX_MODE if _INDEX_MODE is not None else _sw.switch("contract_index")
+            setter(value)
+    except Exception:
+        pass
+
+
 def _ci_variant():
     """This gate's variant spec for the contract lookup index, built on first use.
 
@@ -542,6 +603,7 @@ def _ci_variant():
         _CI_TRIED = True
         try:
             if _ci_make is not None:
+                _apply_index_mode()
                 _CI_VARIANT = _ci_make(
                     "concept-shared", contract_status, _ci_extract, _ci_cover_fn,
                     [os.path.abspath(__file__), _ci_cf_file, _ci_file],
@@ -558,7 +620,7 @@ def _indexed_contract_status(contract_path: Path) -> str:
     racy, so it can skip a read but never change an allow or a block. Named
     limit it cannot see: a same-size in-place rewrite whose modification time is
     then restored, over two seconds after the last parse. Recovery:
-    ``CLAUDE_CONTRACT_INDEX=off`` or deleting ``.claude/cache/contract-index/``.
+    the ``contract_index`` switch set to off, or deleting ``.claude/cache/contract-index/``.
     """
     try:
         variant = _ci_variant()
@@ -670,8 +732,8 @@ def block_message(
         "  /validate-registries  -- check MECHANISMS.md for dead links",
         "",
         "Escape hatches (use sparingly):",
-        "  * Pin an existing contract: CLAUDE_ACTIVE_CONTRACT=<path>",
-        "  * Disable the gate:         CLAUDE_CONCEPT_GATE=off",
+        "  * Pin an existing contract: set pinned_contract to its path in .claude/switches.local.json",
+        "  * Disable the gate:         set concept_gate to off in .claude/switches.local.json",
         bar,
         "",
     ])
@@ -701,6 +763,21 @@ def block(
     sys.exit(2)
 
 
+def _show_off_notice(payload: dict) -> None:
+    """Visible-off rule: tell the person once per session that the gate is switched off (fail-soft)."""
+    try:
+        if _sw is None:
+            return
+        notice = _sw.off_notice(
+            "concept_gate", hook="concept-gate",
+            session_id=payload.get("session_id") if isinstance(payload, dict) else None, guard=True,
+        )
+        if notice:
+            print(json.dumps(notice))
+    except Exception:
+        pass
+
+
 def main() -> None:
     try:
         raw = sys.stdin.read()
@@ -709,8 +786,13 @@ def main() -> None:
         log(f"failed to parse stdin payload: {e}")
         sys.exit(0)  # fail open
 
-    if bypass_env():
-        log("bypass via CLAUDE_CONCEPT_GATE=off")
+    global _INDEX_MODE
+    snapshot = _switch_snapshot()  # one lookup of the switch files for the whole run
+    if snapshot is not None:
+        _INDEX_MODE = _snapshot_value(snapshot, "contract_index", "on")
+    if _snapshot_value(snapshot, "concept_gate", "on") == "off":
+        log("bypass via the concept_gate switch (off)")
+        _show_off_notice(payload)
         sys.exit(0)
 
     tool_name = payload.get("tool_name", "")
@@ -722,7 +804,7 @@ def main() -> None:
         log(f"no file_path in payload for {tool_name}, allowing")
         sys.exit(0)
 
-    pinned = pinned_contract()
+    pinned = pinned_contract(None, snapshot)
 
     blocked_targets: list[tuple[Path, str]] = []
     allowed_count = 0

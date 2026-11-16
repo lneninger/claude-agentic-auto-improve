@@ -20,7 +20,7 @@ Hook contract (Claude Code):
     exit 0: always (advisory; never blocks). One stderr line if the ``accuracy_update`` entry point is missing.
 
 Bypass:
-    CLAUDE_ACCURACY_TRACKER=off
+    "accuracy_tracker": "off" in .claude/switches.local.json (switch file)
 """
 
 from __future__ import annotations
@@ -46,6 +46,11 @@ except Exception:
     def log_event(*args, **kwargs):
         return
 
+try:  # switch files (fail-soft: a missing helper means every switch is at its default)
+    import _switches as _sw  # type: ignore
+except Exception:
+    _sw = None
+
 _ENTRY_POINT_ERROR = ""
 try:
     from accuracy_update import process_journal_change  # type: ignore
@@ -54,10 +59,17 @@ except Exception as exc:  # the scripts folder is missing or too old: say so onc
     _ENTRY_POINT_ERROR = "%s: %s" % (type(exc).__name__, exc)
 
 
-def is_disabled() -> bool:
-    return os.environ.get("CLAUDE_ACCURACY_TRACKER", "").lower() in {
-        "off", "0", "false", "no"
-    }
+def is_disabled(project=None) -> bool:
+    """True when the ``accuracy_tracker`` switch is off (fail-soft: a missing helper means on)."""
+    if _sw is None:
+        return False
+    try:
+        if _sw.switch("accuracy_tracker", project) == "off":
+            _sw.off_notice("accuracy_tracker", hook="journal-post-approval-tracker", project=project)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def extract_target_path(tool_input: dict) -> Path | None:

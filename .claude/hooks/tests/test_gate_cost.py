@@ -102,8 +102,11 @@ def python_command() -> list[str]:
 # Candidates
 # ---------------------------------------------------------------------------
 class Candidate:
-    def __init__(self, name: str, script: Path, project: Path | None, kind: str):
+    def __init__(self, name: str, script: Path, project: Path | None, kind: str, pinned_old: bool = False):
         self.name = name
+        #: True for the gate pinned at the old master commit: that code predates the switch files and reads
+        #: its trace switch from the environment, so only it is launched with the old variable.
+        self.pinned_old = pinned_old
         self.script = script
         self.project = project          # the CLAUDE_PROJECT_DIR of its launches
         self.kind = kind                # "gate" (full-work witness) | "guard" | "noop"
@@ -204,7 +207,14 @@ def launch(c: Candidate, home: Path, *, trace: bool = False) -> tuple[float, sub
     env["HOME"] = env["USERPROFILE"] = str(home)
     if c.project is not None:
         env["CLAUDE_PROJECT_DIR"] = str(c.project)
-    if trace:
+    if c.project is not None and not c.pinned_old:
+        # the current gate reads the contract_index switch from the project's Local switch file
+        local = c.project / ".claude" / "switches.local.json"
+        if trace:
+            local.write_text('{"contract_index": "trace"}', encoding="utf-8")
+        else:
+            local.unlink(missing_ok=True)
+    if trace and c.pinned_old:
         env["CLAUDE_CONTRACT_INDEX"] = "trace"
     t0 = time.perf_counter()
     cp = subprocess.run(python_command() + [str(c.script)], input=c.payload, capture_output=True,
@@ -291,9 +301,9 @@ def section_cost() -> None:
     gate = Candidate("concept-gate.py", root / "gate" / ".claude" / "hooks" / "concept-gate.py",
                      make_project(root / "gate", source), "gate")
     master = Candidate("master gate (pinned)", root / "master" / ".claude" / "hooks" / "concept-gate.py",
-                       make_project(root / "master", source), "gate")
+                       make_project(root / "master", source), "gate", pinned_old=True)
     memo = Candidate("memo control (master)", root / "memo" / ".claude" / "hooks" / "concept-gate.py",
-                     make_project(root / "memo", source), "gate")
+                     make_project(root / "memo", source), "gate", pinned_old=True)
     arch = Candidate("architecture-guard.py", root / "gate" / ".claude" / "hooks" / "architecture-guard.py",
                      make_bare_project(root / "arch"), "guard")
     green = Candidate("noop control", noop, None, "noop")

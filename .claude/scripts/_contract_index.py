@@ -39,8 +39,10 @@ fingerprint). Written by atomic replace of a same-folder temporary file named
 <file>.<pid>.<random hex>.tmp; never edited in place; no lock (last writer wins:
 every record validates itself). Deleting the folder is always safe.
 
-Switch CLAUDE_CONTRACT_INDEX (trimmed, case-insensitive, read once per process):
-    unset, empty, on, 1, true, yes   index on
+Switch ``contract_index`` (switch files, trimmed, case-insensitive). This module reads no
+environment and no switch file: its callers (concept-gate and bash-gate) read the switch
+and call ``set_mode(value)`` once per process. With no call the mode is on.
+    empty, on, 1, true, yes          index on
     off, 0, false, no                off: no index read or write, no output
     trace                            on, plus one stderr line per variant at exit
     anything else                    off, plus one stderr line naming the value
@@ -49,7 +51,7 @@ louder.
 
 Named limit (cannot be seen): a same-size in-place rewrite whose modification
 time is then restored to its old value, more than two seconds after the last
-parse. Recovery: CLAUDE_CONTRACT_INDEX=off, or delete the index folder.
+parse. Recovery: set ``contract_index`` to off, or delete the index folder.
 
 Standard library only.
 """
@@ -103,29 +105,36 @@ def _new_sha256():
 # ---------------------------------------------------------------------------
 # Switch
 # ---------------------------------------------------------------------------
-def _mode() -> str:
-    """The lookup mode, read from the environment once per process."""
+def set_mode(value) -> str:
+    """Set the lookup mode, once per process. A caller reads the ``contract_index`` switch and passes it.
+
+    ``on`` (and the empty text) is on, ``off`` is off, ``trace`` is on plus one stderr line per variant
+    at exit; any other value is off, plus one stderr line naming the value. Returns the mode now in force.
+    """
     global _MODE
-    if _MODE is None:
-        raw = os.environ.get("CLAUDE_CONTRACT_INDEX", "").strip()
-        value = raw.lower()
-        if value in _ON_VALUES:
-            _MODE = "on"
-        elif value in _OFF_VALUES:
-            _MODE = "off"
-        elif value == "trace":
-            _MODE = "trace"
-        else:
-            _MODE = "off"
-            try:
-                print(
-                    f"[contract-index] unknown CLAUDE_CONTRACT_INDEX value {raw!r}; "
-                    "the index is off",
-                    file=sys.stderr,
-                )
-            except Exception:
-                pass
+    raw = "" if value is None else str(value).strip()
+    text = raw.lower()
+    if text in _ON_VALUES:
+        _MODE = "on"
+    elif text in _OFF_VALUES:
+        _MODE = "off"
+    elif text == "trace":
+        _MODE = "trace"
+    else:
+        _MODE = "off"
+        try:
+            print(
+                f"[contract-index] unknown contract_index value {raw!r}; the index is off",
+                file=sys.stderr,
+            )
+        except Exception:
+            pass
     return _MODE
+
+
+def _mode() -> str:
+    """The lookup mode: what ``set_mode`` set; with no call, ``on`` (the old default)."""
+    return _MODE if _MODE is not None else "on"
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ It maintains a lightweight session state file at $TEMP/claude-integration-check.
 to track which files have been touched in the current session.
 
 Bypass:
-    CLAUDE_INTEGRATION_CHECK=off  -- disable the hook for a session
+    "integration_check": "off" in .claude/switches.local.json  -- disable the hook (switch file)
 """
 
 from __future__ import annotations
@@ -29,6 +29,10 @@ import tempfile
 from pathlib import Path
 
 HOME = Path.home()
+try:  # switch files (fail-soft: a missing helper means every switch is at its default)
+    import _switches as _sw
+except Exception:  # pragma: no cover - hooks must never crash a tool call
+    _sw = None
 try:  # project-local .claude first, global second
     import _project_paths as _pp
 except Exception:  # pragma: no cover - hooks must never crash a tool call
@@ -91,10 +95,17 @@ FRONTEND_INTEGRATION_DIRS = [
 ]
 
 
-def is_disabled() -> bool:
-    return os.environ.get("CLAUDE_INTEGRATION_CHECK", "").lower() in {
-        "off", "0", "false", "no"
-    }
+def is_disabled(project=None) -> bool:
+    """True when the ``integration_check`` switch is off (fail-soft: a missing helper means on)."""
+    if _sw is None:
+        return False
+    try:
+        if _sw.switch("integration_check", project) == "off":
+            _sw.off_notice("integration_check", hook="integration-check", project=project)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def is_backend_file(path: str) -> bool:

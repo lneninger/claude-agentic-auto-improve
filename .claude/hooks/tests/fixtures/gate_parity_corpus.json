@@ -9,7 +9,7 @@
     "write": "write `text` (a list of lines, joined with a newline, UTF-8) to `path` below the project folder; `mtime` is `old` (a fixed stamp far outside any racy window) or `now`",
     "rewrite_same_size": "in place, replace the bytes `find` with `replace` (equal length, the runner checks it) in `path`; when `restore_mtime` is true the stamp is put back to its exact value from before the rewrite",
     "delete": "remove `path`",
-    "call": "start the gate with `payload` (or the raw text `raw`) on standard input and `env` added to the environment; `expect_exit` is what master's copy must exit with, which keeps the corpus itself honest",
+    "call": "start the gate with `payload` (or the raw text `raw`) on standard input, `env` added to the environment, and `switches` (switch key to value) written to the project's `.claude/switches.local.json` for this call only and removed after it; `expect_exit` is what the gate must exit with, which keeps the corpus itself honest",
     "group": "run `steps` as one unit; when the first call marked `window_mark` has not finished its working-copy run within `window_s` seconds of the unit's start, the unit is undone and run again, at most `retries` times"
   },
   "categories": [
@@ -115,13 +115,13 @@
     {"op": "call", "id": "stdin-no-path", "category": "non-trivial-file", "expect_exit": 0,
      "payload": {"tool_name": "Write", "tool_input": {"content": "x"}}},
     {"op": "call", "id": "bypass-switch-off", "category": "non-trivial-file", "expect_exit": 0,
-     "env": {"CLAUDE_CONCEPT_GATE": "off"},
+     "switches": {"concept_gate": "off"},
      "payload": {"tool_name": "Write", "tool_input": {"file_path": "${PROJECT_DIR}/src/ParityCorpus/Uncovered/Nothing.cs", "content": "x"}}},
     {"op": "call", "id": "pinned-honored-contract-covers", "category": "non-trivial-file", "expect_exit": 0,
-     "env": {"CLAUDE_ACTIVE_CONTRACT": "${PROJECT_DIR}/.claude/concepts/2026-01-01-parity-covered.md"},
+     "switches": {"pinned_contract": "${PROJECT_DIR}/.claude/concepts/2026-01-01-parity-covered.md"},
      "payload": {"tool_name": "Write", "tool_input": {"file_path": "${PROJECT_DIR}/src/ParityCorpus/Covered/Thing.cs", "content": "x"}}},
     {"op": "call", "id": "pinned-draft-contract-does-not-help", "category": "non-trivial-file", "expect_exit": 2,
-     "env": {"CLAUDE_ACTIVE_CONTRACT": "${PROJECT_DIR}/.claude/concepts/2026-01-02-parity-draft.md"},
+     "switches": {"pinned_contract": "${PROJECT_DIR}/.claude/concepts/2026-01-02-parity-draft.md"},
      "payload": {"tool_name": "Write", "tool_input": {"file_path": "${PROJECT_DIR}/src/ParityCorpus/Draft/Thing.cs", "content": "x"}}},
 
     {"op": "write", "path": ".claude/concepts/2026-02-01-parity-edited.md", "mtime": "old", "text": [

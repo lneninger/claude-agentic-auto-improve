@@ -110,6 +110,10 @@ BYPASS_FILENAMES = {
 }
 
 HOME = Path.home()
+try:  # switch files (fail-soft: a missing helper means every switch is at its default)
+    import _switches as _sw
+except Exception:  # pragma: no cover - hooks must never crash a tool call
+    _sw = None
 try:  # project-local .claude first, global second
     import _project_paths as _pp
 except Exception:  # pragma: no cover - hooks must never crash a tool call
@@ -291,6 +295,16 @@ _CI_VARIANT = None
 _CI_TRIED = False
 
 
+def _apply_index_mode() -> None:
+    """Read the ``contract_index`` switch and hand it to the index, once per process (fail-soft)."""
+    try:
+        setter = getattr(_ci_mod, "set_mode", None)
+        if setter is not None and _sw is not None:
+            setter(_sw.switch("contract_index"))
+    except Exception:
+        pass
+
+
 def _ci_variant():
     """This gate's variant spec for the contract lookup index, built on first use.
 
@@ -302,6 +316,7 @@ def _ci_variant():
         _CI_TRIED = True
         try:
             if _ci_make is not None:
+                _apply_index_mode()
                 _CI_VARIANT = _ci_make(
                     "bash", contract_status, bash_entries, bash_entries_cover,
                     [os.path.abspath(__file__), _ci_file],
@@ -318,7 +333,7 @@ def _indexed_contract_status(contract_path: Path) -> str:
     racy, so it can skip a read but never change an allow or a block. Named
     limit it cannot see: a same-size in-place rewrite whose modification time is
     then restored, over two seconds after the last parse. Recovery:
-    ``CLAUDE_CONTRACT_INDEX=off`` or deleting ``.claude/cache/contract-index/``.
+    the ``contract_index`` switch set to off, or deleting ``.claude/cache/contract-index/``.
     """
     try:
         variant = _ci_variant()
