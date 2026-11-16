@@ -1,0 +1,52 @@
+contract: 2026-11-16-file-based-switches
+started_at: '2026-11-16T16:18:27.950209+00:00'
+sub_tasks:
+  t1-red-tests:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 420
+    base: feature/file-based-switches
+    brief: .claude/work-items/2026-11-16-420-t1-red-tests.md
+  t2-switch-helper-and-database-override:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 421
+    base: feature/file-based-switches
+    brief: .claude/work-items/2026-11-16-421-t2-switch-helper-and-database-override.md
+  t3-live-prompt-trial:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 422
+    base: feature/file-based-switches
+    brief: .claude/work-items/2026-11-16-422-t3-live-prompt-trial.md
+  t4-security-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 423
+    base: feature/file-based-switches
+    brief: .claude/work-items/2026-11-16-423-t4-security-review.md
+  t5-ordinary-switches:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 424
+    base: feature/file-based-switches
+    brief: .claude/work-items/2026-11-16-424-t5-ordinary-switches.md
+  t6-documents-skills-and-registries:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 425
+    base: feature/file-based-switches
+    brief: .claude/work-items/2026-11-16-425-t6-documents-skills-and-registries.md
+  t7-final-review:
+    status: pending
+    branch: null
+    pull_request: null
+    issue: 426
+    base: feature/file-based-switches
+    brief: .claude/work-items/2026-11-16-426-t7-final-review.md
