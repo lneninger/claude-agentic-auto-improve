@@ -3,7 +3,8 @@
 **Project:** claude-agentic-auto-improve
 **Date:** 2026-11-14
 **Requested by:** user
-**Status:** approved
+**Status:** implemented
+**Implemented:** 2026-11-16, automatically, by pr_merged.py after https://github.com/lneninger/claude-agentic-auto-improve/pull/414, https://github.com/lneninger/claude-agentic-auto-improve/pull/416, https://github.com/lneninger/claude-agentic-auto-improve/pull/427; 3 checklist items from review reports, 0 with no structured evidence; not performed (disclosed on #405): none; owner confirmed resolved: none
 **Work Item Brief:** .claude/work-items/2026-11-14-405-manifest-counts-landing-refresh.md
 **Tracking issue:** #405
 **Budget:** 12,000 tokens
@@ -570,11 +571,11 @@ PRIOR_FINDINGS:
 
 `pr_merged.py` fills this list when the contract's work is merged and nothing is pending. Do not tick lines by hand.
 
-- [ ] Implementation matches Data Shapes exactly
-- [ ] Reused Mechanisms are actually reused (no parallel implementations introduced)
-- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md`
-- [ ] New vocabulary terms promoted to `VOCABULARY.md`
-- [ ] Integration surfaces reflected on both backend and frontend sides
-- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced
-- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface)
-- [ ] `Status` flipped to `implemented`
+- [x] Implementation matches Data Shapes exactly — evidence: .claude/reviews/2026-11-14-manifest-counts-landing-refresh/t2-review-fullstack-code-reviewer.md
+- [x] Reused Mechanisms are actually reused (no parallel implementations introduced) — evidence: .claude/reviews/2026-11-14-manifest-counts-landing-refresh/t2-review-fullstack-code-reviewer.md
+- [ ] New Mechanisms (if any) promoted to `MECHANISMS.md` — not applicable (.claude/reviews/2026-11-14-manifest-counts-landing-refresh/t2-review-fullstack-code-reviewer.md)
+- [x] New vocabulary terms promoted to `VOCABULARY.md` — evidence: .claude/reviews/2026-11-14-manifest-counts-landing-refresh/t2-review-fullstack-code-reviewer.md
+- [ ] Integration surfaces reflected on both backend and frontend sides — not applicable (.claude/reviews/2026-11-14-manifest-counts-landing-refresh/t2-review-fullstack-code-reviewer.md)
+- [ ] `INTEGRATION.md` updated if new API endpoints, SignalR events, or DTO shapes were introduced — not applicable (.claude/reviews/2026-11-14-manifest-counts-landing-refresh/t2-review-fullstack-code-reviewer.md)
+- [ ] No orphaned DTO/model mismatches (C# DTO shape matches TypeScript interface) — not applicable (.claude/reviews/2026-11-14-manifest-counts-landing-refresh/t2-review-fullstack-code-reviewer.md)
+- [x] `Status` flipped to `implemented`

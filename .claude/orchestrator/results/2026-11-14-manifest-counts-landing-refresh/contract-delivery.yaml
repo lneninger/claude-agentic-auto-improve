@@ -1,0 +1,15 @@
+status: delivered
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/427
+number: 427
+head_ref: feature/405-landing-time-manifest-count-refresh
+base_ref: master
+base_is_default: true
+commit: 9404de166a2250896165bd5f2ee6634d89bf47a9
+merged_at: '2026-11-16T16:37:12Z'
+verified: github
+recorded_by: pr-merged --record-delivery
+recorded_at: '2026-11-16T19:44:01.885061+00:00'
+blocks_recorded: []
+blocks_already_recorded:
+- t1-count-refresh-at-the-landing
+- t2-review
