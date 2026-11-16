@@ -56,3 +56,6 @@ M — changes the landing and the version-check script, adds tests, touches ship
 
 ## Routing
 non-trivial → /design-first
+
+## Run log
+- 2026-11-16: merged and recorded (https://github.com/lneninger/claude-agentic-auto-improve/pull/414, https://github.com/lneninger/claude-agentic-auto-improve/pull/416, https://github.com/lneninger/claude-agentic-auto-improve/pull/427); contract 2026-11-14-manifest-counts-landing-refresh flipped to implemented by pr_merged.py; owner confirmed resolved: none; not performed and disclosed on #405: none
