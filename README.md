@@ -1774,7 +1774,7 @@ agents/          15 generic agents          (plugin root -- Claude and Cursor)
 .claude/
   agreements/    7 shipped working agreements, delivered at session start
   addons/        3 opt-in add-ons (addon.json + hook files), never registered by hooks.json
-  hooks/         14 generic hooks, a gate launcher, 8 shared helper modules, 5 generic data files
+  hooks/         14 generic hooks, a gate launcher, 9 shared helper modules, 5 generic data files
     hooks.json   Claude hook registration, referenced by .claude-plugin/plugin.json
     tests/       hook test suites
   scripts/       workflow scripts and shared helper modules

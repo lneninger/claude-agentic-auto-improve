@@ -131,8 +131,10 @@ for suffix in sorted(suffixes):
 print("\nINV-Q5  the skill names the guards that bind it")
 for hook in ("db-destructive-guard.py", "db-research-readonly-guard.py"):
     check("skill names %s" % hook, hook in skill)
-check("skill forbids setting CLAUDE_DESTRUCTIVE_DB_OK",
-      bool(re.search(r"Never set `?CLAUDE_DESTRUCTIVE_DB_OK", skill)))
+check("skill forbids creating the database override arm",
+      bool(re.search(r"Never create the database override arm", skill)))
+check("skill no longer names the retired override variable",
+      "CLAUDE_DESTRUCTIVE_DB_OK" not in skill)
 check("skill states the guards fail closed", "fail closed" in skill.lower())
 check("skill forbids executing DDL itself",
       bool(re.search(r"issues no `?CREATE|never to them|does not execute", skill)))

@@ -125,8 +125,9 @@ production connection.
   layer** — `ApplicationIntent=ReadOnly` for SQL Server — and wrapped in
   `BEGIN TRAN; … ROLLBACK;`. `db-research-readonly-guard.py` blocks a connection carrying
   write keywords without that enforcement.
-- **Never set `CLAUDE_DESTRUCTIVE_DB_OK`.** That variable is the user's, and an agent setting
-  it is an agent disabling its own guard.
+- **Never create the database override arm** (`.claude/database-override.once`). Only a person
+  creates it, in their own terminal; an agent creating it is an agent working around its own
+  guard, and both guards refuse any tool call that writes a file named `database-override.*`.
 
 Both guards **fail closed**: with no `db-destructive-guard.rules.json` naming this project's
 databases, every database is treated as protected. If a legitimate operation is blocked, the
@@ -183,8 +184,8 @@ Two constraints on that append:
   every write.
 - **Touching a real database.** This skill produces T-SQL; it does not execute it. Migration
   verification uses a disposable database with an allow-listed suffix.
-- **Setting `CLAUDE_DESTRUCTIVE_DB_OK` to get past a guard.** That variable belongs to the
-  user.
+- **Creating the database override arm to get past a guard.** The arm file belongs to the person
+  at the keyboard; when a guard blocks, say so and let the person run the command themselves.
 
 ## When NOT to use this skill
 

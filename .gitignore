@@ -34,3 +34,7 @@ node_modules/
 
 # Contract-lookup index written by concept-gate into the consuming project. Never content.
 .claude/cache/
+
+# A person's own switch overrides and the one-shot database override arm (and its claims). Never content.
+.claude/switches.local.json
+.claude/database-override.*

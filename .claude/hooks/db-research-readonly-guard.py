@@ -26,9 +26,19 @@ If the command appears to be SELECT-only -> WARN (advisory log, not blocking).
 The destructive-op block in db-destructive-guard.py is the heavier guardrail;
 this one is the lighter "always-read-only-for-research" enforcement.
 
+OVERRIDE (the Database override arm)
+------------------------------------
+A person who wants ONE blocked command put in front of them creates the file
+<project>/.claude/database-override.once in their own terminal. The arm allows nothing by itself:
+the next command this guard would block becomes a Claude Code permission prompt, once, and only
+where Claude Code asks (the permission mode is default, acceptEdits or plan). The claim is shared
+with db-destructive-guard.py through the tool call identifier. An agent never creates the arm: a
+tool call that would write it (a file whose name starts with "database-override.") is refused
+first, before Guard deference (the Arm-write rule).
+
 Hook contract (Claude Code PreToolUse):
-    stdin:  JSON { tool_name, tool_input }
-    exit 0: allow
+    stdin:  JSON { tool_name, tool_input, permission_mode, tool_use_id }
+    exit 0: allow (or, with an ask JSON on standard output, a permission prompt)
     exit 2: block (stderr shown to Claude)
     other:  error (fails open)
 """
@@ -62,6 +72,19 @@ _pp_should_defer = (
     getattr(_pp_log, "should_defer_to_project_guard", None) if _pp_log is not None else None
 )
 GUARD_FILE_NAME = "db-research-readonly-guard.py"
+
+#: Database override arm (contract 2026-11-16-file-based-switches, Guard fallback mode): the claim is
+#: bound with ``getattr``. A missing, stale or raising helper means "no override": the guard blocks.
+try:
+    import _switches as _sw
+except Exception:  # pragma: no cover - fail-soft
+    _sw = None
+_sw_claim_override = getattr(_sw, "claim_database_override", None) if _sw is not None else None
+try:  # the shared shell parser (standard library only)
+    import _shell_write_targets as _swt
+except Exception:  # pragma: no cover - fail-soft
+    _swt = None
+
 AUDIT_LOG = (
     (_pp_log.logs_dir() / "db-research.log") if _pp_log
     else Path.home() / ".claude" / "logs" / "db-research.log"
@@ -120,7 +143,7 @@ ALWAYS_ALLOW = re.compile(
 # Disposable-target exemption (added 2026-09-01).
 #
 # WHY THIS EXISTS. Before this, ANY write keyword on a DB connection was
-# blocked unless read-only was enforced or the user set the override env var.
+# blocked unless read-only was enforced (a person's one-shot arm turns a block into a prompt).
 # That had no exemption for disposable databases, while db-destructive-guard.py
 # has carried one all along. The practical effect: nothing automated could
 # create OR tear down a throwaway test database. Observed 2026-09-01 -- 1,941
@@ -286,6 +309,169 @@ def _defers_to_project_copy(payload: dict) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Database override arm (contract 2026-11-16-file-based-switches, "Override rules"). The name test of
+# the Arm-write rule and the prompt output are INLINE copies of db-destructive-guard.py's (Guard
+# fallback mode); the claim is the helper's.
+# ---------------------------------------------------------------------------
+_ARM_NAME_PREFIX = "database-override."
+_ARM_FILE_NAME = "database-override.once"
+_ARM_NAME_RE = re.compile(r"database-override\.", re.IGNORECASE)
+#: Permission modes where Claude Code asks a person. Any other mode, or none, shows no prompt.
+_PROMPT_MODES = ("default", "acceptEdits", "plan")
+_OVERRIDE_OUTCOMES = ("absent", "stale", "unusable", "claimed", "claimed-by-sibling", "no-prompt-available")
+_PROMPT_WORDING = (
+    "One-shot destructive database override. A person armed it. "
+    "Approve only if you mean to run this exact command."
+)
+
+
+def _last_part_names_arm(path_text: object) -> bool:
+    """True when the last part of a path starts with ``database-override.`` (any case, either slash)."""
+    last = str(path_text).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return last.lower().startswith(_ARM_NAME_PREFIX)
+
+
+def _mask_inert_prose(command: str) -> str:
+    """The command with the quoted prose a commit, pull request, search or echo only carries blanked.
+
+    This guard has no masker of its own: it borrows db-destructive-guard.py's from the same folder.
+    Anything that goes wrong returns the raw text, which only makes the Arm-write rule stricter."""
+    try:
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "db-destructive-guard.py"
+        spec = importlib.util.spec_from_file_location("_db_destructive_guard_masker", str(path))
+        if spec is None or spec.loader is None:
+            return command
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return str(module._mask_inert_prose(command))
+    except Exception:  # noqa: BLE001 -- fail closed: the raw text
+        return command
+
+
+def _arm_write_match(payload: dict) -> str:
+    """Arm-write rule: text naming what would write the arm file, or ``""``. Shell tools only."""
+    tool_input = payload.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        return ""
+    command = str(tool_input.get("command", ""))
+    named = bool(_ARM_NAME_RE.search(command))
+    if not named and _sw is not None:
+        names_test = getattr(_sw, "names_override_file", None)
+        try:
+            named = bool(names_test is not None and names_test(command))
+        except Exception:  # noqa: BLE001 -- the inline test above already ran
+            named = False
+    if not named:
+        return ""
+    if _swt is not None:
+        try:
+            for _kind, target in _swt.parse_redirect_targets(command):
+                if _last_part_names_arm(target):
+                    return target
+        except Exception:  # noqa: BLE001 -- the masked-text test below still runs
+            pass
+    masked = _mask_inert_prose(command)
+    hit = _ARM_NAME_RE.search(masked)
+    if hit is None:
+        return ""
+    return masked[max(0, hit.start() - 30):hit.end() + 30].strip()
+
+
+def _refuse_arm_write(payload: dict, tool_name: str, matched: str) -> int:
+    """Block a tool call that would create the arm. Only a person creates it."""
+    _audit({
+        "ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "hook": HOOK_NAME,
+        "session": payload.get("session_id") or "",
+        "tool": tool_name,
+        "decision": "BLOCK",
+        "reason": "override-file-write-refused",
+        "matched": _truncate(matched, 200),
+    })
+    sys.stderr.write(
+        "[db-research-readonly-guard] BLOCKED: this tool call would write the database override arm file "
+        "(database-override.*).\n"
+        "Only a person creates it, in their own terminal; an agent never does.\n"
+        f"Matched: {_truncate(matched, 200)}\n"
+    )
+    return 2
+
+
+def _single_quote_powershell(path: str) -> str:
+    return "'" + path.replace("'", "''") + "'"
+
+
+def _single_quote_posix(path: str) -> str:
+    return "'" + path.replace("'", "'\\''") + "'"
+
+
+def _project_root() -> Path | None:
+    try:
+        return Path(_pp_log.project_dir()) if _pp_log is not None and _pp_log.project_dir() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _arm_path_text() -> str:
+    root = _project_root()
+    return str(root / ".claude" / _ARM_FILE_NAME) if root is not None else ".claude/" + _ARM_FILE_NAME
+
+
+def _arm_present() -> bool:
+    root = _project_root()
+    return root is not None and os.path.lexists(root / ".claude" / _ARM_FILE_NAME)
+
+
+def _try_override(payload: dict) -> str:
+    """Override outcome for a command this guard is about to block. Claims the arm only when a prompt
+    can be shown (Person-present rule); never raises."""
+    try:
+        root = _project_root()
+        if root is None or _sw_claim_override is None:
+            return "absent"
+        if payload.get("permission_mode") not in _PROMPT_MODES:
+            return "no-prompt-available" if _arm_present() else "absent"
+        tool_use_id = payload.get("tool_use_id")
+        outcome = _sw_claim_override(root, tool_use_id if isinstance(tool_use_id, str) else "")
+        return outcome if outcome in _OVERRIDE_OUTCOMES else "unusable"
+    except Exception:  # noqa: BLE001 -- no override
+        return "unusable"
+
+
+def _print_ask(reason: str) -> None:
+    sys.stdout.write(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "ask",
+        "permissionDecisionReason": reason,
+    }}, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _override_block_lines(outcome: str, mode: object) -> str:
+    """Block text for the override: how a person arms, and why an arm that exists did not help."""
+    path = _arm_path_text()
+    lines = [
+        "A person can run this command themselves, in their own terminal.",
+        "To get ONE permission prompt for the next blocked command instead, a person (never an agent)",
+        "creates the arm file in their own terminal:",
+        f"    PowerShell: New-Item -ItemType File -Force {_single_quote_powershell(path)}",
+        f"    POSIX:      touch {_single_quote_posix(path)}",
+        "The arm lasts 15 minutes and serves one command. It allows nothing by itself: it only leads to a",
+        "prompt, and only where Claude Code asks for permission.",
+    ]
+    if outcome == "stale":
+        lines.append("An arm file was found, but it was older than 15 minutes, so it was removed.")
+    elif outcome == "unusable":
+        lines.append("Something at the arm path was not a usable regular file, so it was removed.")
+    elif outcome == "no-prompt-available":
+        shown = mode if mode in ("dontAsk", "bypassPermissions", "auto") else "unknown"
+        lines.append(f"An arm file exists, but the permission mode ({shown}) shows no prompt, so the command stays blocked.")
+    return "".join(line + "\n" for line in lines)
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read()
@@ -297,6 +483,12 @@ def main() -> int:
     tool_name = payload.get("tool_name") or ""
     if tool_name not in {"Bash", "PowerShell"}:
         return 0
+
+    # Arm-write rule: runs before Guard deference and before every other rule, because it reads no
+    # project rules. Only a person creates the Database override arm.
+    arm_write = _arm_write_match(payload)
+    if arm_write:
+        return _refuse_arm_write(payload, tool_name, arm_write)
 
     # Guard deference: after the payload is read, before anything is classified.
     if _defers_to_project_copy(payload):
@@ -338,11 +530,6 @@ def main() -> int:
         _audit({**record, "decision": "ALLOW", "reason": "benign-system-reads"})
         return 0
 
-    # If user override is set -> ALLOW.
-    if os.environ.get("CLAUDE_DESTRUCTIVE_DB_OK") == "1":
-        _audit({**record, "decision": "ALLOW", "reason": "user-override-env"})
-        return 0
-
     # If the write provably targets ONLY disposable databases -> ALLOW.
     # See the "Disposable-target exemption" block comment above. Fails closed.
     if has_writes:
@@ -357,7 +544,22 @@ def main() -> int:
 
     # If there's any write keyword without read-only -> BLOCK.
     if has_writes:
-        _audit({**record, "decision": "BLOCK", "reason": "writes-without-readonly"})
+        # Database override arm: a person's arm turns this block into ONE permission prompt. Nothing
+        # is allowed here, and a call that reaches no block never touches the arm.
+        override_outcome = _try_override(payload)
+        if override_outcome in ("claimed", "claimed-by-sibling"):
+            _audit({**record, "decision": "ASK", "reason": override_outcome,
+                    "block_reason": "writes-without-readonly",
+                    "permission_mode": payload.get("permission_mode"),
+                    "tool_use_id": payload.get("tool_use_id")})
+            _print_ask(_PROMPT_WORDING)
+            return 0
+        if override_outcome == "absent":
+            _audit({**record, "decision": "BLOCK", "reason": "writes-without-readonly"})
+        else:
+            _audit({**record, "decision": "BLOCK", "reason": override_outcome,
+                    "block_reason": "writes-without-readonly",
+                    "permission_mode": payload.get("permission_mode")})
         sys.stderr.write(
             "[db-research-readonly-guard] BLOCKED: opening a DB connection with\n"
             "write keywords present and no read-only enforcement.\n"
@@ -371,6 +573,8 @@ def main() -> int:
             "\n"
             f"Connection patterns: {', '.join(conn_matches)}\n"
             f"Excerpt: {_truncate(text, 200)}\n"
+            "\n"
+            + _override_block_lines(override_outcome, payload.get("permission_mode"))
         )
         return 2
 

@@ -18,8 +18,7 @@ WHAT IT DOES
 Inspects every Bash / Write / Edit / MultiEdit / PowerShell tool call. If the
 command/content matches any pattern in DESTRUCTIVE_PATTERNS, the hook checks
 whether the same input also names a disposable DB (DISPOSABLE_PATTERNS). If
-not, and unless CLAUDE_DESTRUCTIVE_DB_OK=1 is set, the hook BLOCKS with exit
-code 2 and prints a stderr message Claude can read.
+not, the hook BLOCKS with exit code 2 and prints a stderr message Claude can read.
 
 CROSS-DATA-MANAGER COVERAGE
 ---------------------------
@@ -29,18 +28,21 @@ CLI (mysqladmin drop), MongoDB shell (db.dropDatabase), Redis (FLUSHALL/DB),
 Cosmos SDK (deleteContainer / deleteDatabase), and migrationBuilder.Sql with
 DROP/TRUNCATE inside.
 
-OVERRIDE
---------
-For a one-shot human-approved exception, the USER (not the agent) sets:
-    CLAUDE_DESTRUCTIVE_DB_OK=1   (POSIX)
-    $env:CLAUDE_DESTRUCTIVE_DB_OK="1"   (PowerShell)
-The hook does not unset it (the OS shell scope handles that); a subsequent
-agent-spawned sub-shell will inherit it only if explicitly passed. Agents
-MUST NOT set this variable themselves.
+OVERRIDE (the Database override arm)
+------------------------------------
+A person who wants ONE blocked command put in front of them creates the file
+<project>/.claude/database-override.once in their own terminal. The arm allows nothing by itself:
+the next command this guard would block becomes a Claude Code permission prompt (the PreToolUse
+"ask" answer), and the arm is used up (renamed to a claim) whatever the answer. It counts only
+when it is a regular file modified in the last 15 minutes, and only when the permission mode is one
+where Claude Code asks (default, acceptEdits, plan). Commands of the human-only class and the
+internal-error path never offer the prompt. An agent never creates the arm: a tool call that would
+write it (any file whose name starts with "database-override.") is refused first, before Guard
+deference and before every other rule (the Arm-write rule).
 
 Hook contract (Claude Code PreToolUse):
-    stdin:  JSON with { tool_name, tool_input }
-    exit 0: allow
+    stdin:  JSON with { tool_name, tool_input, permission_mode, tool_use_id }
+    exit 0: allow (or, with an ask JSON on standard output, a permission prompt)
     exit 2: block (stderr shown to Claude)
     other:  error (a Python crash exits 1, which Claude Code does not treat as a block)
 
@@ -55,6 +57,7 @@ import json
 import os
 import re
 import sys
+import unicodedata as _unicodedata
 from pathlib import Path
 
 # Passive error logging (fail-soft import).
@@ -87,6 +90,18 @@ _pp_should_defer = (
     getattr(_pp_log, "should_defer_to_project_guard", None) if _pp_log is not None else None
 )
 GUARD_FILE_NAME = "db-destructive-guard.py"
+
+#: Database override arm (contract 2026-11-16-file-based-switches, Guard fallback mode): the claim is
+#: bound with ``getattr``. A missing, stale or raising helper means "no override": the guard blocks.
+try:
+    import _switches as _sw
+except Exception:  # pragma: no cover - fail-soft
+    _sw = None
+_sw_claim_override = getattr(_sw, "claim_database_override", None) if _sw is not None else None
+try:  # the shared shell parser (standard library only); a missing one leaves the masked-text test
+    import _shell_write_targets as _swt
+except Exception:  # pragma: no cover - fail-soft
+    _swt = None
 
 AUDIT_LOG = (
     (_pp_log.logs_dir() / "db-guard.log") if _pp_log
@@ -1755,18 +1770,201 @@ def _fail_closed(payload: dict, tool_name: str, file_path: str, labels: list[str
         "matched_destructive": labels,
         "error": repr(exc),
     }
-    if os.environ.get("CLAUDE_DESTRUCTIVE_DB_OK") == "1":
-        _audit({**record, "decision": "ALLOW", "reason": "user-override-env"})
-        return 0
+    # No-prompt classes rule: the internal-error path never offers the override prompt.
     _audit({**record, "decision": "BLOCK", "reason": "internal-error-after-match"})
     shown = ", ".join(labels) or "(a command read by the argument-list parser)"
     sys.stderr.write(
         f"[db-destructive-guard] BLOCKED: internal error while reading the target of {shown}; "
         "failing closed.\n"
-        "A person can run this with the human override (USER sets CLAUDE_DESTRUCTIVE_DB_OK=1).\n"
+        "A person can run this command themselves, in their own terminal.\n"
         + "".join(line + "\n" for line in _rules_problem_lines())
     )
     return 2
+
+
+# ---------------------------------------------------------------------------
+# Database override arm (contract 2026-11-16-file-based-switches, "Override rules").
+#
+# The arm <project>/.claude/database-override.once allows nothing by itself. It turns the next
+# BLOCK into a permission prompt (the PreToolUse "ask" answer), once, and only where Claude Code
+# asks. Two things live here and in the read-only guard as INLINE copies (Guard fallback mode):
+# the name test of the Arm-write rule and the prompt output. The claim itself is the helper's.
+# ---------------------------------------------------------------------------
+_ARM_NAME_PREFIX = "database-override."
+_ARM_FILE_NAME = "database-override.once"
+_ARM_NAME_RE = re.compile(r"database-override\.", re.IGNORECASE)
+_ARM_EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+#: Permission modes where Claude Code asks a person. Any other mode, or none, shows no prompt.
+_PROMPT_MODES = ("default", "acceptEdits", "plan")
+_OVERRIDE_OUTCOMES = ("absent", "stale", "unusable", "claimed", "claimed-by-sibling", "no-prompt-available")
+_PROMPT_WORDING = (
+    "One-shot destructive database override. A person armed it. "
+    "Approve only if you mean to run this exact command."
+)
+_TARGET_CUT = 60
+_TARGET_LIMIT = 5
+
+
+def _last_part_names_arm(path_text: object) -> bool:
+    """True when the last part of a path starts with ``database-override.`` (any case, either slash)."""
+    last = str(path_text).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return last.lower().startswith(_ARM_NAME_PREFIX)
+
+
+def _arm_write_match(payload: dict, tool_name: str) -> str:
+    """Arm-write rule: text naming what would write the arm file, or ``""`` when the call does not.
+
+    Edit tools: the target path. Shell tools: a write target the shared shell parser finds, or the
+    name in the command text AFTER the masking of inert quoted prose, so a commit message, a pull
+    request body or a search pattern that only mentions the name is allowed."""
+    tool_input = payload.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        return ""
+    if tool_name in _ARM_EDIT_TOOLS:
+        path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+        return path if _last_part_names_arm(path) else ""
+    command = str(tool_input.get("command", ""))
+    named = bool(_ARM_NAME_RE.search(command))
+    if not named and _sw is not None:
+        names_test = getattr(_sw, "names_override_file", None)
+        try:
+            named = bool(names_test is not None and names_test(command))
+        except Exception:  # noqa: BLE001 -- the inline test above already ran
+            named = False
+    if not named:
+        return ""
+    if _swt is not None:
+        try:
+            for _kind, target in _swt.parse_redirect_targets(command):
+                if _last_part_names_arm(target):
+                    return target
+        except Exception:  # noqa: BLE001 -- the masked-text test below still runs
+            pass
+    try:
+        masked = _mask_inert_prose(command)
+    except Exception:  # noqa: BLE001 -- fail closed: read the raw text
+        masked = command
+    hit = _ARM_NAME_RE.search(masked)
+    if hit is None:
+        return ""
+    return masked[max(0, hit.start() - 30):hit.end() + 30].strip()
+
+
+def _refuse_arm_write(payload: dict, tool_name: str, matched: str) -> int:
+    """Block a tool call that would create the arm. Only a person creates it."""
+    _audit({
+        "ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "hook": HOOK_NAME,
+        "session": payload.get("session_id") or "",
+        "tool": tool_name,
+        "decision": "BLOCK",
+        "reason": "override-file-write-refused",
+        "matched": _truncate(matched, 200),
+    })
+    sys.stderr.write(
+        "[db-destructive-guard] BLOCKED: this tool call would write the database override arm file "
+        "(database-override.*).\n"
+        "Only a person creates it, in their own terminal; an agent never does.\n"
+        f"Matched: {_truncate(matched, 200)}\n"
+    )
+    return 2
+
+
+def _single_quote_powershell(path: str) -> str:
+    return "'" + path.replace("'", "''") + "'"
+
+
+def _single_quote_posix(path: str) -> str:
+    return "'" + path.replace("'", "'\\''") + "'"
+
+
+def _project_root() -> Path | None:
+    try:
+        return Path(_pp_log.project_dir()) if _pp_log is not None and _pp_log.project_dir() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _arm_path_text() -> str:
+    root = _project_root()
+    return str(root / ".claude" / _ARM_FILE_NAME) if root is not None else ".claude/" + _ARM_FILE_NAME
+
+
+def _arm_present() -> bool:
+    root = _project_root()
+    return root is not None and os.path.lexists(root / ".claude" / _ARM_FILE_NAME)
+
+
+def _try_override(payload: dict) -> str:
+    """Override outcome for a command this guard is about to block. Claims the arm only when a prompt
+    can be shown (Person-present rule); never raises."""
+    try:
+        root = _project_root()
+        if root is None or _sw_claim_override is None:
+            return "absent"
+        if payload.get("permission_mode") not in _PROMPT_MODES:
+            return "no-prompt-available" if _arm_present() else "absent"
+        tool_use_id = payload.get("tool_use_id")
+        outcome = _sw_claim_override(root, tool_use_id if isinstance(tool_use_id, str) else "")
+        return outcome if outcome in _OVERRIDE_OUTCOMES else "unusable"
+    except Exception:  # noqa: BLE001 -- no override
+        return "unusable"
+
+
+def _neutralise_target(text: str) -> str:
+    """Plain-reason rule: control characters and comment markers removed, whitespace collapsed, cut."""
+    cleaned = "".join(" " if _unicodedata.category(ch) in ("Cc", "Cf", "Cs") else ch for ch in str(text))
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        for marker in ("/*", "*/", "--", "#"):
+            cleaned = cleaned.replace(marker, " ")
+    return " ".join(cleaned.split())[:_TARGET_CUT]
+
+
+def _plain_reason(targets: list[dict]) -> str:
+    """The fixed prompt wording, then each target once, neutralised and labelled."""
+    names: list[str] = []
+    for target in targets:
+        name = _neutralise_target(target.get("name") or "")
+        if name and name not in names:
+            names.append(name)
+    reason = _PROMPT_WORDING
+    if names:
+        shown = "; ".join('"%s" as written in the command' % n for n in names[:_TARGET_LIMIT])
+        reason += " Target: " + shown + "."
+    return reason
+
+
+def _print_ask(reason: str) -> None:
+    sys.stdout.write(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "ask",
+        "permissionDecisionReason": reason,
+    }}, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _override_block_lines(outcome: str, mode: object) -> list[str]:
+    """Block text for the override: how a person arms, and why an arm that exists did not help."""
+    path = _arm_path_text()
+    lines = [
+        "A person can run this command themselves, in their own terminal.",
+        "To get ONE permission prompt for the next blocked command instead, a person (never an agent)",
+        "creates the arm file in their own terminal:",
+        f"    PowerShell: New-Item -ItemType File -Force {_single_quote_powershell(path)}",
+        f"    POSIX:      touch {_single_quote_posix(path)}",
+        "The arm lasts 15 minutes and serves one command. It allows nothing by itself: it only leads to a",
+        "prompt, and only where Claude Code asks for permission.",
+    ]
+    if outcome == "stale":
+        lines.append("An arm file was found, but it was older than 15 minutes, so it was removed.")
+    elif outcome == "unusable":
+        lines.append("Something at the arm path was not a usable regular file, so it was removed.")
+    elif outcome == "no-prompt-available":
+        shown = mode if mode in ("dontAsk", "bypassPermissions", "auto") else "unknown"
+        lines.append(f"An arm file exists, but the permission mode ({shown}) shows no prompt, so the command stays blocked.")
+    return lines
 
 
 def _refuse_unchecked() -> None:
@@ -1807,6 +2005,12 @@ def main() -> int:
     tool_name = payload.get("tool_name") or ""
     if tool_name not in {"Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit"}:
         return 0
+
+    # Arm-write rule: runs before Guard deference and before every other rule, because it reads no
+    # project rules. Only a person creates the Database override arm.
+    arm_write = _arm_write_match(payload, tool_name)
+    if arm_write:
+        return _refuse_arm_write(payload, tool_name, arm_write)
 
     # Guard deference: after the payload is read, before anything is classified.
     if _defers_to_project_copy(payload):
@@ -1952,15 +2156,7 @@ def _decide(
                 "reason": "authoring-variable-target" if used_variable else "disposable-bound-to-target"})
         return 0
 
-    # ---- ALLOW path 2: user-set environment override -------------------
-    if os.environ.get("CLAUDE_DESTRUCTIVE_DB_OK") == "1":
-        _audit({**base_record, "decision": "ALLOW", "reason": "user-override-env"})
-        # Note: we do NOT unset the env var here. The shell scope outside
-        # this Python process owns it. Agents should not set it; humans set
-        # it once in their shell when they want to authorize a destructive op.
-        return 0
-
-    # ---- BLOCK ----------------------------------------------------------
+    # ---- BLOCK reason ----------------------------------------------------
     if protected_db_violation:
         reason = "protected-db-write-from-non-production-path"
     elif argv_position_bug:
@@ -1973,7 +2169,21 @@ def _decide(
         reason = "unresolved-target"
     else:
         reason = "no-disposable-no-override"
-    _audit({**base_record, "decision": "BLOCK", "reason": reason})
+
+    # ---- Database override arm: the arm-then-ask path --------------------
+    # The human-only class never offers the prompt (No-prompt classes rule). Anything else that is
+    # about to block may become ONE permission prompt when a person armed it. Nothing is allowed here.
+    override_outcome = "absent" if reason == "human-only-command" else _try_override(payload)
+    if override_outcome in ("claimed", "claimed-by-sibling"):
+        _audit({**base_record, "decision": "ASK", "reason": override_outcome, "block_reason": reason,
+                "permission_mode": payload.get("permission_mode"), "tool_use_id": payload.get("tool_use_id")})
+        _print_ask(_plain_reason(targets))
+        return 0
+    if override_outcome == "absent":
+        _audit({**base_record, "decision": "BLOCK", "reason": reason})
+    else:
+        _audit({**base_record, "decision": "BLOCK", "reason": override_outcome, "block_reason": reason,
+                "permission_mode": payload.get("permission_mode")})
 
     # Build a context-appropriate stderr message.
     lines = ["[db-destructive-guard] BLOCKED:"]
@@ -2038,9 +2248,10 @@ def _decide(
         lines.append("Use tools/db-protection/verify-migration.cmd for the safe workflow.")
     lines.extend(_rules_problem_lines())
     lines.append("")
-    lines.append("For a one-shot human-approved override (USER, not agent, must set this):")
-    lines.append("    POSIX:      export CLAUDE_DESTRUCTIVE_DB_OK=1")
-    lines.append("    PowerShell: $env:CLAUDE_DESTRUCTIVE_DB_OK=\"1\"")
+    if reason != "human-only-command":
+        lines.extend(_override_block_lines(override_outcome, payload.get("permission_mode")))
+    else:
+        lines.append("A person runs this step themselves, in their own terminal. It never becomes a prompt.")
     lines.append("")
     lines.append("Reference: ~/.claude/CLAUDE.md -> 'Destructive Database Operations (HARD BLOCK)'")
     lines.append("Audit log: ~/.claude/hooks/db-guard.log")

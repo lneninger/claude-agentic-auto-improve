@@ -164,7 +164,7 @@ Say, in one sentence each:
 - Add a name the user did not confirm, or a Testing database the user did not name.
 - Remove, reorder or respell a name, or touch `production_path_allowlist` or `human_only_commands`.
 - Edit a `.sql` file or run the install command or any database command.
-- Set `CLAUDE_DESTRUCTIVE_DB_OK` or any other override.
+- Create the database override arm (`.claude/database-override.once`) or any other override. Only a person creates it, in their own terminal.
 - Ask the narrowing question as part of another question.
 
 ## When NOT to use

@@ -15,8 +15,8 @@ imported. Nothing here touches this repository's own .claude folder or the real 
 
 Linked worktrees are made with real git, inside the temporary folder.
 
-AT BASE the helper does not exist, so every row fails. The whole class is marked
-unittest.expectedFailure through one decorator (RED). Sub-task 2 (the helper block) removes it.
+The helper (.claude/hooks/_switches.py) exists since sub-task 2 (the helper block), so the rows run as
+ordinary tests: the RED marks of sub-task 1 are removed.
 
 WHAT THE ROWS ASSUME WHERE THE CONTRACT IS SILENT (the stricter reading is taken; see the hand-off)
   * switch(key, project=None) answers the value in force: the text "on" or "off" for an on/off key,
@@ -109,14 +109,6 @@ except SystemExit:
 except BaseException as exc:
     print(json.dumps({"error": type(exc).__name__ + ": " + str(exc)}))
 '''
-
-
-def red(cls):
-    """RED at base: every row of the class fails until the helper exists (sub-task 2 removes this)."""
-    for name in dir(cls):
-        if name.startswith("test_"):
-            setattr(cls, name, unittest.expectedFailure(getattr(cls, name)))
-    return cls
 
 
 def _rmtree(path: Path) -> None:
@@ -263,7 +255,6 @@ class SwitchTestCase(unittest.TestCase):
         return [p for p in folder.rglob("*") if p.is_file()] if folder.is_dir() else []
 
 
-@red
 class CatalogAndValueTests(SwitchTestCase):
 
     def test_the_catalog_holds_exactly_the_nine_keys_each_at_its_default(self):
@@ -353,7 +344,6 @@ class CatalogAndValueTests(SwitchTestCase):
                 self.assertIn(want, source, "the source of %s must name %s" % (key, want))
 
 
-@red
 class NoFileAndBrokenFileTests(SwitchTestCase):
 
     def test_a_missing_empty_or_whitespace_file_means_no_settings_and_reports_nothing(self):
@@ -451,7 +441,6 @@ class NoFileAndBrokenFileTests(SwitchTestCase):
         self.assertEqual(len(self.log_lines(p)), 1, "and not reported again")
 
 
-@red
 class EncodingTests(SwitchTestCase):
 
     TEXT = '{"concept_gate": "off", "architecture_guard": false}'
@@ -483,7 +472,6 @@ class EncodingTests(SwitchTestCase):
         self._assert_off(p, "committed UTF-16 file")
 
 
-@red
 class ProjectFolderRuleTests(SwitchTestCase):
 
     OFF = {k: "off" for k in ON_OFF_KEYS}
@@ -554,7 +542,6 @@ class ProjectFolderRuleTests(SwitchTestCase):
                          "a second process sees the edit: nothing may be cached on disk or at import")
 
 
-@red
 class WorktreeRuleTests(SwitchTestCase):
 
     def test_a_linked_worktree_with_nothing_there_reads_the_main_checkouts_personal_file(self):
@@ -633,7 +620,6 @@ class WorktreeRuleTests(SwitchTestCase):
         self.assert_all_default(self.values(wt, env_project=wt, cwd=cwd), "worktree with nothing, decoy in cwd")
 
 
-@red
 class DatabaseOverrideHelperTests(SwitchTestCase):
     """The helper's two override commands (Commands: Claim database override and Name test)."""
 
