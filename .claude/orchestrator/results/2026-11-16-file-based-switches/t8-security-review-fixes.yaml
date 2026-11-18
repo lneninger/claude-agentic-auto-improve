@@ -1,0 +1,20 @@
+status: completed
+commit: 7d97bc1b1be4b40d466188d4ecfb1048638bcb11
+tests_passed: true
+tests_verified_by: ci
+contract_impact:
+  requires_architect: false
+  severity: none
+  description: null
+completed_by: pr-merged
+pull_request: https://github.com/lneninger/claude-agentic-auto-improve/pull/446
+merged_at: '2026-11-18T19:36:33Z'
+verified: github
+sub_issue_closed: closed
+hand_resolved:
+  files: []
+  merge_commits: 0
+  commits_inspected: 2
+  commits_unread: 0
+base_ref: feature/file-based-switches
+base_is_default: false
