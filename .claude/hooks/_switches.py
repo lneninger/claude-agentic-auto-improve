@@ -18,7 +18,8 @@ from import (Two-layer path resolution).
 THE RULES (each one a test row in tests/test_switches.py)
   * No-file: a missing, empty or whitespace-only file means "no settings".
   * Broken-file: a file that cannot be read, cannot be decoded, is not JSON or is not a JSON object
-    makes the helper ignore EVERY switch file: all keys at their defaults.
+    makes the helper ignore EVERY switch file: all keys at their defaults. Anything but a regular file at the
+    path (a named pipe, a device, a link to a network path on Windows) is unreadable and is never waited on.
   * Encoding: a UTF-8 byte order mark is dropped; UTF-16 is decoded when it starts with its mark.
   * Bad-entry: an unknown key is ignored; a value outside its set leaves that key at its default
     (``contract_index`` reads an unknown value as ``off``); ``pinned_contract`` in the committed file is
@@ -72,6 +73,7 @@ ARM_FILE_NAME = "database-override.once"
 CLAIM_PREFIX = "database-override.claimed-"
 ARM_NAME_PREFIX = "database-override."
 ARM_FRESH_SECONDS = 15 * 60
+ARM_FUTURE_SKEW_SECONDS = 60
 
 OFF_TEXTS = frozenset({"off", "0", "false", "no"})
 ON_TEXTS = frozenset({"on", "1", "true", "yes"})
@@ -184,6 +186,88 @@ def _broken(path: Path, label: str, kind: str, state: str, detail: str = "") -> 
     return _FileRead(path, label, "broken", {}, state, kind, detail)
 
 
+class _NotReadableKind(Exception):
+    """The path holds something the reader will not open or read: not a regular file, or a link to a
+    network path. The Broken-file rule treats it as unreadable."""
+
+
+#: Windows drive kinds that are local: removable, fixed, CD-ROM, RAM disk. Anything else (a network
+#: drive, an unknown or missing root) is not read.
+_LOCAL_DRIVE_KINDS = frozenset({2, 3, 5, 6})
+_MAX_LINK_HOPS = 8
+
+
+def _network_link_reason(path: Path) -> str:
+    """Windows only (no ``O_NONBLOCK``, no named pipe at a file path): when ``path`` is a link, the reason
+    its target (or a later link in the chain) is on a network drive or a ``\\\\server\\share`` path;
+    ``""`` otherwise. Judged from the link text and the LOCAL drive table only: nothing here touches the
+    network, and a target that is judged remote is never opened."""
+    if os.name != "nt":
+        return ""
+    current = os.fspath(path)
+    for _hop in range(_MAX_LINK_HOPS):
+        try:
+            if not os.path.islink(current):
+                return ""
+            target = os.readlink(current)
+        except OSError as exc:
+            return "the link at %s could not be read (%s)" % (current, type(exc).__name__)
+        text = target
+        upper = text.upper()
+        if upper.startswith(("\\\\?\\UNC\\", "\\\\.\\UNC\\")):
+            return "the link points to a network path: %s" % target
+        if text.startswith(("\\\\?\\", "\\\\.\\")):
+            text = text[4:]
+        text = text.replace("/", "\\")
+        if text.startswith("\\\\"):
+            return "the link points to a network path: %s" % target
+        absolute = os.path.join(os.path.dirname(current), text)
+        drive = os.path.splitdrive(absolute)[0] or os.path.splitdrive(os.path.abspath(current))[0]
+        if drive.startswith("\\\\"):
+            return "the link points to a network path: %s" % target
+        try:
+            import ctypes
+
+            kind = int(ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive + "\\")))  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 -- drive kind unknown: not read
+            return "the drive of the link target could not be judged: %s" % target
+        if kind not in _LOCAL_DRIVE_KINDS:
+            return "the link points to a drive that is not local (type %d): %s" % (kind, target)
+        current = absolute
+    return "the link chain is longer than %d links" % _MAX_LINK_HOPS
+
+
+def _read_regular_file_bytes(path: Path) -> bytes:
+    """Read up to ``MAX_SWITCH_FILE_BYTES + 1`` bytes of a REGULAR file, or raise.
+
+    Where ``O_NONBLOCK`` exists (POSIX) the file is opened read-only and non-blocking, so a named pipe
+    cannot hold the hook; its kind is checked on the open descriptor (``fstat``), and anything but a
+    regular file is closed unread. On Windows a link to a network path is refused before any open."""
+    limit = MAX_SWITCH_FILE_BYTES + 1
+    non_block = getattr(os, "O_NONBLOCK", 0)
+    if non_block:
+        fd = os.open(path, os.O_RDONLY | non_block | getattr(os, "O_CLOEXEC", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise _NotReadableKind("not a regular file (a pipe, a device or a socket is at the file path)")
+            chunks: list[bytes] = []
+            total = 0
+            while total < limit:
+                chunk = os.read(fd, min(1 << 16, limit - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+    reason = _network_link_reason(path)
+    if reason:
+        raise _NotReadableKind(reason)
+    with open(path, "rb") as handle:
+        return handle.read(limit)
+
+
 def _read_file(path: Path, label: str) -> _FileRead:
     """Read one switch file. Never raises."""
     try:
@@ -196,8 +280,10 @@ def _read_file(path: Path, label: str) -> _FileRead:
         return _broken(path, label, "unreadable",
                        "%s|IsADirectoryError|%s" % (path, info.st_mtime_ns), "a folder is at the file path")
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read(MAX_SWITCH_FILE_BYTES + 1)
+        raw = _read_regular_file_bytes(path)
+    except _NotReadableKind as exc:
+        return _broken(path, label, "unreadable",
+                       "%s|%s|%s" % (path, "NotReadableKind", _mtime_text(path)), str(exc))
     except OSError as exc:
         return _broken(path, label, "unreadable",
                        "%s|%s|%s" % (path, type(exc).__name__, _mtime_text(path)), str(exc))
@@ -447,6 +533,36 @@ def names_override_file(path_or_text: Any) -> bool:
         return False
 
 
+def _normalised_parts(path_text: Any) -> list[str]:
+    """The parts of a path as the file system reads it: both slashes fold, ``.`` parts vanish, ``..``
+    removes the part before it, and a part that is nothing but dots and spaces (Windows drops trailing
+    dots and spaces) vanishes too."""
+    parts: list[str] = []
+    for part in str(path_text).replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        if not part.rstrip(". "):
+            continue
+        parts.append(part)
+    return parts
+
+
+def names_override_path(path_text: Any) -> bool:
+    """Name test of the Arm-write rule for an edit tool's target path (W1).
+
+    True when the LAST part of the normalised path starts with ``database-override.`` (any case, either
+    slash). ``<arm>/.`` and ``<arm>/x/..`` reach the arm and are named; ``<arm>/../notes.md`` is not."""
+    try:
+        parts = _normalised_parts(path_text)
+        return bool(parts) and parts[-1].lower().startswith(ARM_NAME_PREFIX)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _safe_id(tool_call_id: Any) -> str:
     text = _SAFE_ID_RE.sub("_", str(tool_call_id or "").strip())
     return text[:100]
@@ -462,12 +578,18 @@ def _remove_quietly(path: Path) -> None:
         pass
 
 
+def _is_fresh_age(modified: float) -> bool:
+    """Fresh-arm window: modified in the last 15 minutes and not more than 60 seconds ahead of now."""
+    age = time.time() - modified
+    return -ARM_FUTURE_SKEW_SECONDS <= age <= ARM_FRESH_SECONDS
+
+
 def _sweep_old_claims(claude: Path) -> None:
-    """Remove claims older than the arm's lifetime."""
+    """Remove claims older than the arm's lifetime, or dated more than 60 seconds ahead."""
     try:
         for entry in claude.glob(CLAIM_PREFIX + "*"):
             try:
-                if time.time() - os.lstat(entry).st_mtime > ARM_FRESH_SECONDS:
+                if not _is_fresh_age(os.lstat(entry).st_mtime):
                     _remove_quietly(entry)
             except OSError:
                 continue
@@ -478,7 +600,7 @@ def _sweep_old_claims(claude: Path) -> None:
 def _fresh_regular_file(path: Path) -> bool:
     try:
         info = os.lstat(path)
-        return stat.S_ISREG(info.st_mode) and (time.time() - info.st_mtime) <= ARM_FRESH_SECONDS
+        return stat.S_ISREG(info.st_mode) and _is_fresh_age(info.st_mtime)
     except OSError:
         return False
 
@@ -509,7 +631,7 @@ def claim_database_override(project: Any, tool_call_id: Any) -> str:
         if not stat.S_ISREG(info.st_mode):
             _remove_quietly(arm)
             return "unusable"
-        if time.time() - info.st_mtime > ARM_FRESH_SECONDS:
+        if not _is_fresh_age(info.st_mtime):
             _remove_quietly(arm)
             return "stale"
         target = sibling_claim if sibling_claim is not None else claude / (CLAIM_PREFIX + "noid-" + uuid.uuid4().hex[:12])
@@ -530,5 +652,5 @@ def claim_database_override(project: Any, tool_call_id: Any) -> str:
 
 __all__ = [
     "CATALOG", "SwitchSpec", "SwitchReading", "reading", "switch", "effective_switches", "off_notice",
-    "names_override_file", "claim_database_override",
+    "names_override_file", "names_override_path", "claim_database_override",
 ]

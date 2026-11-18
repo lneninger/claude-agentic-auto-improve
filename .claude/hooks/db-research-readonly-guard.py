@@ -327,9 +327,22 @@ _PROMPT_WORDING = (
 
 
 def _last_part_names_arm(path_text: object) -> bool:
-    """True when the last part of a path starts with ``database-override.`` (any case, either slash)."""
-    last = str(path_text).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    return last.lower().startswith(_ARM_NAME_PREFIX)
+    """True when the last part of the NORMALISED path starts with ``database-override.`` (any case).
+
+    Inline copy of db-destructive-guard.py's: both slashes fold, ``.`` parts vanish, ``..`` removes the part
+    before it, and a part of only dots and spaces (Windows drops trailing dots and spaces) vanishes."""
+    parts: list[str] = []
+    for part in str(path_text).replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        if not part.rstrip(". "):
+            continue
+        parts.append(part)
+    return bool(parts) and parts[-1].lower().startswith(_ARM_NAME_PREFIX)
 
 
 def _mask_inert_prose(command: str) -> str:
@@ -346,7 +359,8 @@ def _mask_inert_prose(command: str) -> str:
             return command
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return str(module._mask_inert_prose(command))
+        # Arm-write rule only: a git segment with a real redirection to a named file is code, not prose.
+        return str(module._mask_inert_prose(command, redirect_is_code=True))
     except Exception:  # noqa: BLE001 -- fail closed: the raw text
         return command
 
@@ -463,7 +477,7 @@ def _override_block_lines(outcome: str, mode: object) -> str:
         "prompt, and only where Claude Code asks for permission.",
     ]
     if outcome == "stale":
-        lines.append("An arm file was found, but it was older than 15 minutes, so it was removed.")
+        lines.append("An arm file was found, but it was older than 15 minutes or dated in the future, so it was removed.")
     elif outcome == "unusable":
         lines.append("Something at the arm path was not a usable regular file, so it was removed.")
     elif outcome == "no-prompt-available":

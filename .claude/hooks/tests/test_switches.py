@@ -101,6 +101,8 @@ try:
         out = outcome(s.claim_database_override(project, tool_call_id))
     elif op == "names":
         out = bool(s.names_override_file(args[0]))
+    elif op == "names-path":
+        out = bool(s.names_override_path(args[0]))
     else:
         raise SystemExit("unknown op")
     print(json.dumps({"ok": out}))
@@ -212,14 +214,17 @@ class SwitchTestCase(unittest.TestCase):
 
     # ------------------------------------------------------------------ running
     def call(self, op: str, args: list, *, env_project: Path | None = None, cwd: Path | None = None,
-             extra_env: dict | None = None, hooks: Path | None = None):
+             extra_env: dict | None = None, hooks: Path | None = None, timeout: float = PROCESS_TIMEOUT):
         env = base_env(self.home)
         if env_project is not None:
             env["CLAUDE_PROJECT_DIR"] = str(env_project)
         env.update(extra_env or {})
-        proc = subprocess.run(
-            [sys.executable, "-I", "-B", "-c", _RUNNER, str(hooks or self.hooks_dir), op, json.dumps(args)],
-            capture_output=True, env=env, cwd=str(cwd or self.tmp), timeout=PROCESS_TIMEOUT)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", _RUNNER, str(hooks or self.hooks_dir), op, json.dumps(args)],
+                capture_output=True, env=env, cwd=str(cwd or self.tmp), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.fail("the helper process did not finish within %s seconds (it hung)" % timeout)
         err = proc.stderr.decode("utf-8", "replace")
         out = proc.stdout.decode("utf-8", "replace").strip()
         self.assertEqual(proc.returncode, 0, "the helper process failed: " + err[-400:])
@@ -650,6 +655,45 @@ class DatabaseOverrideHelperTests(SwitchTestCase):
         self.assertEqual(self.call("claim", [str(p), "tool-9"], env_project=p), "claimed")
         self.assertEqual(self.call("claim", [str(p), "tool-9"], env_project=p), "claimed-by-sibling")
 
+    def test_an_arm_dated_one_day_ahead_is_stale_and_removed(self):
+        p = self.project()
+        arm = self.arm(p, age_seconds=-24 * 3600)
+        self.assertEqual(self.call("claim", [str(p), "tool-1"], env_project=p), "stale",
+                         "Fresh-arm rule: more than 60 seconds in the future is not fresh")
+        self.assertFalse(arm.exists(), "a future-dated arm is removed")
+
+    def test_an_arm_thirty_seconds_ahead_is_still_claimed(self):
+        p = self.project()
+        self.arm(p, age_seconds=-30)
+        self.assertEqual(self.call("claim", [str(p), "tool-1"], env_project=p), "claimed",
+                         "a small clock skew is tolerated")
+
+    def test_a_claim_dated_one_day_ahead_is_removed_by_the_sweep(self):
+        p = self.project()
+        future = p / ".claude" / "database-override.claimed-future"
+        future.write_bytes(b"")
+        stamp = time.time() + 24 * 3600
+        os.utime(future, (stamp, stamp))
+        fresh = p / ".claude" / "database-override.claimed-fresh"
+        fresh.write_bytes(b"")
+        self.assertEqual(self.call("claim", [str(p), "tool-1"], env_project=p), "absent")
+        self.assertFalse(future.exists(), "the sweep removes a claim dated more than 60 seconds ahead")
+        self.assertTrue(fresh.exists(), "CONTROL: a claim made just now stays")
+
+    def test_the_path_name_test_normalises_dot_parts_slashes_and_trailing_dots_and_spaces(self):
+        for path in (".claude/database-override.once/.", ".claude/database-override.once/x/..",
+                     ".claude\\database-override.once\\.", ".claude\\database-override.once\\x\\..",
+                     ".claude/Database-Override.ONCE.", ".claude/database-override.once ",
+                     ".claude/x/../database-override.claimed-abc", "C:\\p\\.claude\\database-override.once\\..\\.\\database-override.once"):
+            with self.subTest(path=path):
+                self.assertTrue(self.call("names-path", [path]), "must name the arm: " + path)
+
+    def test_the_path_name_test_does_not_match_a_path_that_climbs_out_of_the_arm(self):
+        for path in (".claude/database-override.once/../notes.md", ".claude\\database-override.once\\..\\notes.md",
+                     ".claude/switches.json", "docs/database-override-notes.md", ""):
+            with self.subTest(path=path):
+                self.assertFalse(self.call("names-path", [path]), "must not name the arm: " + path)
+
     def test_a_stale_arm_is_removed_and_reported_stale(self):
         p = self.project()
         arm = self.arm(p, age_seconds=16 * 60)
@@ -681,6 +725,71 @@ class DatabaseOverrideHelperTests(SwitchTestCase):
         for text in (".claude/switches.json", "docs/override.md", "database_override", "notes.txt"):
             with self.subTest(text=text):
                 self.assertFalse(self.call("names", [text]), "must not name the arm: " + text)
+
+
+class ReaderFileKindTests(SwitchTestCase):
+    """W4: the reader never blocks on a file that is not a regular local file (Broken-file rule).
+
+    Each row has a SHORT process timeout, so a regression fails the row instead of hanging the suite."""
+
+    SHORT_TIMEOUT = 15
+
+    def _assert_unreadable_once(self, p: Path, why: str):
+        self.committed(p, {"concept_gate": "off", "architecture_guard": "off"})
+        vals = self.values(p, env_project=p, timeout=self.SHORT_TIMEOUT)
+        self.assert_all_default(vals, why)
+        first = self.log_lines(p)
+        self.assertEqual(len(first), 1, why + ": one report on the first read: %r" % first)
+        self.values(p, env_project=p, timeout=self.SHORT_TIMEOUT)
+        self.assertEqual(self.log_lines(p), first, why + ": the same file state is not reported again")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"), "POSIX only: needs a named pipe")
+    def test_a_named_pipe_at_the_personal_file_path_gives_every_default_and_one_report(self):
+        p = self.project()
+        os.mkfifo(p / ".claude" / "switches.local.json")
+        self._assert_unreadable_once(p, "a named pipe at the personal file path")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"), "POSIX only: needs a named pipe")
+    def test_a_named_pipe_at_the_committed_file_path_gives_every_default_and_one_report(self):
+        p = self.project()
+        os.mkfifo(p / ".claude" / "switches.json")
+        self.local(p, {"concept_gate": "off"})
+        vals = self.values(p, env_project=p, timeout=self.SHORT_TIMEOUT)
+        self.assert_all_default(vals, "a named pipe at the committed file path")
+        self.assertEqual(len(self.log_lines(p)), 1)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows only: a link to a network path")
+    def test_a_link_to_a_network_share_gives_every_default_and_one_report_without_waiting_for_the_network(self):
+        p = self.project()
+        link = p / ".claude" / "switches.local.json"
+        try:
+            # 192.0.2.1 is a documentation address (TEST-NET-1): nothing answers, so an open would wait.
+            os.symlink("\\\\192.0.2.1\\share\\switches.local.json", link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("this machine cannot create a symbolic link: %s" % exc)
+        self._assert_unreadable_once(p, "a link to a \\\\server\\share path")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows only: a link to a network path")
+    def test_control_a_link_to_a_local_regular_file_is_read(self):
+        p = self.project()
+        target = p / "real-switches.json"
+        target.write_text(json.dumps({"concept_gate": "off"}), encoding="utf-8")
+        try:
+            os.symlink(target, p / ".claude" / "switches.local.json")
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("this machine cannot create a symbolic link: %s" % exc)
+        self.assertEqual(self.value("concept_gate", p, env_project=p, timeout=self.SHORT_TIMEOUT), "off",
+                         "a link to a local regular file still counts")
+        self.assertEqual(self.log_lines(p), [])
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX only")
+    def test_control_a_link_to_a_regular_file_is_read(self):
+        p = self.project()
+        target = p / "real-switches.json"
+        target.write_text(json.dumps({"concept_gate": "off"}), encoding="utf-8")
+        os.symlink(target, p / ".claude" / "switches.local.json")
+        self.assertEqual(self.value("concept_gate", p, env_project=p, timeout=self.SHORT_TIMEOUT), "off")
+        self.assertEqual(self.log_lines(p), [])
 
 
 if __name__ == "__main__":

@@ -1649,11 +1649,32 @@ def _span_is_inert(text: str, start: int, end: int) -> bool:
         pos = close.end()
 
 
-def _segment_is_prose(words: list[str], piped: bool, redirected: bool) -> bool:
+_STREAM_DUPLICATION_RE = re.compile(r"&\s*(?:\d+-?|-)(?![^\s;|&<>])")
+
+
+def _is_file_redirect(text: str, at: int) -> bool:
+    """True when the ``>`` at ``at`` sends output to a NAMED file (``>``, ``>>``, ``2>``, ``>&file``).
+    A stream duplication such as ``2>&1`` and a ``>`` with nothing after it do not count."""
+    n = len(text)
+    j = at + 1
+    if text[j:j + 1] == ">":
+        j += 1
+    if text[j:j + 1] == "&":
+        if _STREAM_DUPLICATION_RE.match(text, j):
+            return False
+        j += 1
+    while j < n and text[j] in " \t":
+        j += 1
+    return j < n and text[j] not in "\r\n;|&<>"
+
+
+def _segment_is_prose(words: list[str], piped: bool, redirected: bool, file_redirected: bool = False) -> bool:
     first = re.split(r"[\\/]", words[0])[-1].lower()
     if first.endswith(".exe"):
         first = first[:-4]
     if first == "git":
+        if file_redirected:
+            return False  # Arm-write rule only: a real redirection to a named file runs, it is not prose
         sub = next((w.lower() for w in words[1:] if not w.startswith("-")), "")
         return sub in _PROSE_GIT_SUBCOMMANDS
     if piped or redirected:
@@ -1666,23 +1687,28 @@ def _segment_is_prose(words: list[str], piped: bool, redirected: bool) -> bool:
     return first in _PROSE_SEARCH_COMMANDS or first in _PROSE_ECHO_COMMANDS
 
 
-def _mask_inert_prose(text: str) -> str:
-    """``text`` with the quoted spans of prose-carrying commands replaced by spaces (same length)."""
+def _mask_inert_prose(text: str, redirect_is_code: bool = False) -> str:
+    """``text`` with the quoted spans of prose-carrying commands replaced by spaces (same length).
+
+    ``redirect_is_code`` is for the Arm-write rule only: a git segment with a real output redirection to a
+    named file is then NOT prose (its quoted spans stay readable). Destructive-command detection never
+    sets it, so its masking is unchanged."""
     out = list(text)
     n, i = len(text), 0
     words: list[str] = []
     spans: list[tuple[int, int]] = []
     redirected = False
+    file_redirected = False
     unsafe = False  # the segment's unquoted text runs something or desyncs the quote pairing
 
     def flush(piped: bool) -> None:
-        nonlocal words, spans, redirected, unsafe
-        if words and not unsafe and _segment_is_prose(words, piped, redirected):
+        nonlocal words, spans, redirected, file_redirected, unsafe
+        if words and not unsafe and _segment_is_prose(words, piped, redirected, file_redirected and redirect_is_code):
             for s, e in spans:
                 if _span_is_inert(text, s, e):
                     for k in range(s + 1, e - 1):
                         out[k] = " "
-        words, spans, redirected, unsafe = [], [], False, False
+        words, spans, redirected, file_redirected, unsafe = [], [], False, False, False
 
     while i < n:
         c = text[i]
@@ -1713,6 +1739,8 @@ def _mask_inert_prose(text: str) -> str:
                 continue
             if ch == ">":
                 redirected = True
+                if redirect_is_code and _is_file_redirect(text, i):
+                    file_redirected = True
             buf.append(ch)
             i += 1
         words.append("".join(buf))
@@ -1806,9 +1834,24 @@ _TARGET_LIMIT = 5
 
 
 def _last_part_names_arm(path_text: object) -> bool:
-    """True when the last part of a path starts with ``database-override.`` (any case, either slash)."""
-    last = str(path_text).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    return last.lower().startswith(_ARM_NAME_PREFIX)
+    """True when the last part of the NORMALISED path starts with ``database-override.`` (any case).
+
+    Normalised as the file system reads it (inline copy of ``_switches.names_override_path``): both slashes
+    fold, ``.`` parts vanish, ``..`` removes the part before it, and a part of only dots and spaces
+    (Windows drops trailing dots and spaces) vanishes. ``<arm>/.`` and ``<arm>/x/..`` name the arm;
+    ``<arm>/../notes.md`` does not."""
+    parts: list[str] = []
+    for part in str(path_text).replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        if not part.rstrip(". "):
+            continue
+        parts.append(part)
+    return bool(parts) and parts[-1].lower().startswith(_ARM_NAME_PREFIX)
 
 
 def _arm_write_match(payload: dict, tool_name: str) -> str:
@@ -1822,7 +1865,13 @@ def _arm_write_match(payload: dict, tool_name: str) -> str:
         return ""
     if tool_name in _ARM_EDIT_TOOLS:
         path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
-        return path if _last_part_names_arm(path) else ""
+        if _last_part_names_arm(path):
+            return path
+        path_test = getattr(_sw, "names_override_path", None) if _sw is not None else None
+        try:
+            return path if path_test is not None and path_test(path) else ""
+        except Exception:  # noqa: BLE001 -- the inline test above already ran
+            return ""
     command = str(tool_input.get("command", ""))
     named = bool(_ARM_NAME_RE.search(command))
     if not named and _sw is not None:
@@ -1841,7 +1890,8 @@ def _arm_write_match(payload: dict, tool_name: str) -> str:
         except Exception:  # noqa: BLE001 -- the masked-text test below still runs
             pass
     try:
-        masked = _mask_inert_prose(command)
+        # Arm-write rule only: a git segment with a real redirection to a named file is code, not prose.
+        masked = _mask_inert_prose(command, redirect_is_code=True)
     except Exception:  # noqa: BLE001 -- fail closed: read the raw text
         masked = command
     hit = _ARM_NAME_RE.search(masked)
@@ -1958,7 +2008,7 @@ def _override_block_lines(outcome: str, mode: object) -> list[str]:
         "prompt, and only where Claude Code asks for permission.",
     ]
     if outcome == "stale":
-        lines.append("An arm file was found, but it was older than 15 minutes, so it was removed.")
+        lines.append("An arm file was found, but it was older than 15 minutes or dated in the future, so it was removed.")
     elif outcome == "unusable":
         lines.append("Something at the arm path was not a usable regular file, so it was removed.")
     elif outcome == "no-prompt-available":
@@ -2171,9 +2221,13 @@ def _decide(
         reason = "no-disposable-no-override"
 
     # ---- Database override arm: the arm-then-ask path --------------------
-    # The human-only class never offers the prompt (No-prompt classes rule). Anything else that is
-    # about to block may become ONE permission prompt when a person armed it. Nothing is allowed here.
-    override_outcome = "absent" if reason == "human-only-command" else _try_override(payload)
+    # The human-only class never offers the prompt (No-prompt classes rule). It is decided from EVERY
+    # matched target, not from the block reason chosen above: a human-only target beside a protected
+    # write or an argument-position bug must not turn into a prompt. The arm is not claimed.
+    # Anything else that is about to block may become ONE permission prompt when a person armed it.
+    # Nothing is allowed here.
+    human_only = any(t["classification"] == "human-only" for t in targets)
+    override_outcome = "absent" if human_only else _try_override(payload)
     if override_outcome in ("claimed", "claimed-by-sibling"):
         _audit({**base_record, "decision": "ASK", "reason": override_outcome, "block_reason": reason,
                 "permission_mode": payload.get("permission_mode"), "tool_use_id": payload.get("tool_use_id")})
@@ -2219,7 +2273,7 @@ def _decide(
             lines.append(f"Target(s) read: {_targets_summary(targets)}")
         lines.append(f"Excerpt: {_truncate(excerpt_source, 200)}")
         lines.append("")
-        if reason == "human-only-command":
+        if human_only:
             lines.append("This step changes the development database and is run by a person in")
             lines.append("their own terminal, never from Claude Code.")
             lines.append("")
@@ -2248,7 +2302,7 @@ def _decide(
         lines.append("Use tools/db-protection/verify-migration.cmd for the safe workflow.")
     lines.extend(_rules_problem_lines())
     lines.append("")
-    if reason != "human-only-command":
+    if not human_only:
         lines.extend(_override_block_lines(override_outcome, payload.get("permission_mode")))
     else:
         lines.append("A person runs this step themselves, in their own terminal. It never becomes a prompt.")
