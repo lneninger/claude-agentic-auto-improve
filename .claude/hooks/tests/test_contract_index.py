@@ -35,7 +35,7 @@ THE INTERFACE THESE TESTS EXPECT (the implementer's contract with this file)
     with ``schema`` (1), ``variant`` ("concept-shared" | "bash"),
     ``fingerprint``, ``root``, ``records`` (relative path, forward slashes ->
     {size, mtime_ns, file_id, parsed_at_ns, status, entries?}).
-  * Trace line (``CLAUDE_CONTRACT_INDEX=trace``), on stderr, one per gate
+  * Trace line (the ``contract_index`` switch set to ``trace`` in the Local switch file), on stderr, one per gate
     process and variant, printed by the atexit wrapper, never from inside a
     function whose name contains "save":
       [contract-index] variant=<v> hits=<n> misses=<m> uncacheable=<u>
@@ -46,7 +46,8 @@ THE INTERFACE THESE TESTS EXPECT (the implementer's contract with this file)
     "save" (case-insensitive); the failure rows replace every such function.
   * Every other public top-level function is an entry point a gate may bind;
     the stale-module rows remove them one at a time.
-  * Any other CLAUDE_CONTRACT_INDEX value: stderr names the value.
+  * Any other ``contract_index`` value: the helper reads it as ``off`` (reported once in the error log).
+  * The module reads no switch itself: its two callers read ``contract_index`` and call ``set_mode``.
 
 Run:  py -3 .claude/hooks/tests/test_contract_index.py
 Scratch space: CLAUDE_TEST_SCRATCH (default: the system temp folder).
@@ -181,7 +182,7 @@ class Run:
 # ---------------------------------------------------------------------------
 # Sandbox: a throwaway tree holding a copy of the gates and their helpers
 # ---------------------------------------------------------------------------
-HOOK_FILES = ("concept-gate.py", "_error_log.py", "_project_paths.py")
+HOOK_FILES = ("concept-gate.py", "_error_log.py", "_project_paths.py", "_switches.py")
 SCRIPT_FILES = ("_contract_files.py", "_contract_index.py")
 
 _SANDBOXES: list[Path] = []
@@ -315,13 +316,26 @@ class Sandbox:
             body = {"tool_name": "Bash", "tool_input": {"command": f"echo x > {target}"}}
         return json.dumps(body).encode("utf-8")
 
-    def run(self, gate: str, target: str, *, mode: str | None = "trace", env=None,
+    def write_switches(self, switches: dict | None, project_dir=None) -> None:
+        """Write the project's Local switch file for the next run: one key per entry, a ``None`` value leaves
+        the key out (its default). Nothing is set in the environment: a switch lives in a file."""
+        target = Path(project_dir if project_dir is not None else self.root) / ".claude" / "switches.local.json"
+        data = {k: v for k, v in (switches or {}).items() if v is not None}
+        if not data:
+            target.unlink(missing_ok=True)
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data), encoding="utf-8")
+
+    def run(self, gate: str, target: str, *, mode: str | None = "trace", env=None, switches=None,
             cwd=None, project_dir=None, hooks_dir=None, script=None) -> Run:
         if gate == "bash" and self.addon_error is not None:
             raise self.addon_error
         e = dict(env or {})
-        if mode is not None and "CLAUDE_CONTRACT_INDEX" not in e:
-            e["CLAUDE_CONTRACT_INDEX"] = mode
+        sw = dict(switches or {})
+        if mode is not None and "contract_index" not in sw:
+            sw["contract_index"] = mode
+        self.write_switches(sw, project_dir)
         script_path = script or ((hooks_dir or self.hooks) / GATE_FILE[gate])
         t0 = time.perf_counter()
         cp = subprocess.run(
@@ -340,11 +354,12 @@ class Sandbox:
     def popen(self, gate: str, target: str, mode: str = "trace") -> subprocess.Popen:
         if gate == "bash" and self.addon_error is not None:
             raise self.addon_error
+        self.write_switches({"contract_index": mode})
         p = subprocess.Popen(
             [sys.executable, str(self.hooks / GATE_FILE[gate])],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=str(self.root),
-            env=self.env({"CLAUDE_CONTRACT_INDEX": mode}),
+            env=self.env(),
         )
         assert p.stdin is not None
         p.stdin.write(self.payload(gate, target))
@@ -1038,43 +1053,46 @@ MARKER_STUB = (
 
 def section_f() -> None:
     print("-- (f) escape hatches and D5 --")
-    # CLAUDE_CONCEPT_GATE=off: the concept gate exits 0, index untouched, no trace
-    for var, val in (("CLAUDE_CONCEPT_GATE", "off"), ("CLAUDE_CONCEPT_GATE", "0")):
+    # the concept_gate switch off: the concept gate exits 0, index untouched, no trace
+    for var, val in (("concept_gate", "off"), ("concept_gate", "0")):
         sb, T_a, T_b = basic_sandbox("f")
         sb.run("concept", T_a)
         before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in sb.index_files("main")}
-        r = sb.run("concept", T_b, env={var: val})
+        r = sb.run("concept", T_b, switches={var: val})
         after = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in sb.index_files("main")}
         check(f"(f) concept-gate with {var}={val}: exit 0, no trace line, index untouched",
               r.code == 0 and not r.trace and before == after, short(r))
 
-    # K-3: the bash gate (an add-on) has no kill switch. CLAUDE_CONCEPT_GATE=off no longer turns it off,
+    # K-3: the bash gate (an add-on) has no kill switch. The concept_gate switch off does not turn it off,
     # and CLAUDE_BASH_GATE is not read at all: the uncovered target is blocked exactly as with no variable.
     sb, T_a, T_b = basic_sandbox("f")
     control = sb.run("bash", T_b)
     check("(f) bash-gate control, no switch set: the uncovered target is blocked (exit 2)",
           control.code == 2, short(control))
-    for var, val in (("CLAUDE_CONCEPT_GATE", "off"), ("CLAUDE_CONCEPT_GATE", "0"),
-                     ("CLAUDE_BASH_GATE", "off"), ("CLAUDE_BASH_GATE", "0")):
-        r = sb.run("bash", T_b, env={var: val})
+    for var, val in (("concept_gate", "off"), ("concept_gate", "0")):
+        r = sb.run("bash", T_b, switches={var: val})
         check(f"(f) bash-gate with {var}={val} has no effect: still blocked, same exit code as the control",
               r.code == control.code == 2, short(r))
         check(f"(f) bash-gate with {var}={val}: the block message names neither switch",
-              "CLAUDE_CONCEPT_GATE" not in r.plain_err and "CLAUDE_BASH_GATE" not in r.plain_err, short(r))
+              "concept_gate" not in r.plain_err and "CLAUDE_BASH_GATE" not in r.plain_err, short(r))
+    for var, val in (("CLAUDE_BASH_GATE", "off"), ("CLAUDE_BASH_GATE", "0")):
+        r = sb.run("bash", T_b, env={var: val})
+        check(f"(f) bash-gate with {var}={val} (not read at all) has no effect: still blocked",
+              r.code == control.code == 2, short(r))
 
-    # the stub on the (CLAUDE_CONCEPT_GATE=off) path and the pinned-contract path
+    # the stub on the (concept_gate off) path and the pinned-contract path
     sb, T_a, T_b = basic_sandbox("f")
     (sb.scripts / "_contract_index.py").write_text(MARKER_STUB, encoding="utf-8")
     marker = sb.root / "marker.txt"
     env = {"CI_MARKER": str(marker)}
-    r = sb.run("concept", T_b, env={**env, "CLAUDE_CONCEPT_GATE": "off"})
-    check("(f) CLAUDE_CONCEPT_GATE=off exits before any index entry point is called",
+    r = sb.run("concept", T_b, env=env, switches={"concept_gate": "off"})
+    check("(f) concept_gate off exits before any index entry point is called",
           r.code == 0 and not marker.exists(), short(r))
     pinned = sb.root / "pins" / "pinned.md"
     write_contract(pinned, "approved", ["src/feat/pinned.cs"])
     r = sb.run("concept", sb.target("main", "src/feat/pinned.cs"),
-               env={**env, "CLAUDE_ACTIVE_CONTRACT": str(pinned)})
-    check("(f) CLAUDE_ACTIVE_CONTRACT reads the pinned file directly: allowed, no entry point, no index",
+               env=env, switches={"pinned_contract": str(pinned)})
+    check("(f) pinned_contract reads the pinned file directly: allowed, no entry point, no index",
           r.code == 0 and not marker.exists() and not sb.index_files("main") and not r.trace,
           short(r))
     # with a real module: pinned contract allow, nothing written
@@ -1082,7 +1100,7 @@ def section_f() -> None:
     pinned2 = sb2.root / "pins" / "pinned.md"
     write_contract(pinned2, "approved", ["src/feat/pinned.cs"])
     r = sb2.run("concept", sb2.target("main", "src/feat/pinned.cs"),
-                env={"CLAUDE_ACTIVE_CONTRACT": str(pinned2)})
+                switches={"pinned_contract": str(pinned2)})
     check("(f) a pinned contract that covers the target never reaches the index (no file, no trace)",
           r.code == 0 and not sb2.index_files("main") and not r.trace, short(r))
 
@@ -1133,6 +1151,7 @@ def section_g() -> None:
         sb.contract("main", "c1.md", "approved", ["src/feat/covered.cs"])
         sb.contract("worktree", "w1.md", "approved", ["src/wtfeat/covered.cs"])
         (sb.root / "wt2" / "src").mkdir(parents=True)  # a "worktree" with no concepts root
+        sb.write_switches({"contract_index": "trace"})  # the runs rewrite this same file: it is not a new path
         before = _tree(sb.root)
         runs = [
             sb.run(gate, sb.target("main", "src/feat/covered.cs")),
@@ -1179,10 +1198,11 @@ def section_g() -> None:
 # ===========================================================================
 # (h) the switch
 # ===========================================================================
-ON_VALUES = [None, "", "on", "1", "true", "yes", "ON", " Yes ", "True"]
+# An empty text is not a value of the set: the helper reads it as off (the old variable read "" as on).
+ON_VALUES = [None, "on", "1", "true", "yes", "ON", " Yes ", "True"]
 OFF_VALUES = ["off", "0", "false", "no", "OFF", " No ", "False"]
 TRACE_VALUES = ["trace", "TRACE", " Trace "]
-OTHER_VALUES = ["bogus", "2", "enabled", "maybe-off"]
+OTHER_VALUES = ["", "bogus", "2", "enabled", "maybe-off"]
 
 
 def section_h() -> None:
@@ -1192,39 +1212,54 @@ def section_h() -> None:
         sb, T_a, T_b = basic_sandbox("h")
         for val in ON_VALUES:
             sb.drop_cache()
-            env = {"CLAUDE_CONTRACT_INDEX": val} if val is not None else {"CLAUDE_CONTRACT_INDEX": None}
-            r1 = sb.run(gate, T_a, mode=None, env=env)
-            r2 = sb.run(gate, T_a, mode=None, env=env)
+            sw = {"contract_index": val}
+            r1 = sb.run(gate, T_a, mode=None, switches=sw)
+            r2 = sb.run(gate, T_a, mode=None, switches=sw)
             off = sb.off(gate, T_a)
-            check(f"(h) {gate}-gate: CLAUDE_CONTRACT_INDEX={val!r} is on: index written, silent",
+            check(f"(h) {gate}-gate: contract_index={val!r} is on: index written, silent",
                   bool(sb.index_files("main", v)) and not r1.trace and not r2.trace
                   and "[contract-index]" not in r1.err + r2.err and decisions_equal(r2, off),
                   short(r1))
         for val in OFF_VALUES:
             sb.drop_cache()
-            r1 = sb.run(gate, T_a, mode=None, env={"CLAUDE_CONTRACT_INDEX": val})
+            r1 = sb.run(gate, T_a, mode=None, switches={"contract_index": val})
             off = sb.off(gate, T_a)
-            check(f"(h) {gate}-gate: CLAUDE_CONTRACT_INDEX={val!r} is off: no index read or write, no output",
+            check(f"(h) {gate}-gate: contract_index={val!r} is off: no index read or write, no output",
                   not sb.cache_of("main").exists() and not r1.trace and decisions_equal(r1, off)
                   and "contract-index" not in r1.err,
                   short(r1))
         for val in TRACE_VALUES:
             sb.drop_cache()
-            r1 = sb.run(gate, T_a, mode=None, env={"CLAUDE_CONTRACT_INDEX": val})
-            r2 = sb.run(gate, T_a, mode=None, env={"CLAUDE_CONTRACT_INDEX": val})
-            check(f"(h) {gate}-gate: CLAUDE_CONTRACT_INDEX={val!r} traces; warm run shows hits > 0",
+            r1 = sb.run(gate, T_a, mode=None, switches={"contract_index": val})
+            r2 = sb.run(gate, T_a, mode=None, switches={"contract_index": val})
+            check(f"(h) {gate}-gate: contract_index={val!r} traces; warm run shows hits > 0",
                   bool(r1.of(v)) and r1.hits(v) == 0 and r2.hits(v) > 0,
                   f"cold: {short(r1)}\nwarm: {short(r2)}")
         for val in OTHER_VALUES:
             sb.drop_cache()
-            r1 = sb.run(gate, T_a, mode=None, env={"CLAUDE_CONTRACT_INDEX": val})
+            r1 = sb.run(gate, T_a, mode=None, switches={"contract_index": val})
             off = sb.off(gate, T_a)
-            named = [ln for ln in r1.err.splitlines() if val in ln]
-            rest = "\n".join(ln for ln in r1.err.splitlines() if val not in ln)
-            check(f"(h) {gate}-gate: unknown value {val!r} acts as off and names the value on stderr",
-                  not sb.cache_of("main").exists() and r1.code == off.code
-                  and strip_trace(rest) == off.plain_err and len(named) == 1,
-                  f"lines naming the value: {named}\n{short(r1)}")
+            check(f"(h) {gate}-gate: unknown value {val!r} acts as off (the helper reads it as off; the "
+                  f"problem goes to the error log, not to this gate's stderr)",
+                  not sb.cache_of("main").exists() and r1.code == off.code and not r1.trace
+                  and strip_trace(r1.err) == off.plain_err,
+                  f"{short(r1)}")
+    # set_mode: the module reads no environment; with no call the mode is on, and the value set is the mode
+    code = (
+        "import importlib.util, os, sys\n"
+        "spec = importlib.util.spec_from_file_location('ci_fresh', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "os.environ['CLAUDE_CONTRACT_INDEX'] = 'off'\n"  # a leftover old variable must change nothing
+        "out = [m._mode()]\n"
+        "for v in ('off', 'trace', 'on', 'bogus', None):\n"
+        "    out.append(m.set_mode(v))\n"
+        "print(','.join(out))\n"
+    )
+    cp = subprocess.run([sys.executable, "-I", "-c", code, str(INDEX_MODULE)], capture_output=True, timeout=60)
+    check("(h) set_mode: no call means on, even with the old variable set; off, trace, on, an unknown value (off), "
+          "and None (on) are taken as written",
+          cp.stdout.decode().strip() == "on,off,trace,on,off,on",
+          f"stdout={cp.stdout!r} stderr={cp.stderr[-300:]!r}")
     # st_ino
     probe = Path(scratch_parent()) / f"ci_ino_{uuid.uuid4().hex[:8]}.txt"
     probe.write_text("x")
@@ -1260,7 +1295,7 @@ def section_i() -> None:
         for which, want in (("block", 2), ("allow", 0)):
             sb, T_a, T_b = basic_sandbox("i")
             t = {"allow": T_a, "block": T_b}[which]
-            r = sb.run(gate, t, mode=None, env={"CLAUDE_CONTRACT_INDEX": None})
+            r = sb.run(gate, t, mode=None)
             files = sb.index_files("main", v)
             data = sb.read_index("main", v)
             check(f"(i) {gate}-gate: the index file exists after a {which} run",
@@ -1287,9 +1322,8 @@ def section_i() -> None:
                     check(label, False, "no top-level function whose name contains 'save' found")
                     continue
                 (sb.scripts / "_contract_index.py").write_text(src2, encoding="utf-8")
-                env = {"CLAUDE_CONTRACT_INDEX": "trace" if trace_on else "on"}
                 off = sb.off(gate, t)
-                r = sb.run(gate, t, mode=None, env=env)
+                r = sb.run(gate, t, mode="trace" if trace_on else "on")
                 proven = marker.exists()
                 if trace_on:
                     proven = proven and any(x["write"].startswith("failed:") for x in r.of(v))

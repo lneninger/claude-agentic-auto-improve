@@ -207,10 +207,17 @@ class Box:
             for f in REAL_AGREEMENTS.glob("*.md"):
                 shutil.copy2(f, dest / f.name)
 
+    def set_switch(self, value):
+        """Write the project's Local switch file with the ``working_agreements`` key set to ``value``.
+        A switch lives in a file, never in the environment."""
+        folder = self.project / ".claude"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "switches.local.json").write_text(json.dumps({"working_agreements": value}), encoding="utf-8")
+
     # -- running -----------------------------------------------------------
     def _env(self, project="set", env_extra=None, utf8_env=True):
         env = dict(os.environ)
-        for k in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_AGREEMENTS", "CLAUDE_PLUGIN_ROOT"):
+        for k in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_AGREEMENTS", "CLAUDE_PLUGIN_ROOT"):  # strip list: left as is
             env.pop(k, None)
         env["HOME"] = str(self.home)
         env["USERPROFILE"] = str(self.home)
@@ -1256,9 +1263,10 @@ def _make_escape_case(value):
         box = Box()
         try:
             box.make_plugin(SIMPLE_SHIPPED)
-            res = box.run(env_extra={"CLAUDE_WORKING_AGREEMENTS": value})
-            silent(res, "escape hatch %r" % value)
-            check(res.log.strip() == "", "INV-12: the escape hatch writes no log line; log was %r" % res.log[-200:])
+            box.set_switch(value)
+            res = box.run()
+            silent(res, "off switch %r" % value)
+            check(res.log.strip() == "", "INV-12: the off switch writes no log line; log was %r" % res.log[-200:])
         finally:
             box.close()
     return case
@@ -1269,9 +1277,10 @@ def case_escape_hatch_values_with_stray_whitespace_still_mean_off():
         box = Box()
         try:
             box.make_plugin(SIMPLE_SHIPPED)
-            res = box.run(env_extra={"CLAUDE_WORKING_AGREEMENTS": value})
-            silent(res, "escape hatch %r (stray whitespace)" % value)
-            check(res.log.strip() == "", "the escape hatch %r writes no log line" % value)
+            box.set_switch(value)
+            res = box.run()
+            silent(res, "off switch %r (stray whitespace)" % value)
+            check(res.log.strip() == "", "the off switch %r writes no log line" % value)
         finally:
             box.close()
 
@@ -1297,8 +1306,8 @@ def case_other_escape_hatch_values_do_not_switch_it_off():
         box = Box()
         try:
             box.make_plugin(SIMPLE_SHIPPED)
-            delivered(box.run(env_extra={"CLAUDE_WORKING_AGREEMENTS": value}, project=None),
-                      "CLAUDE_WORKING_AGREEMENTS=%r" % value)
+            box.set_switch(value)
+            delivered(box.run(), "working_agreements=%r" % value)
         finally:
             box.close()
 

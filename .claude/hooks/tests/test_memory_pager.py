@@ -31,7 +31,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOKS_DIR = HERE.parent
-HELPERS = ("memory-pager.py", "_memory_common.py", "_project_paths.py", "_error_log.py")
+HELPERS = ("memory-pager.py", "_memory_common.py", "_project_paths.py", "_error_log.py", "_switches.py")
 CONFIG_NAME = "memory-blocks.json"
 RANKS = ("project", "self", "cwd", "home")
 MALFORMED = "{ this is not json"
@@ -103,11 +103,23 @@ class PagerCase(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("config-load-failed", self.events())
 
-    def test_bypass_env_logs_nothing(self) -> None:
+    def switch_file(self) -> Path:
+        return self.dirs["project"] / ".claude" / "switches.local.json"
+
+    def test_off_switch_logs_nothing(self) -> None:
         self.config_at("self").write_text(MALFORMED, encoding="utf-8")
-        proc = self.run_hook(CLAUDE_MEMORY_PAGER="off")
+        self.switch_file().write_text(json.dumps({"memory_pager": "off"}), encoding="utf-8")
+        proc = self.run_hook()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.events(), [])
+        self.assertIn("memory_pager", proc.stderr, "Visible-off rule: one stderr line names the switch")
+
+    def test_on_switch_still_pages_and_logs(self) -> None:
+        self.config_at("self").write_text(MALFORMED, encoding="utf-8")
+        self.switch_file().write_text(json.dumps({"memory_pager": "on"}), encoding="utf-8")
+        proc = self.run_hook()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("config-load-failed", self.events())
 
 
 if __name__ == "__main__":

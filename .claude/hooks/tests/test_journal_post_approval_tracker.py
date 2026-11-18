@@ -105,6 +105,15 @@ class Project:
                   "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"})
         return e
 
+    def set_switches(self, switches: dict | None) -> None:
+        """The project's Local switch file (a switch lives in a file, never in the environment)."""
+        target = self.base / ".claude" / "switches.local.json"
+        if switches is None:
+            target.unlink(missing_ok=True)
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(switches), encoding="utf-8")
+
     def hook(self, path: Path, tool: str = "Edit", extra_env: dict | None = None, hook: Path = HOOK):
         payload = json.dumps({"tool_name": tool, "tool_input": {"file_path": str(path)}}).encode("utf-8")
         env = self.env()
@@ -402,9 +411,17 @@ class WorktreeTests(TrackerCase):
 class HookContractTests(TrackerCase):
     def test_off_switch_does_nothing(self):
         append_text(self.general, entry("Switched off", "post-approval", self.p.contract))
-        done = self.p.hook(self.general, extra_env={"CLAUDE_ACCURACY_TRACKER": "off"})
+        self.p.set_switches({"accuracy_tracker": "off"})
+        done = self.p.hook(self.general)
         self.assertEqual(done.returncode, 0)
         self.assertEqual(self.p.cache(), {})
+
+    def test_on_switch_lets_the_hook_fire(self):
+        self.seed()
+        append_text(self.general, entry("Switched on", "post-approval", self.p.contract))
+        self.p.set_switches({"accuracy_tracker": "on"})
+        self.assertEqual(self.p.hook(self.general).returncode, 0)
+        self.assertEqual(self.p.fires(), 1)
 
     def test_missing_entry_point_exits_zero_with_one_stderr_line(self):
         lone = self.tmp / "lone" / ".claude" / "hooks"

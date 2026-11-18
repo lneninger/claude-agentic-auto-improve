@@ -68,7 +68,9 @@ STATE (in the system temporary folder, named by the session id)
   auto-improve-changed-stopped-<session>    files already stopped for
   auto-improve-changed-notice-<session>     the one "not checked" note per session
 
-Turn it off, like the gate, with CLAUDE_CONCEPT_GATE=off.
+Turn it off, like the gate, by setting concept_gate to off in .claude/switches.local.json. The check
+computes the tree root it judges first and passes it to the gate's ``bypass_env`` and ``pinned_contract``,
+so the switch file of that tree is read, at commit time too.
 
 Exit codes:
     0  clean or noted (or failed open at turn end)
@@ -79,6 +81,7 @@ Exit codes:
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -397,9 +400,30 @@ def _load_gate():
     return module
 
 
+def _call_for_tree(function, root: str | None):
+    """Call a gate switch function with the tree root it judges, so the check reads the switch files of
+    that tree (including at commit time, outside any hook). A gate whose function takes no argument is
+    called without it; with no root known the function is called without it too."""
+    if root is not None:
+        try:
+            takes_root = bool(inspect.signature(function).parameters)
+        except (TypeError, ValueError):
+            takes_root = False
+        if takes_root:
+            return function(root)
+    return function()
+
+
+def _tree_root_or_none(start: str) -> str | None:
+    try:
+        return _tree_root(start)
+    except CannotCheck:
+        return None
+
+
 def _uncovered(gate, root: str, rels: list[str]) -> list[tuple[str, str]]:
     """(path, reason) for each file the gate would block."""
-    pinned = gate.pinned_contract()
+    pinned = _call_for_tree(gate.pinned_contract, root)
     found = []
     for rel in rels:
         target = Path(os.path.join(root, rel))
@@ -468,7 +492,7 @@ def run_turn(raw: bytes) -> int:
     try:
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else os.getcwd()
         gate = _load_gate()
-        if gate.bypass_env():
+        if _call_for_tree(gate.bypass_env, _tree_root_or_none(cwd)):
             return 0
         root = _tree_root(cwd)
         uncommitted = _uncommitted_files(root)
@@ -517,7 +541,7 @@ def run_staged() -> int:
     """Commit time: judge the staged added, copied, modified and renamed files."""
     try:
         gate = _load_gate()
-        if gate.bypass_env():
+        if _call_for_tree(gate.bypass_env, _tree_root_or_none(os.getcwd())):
             return 0
         root = _tree_root(os.getcwd())
         staged = [rel for state, rel in _status(root, untracked=False) if state[0] in STAGED_STATES]

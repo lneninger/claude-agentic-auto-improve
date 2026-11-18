@@ -238,6 +238,11 @@ class Project:
         return write_contract((base or self.project) / ".claude" / "concepts" / (name or "c-%s.md" % token()),
                               files, status)
 
+    def set_switches(self, data: dict, base: Path | None = None) -> Path:
+        """Write the Local switch file of a tree (``<tree>/.claude/switches.local.json``). A switch lives in a
+        file, never in the environment."""
+        return self.write(".claude/switches.local.json", json.dumps(data), base=base)
+
     # -- running -----------------------------------------------------------
     def env(self, extra: dict | None = None, project_dir: Path | None = None) -> dict:
         env = clean_env({
@@ -434,9 +439,25 @@ class JudgementTests(Base):
         self.p.write("src/" + name)
         self.assertEqual(self.p.run_check(session="control-" + token()).rc, 2,
                          msg="control: without the switch the same tree stops")
-        res = self.p.run_check(env={"CLAUDE_CONCEPT_GATE": "off"})
-        self.assertEqual(res.rc, 0, msg="CLAUDE_CONCEPT_GATE=off must turn the check off: " + res.describe())
+        self.p.set_switches({"concept_gate": "off"})
+        res = self.p.run_check()
+        self.assertEqual(res.rc, 0, msg="concept_gate off in the tree's switch file must turn the check off: " + res.describe())
         self.assertNotIn(name, res.err, msg="and it names nothing: " + res.describe())
+
+    def test_concept_gate_on_in_the_switch_file_keeps_the_check_on(self):
+        name = "On_%s.cs" % token()
+        self.p.write("src/" + name)
+        self.p.set_switches({"concept_gate": "on"})
+        self.assertEqual(self.p.run_check().rc, 2, msg="an explicit on is the default: the tree still stops")
+
+    def test_the_check_reads_the_switch_file_of_the_tree_it_judges_not_of_the_process_project(self):
+        tag = token()
+        wt = self.p.project / ".claude" / "worktrees" / ("wt-sw-%s" % tag)
+        git(self.p.project, "worktree", "add", "-q", "-b", "branch-sw-%s" % tag, str(wt))
+        self.p.write("src/Sw_%s.cs" % tag, base=wt)
+        self.p.set_switches({"concept_gate": "off"}, base=wt)
+        res = self.p.run_check(cwd=wt)
+        self.assertEqual(res.rc, 0, msg="the worktree's own switch file turns its check off: " + res.describe())
 
     def test_a_pinned_contract_covers_the_file_and_without_the_pin_it_stops(self):
         tag = token()
@@ -444,7 +465,8 @@ class JudgementTests(Base):
         self.p.write("src/" + name)
         pinned = write_contract(self.p.root / "elsewhere" / ("pin-%s.md" % tag), ["src/" + name])
         self.assertStopped(self.p.run_check(session="control-" + tag), name)
-        res = self.p.run_check(env={"CLAUDE_ACTIVE_CONTRACT": str(pinned)})
+        self.p.set_switches({"pinned_contract": str(pinned)})
+        res = self.p.run_check()
         self.assertClean(res)
 
     def test_a_worktrees_own_approved_contract_covers_its_files(self):
@@ -754,7 +776,8 @@ class StagedTests(Base):
     def test_concept_gate_off_exits_0(self):
         self._stage("src/StagedOff_%s.cs" % token())
         self.assertEqual(self.p.run_check(args=("--staged",)).rc, 2, msg="control: it stops without the switch")
-        res = self.p.run_check(args=("--staged",), env={"CLAUDE_CONCEPT_GATE": "off"})
+        self.p.set_switches({"concept_gate": "off"})
+        res = self.p.run_check(args=("--staged",))
         self.assertEqual(res.rc, 0, msg="the switch turns the commit check off too: " + res.describe())
 
 

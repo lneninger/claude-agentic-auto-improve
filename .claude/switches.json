@@ -1,0 +1,11 @@
+{
+  "$comment": "Plugin switches, committed, every key at its default. A person's own overrides go in .claude/switches.local.json (never committed); it wins key by key. pinned_contract is allowed in the local file only.",
+  "concept_gate": "on",
+  "architecture_guard": "on",
+  "accuracy_tracker": "on",
+  "integration_check": "on",
+  "memory_pager": "on",
+  "working_agreements": "on",
+  "plan_question_advisor": "on",
+  "contract_index": "on"
+}

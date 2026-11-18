@@ -26,7 +26,7 @@ Rules in short:
     is larger than four times the limit is skipped without being read in full.
   * The log records what was printed, not what the host received.
 
-Turn it off for one session with CLAUDE_WORKING_AGREEMENTS=off (also 0, false, no).
+Turn it off by setting working_agreements to off (also 0, false, no) in .claude/switches.local.json.
 """
 from __future__ import annotations
 
@@ -46,6 +46,11 @@ try:
 except Exception:  # pragma: no cover - a missing helper must never break a session
     _PATHS_OK = False
 
+try:  # switch files (fail-soft: a missing helper means every switch is at its default)
+    import _switches as _sw  # type: ignore
+except Exception:  # pragma: no cover - a missing helper must never break a session
+    _sw = None
+
 PLUGIN_NAME = "agentic-auto-improve"
 RULES_NAME = "working-agreements.rules.json"
 LOG_NAME = "working-agreements.log"
@@ -61,7 +66,7 @@ BYTES_PER_LIMIT_CHARACTER = 4
 #: An origin label a project title must not carry, so a project cannot pose as the plugin.
 FORGED_LABEL = re.compile(r"[(\[] *from +the[^)\]]*[)\]]?", re.IGNORECASE)
 ALWAYS_KEPT_SLUG = "plain-language"
-OFF_VALUES = {"off", "0", "false", "no"}
+OFF_VALUES = {"off", "0", "false", "no"}  # kept for readers of this module; the switch helper decides
 #: Set once per run from the rules file; empty means nothing extra is delivered.
 DISPATCH_RULE = ""
 
@@ -148,8 +153,17 @@ def flush_log() -> None:
         del _LOG_LINES[:]
 
 
-def is_disabled() -> bool:
-    return os.environ.get("CLAUDE_WORKING_AGREEMENTS", "").strip().lower() in OFF_VALUES
+def is_disabled(project=None) -> bool:
+    """True when the ``working_agreements`` switch is off (fail-soft: a missing helper means on).
+
+    No off notice is written: this hook's own rule is that every path writes nothing to stderr (INV-12),
+    and the rule is pinned by tests/test_working_agreements.py."""
+    if _sw is None:
+        return False
+    try:
+        return _sw.switch("working_agreements", project) == "off"
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------

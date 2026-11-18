@@ -17,7 +17,7 @@ Hook contract (Claude Code):
     other:  non-fatal -- fails open
 
 Bypass:
-    CLAUDE_PLAN_QUESTION_ADVISOR=off -- disable for a session
+    "plan_question_advisor": "off" in .claude/switches.local.json -- disable (switch file)
 """
 
 from __future__ import annotations
@@ -26,6 +26,11 @@ import json
 import os
 import sys
 from collections import deque
+
+try:  # switch files (fail-soft: a missing helper means every switch is at its default)
+    import _switches as _sw
+except Exception:  # pragma: no cover - hooks must never crash a prompt
+    _sw = None
 
 PLAN_MODE_MARKER = "Plan mode is active"
 TRANSCRIPT_TAIL_LINES = 200
@@ -40,7 +45,7 @@ REMINDER = """\
   is already in CLAUDE.md or the active concept contract.
 
 The developer flagged earlier plan questions as 'too confusing'. This reminder
-is the corrective. Bypass with CLAUDE_PLAN_QUESTION_ADVISOR=off.
+is the corrective. Bypass by setting plan_question_advisor to off in .claude/switches.local.json.
 """
 
 
@@ -61,8 +66,21 @@ def transcript_contains_plan_marker(transcript_path: str) -> bool:
     return any(PLAN_MODE_MARKER in line for line in tail)
 
 
+def is_disabled(project=None) -> bool:
+    """True when the ``plan_question_advisor`` switch is off (fail-soft: a missing helper means on)."""
+    if _sw is None:
+        return False
+    try:
+        if _sw.switch("plan_question_advisor", project) == "off":
+            _sw.off_notice("plan_question_advisor", hook="plan-question-advisor", project=project)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def main() -> None:
-    if os.environ.get("CLAUDE_PLAN_QUESTION_ADVISOR", "").lower() in {"off", "0", "false", "no"}:
+    if is_disabled():
         sys.exit(0)
 
     try:

@@ -963,13 +963,29 @@ class DirectoryLeftBehindTests(GuardTestCase):
 
 
 class OffSwitchTests(GuardTestCase):
-    """The existing off switches run after the guard: they never switch the guard off."""
+    """The existing off switches run after the guard: they never switch the guard off.
+
+    A switch lives in the project's Local switch file, so each row writes ``<main>/.claude/switches.local.json``
+    (the project the hook is launched for) and removes it when the row ends."""
+
+    def write_switches(self, data: dict) -> None:
+        path = FX.main / ".claude" / "switches.local.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+
+    def test_concept_gate_on_still_blocks_a_main_edit(self):
+        self.write_switches({"concept_gate": "on"})
+        self.run_cases([
+            f("Edit main with concept_gate on", "Edit", FX.main / "src" / "x.cs", FX.main, FX.main, "block"),
+            f("Edit worktree md with concept_gate on", "Edit", FX.wt / "docs" / "x.md", FX.wt, FX.main, "allow"),
+        ])
 
     def test_concept_gate_off_still_blocks_a_main_edit(self):
-        env = {"CLAUDE_CONCEPT_GATE": "off"}
+        self.write_switches({"concept_gate": "off"})
         self.run_cases([
-            f("Edit main with CLAUDE_CONCEPT_GATE=off", "Edit", FX.main / "src" / "x.cs", FX.main, FX.main, "block", extra_env=env),
-            f("Edit worktree md with CLAUDE_CONCEPT_GATE=off", "Edit", FX.wt / "docs" / "x.md", FX.wt, FX.main, "allow", extra_env=env),
+            f("Edit main with concept_gate off", "Edit", FX.main / "src" / "x.cs", FX.main, FX.main, "block"),
+            f("Edit worktree md with concept_gate off", "Edit", FX.wt / "docs" / "x.md", FX.wt, FX.main, "allow"),
         ])
 
     def test_a_bash_gate_switch_the_default_shell_row_never_reads_does_not_unblock_a_main_commit(self):
@@ -984,7 +1000,8 @@ class OffSwitchTests(GuardTestCase):
         ])
 
     def test_both_switches_together_still_block(self):
-        env = {"CLAUDE_BASH_GATE": "off", "CLAUDE_CONCEPT_GATE": "off"}
+        self.write_switches({"concept_gate": "off"})
+        env = {"CLAUDE_BASH_GATE": "off"}  # not read by anything: it has no effect, as the row above proves
         self.run_cases([
             f("Edit main with both off", "Edit", FX.main / "src" / "x.cs", FX.main, FX.main, "block", extra_env=env),
             sh("Bash write main with both off", "Bash", f"echo x > {posix(FX.main)}/src/x.cs", FX.wt, FX.main, "block", extra_env=env),

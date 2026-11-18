@@ -16,7 +16,8 @@ four. It runs the four trackers inside its own process, in this order, with the 
   * One check's failure never stops the next one.
   * Its single output joins each check's context and plain output, in that order, each prefixed with
     the check's file name. It exits 0. A check's error output passes through.
-  * Each check's own off switch still works (CLAUDE_INTEGRATION_CHECK, CLAUDE_ACCURACY_TRACKER).
+  * Each check's own off switch still works (the integration_check and accuracy_tracker keys of the
+    project's switch file).
   * The state the checks leave behind equals what the four standalone runs leave behind.
 
 HOW IT IS TESTED
@@ -130,10 +131,15 @@ class Env:
         self.dto = self.project / "srv" / "Zeta.Api" / "Controllers" / "FooController.cs"
         self.readme = self.project / "README.md"
 
+    def write_switches(self, switches: dict | None) -> None:
+        """The project's Local switch file for this replay: a switch lives in a file, not in the environment."""
+        if switches:
+            (self.project / ".claude" / "switches.local.json").write_text(json.dumps(switches), encoding="utf-8")
+
     def env(self, plugin_root: Path, extra: dict | None = None) -> dict:
         e = dict(os.environ)
         for key in ("CLAUDE_INTEGRATION_CHECK", "CLAUDE_ACCURACY_TRACKER", "CLAUDE_PROJECT_DIR"):
-            e.pop(key, None)
+            e.pop(key, None)  # the retired variables are read by nothing; stripped so a stray one proves it
         e.update({"CLAUDE_PROJECT_DIR": str(self.project), "CLAUDE_PLUGIN_ROOT": str(plugin_root),
                   "HOME": str(self.home), "USERPROFILE": str(self.home), "TEMP": str(self.temp),
                   "TMP": str(self.temp), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
@@ -247,9 +253,10 @@ def snapshot(env: Env) -> dict:
     return found
 
 
-def replay_standalone(plugin_root: Path, extra: dict | None = None):
+def replay_standalone(plugin_root: Path, extra: dict | None = None, switches: dict | None = None):
     """The four standalone hooks, in order, for every edit of the corpus."""
     env = Env()
+    env.write_switches(switches)
     hooks = plugin_root / ".claude" / "hooks"
     records = []
     for label, mutate, path in corpus(env):
@@ -263,9 +270,10 @@ def replay_standalone(plugin_root: Path, extra: dict | None = None):
     return records, snapshot(env)
 
 
-def replay_dispatcher(plugin_root: Path, extra: dict | None = None):
+def replay_dispatcher(plugin_root: Path, extra: dict | None = None, switches: dict | None = None):
     """The dispatcher once per edit of the corpus."""
     env = Env()
+    env.write_switches(switches)
     script = plugin_root / ".claude" / "hooks" / DISPATCHER_NAME
     records = []
     for label, mutate, path in corpus(env):
@@ -435,16 +443,16 @@ else:
 # ---------------------------------------------------------------------------
 print("\nINV-O4  each check's own off switch still works, and removes only that piece")
 if the_dispatcher_exists():
-    off_env = {"CLAUDE_INTEGRATION_CHECK": "off"}
-    ref_off = replay_standalone(ROOT, off_env)
-    got_off = replay_dispatcher(ROOT, off_env)
+    off_sw = {"integration_check": "off"}
+    ref_off = replay_standalone(ROOT, switches=off_sw)
+    got_off = replay_dispatcher(ROOT, switches=off_sw)
     problems = verify(ref_off, got_off)
-    check("CLAUDE_INTEGRATION_CHECK=off: output and state still equal the standalone runs under the same switch",
+    check("integration_check off: output and state still equal the standalone runs under the same switch",
           not problems, "\n".join(problems))
-    check("CLAUDE_INTEGRATION_CHECK=off: no integration warning is printed",
+    check("integration_check off: no integration warning is printed",
           not any("[integration-check]" in rec[2] for rec in got_off[0]),
           "the warning was printed with the switch off")
-    check("CLAUDE_INTEGRATION_CHECK=off removes only that piece: the accuracy state is still written",
+    check("integration_check off removes only that piece: the accuracy state is still written",
           any(k.startswith("home-state/") for k in got_off[1]) and "project/contract-accuracy.json" in got_off[1],
           "state files: %s" % sorted(got_off[1]))
     check("control: with the switch off, the integration state file is absent but the same replay with it on has it",
@@ -452,13 +460,20 @@ if the_dispatcher_exists():
           "off: %s / on: %s" % (sorted(k for k in got_off[1] if k.startswith("temp/")),
                                 sorted(k for k in s_snap if k.startswith("temp/"))))
 
-    acc_env = {"CLAUDE_ACCURACY_TRACKER": "off"}
-    ref_acc = replay_standalone(ROOT, acc_env)
-    got_acc = replay_dispatcher(ROOT, acc_env)
+    on_sw = {"integration_check": "on", "accuracy_tracker": "on"}
+    got_on = replay_dispatcher(ROOT, switches=on_sw)
+    check("integration_check and accuracy_tracker written as on: the state equals the default replay (both pieces run)",
+          set(got_on[1]) == set(s_snap) and any(k.startswith("home-state/") for k in got_on[1])
+          and any(k.startswith("temp/") for k in got_on[1]),
+          "on: %s / default: %s" % (sorted(got_on[1]), sorted(s_snap)))
+
+    acc_sw = {"accuracy_tracker": "off"}
+    ref_acc = replay_standalone(ROOT, switches=acc_sw)
+    got_acc = replay_dispatcher(ROOT, switches=acc_sw)
     problems = verify(ref_acc, got_acc)
-    check("CLAUDE_ACCURACY_TRACKER=off: output and state still equal the standalone runs under the same switch",
+    check("accuracy_tracker off: output and state still equal the standalone runs under the same switch",
           not problems, "\n".join(problems))
-    check("CLAUDE_ACCURACY_TRACKER=off removes only the three trackers: no accuracy state, the integration warning remains",
+    check("accuracy_tracker off removes only the three trackers: no accuracy state, the integration warning remains",
           not any(k.startswith("home-state/") for k in got_acc[1]) and "project/contract-accuracy.json" not in got_acc[1]
           and any("[integration-check] WARNING" in rec[2] for rec in got_acc[0]),
           "state files: %s" % sorted(got_acc[1]))

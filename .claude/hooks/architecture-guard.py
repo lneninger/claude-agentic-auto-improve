@@ -20,7 +20,7 @@ Hook contract (Claude Code):
     other:  error (hook fails open -- logs to stderr, allows the call)
 
 Bypass:
-    CLAUDE_ARCH_GUARD=off -- disable the hook for a session
+    "architecture_guard": "off" in .claude/switches.local.json -- disable the hook (switch file, no environment variable)
 
 Exception list and rules file:
     architecture-guard.exceptions.json and architecture-guard.rules.json (both)
@@ -69,6 +69,11 @@ try:
 except Exception:
     def log_event(*args, **kwargs):  # type: ignore[no-redef]
         return
+
+try:  # switch files (fail-soft: a missing helper means every switch is at its default)
+    import _switches as _sw
+except Exception:  # pragma: no cover - hooks must never crash a tool call
+    _sw = None
 
 HOOK_DIR = Path(__file__).resolve().parent
 try:  # project-local .claude first, global second
@@ -435,8 +440,14 @@ def log(msg: str) -> None:
     print(f"[architecture-guard] {msg}", file=sys.stderr)
 
 
-def bypass_env() -> bool:
-    return os.environ.get("CLAUDE_ARCH_GUARD", "").lower() in {"off", "0", "false", "no"}
+def bypass_env(project=None) -> bool:
+    """True when the ``architecture_guard`` switch is off (fail-soft: a missing helper means on)."""
+    if _sw is None:
+        return False
+    try:
+        return _sw.switch("architecture_guard", project) == "off"
+    except Exception:
+        return False
 
 
 def load_exceptions() -> dict:
@@ -1260,7 +1271,7 @@ def format_block_message(file_path: str, blocking: list[Violation]) -> str:
         lines.extend(f"  {doc}" for doc in reference_docs)
         lines.append("")
     lines.extend([
-        "Escape hatch: CLAUDE_ARCH_GUARD=off (use sparingly)",
+        "Escape hatch: set architecture_guard to off in .claude/switches.local.json (use sparingly)",
         bar,
         "",
     ])
@@ -1330,7 +1341,16 @@ def main() -> None:
         sys.exit(0)
 
     if bypass_env():
-        log("bypass via CLAUDE_ARCH_GUARD=off")
+        log("bypass via the architecture_guard switch (off)")
+        try:
+            notice = _sw.off_notice(
+                "architecture_guard", hook="architecture-guard",
+                session_id=payload.get("session_id"), guard=True,
+            )
+            if notice:
+                print(json.dumps(notice))
+        except Exception:
+            pass
         sys.exit(0)
 
     tool_name = payload.get("tool_name", "")
