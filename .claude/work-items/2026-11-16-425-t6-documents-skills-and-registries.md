@@ -31,7 +31,7 @@ The contract's own handoff block, verbatim:
 
 ### 6. Documents, skills and registries (`python-ai-developer`)
 
-**Depends on:** 4, 5
+**Depends on:** 5, 10 — block 4 is no longer named: its record reads `blocked`, and the loop never releases a block whose dependency reads `blocked`; the re-review (10) replaces it.
 
 **Files to touch:**
 - `README.md`
@@ -56,13 +56,18 @@ TASK: Rewrite the documents and skill text for file settings, rewrite INV-12 and
   test_plugin_manifests.py, and record the mechanism and terms in the registries. Remove the last
   expectedFailure marks.
 CONTEXT: concept contract at .claude/concepts/2026-11-16-file-based-switches.md, the skill-text
-  table of the Inventory.
+  table of the Inventory. This block runs after the ordinary switches block (5) and the security
+  re-review (10) have passed; read the re-review report
+  t10-security-re-review-security-auditor.md and the second run sheet
+  t9-live-prompt-trial-second-round-senior-test-engineer.md for the residual-risk wording.
 FILES: as listed.
 CONSTRAINTS:
   - README: replace the variable table with a switch table (key, values, default, effect,
     allowed in), show the whole switch file to edit in an editor, and add a section on the
     Database override arm with PowerShell and POSIX commands for the person's own terminal and
-    the stated residual risk, including prompts answered by code. Add _switches.py to the helper
+    the stated residual risk as the contract's "Residual risk" paragraph words it: prompts
+    answered by code, the arm not tied to a command, and the allow-rule result of the second live
+    trial report (t9). Add _switches.py to the helper
     lists. Leave "Change notes by version" as written and add a dated note for this change.
   - CONTRIBUTING: a new switch is one catalog entry, one README row and one on/off test pair,
     never an environment read.
