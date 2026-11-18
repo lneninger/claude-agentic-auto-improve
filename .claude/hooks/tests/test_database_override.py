@@ -68,6 +68,8 @@ PROTECTED = "ScalpingMachine"
 #: Blocked by BOTH guards: a protected database named as the target of a database-level statement.
 BLOCKED_COMMAND = 'sqlcmd -S "(localdb)\\m" -E -Q "' + _V + " " + PROTECTED + '"'
 HUMAN_ONLY_SCRIPT = "tools/db-protection/update-dev-database.cmd"
+_EF_UPDATE = "dotnet ef database " + "up" + "date"
+_ROW_DELETE = "DE" + "LETE"
 
 RULES = {
     "protected_databases": [PROTECTED, PROTECTED + "_Testing"],
@@ -288,6 +290,19 @@ class OverrideRows:
         self.assert_blocks(run, "an arm older than 15 minutes")
         self.assertFalse(self.arm_path.exists(), "Fresh-arm rule: a stale arm is removed")
 
+    # -- N1: an arm dated in the future is not fresh --------------------------------------------------
+    def test_an_arm_dated_one_day_ahead_blocks_and_is_removed(self):
+        self.control_asks("CONTROL")
+        self.arm(age_seconds=-24 * 3600)
+        run = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()))
+        self.assert_blocks(run, "Fresh-arm rule: an arm more than 60 seconds in the future")
+        self.assertFalse(self.arm_path.exists(), "Fresh-arm rule: the future-dated arm is removed")
+
+    def test_an_arm_thirty_seconds_ahead_still_asks(self):
+        self.arm(age_seconds=-30)
+        run = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()))
+        self.assert_asks(run, "a small clock skew (30 seconds ahead) is tolerated")
+
     def test_an_arm_just_inside_fifteen_minutes_still_asks(self):
         self.arm(age_seconds=FRESH_SECONDS - 120)
         run = self.run_guard(self.shell(BLOCKED_COMMAND, tool_use_id=self.next_id()))
@@ -369,6 +384,42 @@ class OverrideRows:
         search = self.run_guard(self.shell('rg "database-override.once" README.md', "PowerShell"))
         self.assertEqual(search.rc, 0, "a search pattern only mentions the name: %s" % search)
 
+    # -- W2: a git segment with a real redirection to a named file is not prose ---------------------------
+    def test_a_git_command_redirected_to_the_arm_is_refused(self):
+        slash = str(self.arm_path).replace("\\", "/")
+        for command in (
+            'git commit -m "x" > "%s"' % slash,
+            'git commit -m "x" >> "%s"' % slash,
+            'git tag -m "x" v1 > "%s"' % slash,
+            'git notes add -m "x" > "%s"' % slash,
+            'git commit -m "x" 2> "%s"' % slash,
+            'git commit -m "x" 2>> \'%s\'' % slash,
+            'git commit -m "x" >"%s"' % slash,
+        ):
+            for tool in ("Bash", "PowerShell"):
+                for armed in (False, True):
+                    with self.subTest(command=command[:34], tool=tool, armed=armed):
+                        if armed:
+                            self.arm()
+                        elif self.arm_path.exists():
+                            self.arm_path.unlink()
+                        run = self.run_guard(self.shell(command, tool, tool_use_id=self.next_id()))
+                        self.assert_blocks(run, "Arm-write rule: %r" % command)
+                        self.assertIn("database-override", run.err.lower())
+
+    def test_control_a_git_message_naming_the_arm_with_a_stream_duplication_or_a_pipe_is_allowed(self):
+        self.arm()
+        for command in (
+            'git commit -m "Explain database-override.once in the README" 2>&1 | tail -n 5',
+            'git commit -m "Explain database-override.once" 2>&1',
+            'git tag -m "database-override.once docs" v1 | cat',
+        ):
+            for tool in ("Bash", "PowerShell"):
+                with self.subTest(command=command[:50], tool=tool):
+                    run = self.run_guard(self.shell(command, tool))
+                    self.assertEqual(run.rc, 0, "a message that only names the arm is prose: %s" % run)
+                    self.assertTrue(self.arm_path.exists(), "a mention must leave the arm alone")
+
 
 # =====================================================================================================
 # The destructive guard's own rows (it alone has the edit tools, the human-only class and fault injection).
@@ -428,6 +479,72 @@ class DestructiveGuardTests(OverrideTestCase, OverrideRows):
         run = self.run_guard(self.shell(HUMAN_ONLY_SCRIPT, tool_use_id=self.next_id()))
         self.assert_blocks(run, "No-prompt classes rule: a human-only command never offers the prompt")
         self.assertIn("own terminal", run.err, "a person runs it by hand in their own terminal")
+
+    # -- B1: the no-prompt class is decided from EVERY matched target, not from the chosen block reason --
+    def _human_only_combinations(self) -> dict[str, str]:
+        disposable = '"Server=(localdb)\\m;Database=App_MigrationVerify_abc"'
+        rollback_after_separator = (_EF_UPDATE + " 0 --project src/X.Persistence -- --connection " + disposable)
+        return {
+            # O12: human-only script + the EF argument-position check
+            "O12 human-only script plus the EF argument-position check":
+                HUMAN_ONLY_SCRIPT + " && " + rollback_after_separator,
+            # O13: human-only script + a row-deleting statement on a protected database
+            "O13 human-only script plus a row-deleting statement on a protected database":
+                HUMAN_ONLY_SCRIPT + ' && sqlcmd -S "(localdb)\\m" -E -d ' + PROTECTED + ' -Q "' + _ROW_DELETE + ' FROM dbo.T"',
+            # O14: an EF forward update + the EF argument-position check
+            "O14 EF forward update plus the EF argument-position check":
+                _EF_UPDATE + " --project src/X.Persistence && " + rollback_after_separator,
+        }
+
+    def test_a_human_only_target_beside_another_blocked_operation_never_offers_the_prompt(self):
+        self.control_asks("CONTROL")
+        for leftover in self.claim_files():  # the control used its arm up; its claim is not this row's
+            leftover.unlink()
+        for label, command in self._human_only_combinations().items():
+            for tool in ("Bash", "PowerShell"):
+                with self.subTest(row=label, tool=tool):
+                    self.arm()
+                    run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+                    self.assert_blocks(run, "No-prompt classes rule: " + label)
+                    self.assertIsNone(run.ask, label + ": no ask JSON")
+                    self.assertTrue(self.arm_path.exists(), label + ": the arm is still in place (never claimed)")
+                    self.assertEqual(self.claim_files(), [], label + ": no claim file was made")
+                    self.assertIn("own terminal", run.err, label + ": the human-only instruction is printed")
+                    self.arm_path.unlink()
+
+    def test_the_human_only_class_alone_still_blocks_with_the_arm_in_place(self):
+        """O11, kept: a human-only command alone blocks and leaves the arm."""
+        self.arm()
+        run = self.run_guard(self.shell(HUMAN_ONLY_SCRIPT, tool_use_id=self.next_id()))
+        self.assert_blocks(run, "O11 human-only alone")
+        self.assertTrue(self.arm_path.exists(), "the arm is still in place")
+
+    # -- W1: the edit tools' target path is normalised before the last-part name test --------------------
+    def test_an_edit_tool_target_that_reaches_the_arm_by_dot_parts_is_refused(self):
+        forward = str(self.arm_path).replace("\\", "/")
+        back = str(self.arm_path).replace("/", "\\")
+        spellings = [forward + "/.", forward + "/x/..", back + "\\.", back + "\\x\\..",
+                     forward + "/./", back + "\\x\\..\\", forward + "/x/y/../..",
+                     forward + ".", forward + " ", forward + "/. "]
+        for spelling in spellings:
+            for tool, payload in self._edit_payloads(spelling).items():
+                for armed in (False, True):
+                    with self.subTest(path=spelling[-24:], tool=tool, armed=armed):
+                        if armed:
+                            self.arm()
+                        elif self.arm_path.exists():
+                            self.arm_path.unlink()
+                        self.assert_blocks(self.run_guard(payload), "Arm-write rule, normalised path, %s" % tool)
+
+    def test_control_an_edit_that_climbs_out_of_the_arm_to_another_file_is_allowed(self):
+        """The normalised last part of <p>/.claude/database-override.once/../notes.md is notes.md."""
+        base = str(self.project / ".claude")
+        for spelling in (base.replace("\\", "/") + "/database-override.once/../notes.md",
+                         base.replace("/", "\\") + "\\database-override.once\\..\\notes.md"):
+            for tool, payload in self._edit_payloads(spelling).items():
+                with self.subTest(path=spelling[-40:], tool=tool):
+                    run = self.run_guard(payload)
+                    self.assertEqual(run.rc, 0, "its normalised last part is notes.md: %s" % run)
 
     def test_an_injected_guard_fault_blocks_even_when_armed(self):
         self.control_asks("CONTROL")
@@ -596,6 +713,21 @@ class InlineNameTestCopyTests(OverrideTestCase):
             with self.subTest(tool=tool):
                 self.assert_blocks(self.run_guard(self.payload(tool, tool_input), guard=self.hooks / "db-destructive-guard.py"),
                                    "inline name-test copy, tool " + tool)
+
+    def test_the_destructive_guard_refuses_a_dot_part_edit_path_with_the_helper_removed(self):
+        """W1 fallback row: the guard's inline copy of the name test normalises the path itself."""
+        forward = str(self.arm_path).replace("\\", "/")
+        back = str(self.arm_path).replace("/", "\\")
+        for spelling in (forward + "/.", forward + "/x/..", back + "\\.", back + "\\x\\.."):
+            for tool, tool_input in (("Write", {"file_path": spelling, "content": "x"}),
+                                     ("NotebookEdit", {"notebook_path": spelling, "new_source": "b"})):
+                with self.subTest(path=spelling[-20:], tool=tool):
+                    self.assert_blocks(self.run_guard(self.payload(tool, tool_input),
+                                                      guard=self.hooks / "db-destructive-guard.py"),
+                                       "inline normalising copy, tool " + tool)
+        control = self.run_guard(self.payload("Write", {"file_path": forward + "/../notes.md", "content": "x"}),
+                                 guard=self.hooks / "db-destructive-guard.py")
+        self.assertEqual(control.rc, 0, "CONTROL: the normalised last part is notes.md: %s" % control)
 
     def test_with_the_helper_removed_an_armed_command_gets_no_override_and_an_arm_write_is_still_refused(self):
         self.arm()
