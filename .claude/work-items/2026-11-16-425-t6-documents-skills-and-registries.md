@@ -31,7 +31,7 @@ The contract's own handoff block, verbatim:
 
 ### 6. Documents, skills and registries (`python-ai-developer`)
 
-**Depends on:** 5, 10 — block 4 is no longer named: its record reads `blocked`, and the loop never releases a block whose dependency reads `blocked`; the re-review (10) replaces it.
+**Depends on:** 5, 12 — blocks 4 and 10 are no longer named: their records read `blocked`, and the loop never releases a block whose dependency reads `blocked`; the third security review (12) replaces them. Before amendment 2 this line read "5, 10".
 
 **Files to touch:**
 - `README.md`
@@ -56,8 +56,9 @@ TASK: Rewrite the documents and skill text for file settings, rewrite INV-12 and
   test_plugin_manifests.py, and record the mechanism and terms in the registries. Remove the last
   expectedFailure marks.
 CONTEXT: concept contract at .claude/concepts/2026-11-16-file-based-switches.md, the skill-text
-  table of the Inventory. This block runs after the ordinary switches block (5) and the security
-  re-review (10) have passed; read the re-review report
+  table of the Inventory. This block runs after the ordinary switches block (5) and the third
+  security review (12) have passed; read the report
+  t12-security-re-review-round-three-security-auditor.md, the blocked re-review
   t10-security-re-review-security-auditor.md and the second run sheet
   t9-live-prompt-trial-second-round-senior-test-engineer.md for the residual-risk wording.
 FILES: as listed.
@@ -66,9 +67,16 @@ CONSTRAINTS:
     allowed in), show the whole switch file to edit in an editor, and add a section on the
     Database override arm with PowerShell and POSIX commands for the person's own terminal and
     the stated residual risk as the contract's "Residual risk" paragraph words it: prompts
-    answered by code, the arm not tied to a command, and the allow-rule result of the second live
-    trial report (t9). Add _switches.py to the helper
-    lists. Leave "Change notes by version" as written and add a dated note for this change.
+    answered by code, the arm not tied to a command, the allow-rule result of the second live
+    trial report (t9) with its limits (one rule, one settings layer, default mode, one host
+    version), that an older installed copy of the plugin knows no arm and blocks, and that
+    acceptEdits, plan and dontAsk were not tried live. Add _switches.py to the helper
+    lists. Leave "Change notes by version" as written and add a dated note for this change. The
+    note names apart, as fixes of behaviour older than this contract: a human-only script after
+    quoted text in the same call was allowed with no prompt (re-review P1), and a link at the
+    database guards' rules file to a named pipe could hang them (I1). It also says that a rules
+    file which is a link to a network drive or share now counts as unreadable, so every
+    database is protected; keep the rules file a regular file in the project folder.
   - CONTRIBUTING: a new switch is one catalog entry, one README row and one on/off test pair,
     never an environment read.
   - Delete the CLAUDE_CONTRACT_SKIP and CLAUDE_VERIFY_REVIEW_GATE text as the table says.
@@ -76,7 +84,10 @@ CONSTRAINTS:
     concept_gate switch through the helper". Keep the add-on scan rows.
   - Registries: append through .claude/scripts/registry_append.py only. Corrections to
     "Disposable migration dry-run DB" and "Session-start context delivery", the Switch file and
-    switch helper mechanism, a correction to the Add-on term, and the five new terms.
+    switch helper mechanism, a correction to the Add-on term, and the five new terms. Amendment
+    2 adds two corrections: "Guard rules file" (the database guards read it through
+    read_regular_file_bytes) and "Guard fallback mode" (the read-only guard is a new user, with
+    an inline regular-file reader).
   - Do not touch any plugin version file. Run test_plugin_manifests.py,
     test_switch_env_scan.py, test_skill_script_lookup.py and validate_registries.py
     --check-structure.
