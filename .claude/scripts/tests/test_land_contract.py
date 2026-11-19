@@ -5661,3 +5661,587 @@ class TestRunRecordingManifestCounts(LandCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ===========================================================================
+# Contract 2026-10-13-database-guard-names-in-rules-file, Revision 12, block 32 (RED): invariants C13 and C14.
+#
+# Gate 31's finding B2: a planted git.exe answering the landing's, or P7b's child's, BARE `git`. On Windows
+# CreateProcess looks in the calling process's current folder before PATH unless
+# NoDefaultCurrentDirectoryInExePath is set, and a bare `git` also takes a PATH entry that lies inside the
+# project. C13: every git process of the landing and of its P7b child takes an absolute program, found by
+# resolve_git or named with --git-program, and the landing's own environment sets the variable. C14: P7b's
+# commit touches only the four manifests and descends from the head read before it.
+#
+# The planted program is a copy of the Python interpreter named git.exe, with a ._pth file and a
+# sitecustomize.py that append one line to an evidence file the test reads and then exit 97 (a status git never
+# returns). It leaves evidence for ANY arguments except a lone --version, which Python answers before it
+# imports site; no git run in this file asks for that. Every planted program, fixture repository, bare remote
+# and stand-in lives in the test's own temporary folder, which the test removes; nothing is put on the
+# session's PATH, and the environment variables a row changes are changed only inside mock.patch.dict.
+#
+# These classes are appended after the last line of the file so no existing row's line moves. Run them with
+# `py -3 -B -m unittest test_land_contract` (or discovery) from this folder: the `unittest.main()` above this
+# block ends a direct `py -3 test_land_contract.py` run before they are defined.
+# ===========================================================================
+import ast  # noqa: E402
+import inspect  # noqa: E402
+
+T32_VAR = "NoDefaultCurrentDirectoryInExePath"
+T32_MANIFEST_NAMES = ("plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json",
+                      ".claude-plugin/marketplace.json")
+T32_WINDOWS_ONLY = unittest.skipUnless(
+    os.name == "nt",
+    "Windows only: CreateProcess looks in the current folder (and PATH) for a bare program name, and "
+    "NoDefaultCurrentDirectoryInExePath is a Windows variable")
+T32_STATE = {"git": None}
+
+
+def t32_abs_git():
+    """The absolute path of the real git, found once, before any row changes PATH."""
+    if T32_STATE["git"] is None:
+        found = shutil.which("git")
+        if not found:
+            raise AssertionError("fixture: no git program on PATH")
+        T32_STATE["git"] = os.path.abspath(found)
+    return T32_STATE["git"]
+
+
+def t32_git(cwd, *args, check=True):
+    """The fixture's git helper with the real git named by its absolute path: a planted bare ``git`` in the
+    process's current folder or on PATH can never answer the fixture itself."""
+    proc = _REAL_SUBPROCESS_RUN(
+        [t32_abs_git(), "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false"] + list(args),
+        cwd=str(cwd), capture_output=True, text=True, env=_GIT_ENV)
+    if check and proc.returncode != 0:
+        raise AssertionError("fixture git %r failed: %s" % (args, proc.stderr))
+    return proc.stdout.strip()
+
+
+def t32_push_target_is_temporary(rest, where):
+    """``_push_target_is_temporary`` of the module guard, reading the remote with the real git's absolute path."""
+    remote = next((w for w in rest if not w.startswith("-")), "origin")
+    if _is_url(remote):
+        return False
+    target = None
+    try:
+        proc = _REAL_POPEN([t32_abs_git(), "-C", where, "remote", "get-url", "--push", remote],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, _ = proc.communicate(timeout=30)
+        if proc.returncode == 0 and out.strip():
+            target = out.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if target is None and os.path.isabs(remote):
+        target = remote
+    if target is None or _is_url(target):
+        return False
+    return _is_under(os.path.join(where, target), _TEMP_ROOT)
+
+
+def t32_manifests(version):
+    plugin = json.dumps({"name": "x", "version": version, "description": "Protocol: 3 skills that put design first."},
+                        indent=2) + "\n"
+    claude = json.dumps({"name": "x", "version": version,
+                         "description": "Protocol: 3 skills, 2 agents and 2 hooks that put design first."},
+                        indent=2) + "\n"
+    cursor = json.dumps({"name": "x", "version": version,
+                         "description": "Protocol: 3 skills and 2 subagents that put design first."}, indent=2) + "\n"
+    market = json.dumps({"name": "m", "version": version, "description": "A marketplace.",
+                         "plugins": [{"name": "x", "version": version,
+                                      "description": "Protocol: 3 skills, 2 agents and 2 hooks that put design first."}]},
+                        indent=2) + "\n"
+    return {"plugin.json": plugin, ".claude-plugin/plugin.json": claude, ".cursor-plugin/plugin.json": cursor,
+            ".claude-plugin/marketplace.json": market}
+
+
+def t32_tree_files():
+    """3 skills, 2 agents, 2 hooks (and one helper that is not counted): what the manifests above claim."""
+    files = {"skills/s%d/SKILL.md" % i: "s\n" for i in range(3)}
+    files.update({"agents/a%d.md" % i: "a\n" for i in range(2)})
+    files.update({".claude/hooks/h%d.py" % i: "h\n" for i in range(2)})
+    files[".claude/hooks/_helper.py"] = "helper\n"
+    return files
+
+
+def t32_versions(root):
+    found = []
+    for name in T32_MANIFEST_NAMES:
+        data = json.loads((Path(root) / name).read_text(encoding="utf-8"))
+        if "version" in data:
+            found.append(data["version"])
+        found.extend(entry["version"] for entry in data.get("plugins", []))
+    return found
+
+
+def t32_isolated_env(folder):
+    """An identity, signing off, an empty global config, no system config (the identity file's pinned shape)."""
+    empty = Path(folder) / "t32-empty-gitconfig"
+    empty.write_text("", encoding="utf-8")
+    env = {k: _GIT_ENV[k] for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")}
+    env.update(GIT_CONFIG_GLOBAL=str(empty), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="1",
+               GIT_CONFIG_KEY_0="commit.gpgsign", GIT_CONFIG_VALUE_0="false")
+    return env
+
+
+def t32_plant_git(folder, evidence, hook_dir):
+    """Put a program named git.exe into ``folder``. Any run of it (except a lone --version) appends one line to
+    ``evidence`` and exits 97. Returns the file names it created in ``folder``."""
+    folder, hook_dir = Path(folder), Path(hook_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    base = Path(sys.base_prefix)
+    if not (base / "python.exe").is_file():
+        raise AssertionError("fixture: cannot build the planted program: %s is missing" % (base / "python.exe"))
+    created = ["git.exe", "git._pth"]
+    shutil.copy2(base / "python.exe", folder / "git.exe")
+    for name in ("python%d%d.dll" % sys.version_info[:2], "vcruntime140.dll", "vcruntime140_1.dll"):
+        if (base / name).is_file():
+            shutil.copy2(base / name, folder / name)
+            created.append(name)
+    (hook_dir / "sitecustomize.py").write_text(
+        "import os, sys\n"
+        "with open(%r, 'a', encoding='utf-8') as handle:\n"
+        "    handle.write('planted git ran: argv=%%r cwd=%%r\\n' %% (sys.argv, os.getcwd()))\n"
+        "os._exit(97)\n" % str(evidence), encoding="utf-8")
+    (folder / "git._pth").write_text("\n".join([str(base / "DLLs"), str(base / "Lib"), str(hook_dir), "import site"])
+                                     + "\n", encoding="utf-8")
+    return created
+
+
+def t32_evidence(path):
+    path = Path(path)
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def t32_exclude(main, names):
+    """Keep the planted files out of ``git status`` and ``git clean -fd`` of every worktree of ``main``."""
+    common = Path(main, t32_git(main, "rev-parse", "--git-common-dir"))
+    info = common / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    with open(str(info / "exclude"), "a", encoding="utf-8", newline="\n") as handle:
+        handle.write("".join("/%s\n" % n for n in names))
+
+
+T32_STANDIN = r'''import os, re, subprocess, sys
+GIT = @GIT@
+MANIFESTS = @MANIFESTS@
+RULES = @RULES@
+MARK = @MARK@
+ORPHAN = @ORPHAN@
+COMMIT = @COMMIT@
+VAR = @VAR@
+
+
+def git(*a):
+    return subprocess.run([GIT] + list(a), check=True, capture_output=True, text=True).stdout.strip()
+
+
+if MARK:
+    with open(MARK, "a") as handle:
+        handle.write(VAR + "=" + str(os.environ.get(VAR)) + "\n")
+if "--raise" in sys.argv and ORPHAN:
+    tree = git("rev-parse", "HEAD^{tree}")
+    git("reset", "-q", "--hard", git("commit-tree", tree, "-m", "unrelated root"))
+elif "--raise" in sys.argv and COMMIT:
+    paths = list(MANIFESTS)
+    for name in MANIFESTS:
+        text = open(name, "rb").read().decode("utf-8")
+        open(name, "wb").write(re.sub(r'("version"\s*:\s*")[^"]*(")', r'\g<1>0.12.0\g<2>', text).encode("utf-8"))
+    if RULES:
+        import json
+        data = json.loads(open(RULES, "rb").read().decode("utf-8"))
+        data["protected_databases"] = data["protected_databases"][:1]
+        open(RULES, "wb").write((json.dumps(data, indent=2) + "\n").encode("utf-8"))
+        paths.append(RULES)
+    git("add", "--", *paths)
+    git("commit", "-q", "--no-verify", "-m", "chore: raise the plugin version to 0.12.0 at the landing")
+sys.exit(0)
+'''
+
+
+def t32_standin(*, marker=None, rules=None, orphan=False, commit=True):
+    """The text of a check_version_bump.py stand-in: records the variable (``marker``), then (``commit``) commits
+    the four manifests at 0.12.0 and, with ``rules``, also that rules file with a name removed; or (``orphan``)
+    moves HEAD to a root commit that does not descend from the head it started at. Exits 0 in every mode."""
+    values = {"@GIT@": repr(t32_abs_git()), "@MANIFESTS@": repr(list(T32_MANIFEST_NAMES)), "@RULES@": repr(rules),
+              "@MARK@": repr(str(marker) if marker else None), "@ORPHAN@": repr(bool(orphan)),
+              "@COMMIT@": repr(bool(commit)), "@VAR@": repr(T32_VAR)}
+    text = T32_STANDIN
+    for key, value in values.items():
+        text = text.replace(key, value)
+    return text
+
+
+class T32Stage(Stage):
+    """The stage with the push left REAL (into the fixture's bare remote) when asked, the process launcher
+    passed through instead of refused, the head P7b started from recorded, and the fixture's own git helpers
+    naming the real git by its absolute path. ``run_cwd`` is the process's current folder while the landing runs
+    (None: the fixture's temporary root, as the stock stage)."""
+
+    def __init__(self, *a, real_push=True, run_cwd=None, **k):
+        super().__init__(*a, **k)
+        self.real_push, self.run_cwd = real_push, run_cwd
+        self.p7_head = None
+        self.programs = []
+
+    def install(self, stack):
+        lc, stage = self.lc, self
+        real_run, real_push, real_p7b = lc._run, lc.git_push, lc._p7b_version_raise
+        super().install(stack)
+
+        def passthrough(cmd, *a, **k):
+            stage.argv_seen.append([str(c) for c in cmd])
+            stage.programs.append(str(cmd[0]) if cmd else "")
+            return real_run(cmd, *a, **k)
+
+        def probe(wt, *a, **k):
+            stage.p7_head = t32_git(wt, "rev-parse", "HEAD")
+            return real_p7b(wt, *a, **k)
+
+        stack.enter_context(mock.patch.object(lc, "_run", side_effect=passthrough))
+        stack.enter_context(mock.patch.object(lc, "_p7b_version_raise", side_effect=probe))
+        if self.real_push:
+            def push(*a, **k):
+                stage._record("git_push", *a, **k)
+                return real_push(*a, **k)
+            stack.enter_context(mock.patch.object(lc, "git_push", side_effect=push))
+        here = sys.modules[__name__]
+        stack.enter_context(mock.patch.object(here, "git", t32_git))
+        stack.enter_context(mock.patch.object(here, "_push_target_is_temporary", t32_push_target_is_temporary))
+
+    def run(self, **over):
+        args = {"contract": SLUG, "parent": PARENT, "project_root": str(self.kit.main),
+                "checkout": str(self.kit.main), "run_id": self.run_id,
+                "worktree": str(self.worktree), "dry_run": False}
+        args.update(over)
+        saved_cwd = os.getcwd()
+        saved_env = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        os.chdir(str(self.run_cwd or self.kit.tmp))
+        try:
+            with contextlib.ExitStack() as stack:
+                self.install(stack)
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                return self.lc.run_landing(args)
+        finally:
+            os.chdir(saved_cwd)
+            if saved_env is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_env
+
+
+class T32Case(PnLandingCase):
+    """A fixture landing with the version raise on, in its own folder, every planted file test-owned."""
+
+    def setUp(self):
+        super().setUp()
+        t32_abs_git()  # before any row changes PATH
+        self.t32_root = Path(self._tmp.name) / "t32-owned"
+        self.t32_root.mkdir()
+
+    def t32_world(self, subdir, *, counts=False, rules=False, move_master=True, real_push=True, run_cwd_worktree=False,
+                  standin=None):
+        folder = Path(self._tmp.name) / subdir
+        folder.mkdir()
+        base = dict(t32_manifests("0.11.3"))
+        base.update(t32_tree_files())
+        base[".claude/scripts/check_version_bump.py"] = (
+            standin if standin is not None else (SCRIPTS_DIR / "check_version_bump.py").read_text(encoding="utf-8"))
+        if rules:
+            base.update(self.real_checker())
+            base[PN_RULES] = pn_rules(PN_NAMES)
+        cfg = landing_config(steps=[STEP_BUILD], versionRaise=True, manifestCounts=counts)
+        kit = Kit(folder, config=cfg, base_files=base, parent_files={"src/feature.py": "x = 1\n"})
+        if move_master:
+            kit.commit_remote("master", {"master-note.txt": "master moved on\n"})
+        st = T32Stage(self, kit, real_push=real_push)
+        if run_cwd_worktree:
+            st.run_cwd = st.worktree
+        return st
+
+    def t32_standin_dir(self, name, text):
+        folder = self.t32_root / ("standin-" + name)
+        folder.mkdir()
+        (folder / "check_version_bump.py").write_text(text, encoding="utf-8")
+        return folder
+
+    def t32_land(self, st, *, nodefault, path=None, standin_dir=None):
+        """The landing under an environment the test builds: the isolated git settings, the variable removed
+        (``nodefault`` None) or set, PATH replaced when given. Returns ``(report, error)``; an exception is
+        read as an error text so the row's own assertions decide, never the exception."""
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, t32_isolated_env(st.kit.tmp)))
+            if nodefault is None:
+                os.environ.pop(T32_VAR, None)
+            else:
+                os.environ[T32_VAR] = nodefault
+            if path is not None:
+                os.environ["PATH"] = path
+            if standin_dir is not None:
+                stack.enter_context(mock.patch.object(st.lc, "SCRIPTS_DIR", standin_dir))
+            try:
+                return st.run(), None
+            except Exception as exc:  # noqa: BLE001 - the row asserts on what the landing did, not on how it died
+                return None, "%s: %s" % (type(exc).__name__, exc)
+
+    def t32_plant(self, folder, name):
+        evidence = self.t32_root / ("evidence-%s.txt" % name)
+        created = t32_plant_git(folder, evidence, self.t32_root / ("hook-" + name))
+        return evidence, created
+
+    @staticmethod
+    def t32_what(report, error):
+        return "landing outcome %s, error %s" % ((report or {}).get("outcome"), error)
+
+    def t32_remote_head(self, st):
+        return t32_git(st.kit.origin, "rev-parse", "refs/heads/%s" % PARENT)
+
+    def assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(self, st, before):
+        after = self.t32_remote_head(st)
+        self.assertNotEqual(after, before, "the landing reached P9 and pushed a new head to the remote")
+        self.assertIsNotNone(st.p7_head, "P7b started, so the head P7 checked was read")
+        if after != st.p7_head:
+            parents = t32_git(st.kit.origin, "rev-list", "--parents", "-n", "1", after).split()
+            self.assertEqual(parents[1:], [st.p7_head],
+                             "the remote's head is the commit P7 checked plus at most one commit on top of it")
+            changed = set(t32_git(st.kit.origin, "diff-tree", "-r", "--no-commit-id", "--name-only", after).splitlines())
+            self.assertTrue(changed and changed <= set(T32_MANIFEST_NAMES),
+                            "that one commit is P7b's version commit and touches only the manifests: %s" % sorted(changed))
+
+
+@T32_WINDOWS_ONLY
+class TestT32PlantedGitInTheVersionRaiseChild(T32Case):
+
+    def prepared(self, subdir):
+        st = self.t32_world(subdir, counts=True, move_master=False, real_push=False)
+        evidence, created = self.t32_plant(st.worktree, subdir)
+        t32_exclude(st.kit.main, created)
+        return st, evidence
+
+    def test_R12_C13_1_the_version_raise_child_never_runs_a_git_planted_in_the_landing_worktree_root(self):
+        st, evidence = self.prepared("r1")
+        before = t32_git(st.worktree, "rev-parse", "HEAD")
+        lc = self.mod()
+        extra = {name: t32_abs_git() for name, p in list(inspect.signature(lc._p7b_version_raise).parameters.items())[3:]
+                 if p.default is p.empty and "git" in name}
+        with mock.patch.dict(os.environ, t32_isolated_env(st.kit.tmp)):
+            os.environ.pop(T32_VAR, None)
+            failure = lc._p7b_version_raise(st.worktree, "master", True, **extra)
+        self.assertEqual(t32_evidence(evidence), [],
+                         "P7b's child runs with the landing worktree as its working folder, so a bare `git` would run "
+                         "the planted program there; it must name the real git by its absolute path. P7b said: %s" % failure)
+        self.assertIsNone(failure, "the raise and the --exact check both pass in a fixture whose counts are true")
+        self.assertEqual(t32_git(st.worktree, "rev-parse", "HEAD^"), before, "one version commit on top of the head")
+        self.assertEqual(t32_versions(st.worktree), ["0.12.0"] * 5, "the manifests carry the raise")
+        self.assertTrue(t32_git(st.worktree, "log", "-1", "--format=%s").startswith("chore: raise the plugin version to 0.12.0"),
+                        "and the commit is the version commit, made by the real git")
+
+    def test_R12_C13_1C_control_started_directly_with_no_git_program_the_script_does_run_the_planted_git(self):
+        st, evidence = self.prepared("r1c")
+        with mock.patch.dict(os.environ, t32_isolated_env(st.kit.tmp)):
+            os.environ.pop(T32_VAR, None)
+            proc = _REAL_SUBPROCESS_RUN(
+                [sys.executable, "-B", str(SCRIPTS_DIR / "check_version_bump.py"), "--raise", "--manifest-counts",
+                 "--default-branch", "master"], cwd=str(st.worktree), capture_output=True, text=True)
+        self.assertTrue(t32_evidence(evidence),
+                        "control: the script, started as the landing starts it at the base (its bare `git`, the "
+                        "worktree as working folder, the variable removed), reaches the planted program. exit %s: %s"
+                        % (proc.returncode, (proc.stdout + proc.stderr).strip()))
+
+
+@T32_WINDOWS_ONLY
+class TestT32PlantedGitAgainstTheWholeLanding(T32Case):
+
+    def test_R12_C13_2_a_git_planted_in_the_worktree_root_and_the_process_folder_never_runs(self):
+        st = self.t32_world("r2", counts=True, run_cwd_worktree=True)
+        evidence, created = self.t32_plant(st.worktree, "r2")
+        t32_exclude(st.kit.main, created)
+        before = self.t32_remote_head(st)
+        report, error = self.t32_land(st, nodefault=None)
+        self.assertEqual(t32_evidence(evidence), [],
+                         "no git process of the landing may be started by a bare name, whatever the current folder "
+                         "holds. %s" % self.t32_what(report, error))
+        self.assertIsNone(error, "the landing ran to its end: %s" % error)
+        self.assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(st, before)
+
+    def test_R12_C13_4_a_path_whose_only_git_is_inside_the_project_halts_unverifiable_before_any_git_process(self):
+        st = self.t32_world("r4")
+        folder = st.kit.main / "node_modules" / ".bin"
+        evidence, _created = self.t32_plant(folder, "r4")
+        before_remote, before_head = self.t32_remote_head(st), t32_git(st.worktree, "rev-parse", "HEAD")
+        path = os.pathsep.join([str(folder), os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32")])
+        report, error = self.t32_land(st, nodefault="1", path=path)
+        self.assertEqual(t32_evidence(evidence), [],
+                         "the only git on PATH is inside the project, so the landing must not run it. %s"
+                         % self.t32_what(report, error))
+        self.assertIsNone(error, "the landing ended with a report: %s" % error)
+        self.assertEqual(report["outcome"], "unverifiable",
+                         "no git program outside the project: the landing cannot verify and halts. %s %s"
+                         % (report["outcome"], report.get("detail")))
+        self.assertEqual(t32_git(st.worktree, "rev-parse", "HEAD"), before_head, "no commit was made")
+        self.assertEqual(self.t32_remote_head(st), before_remote, "and the remote is unchanged")
+        self.assertEqual(st.count("git_push"), 0, "nothing was pushed")
+
+    def test_R12_C13_6_the_landing_hands_its_child_the_no_default_folder_variable_set_to_1(self):
+        marker = self.marker("p7b-env")
+        text = t32_standin(marker=marker, commit=False)
+        st = self.t32_world("r6", real_push=False, standin=text)
+        report, error = self.t32_land(st, nodefault=None, standin_dir=self.t32_standin_dir("r6", text))
+        lines = marker.read_text(encoding="utf-8").split() if marker.exists() else []
+        self.assertTrue(lines, "control: the stand-in P7b ran (it is what _p7b_version_raise starts). %s"
+                        % self.t32_what(report, error))
+        self.assertEqual(set(lines), {"%s=1" % T32_VAR},
+                         "the environment the test built has the variable removed; the landing must set it for itself "
+                         "and so for the child it starts")
+
+    def test_R12_C13_7_the_absolute_path_alone_keeps_a_project_folder_first_on_path_from_running(self):
+        st = self.t32_world("r7", counts=True)
+        folder = st.kit.main / "node_modules" / ".bin"
+        evidence, _created = self.t32_plant(folder, "r7")
+        before = self.t32_remote_head(st)
+        path = os.pathsep.join([str(folder), os.environ["PATH"]])
+        report, error = self.t32_land(st, nodefault="1", path=path)
+        self.assertEqual(t32_evidence(evidence), [],
+                         "with the variable set the current folder is out of the search, but the first PATH entry, "
+                         "inside the project, is not: a bare `git` would run it. %s" % self.t32_what(report, error))
+        self.assertIsNone(error, "the landing ran to its end: %s" % error)
+        self.assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(st, before)
+
+    def test_R12_C13_7C_control_in_that_environment_a_bare_git_does_run_the_planted_program(self):
+        st = self.t32_world("r7c", counts=True)
+        folder = st.kit.main / "node_modules" / ".bin"
+        evidence, _created = self.t32_plant(folder, "r7c")
+        with mock.patch.dict(os.environ, {T32_VAR: "1", "PATH": os.pathsep.join([str(folder), os.environ["PATH"]])}):
+            proc = _REAL_SUBPROCESS_RUN(["git", "rev-parse", "HEAD"], cwd=str(st.kit.tmp), capture_output=True, text=True)
+        self.assertTrue(t32_evidence(evidence),
+                        "control: with the variable set and the project folder first on PATH a bare `git` reaches the "
+                        "planted program, so R12-C13-7 can fail. exit %s" % proc.returncode)
+
+
+def t32_git_literal_starts(source):
+    """``[(function, line)]`` of every list or tuple literal whose first element is the string ``git``: the argv
+    of a process start whose program is the bare name (``subprocess.run([...])``, ``_run([...])``, ``Popen``,
+    a local wrapper, or an argv built first and passed after)."""
+    tree = ast.parse(source)
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)) and node.elts and isinstance(node.elts[0], ast.Constant) \
+                and isinstance(node.elts[0].value, str) and node.elts[0].value.lower() in ("git", "git.exe"):
+            owner = node
+            while owner in parents and not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = parents[owner]
+            found.append((owner.name if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)) else "<module>",
+                          node.lineno))
+    return found
+
+
+class TestT32NoProcessStartNamesGitByItsBareName(unittest.TestCase):
+
+    def test_R12_C13_3_the_landing_script_starts_no_git_by_a_bare_name_and_the_version_script_only_in_one_helper(self):
+        landing = t32_git_literal_starts((SCRIPTS_DIR / "land_contract.py").read_text(encoding="utf-8"))
+        self.assertEqual(landing, [],
+                         "land_contract.py: every process start that runs git takes its program from resolve_git's "
+                         "result, never the bare name; (function, line) of each bare one: %s" % landing)
+        bump_source = (SCRIPTS_DIR / "check_version_bump.py").read_text(encoding="utf-8")
+        helpers = sorted({name for name, _line in t32_git_literal_starts(bump_source)})
+        self.assertLessEqual(len(helpers), 1,
+                             "check_version_bump.py: at most one helper keeps the bare name, used only when "
+                             "--git-program is absent; found it in: %s" % helpers)
+        for tree_node in ast.walk(ast.parse(bump_source)):
+            if isinstance(tree_node, ast.FunctionDef) and tree_node.name in helpers:
+                self.assertIn("git_program", ast.get_source_segment(bump_source, tree_node) or "",
+                              "the one helper that keeps the bare name reads the --git-program value")
+
+    def test_R12_C13_3C_control_the_scan_finds_a_bare_name_and_passes_an_absolute_program(self):
+        self.assertEqual(t32_git_literal_starts("import subprocess\nsubprocess.run(['git', 'x'])\n"), [("<module>", 2)])
+        self.assertEqual(t32_git_literal_starts("def f():\n    return _run((\"git\", \"a\"))\n"), [("f", 2)])
+        self.assertEqual(t32_git_literal_starts("subprocess.run([GIT, 'x'])\n_run(['/usr/bin/git', 'y'])\n"), [],
+                         "a program held in a variable or named by a path is not a bare name")
+
+
+class TestT32GitProgramOption(unittest.TestCase):
+
+    def setUp(self):
+        t32_abs_git()
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+        self.origin, self.repo = tmp / "origin.git", tmp / "main"
+        t32_git(tmp, "init", "--bare", "--initial-branch=master", str(self.origin))
+        t32_git(tmp, "clone", str(self.origin), str(self.repo))
+        Kit._configure(self.repo)
+        write_files(self.repo, t32_manifests("0.11.3"))
+        write_files(self.repo, t32_tree_files())
+        t32_git(self.repo, "add", "-A")
+        t32_git(self.repo, "commit", "-q", "-m", "initial")
+        Kit._push(self.repo, "master")
+        t32_git(self.repo, "fetch", "origin")
+        self.head = t32_git(self.repo, "rev-parse", "HEAD")
+
+    def raise_with(self, program):
+        proc = _REAL_SUBPROCESS_RUN(
+            [sys.executable, "-B", str(SCRIPTS_DIR / "check_version_bump.py"), "--raise", "--default-branch", "master",
+             "--git-program", program], cwd=str(self.repo), capture_output=True, text=True)
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+    def assertRefused(self, program, why):
+        code, out = self.raise_with(program)
+        self.assertNotEqual(code, 0, "%s is refused (exit %s): %s" % (why, code, out))
+        self.assertNotIn("unrecognized arguments", out, "the option exists and its value is checked, not parsed away")
+        self.assertIn(program, out, "the message names the value it refused")
+        self.assertEqual(t32_versions(self.repo), ["0.11.3"] * 5, "no file was written")
+        self.assertEqual(t32_git(self.repo, "status", "--porcelain"), "", "nothing is left in the tree")
+        self.assertEqual(t32_git(self.repo, "rev-parse", "HEAD"), self.head, "and no commit was made")
+
+    def test_R12_C13_5_an_absolute_git_program_raises_and_commits(self):
+        code, out = self.raise_with(t32_abs_git())
+        self.assertEqual(code, 0, "--raise --git-program <absolute path of the real git> succeeds: %s" % out)
+        self.assertEqual(t32_versions(self.repo), ["0.12.0"] * 5, "the manifests carry the raise")
+        self.assertEqual(t32_git(self.repo, "rev-parse", "HEAD^"), self.head, "one version commit on top")
+
+    def test_R12_C13_5_a_relative_git_program_is_refused(self):
+        self.assertRefused("relative-folder/git.exe", "a relative path")
+
+    def test_R12_C13_5_an_absent_git_program_is_refused(self):
+        self.assertRefused(str(Path(self._tmp.name) / "no-such-folder" / "git.exe"), "a file that does not exist")
+
+
+class TestT32VersionRaiseStaysInsideTheManifests(T32Case):
+
+    def land(self, name, **standin_options):
+        text = t32_standin(**standin_options)
+        st = self.t32_world(name, rules=True, standin=text)
+        before = self.t32_remote_head(st)
+        report, error = self.t32_land(st, nodefault=None, standin_dir=self.t32_standin_dir(name, text))
+        return st, before, report, error
+
+    def test_R12_C14_1_a_version_commit_that_also_edits_the_rules_file_halts_before_p8_and_the_remote_stays(self):
+        st, before, report, error = self.land("c14-1", rules=PN_RULES)
+        self.assertIsNone(error, "the landing ended with a report: %s" % error)
+        self.assertEqual(report["outcome"], "version-raise-outside-manifests",
+                         "P7b's commit touched a file that is not one of the four manifests: %s %s"
+                         % (report["outcome"], report.get("detail")))
+        self.assertEqual(self.t32_remote_head(st), before, "the remote is unchanged")
+        self.assertEqual(st.count("git_push"), 0, "no push after the halt")
+
+    def test_R12_C14_1C_control_a_version_commit_of_only_the_four_manifests_lands(self):
+        st, before, report, error = self.land("c14-1c")
+        self.assertIsNone(error, "the landing ended with a report: %s" % error)
+        self.assertEqual(report["outcome"], "landed",
+                         "control: the same stand-in without the rules edit lands: %s %s" % (report["outcome"], report.get("detail")))
+        self.assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(st, before)
+
+    def test_R12_C14_2_a_head_that_does_not_descend_from_the_head_read_before_p7b_halts_and_the_remote_stays(self):
+        st, before, report, error = self.land("c14-2", orphan=True)
+        self.assertIsNone(error, "the landing ended with a report: %s" % error)
+        self.assertEqual(report["outcome"], "version-raise-outside-manifests",
+                         "P7b left HEAD on a commit that is not a descendant of the head it started from: %s %s"
+                         % (report["outcome"], report.get("detail")))
+        self.assertEqual(self.t32_remote_head(st), before, "the remote is unchanged")
+        self.assertEqual(st.count("git_push"), 0, "no push after the halt")
