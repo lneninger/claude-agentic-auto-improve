@@ -38,8 +38,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 
 HOOKS_SRC = Path(__file__).resolve().parents[1]
@@ -131,6 +133,87 @@ def _rmtree(path: Path) -> None:
             pass
     if path.exists():
         raise AssertionError("cleanup failed: could not remove " + str(path))
+
+
+class PipeServer:
+    """A listening Windows named pipe that accepts one client and never writes (W4 and I1 rows).
+
+    A reader that opens the pipe and reads from it blocks for good, so a row that opens it in a child
+    process runs under a short timeout and fails instead of hanging the suite."""
+
+    #: The pipe keeps a listening instance ready for every client (up to 255), because a client open can
+    #: take more than one connection and a pipe with no free instance answers "busy", which is not a hang.
+    MAX_INSTANCES = 255
+
+    def __init__(self) -> None:
+        import ctypes  # only the Windows rows need it
+        from ctypes import wintypes
+
+        self._kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        self._kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+        self._kernel.CreateNamedPipeW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+            wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+        self._kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        self._kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._invalid = wintypes.HANDLE(-1).value
+        self.leaf = "t11-" + uuid.uuid4().hex
+        self.name = "\\\\.\\pipe\\" + self.leaf
+        self._stop = threading.Event()
+        self._handles: list = []
+        first = self._new_instance()
+        if first is None:
+            raise OSError("could not create the named pipe %s" % self.name)
+        threading.Thread(target=self._serve, args=(first,), daemon=True).start()
+
+    def _new_instance(self):
+        handle = self._kernel.CreateNamedPipeW(self.name, 3, 0, self.MAX_INSTANCES, 4096, 4096, 0, None)
+        if handle in (None, self._invalid):
+            return None
+        self._handles.append(handle)
+        return handle
+
+    def _serve(self, handle) -> None:
+        while not self._stop.is_set():
+            self._pending = handle
+            self._kernel.ConnectNamedPipe(handle, None)  # accept a client and never write to it
+            self._pending = None
+            if self._stop.is_set():
+                return
+            handle = self._new_instance()
+            if handle is None:
+                return
+
+    _pending = None
+
+    def close(self) -> None:
+        """Close the connected instances. The instance still waiting in ``ConnectNamedPipe`` is left to
+        the process end: closing a handle while another thread waits on it synchronously blocks."""
+        self._stop.set()
+        for handle in list(self._handles):
+            if handle != self._pending:
+                self._kernel.CloseHandle(handle)
+        self._handles.clear()
+
+
+#: The two device-namespace spellings of a pipe path that a symbolic link can point at.
+PIPE_SPELLINGS = {"dot": "\\\\.\\", "question-mark": "\\\\?\\"}
+SKIP_NO_SYMLINK = "symbolic link creation not permitted on this host"
+SKIP_POSIX_PIPES = "Windows only: the POSIX named-pipe rows cover it"
+
+
+def make_pipe_link(case: unittest.TestCase, link: Path, spelling: str) -> None:
+    """Start a pipe server (stopped when the row ends) and make ``link`` a symbolic link to it."""
+    server = PipeServer()
+    case.addCleanup(server.close)
+    try:
+        os.symlink(PIPE_SPELLINGS[spelling] + "pipe\\" + server.leaf, link)
+    except NotImplementedError:
+        case.skipTest(SKIP_NO_SYMLINK)
+    except OSError as exc:
+        if isinstance(exc, PermissionError) or getattr(exc, "winerror", 0) == 1314:
+            case.skipTest(SKIP_NO_SYMLINK)
+        raise
 
 
 def base_env(home: Path) -> dict:
@@ -781,6 +864,52 @@ class ReaderFileKindTests(SwitchTestCase):
         self.assertEqual(self.value("concept_gate", p, env_project=p, timeout=self.SHORT_TIMEOUT), "off",
                          "a link to a local regular file still counts")
         self.assertEqual(self.log_lines(p), [])
+
+    # -- W4 (Windows): a symbolic link to a LISTENING named pipe. Each row runs the helper as a separate
+    #    process under a short timeout, so a reader that opens and reads the pipe fails the row.
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_to_a_listening_pipe_in_the_dot_spelling_gives_every_default_and_one_report(self):
+        p = self.project()
+        make_pipe_link(self, p / ".claude" / "switches.local.json", "dot")
+        self._assert_unreadable_once(p, "a link to a pipe, backslash-backslash-dot spelling")
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_to_a_listening_pipe_in_the_question_mark_spelling_gives_every_default_and_one_report(self):
+        p = self.project()
+        make_pipe_link(self, p / ".claude" / "switches.local.json", "question-mark")
+        self._assert_unreadable_once(p, "a link to a pipe, backslash-backslash-question-mark spelling")
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_to_a_listening_pipe_at_the_committed_file_path_gives_every_default(self):
+        p = self.project()
+        make_pipe_link(self, p / ".claude" / "switches.json", "dot")
+        self.local(p, {"concept_gate": "off"})
+        vals = self.values(p, env_project=p, timeout=self.SHORT_TIMEOUT)
+        self.assert_all_default(vals, "a link to a pipe at the committed file path")
+        self.assertEqual(len(self.log_lines(p)), 1)
+
+    # -- Read regular file (the Commands row): the public name, the private name kept as its alias -----
+    def _python(self, code: str, *args: str) -> str:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(self.hooks_dir), *args],
+                              capture_output=True, env=base_env(self.home), timeout=PROCESS_TIMEOUT)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace")[-300:])
+        return proc.stdout.decode("utf-8", "replace")
+
+    def test_the_reader_is_public_and_the_private_name_is_an_alias_of_it(self):
+        out = self._python("import sys; sys.path.insert(0, sys.argv[1]); import _switches as s; "
+                           "print(callable(getattr(s, 'read_regular_file_bytes', None)), "
+                           "getattr(s, '_read_regular_file_bytes', None) is getattr(s, 'read_regular_file_bytes', 0))")
+        self.assertEqual(out.split(), ["True", "True"])
+
+    def test_the_public_reader_returns_a_regular_file_and_refuses_a_folder(self):
+        p = self.project()
+        file = p / "regular.json"
+        file.write_bytes(b"abc")
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import _switches as s; from pathlib import Path\n"
+                "print(s.read_regular_file_bytes(Path(sys.argv[2])).decode())\n"
+                "try:\n    s.read_regular_file_bytes(Path(sys.argv[3]))\n    print('read')\n"
+                "except Exception:\n    print('raised')\n")
+        self.assertEqual(self._python(code, str(file), str(p)).split(), ["abc", "raised"])
 
     @unittest.skipIf(sys.platform == "win32", "POSIX only")
     def test_control_a_link_to_a_regular_file_is_read(self):
