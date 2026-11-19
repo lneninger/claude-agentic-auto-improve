@@ -15,9 +15,9 @@ north_stars: inherited from .claude/work-items/2026-11-16-file-based-switches.md
 parent_issue: 419
 base: feature/file-based-switches
 contract: .claude/concepts/2026-11-16-file-based-switches.md
-pr: none
-issue_link: unknown
-status: implementing
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/457
+issue_link: deferred
+status: shipped
 created: 2026-11-19
 ---
 
