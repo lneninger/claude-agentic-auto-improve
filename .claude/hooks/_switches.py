@@ -198,10 +198,11 @@ _MAX_LINK_HOPS = 8
 
 
 def _network_link_reason(path: Path) -> str:
-    """Windows only (no ``O_NONBLOCK``, no named pipe at a file path): when ``path`` is a link, the reason
-    its target (or a later link in the chain) is on a network drive or a ``\\\\server\\share`` path;
-    ``""`` otherwise. Judged from the link text and the LOCAL drive table only: nothing here touches the
-    network, and a target that is judged remote is never opened."""
+    """Windows only: when ``path`` is a link, the reason its target (or a later link in the chain) is on a
+    network drive, is a ``\\\\server\\share`` path or is in the device namespace (``\\\\.\\...``, or
+    ``\\\\?\\...`` not followed by a drive letter: a named pipe, a device); ``""`` otherwise. Judged from
+    the link text and the LOCAL drive table only: nothing here touches the network, and a target that is
+    judged remote or a device is never opened. (A named pipe CAN sit at the end of a link on Windows.)"""
     if os.name != "nt":
         return ""
     current = os.fspath(path)
@@ -212,13 +213,17 @@ def _network_link_reason(path: Path) -> str:
             target = os.readlink(current)
         except OSError as exc:
             return "the link at %s could not be read (%s)" % (current, type(exc).__name__)
-        text = target
+        text = target.replace("/", "\\")  # a forward-slash spelling is the same path
         upper = text.upper()
-        if upper.startswith(("\\\\?\\UNC\\", "\\\\.\\UNC\\")):
+        if upper.startswith(("\\\\?\\UNC\\", "\\\\.\\UNC\\", "\\??\\UNC\\")):
             return "the link points to a network path: %s" % target
-        if text.startswith(("\\\\?\\", "\\\\.\\")):
-            text = text[4:]
-        text = text.replace("/", "\\")
+        if text.startswith("\\\\."):
+            return "the link points into the device namespace: %s" % target
+        if text.startswith(("\\\\?\\", "\\??\\")):
+            rest = text[4:]
+            if not (len(rest) >= 2 and rest[0].isalpha() and rest[1] == ":"):
+                return "the link points into the device namespace: %s" % target
+            text = rest
         if text.startswith("\\\\"):
             return "the link points to a network path: %s" % target
         absolute = os.path.join(os.path.dirname(current), text)
@@ -237,35 +242,41 @@ def _network_link_reason(path: Path) -> str:
     return "the link chain is longer than %d links" % _MAX_LINK_HOPS
 
 
-def _read_regular_file_bytes(path: Path) -> bytes:
-    """Read up to ``MAX_SWITCH_FILE_BYTES + 1`` bytes of a REGULAR file, or raise.
+def read_regular_file_bytes(path: Path) -> bytes:
+    """Read up to ``MAX_SWITCH_FILE_BYTES + 1`` bytes of a REGULAR file, or raise (Commands: "Read regular
+    file"). The database guards read their rules file through this too, each mapping a raise to its own
+    strict default.
 
-    Where ``O_NONBLOCK`` exists (POSIX) the file is opened read-only and non-blocking, so a named pipe
-    cannot hold the hook; its kind is checked on the open descriptor (``fstat``), and anything but a
-    regular file is closed unread. On Windows a link to a network path is refused before any open."""
+    On every platform: a link to a network path or into the device namespace is refused BEFORE any open
+    (Windows; nothing is opened, nothing touches the network); the file is then opened read-only (binary,
+    and non-blocking where ``O_NONBLOCK`` exists), its kind is checked on the open descriptor
+    (``fstat``), and anything but a regular file is closed unread. So a named pipe at the path, or at the
+    end of a link, can never hold the hook."""
     limit = MAX_SWITCH_FILE_BYTES + 1
-    non_block = getattr(os, "O_NONBLOCK", 0)
-    if non_block:
-        fd = os.open(path, os.O_RDONLY | non_block | getattr(os, "O_CLOEXEC", 0))
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise _NotReadableKind("not a regular file (a pipe, a device or a socket is at the file path)")
-            chunks: list[bytes] = []
-            total = 0
-            while total < limit:
-                chunk = os.read(fd, min(1 << 16, limit - total))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-            return b"".join(chunks)
-        finally:
-            os.close(fd)
     reason = _network_link_reason(path)
     if reason:
         raise _NotReadableKind(reason)
-    with open(path, "rb") as handle:
-        return handle.read(limit)
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _NotReadableKind("not a regular file (a pipe, a device or a socket is at the file path)")
+        chunks: list[bytes] = []
+        total = 0
+        while total < limit:
+            chunk = os.read(fd, min(1 << 16, limit - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+#: The private name, kept for the helper's own callers.
+_read_regular_file_bytes = read_regular_file_bytes
 
 
 def _read_file(path: Path, label: str) -> _FileRead:
