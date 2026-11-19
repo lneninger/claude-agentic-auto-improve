@@ -16,7 +16,7 @@ parent_issue: 419
 base: feature/file-based-switches
 contract: .claude/concepts/2026-11-16-file-based-switches.md
 pr: none
-issue_link: unknown
+issue_link: deferred
 status: implementing
 created: 2026-11-18
 ---
