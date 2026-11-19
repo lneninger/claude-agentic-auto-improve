@@ -4,6 +4,7 @@
 **Date:** 2026-11-16
 **Requested by:** user
 **Status:** approved
+**Revision 2:** 2026-11-19, security-review remedy round 2 (amendment 2). The security re-review block (`t10`) read `blocked`: finding B1 was not cleared, because the human-only script is not seen when quoted text comes before it in the same call, and the same cause lets that script run with no arm at all (P1, older than this contract). This revision adds the second fixes block (11) and the third security review (12), re-links the documents and final review blocks to block 12, and amends the No-prompt classes rule, the Broken-file rule, the Guard rules file entry, Uncertain Assumptions, Failure Modes and the residual risk. Blocks 1 to 10 keep their ordinals, headings and ids, and block 10's own text is unchanged. Step 6 of the second live trial was met (with the session start time inferred, not recorded; see Uncertain Assumptions), so the override is **not** withdrawn. Status is `draft` until the user re-approves. Second pass, same day: the user's answers (destructive guard alone decides in block 11's rows; I1 in block 11; L1 accepted; no third live trial) and the critic's third-round blocker and seven warnings are applied. Preconditions for the main session before the first dispatch: the t10 report and its Gate Output are merged into the parent branch (today they sit on the t10 task branch only); sub-issues for blocks 11 and 12 are opened; the t6 and t7 briefs and sub-issues 425 and 426 are refreshed with the new Depends on lines and block text.
 **Revision:** 2026-11-18, security-review remedy round 1. The security review block (`t4`, pull request 440) read `blocked`. This revision adds the fixes block, the second live trial block and the security re-review block (8, 9 and 10), re-links the documents and final review blocks to the re-review, and amends the rules and the residual risk the review found wrong. Blocks 1 to 7 keep their ordinals, headings and ids. Status is `draft` until the critic runs and the user re-approves. Second pass, same day: the user's answers ("Accept all") and the critic's round-two warnings are applied (the W2 rule narrowed, the W4 open made non-blocking, a fresh session in the second trial's step 6, the Gate Output files named in blocks 9 and 10).
 **Work Item Brief:** .claude/work-items/2026-11-16-file-based-switches.md
 **Parent issue:** #419 (https://github.com/lneninger/claude-agentic-auto-improve/issues/419), opened on 2026-11-16 and recorded in the brief's `id:`.
@@ -13,7 +14,7 @@
 
 **Short forms used below.** JSON (JavaScript Object Notation) is the text format of the switch files. SHA-256 is a fixed-length fingerprint of a file's bytes. POSIX shells are the shells of macOS and Linux. Standard output and standard error are a hook's normal and error output streams. A byte order mark (BOM) is an invisible marker some editors put at the start of a file. UTF-8 and UTF-16 are text encodings. SDK means software development kit. The *payload* is the JSON input Claude Code sends to a hook. *Fail-soft* means a failed import leaves the defaults in force instead of stopping the hook. An *atomic rename* is a rename the operating system does in one step, so only one process can win it.
 
-**Delivery shape.** This contract has ten mergeable blocks, so it is delivered through a parent branch (`feature/file-based-switches`, the brief's `branch:`). It needs the parent issue named above, one sub-issue per block (three new ones for blocks 8 to 10) and a landing pull request. No block raises the plugin version; the landing raises it once. The blocks are named in prose by their headings: the RED tests block, the helper block, the live trial block, the security review block, the ordinary switches block, the documents block, the final review block, the fixes block, the second live trial block and the re-review block. The graph: 1 → 2 → {3, 5}; {2, 3} → 4 (delivered, `blocked`); 2 → 8 (fixing 4's findings; 8 cannot name 4, because the loop never releases a block whose dependency reads `blocked`); 2 → 9; {8, 9} → 10; {5, 10} → 6; {5, 6, 10} → 7.
+**Delivery shape.** This contract has twelve mergeable blocks, so it is delivered through a parent branch (`feature/file-based-switches`, the brief's `branch:`). It needs the parent issue named above, one sub-issue per block (three new ones for blocks 8 to 10, two more for blocks 11 and 12) and a landing pull request. No block raises the plugin version; the landing raises it once. The blocks are named in prose by their headings: the RED tests block, the helper block, the live trial block, the security review block, the ordinary switches block, the documents block, the final review block, the fixes block, the second live trial block, the re-review block, the second fixes block and the third security review. The graph: 1 → 2 → {3, 5}; {2, 3} → 4 (delivered, `blocked`); 2 → 8 (fixing 4's findings; 8 cannot name 4, because the loop never releases a block whose dependency reads `blocked`); 2 → 9; {8, 9} → 10 (delivered, `blocked`); 8 → 11 (fixing 10's findings; 11 cannot name 10, for the same reason); 11 → 12; {5, 12} → 6; {5, 6, 12} → 7. Before amendment 2 the last two edges read {5, 10} → 6 and {5, 6, 10} → 7.
 
 ---
 
@@ -89,7 +90,7 @@ Text that names these variables without reading them: `concept-gate.py:27-28,673
 
 **Switch rules.**
 - **No-file rule.** A missing file, or a file that is empty or holds only whitespace, means "no settings". Every key keeps its default, and every guard stays enabled.
-- **Broken-file rule.** A file that cannot be read (a permission error, a folder at that path, anything that is not a regular file once links are followed, such as a named pipe, a socket or a device, bytes that decode in no accepted encoding) or that is not a JSON object makes the helper ignore **every** switch file. Every key is then at its default. A broken personal file can therefore never leave a committed `off` in force, nor turn anything off itself. No read may wait. Where the platform offers a non-blocking open (POSIX), the file is opened non-blocking and its kind is checked on the open file itself, so a named pipe neither blocks nor can be swapped in between a check and the open; anything but a regular file is closed unread and counts as unreadable. Windows has no named pipes at a file path, but opening a link whose target is on a disconnected network drive can stall until the hook times out, and a timed-out hook is an allow (the 2026-11-06 drive-letter lesson). So on Windows a switch file that is a link is judged first by its target's drive, from the local drive table with no network access: a network drive or a `\\server\share` target counts as unreadable and is never opened. A project folder that itself sits on a network drive is out of scope.
+- **Broken-file rule.** A file that cannot be read (a permission error, a folder at that path, anything that is not a regular file once links are followed, such as a named pipe, a socket or a device, bytes that decode in no accepted encoding) or that is not a JSON object makes the helper ignore **every** switch file. Every key is then at its default. A broken personal file can therefore never leave a committed `off` in force, nor turn anything off itself. No read may wait. On every platform the file is opened read-only (non-blocking where the platform offers it, POSIX) and its kind is checked on the open file itself (`fstat`), so a named pipe neither blocks nor can be swapped in between a check and the open; anything but a regular file is closed unread and counts as unreadable. ~~Windows has no named pipes at a file path~~ *(reversed by amendment 2, re-review finding W4: a symbolic link at the switch-file path can point at a Windows named pipe, `\\.\pipe\<name>`, and reading through it hung the helper; opening it returns at once and `fstat` shows it is not a regular file, so the open-then-check now runs on Windows too)*. Opening a link whose target is on a disconnected network drive can also stall until the hook times out, and a timed-out hook is an allow (the 2026-11-06 drive-letter lesson). So on Windows a switch file that is a link is judged first by its target, from the local drive table with no network access: a network drive, a `\\server\share` target, or a device-namespace target (`\\.\…`, or `\\?\…` not followed by a drive letter) counts as unreadable and is never opened. A project folder that itself sits on a network drive is out of scope.
 - **Encoding rule.** The helper reads bytes. It drops a leading UTF-8 byte order mark, decodes UTF-16 when the file starts with a UTF-16 byte order mark (what Windows PowerShell 5.1 writes with `>` or `Out-File`), and otherwise decodes UTF-8.
 - **Bad-entry rule.** An unknown key is ignored. A value outside its allowed set leaves that key at its default. The exception is `contract_index`, where an unknown value means `off`, as today. A `pinned_contract` in the Switch file is ignored as misplaced.
 - **Personal-wins rule.** The Local switch file wins, key by key, over the Switch file.
@@ -106,7 +107,7 @@ Text that names these variables without reading them: `concept-gate.py:27-28,673
 - **Fresh-arm rule.** The arm counts only when it is a regular file (not a link or a folder) modified in the last 15 minutes and not more than 60 seconds in the future. Otherwise the guard removes it and blocks, naming the reason. The claim sweep uses the same window: a claim older than 15 minutes, or dated more than 60 seconds ahead, is removed.
 - **Person-present rule.** The prompt is offered only when the payload's permission mode is one where Claude Code asks (`default`, `acceptEdits`, `plan`). For `bypassPermissions`, `dontAsk`, or a missing or unknown mode, the guard blocks. The block text then tells the person to run the command themselves, in their own terminal.
 - **Arm-write rule.** Both database guards refuse a tool call that would write the arm. For the edit tools (Write, Edit, MultiEdit, NotebookEdit) that is a target path whose last part starts with `database-override.`, in any case, judged after the path is normalised the way the operating system opens it: slashes folded, `.` and `..` parts resolved, and trailing dots and spaces dropped from each part. So `<arm>/.` and `<arm>/x/..` are refused. For the shell tools (Bash, PowerShell) it is either a write target found by the shared shell parser `_shell_write_targets.parse_redirect_targets` with that name, or that name in the command text **after** the guard's existing masking of inert quoted prose. For this rule only, a `git` segment with a real output redirection to a named file (`>` or `>>`, with or without a stream number, followed by a path) is not prose, so `git commit -m "x" > "<arm>"` is refused. A stream duplication such as `2>&1` and a plain pipe `|` do not count, so `git commit -m "<mentions the name>" 2>&1 | tail` stays allowed. The masking used for destructive-command detection is unchanged, and the shared parser is not changed. So a commit message, a pull request body or a search pattern that only mentions the name is allowed, while `New-Item`, `touch`, a redirection (also after `git commit`, `git tag` or `git notes`) or a quoted path argument is refused. The check runs before Guard deference and before every other rule, in every copy of each guard, because it reads no project rules.
-- **No-prompt classes rule.** Commands the destructive guard classes as `human-only`, and the internal-error path (`_fail_closed`), never offer the prompt. Both block. The class is decided from every target the tool call matched, not from the one reason chosen for the block text: when any matched target is `human-only`, the guard does not touch the arm and blocks, whatever other reason (a protected-database write, the EF argument-position check) the same call also raised. The block text then carries the human-only instruction.
+- **No-prompt classes rule.** Commands the destructive guard classes as `human-only`, and the internal-error path (`_fail_closed`), never offer the prompt. Both block. The class is decided from every target the tool call matched, not from the one reason chosen for the block text: when any matched target is `human-only`, the guard does not touch the arm and blocks, whatever other reason (a protected-database write, the EF argument-position check) the same call also raised. The block text then carries the human-only instruction. A human-only script is **invoked** (and so a `human-only` target) when the word that holds it, quoted or not, is the first word of a command segment, after any launcher word the guard already knows (`call`, `start`, `&`, `sh`, `cmd /c`, `-File` and the rest), wherever the segment stands in the call; segments are split on separators outside quotes (`;`, `&`, `|`, `&&`, `||`, `(`, a newline). Text inside the quoted argument of a known launcher (`bash -c "…"`, `cmd /c "…"`, `powershell -Command "…"` and the rest) is itself command text and is split the same way, so `bash -c "cd x; <script>"` is invoked. It is only **mentioned** when that word is an argument of a command that is not a launcher, such as text inside a commit message or an `echo`. The classifier may only move a form from mentioned to invoked, never the reverse: every form classed as invoked before amendment 2 stays invoked. Quoted text in an earlier segment never decides it (amendment 2, re-review findings B1 and P1: a closing quote before the script used to hide it, so the arm was claimed and, with no arm, the script was allowed).
 - **Variable-retired rule.** `CLAUDE_DESTRUCTIVE_DB_OK` is not read anywhere.
 - **Untouched rule.** A tool call that matches no destructive or write rule leaves the arm alone.
 - **Shared-claim rule.** When both database guards match one tool call, the first one renames the arm to the claim name carrying the tool call identifier (`tool_use_id`). The other guard accepts that claim for the same identifier, and both may ask. With no identifier in the payload, the second guard blocks.
@@ -136,6 +137,7 @@ Text that names these variables without reading them: `concept-gate.py:27-28,673
 | Read every switch | `_switches.effective_switches(project=None)` | optional project | none: problems are reported, never raised |
 | Claim database override | `_switches.claim_database_override(project, tool_call_id)` | project; tool call identifier | returns an Override outcome; never raises |
 | Name test | `_switches.names_override_file(path_or_text)` | path or masked command text | none |
+| Read regular file (amendment 2) | `_switches.read_regular_file_bytes(path)` | path | raises for anything not a regular file (a pipe, a device, a folder, a network or device-namespace link target); each caller maps that to its own fail direction: the switch helper to every default, the database guards' rules loaders to their strict default |
 
 ---
 
@@ -143,7 +145,7 @@ Text that names these variables without reading them: `concept-gate.py:27-28,673
 
 - **Two-layer Claude path resolution** (`MECHANISMS.md:46`) — consumed as-is. `project_dir()`, `state_dir()` and `main_checkout_root()` are call-time functions; the helper calls them on each read and never stores a path at import. The bridge `_claude_paths.py` is **not** extended: a script that needs the helper imports the bridge, which already appends the hooks folder to `sys.path`, then imports `_switches` fail-soft.
 - **Guard fallback mode** (`:64`) — extended. Each database guard binds `claim_database_override` and `names_override_file` with `getattr`. A missing binding means no override. Each guard keeps an inline copy of the name test for the Arm-write rule, with one fallback test row per copy. Other hooks bind `switch` the same way; a missing binding means the default.
-- **Guard rules file** (`:62`) — consumed as-is and not extended (see Alternatives). Its fail-closed rule for the database guard is unchanged.
+- **Guard rules file** (`:62`) — not extended as a switch home (see Alternatives); its reading is hardened by amendment 2. Its fail-closed rule for the database guards is unchanged. Amendment 2 (user answer 2026-11-19, Open Question "Rules-file pipe link": yes): both database guards read `db-destructive-guard.rules.json` through the same regular-file check as the switch helper (`read_regular_file_bytes`: the Windows link-target check first, then open, `fstat`, regular file only), bound from the helper with an inline fallback copy in each guard (Guard fallback mode; the read-only guard becomes a new user of it). A file that fails the check counts as unreadable, which is the existing fail-closed path. A regular file decodes exactly as today. ~~so no rules file that works now changes meaning~~ *(corrected, third critique round W6)*: one working form does change meaning: a rules file that is a link to a network drive or a `\\server\share` file loads today and now counts as unreadable, so every database is protected and the disposable exemption is withdrawn. That is accepted fail-closed behaviour (Failure Modes, I1); the way out is a regular file in the project folder.
 - **Guard deference** (`VOCABULARY.md:95`) — consumed as-is. The Arm-write rule runs before it; the arm is honoured only by a guard that does not defer.
 - **Main-checkout guard** (`:78`) — consumed as-is. It keeps "never add a variable, flag or file that switches it off". A test proves `concept_gate: off` leaves it enforcing.
 - **Session-start context delivery** (`:76`) — extended: its way out becomes the `working_agreements` key.
@@ -214,7 +216,7 @@ No — this contract adds no REST endpoint and no real-time event, so there is n
 
 ## Confidence
 
-Confidence: Medium. High on the inventory (every read found by search and opened). The live trial (t3) proved the prompt in `default` mode, the block in `bypassPermissions` and headless runs, and the `systemMessage` notice. Medium on the rest of the host behaviour: the allow-rule question and the `acceptEdits`, `plan` and `dontAsk` modes stay ASSUMED until the second live trial block runs.
+Confidence: Medium. High on the inventory (every read found by search and opened). The live trial (t3) proved the prompt in `default` mode, the block in `bypassPermissions` and headless runs, and the `systemMessage` notice. Medium on the rest of the host behaviour. The second live trial (t9, step 6) answered the allow-rule question for one rule in one settings layer. The `acceptEdits`, `plan` and `dontAsk` modes stay ASSUMED: t9 steps 7 to 9 were not run (amendment 2; Open Question "Third live trial").
 
 ## Alternatives Considered & Why Rejected
 
@@ -232,10 +234,10 @@ Confidence: Medium. High on the inventory (every read found by search and opened
 ## Uncertain Assumptions
 
 - `VERIFIED live via the t3 run sheet (pull request 438, verdict pass-with-findings)`: the payload carries `permission_mode`; in `default` mode the guard's `ask` shows a prompt and declining leaves no arm; `bypassPermissions` blocks; a headless run reports mode `auto` and blocks; `systemMessage` is shown to the person once per session when `concept_gate` is off.
-- `ASSUMED`: the payload carries `tool_use_id`, and a block beats an ask when both guards answer one call. Neither was observed live; both rest on the documentation quoted in the helper block's pull request 432 and on the unit rows. If wrong, the second guard blocks a call the first guard asked about, which fails closed.
+- `ASSUMED`: the payload carries `tool_use_id`, and a block beats an ask when both guards answer one call. Neither was observed live; both rest on the documentation quoted in the helper block's pull request 432 and on the unit rows. If wrong, the second guard blocks a call the first guard asked about, which fails closed. Amendment 2: "a block beats an ask" also carries the L1 acceptance. If an ask could win over the destructive guard's human-only block, the read-only guard's ask would make that call promptable (Failure Modes, L1).
 - `ASSUMED`: a prompt can also be answered by code the person configured: a headless run's permission-prompt tool, an SDK permission callback, or a `PermissionRequest` hook. The guard cannot tell. Verification path: none; stated as residual risk and in the README.
-- `ASSUMED`: a `permissions.allow` rule in `settings.json` or `settings.local.json` that matches the command does not turn a hook's `ask` into an allow. The helper block quoted only hook-to-hook precedence ("deny > defer > ask > allow"), and an agent can write those files. If wrong, an agent can approve its own armed command with no prompt, and the override is withdrawn (user answer 2026-11-18). Verification path: the second live trial block, step 6, run in a session started after the rule was written.
-- `ASSUMED`: in `acceptEdits` and `plan` mode the host shows the guard's `ask` as a prompt, and in `dontAsk` mode the guard's block holds. The first trial ran only `default`, `bypassPermissions` and headless `auto`. Verification path: the second live trial block, steps 7 to 9. A missing mode cannot be produced from a normal session; it stays covered by the unit suite only, and the run sheet says so.
+- `OBSERVED live, limited, not verified to block 9's own standard (t9 step 6, pass-with-findings; amendment 2)`: a `permissions.allow` rule that matches the command did not turn a hook's `ask` into an allow. The session's start time was never recorded; it was inferred from a session id that differed from the one before the save. Block 9's step 6 says the Observed line must show the session started after the save, "otherwise the step is void and is run again", so by the letter of that rule the step is void. The person who ran it and the re-review (t10) accepted the inference, and the user decided on 2026-11-19 against a further live trial, so the contract does not withdraw the override on this point; it names the gap as a residual (the residual-risk paragraph). Observed for one rule, `PowerShell(sqlcmd:*)`, in the project's `.claude/settings.local.json`, in `default` mode, on Claude Code 2.1.327, with the installed plugin disabled and the branch's hooks loaded through `--plugin-dir` (t9 item 1). Not proven: a `Bash(...)` rule, a user-level or managed settings rule, another host version. If a later host lets an allow rule win, an agent can approve its own armed command with no prompt, and the user's direction is to withdraw the override (user answer 2026-11-18). Before amendment 2 this bullet read `ASSUMED`, verification path "the second live trial block, step 6".
+- `ASSUMED`: in `acceptEdits` and `plan` mode the host shows the guard's `ask` as a prompt, and in `dontAsk` mode the guard's block holds. The first trial ran only `default`, `bypassPermissions` and headless `auto`. The verification path was the second live trial block, steps 7 to 9; the owner closed that trial after step 6 (2026-11-18), so they rest on the unit rows and the auditor's offline probes (t10 O2, O3, O5). The code fails closed in `dontAsk`, and the two prompt modes' designed outcome is a prompt. A missing mode cannot be produced from a normal session; it stays covered by the unit suite only.
 - `ASSUMED`: hook rows are read once, at session start, so a `PermissionRequest` hook an agent adds to `settings.json` acts only from the next session (`auto_improve_finish_install.py`, `NEW_SESSION_NOTE`).
 - `ASSUMED`: the cross-area scan was not run (the architect has no shell). `.claude/area-mapping.json` declares `"areas": {}`, so it can score nothing. The main session runs it before approval.
 - `VERIFIED via search, 2026-11-16`: the inventory above, including `CLAUDE_PLAN_QUESTION_ADVISOR` and two skill-only variables no code reads.
@@ -279,12 +281,26 @@ Confidence: Medium. High on the inventory (every read found by search and opened
 - **FM (the W2 fix drawn too wide):** treating every redirected or piped `git` segment as non-prose would refuse the common `git commit -m "…" 2>&1 | tail`, including this contract's own deliveries whose messages name the arm.
   - **Mitigation:** only a real output redirection to a named file counts; stream duplication and pipes do not. Control rows in the fixes block. A commit whose message names the arm AND redirects to some other file is still refused; that false refusal is accepted, and the way out is to drop the redirection.
 - **FM (security review W4):** a named pipe at a switch-file path hung every switch read on POSIX, so the hook timed out and the guard stopped enforcing with no notice.
-  - **Mitigation:** the amended Broken-file rule: a non-blocking open and a kind check on the open file on POSIX; on Windows, a link to a network target is judged from the drive table and never opened. The fixes block adds a POSIX-only row and a Windows-only row.
+  - **Mitigation:** the amended Broken-file rule: a non-blocking open and a kind check on the open file on POSIX; on Windows, a link to a network target is judged from the drive table and never opened. The fixes block adds a POSIX-only row and a Windows-only row. *Amendment 2: cleared on POSIX only (t10). See the next entry for Windows.*
+- **FM (re-review W4, Windows):** a symbolic link at `switches.local.json` to a Windows named pipe (`\\.\pipe\<name>`, or the `\\?\` spelling) hangs every switch read. `_network_link_reason` read the pipe target as a local relative path, and the kind check ran on POSIX only. Symbolic links need no elevation on the auditor's host. The concept gate and the architecture guard then time out with no Visible-off notice. The database guards do not read switch files, so the override is unaffected.
+  - **Mitigation:** the Broken-file rule as amended again: open, then `fstat`, regular file only, on every platform; a device-namespace link target is unreadable and never opened. Block 11 adds a Windows pipe-link row, skipped with a stated reason where a link cannot be created.
+- **FM (re-review B1, not cleared by block 8):** a human-only script after any quoted text in the same call (`<row delete on a protected database> ; <script>`, or the removal of a non-disposable database through `sqlcmd -Q`, then the script, in bash or PowerShell) still claims the arm and prompts. Root cause: `_in_command_position` strips from the closing quote of an earlier quoted span, so the script reads as "mentioned". Block 8's decision fix was right; its rows all put the script first, the one order that works, so the suite was green.
+  - **Mitigation:** the No-prompt classes rule's invoked-or-mentioned sentence; block 11 fixes the classifier, not the decision, and copies every failing probe of t4 and t10 in the reporter's exact clause order, in bash and PowerShell.
+- **FM (re-review P1, older than this contract, same root cause):** with **no arm**, the same shapes (`echo "start" ; <script>`, `cd "<p>" && <script>`, PowerShell `Write-Host 'x'; <script>`, `echo "a" && <restore script with its recover flag>`) are allowed with no prompt. Reproduced at `cd8eb51`, before this contract. It is the 2026-05-06 incident class: an agent runs the "never by an agent" class with nobody answering anything.
+  - **Mitigation:** the same classifier fix in block 11, with unarmed rows that expect a block. It gets its own change note in the documents block, because it is not caused by this contract.
+- **FM (re-review I1, older than this contract):** a link at `<project>/.claude/hooks/db-destructive-guard.rules.json` to a named pipe hangs the destructive guard at import (plain `open()`), so the hook times out before any rule runs. The read-only guard reads the same file the same way (`db-research-readonly-guard.py:207`). If the host treats a timed-out hook as not blocking, the destructive command runs with no prompt and no arm.
+  - **Mitigation (user answer 2026-11-19: include I1 in block 11):** block 11 reads the rules file in both guards through the regular-file check; a file that fails it takes the existing fail-closed path. Other hooks' rules files (the architecture guard and others) read with a plain `open()` are the same class and are out of this contract's scope; block 12 lists them as information.
+- **FM (the I1 fix, a new false block, accepted):** a rules file that is a link to a network drive or a `\\server\share` file loads today; after block 11 it counts as unreadable, so the destructive guard protects every database and the read-only guard withdraws the disposable exemption.
+  - **Disposition:** accepted fail-closed behaviour, because a link to a network target is exactly the hang route the drive-letter lesson names. The block text and the documents block's change note tell the person to keep the rules file as a regular file in the project folder. Block 11 has a row for it.
+- **FM (re-review L1, accepted as a design choice; user answer 2026-11-19: accept and record):** in `<script> && sqlcmd -d <db> -Q "<row delete>"`, armed, the read-only guard (which has no human-only class) claims the arm and asks, while the destructive guard blocks as human-only. The person's arm is used up by a call that cannot run. The same holds for the reported orders O13, O13e and H7: block 11's read-only guard rows pin that it asks and claims the arm there, and that it allows the shapes with no database statement.
+  - **Why accepted, not fixed:** the arm is one-shot and only ever yields a prompt, and fixing it means the read-only guard imports the destructive guard's human-only classifier, a new cross-guard dependency with its own fallback rows. It fails closed **only if** a hook block beats a hook ask when both guards answer one call, which is still ASSUMED (Uncertain Assumptions; the documentation quoted in pull request 432 gives "deny > defer > ask > allow", but no live trial observed it). If that assumption is wrong, the read-only guard's ask would make a human-only call promptable, the B1 class; block 12 states which way the evidence stands. No block text tells the person to re-arm; the destructive guard's human-only text tells them to run the command by hand. ~~The block text tells the person to re-arm.~~ *(removed, third critique round W5: no code or block writes that text)*
+- **FM (t9 steps 7 to 9 not run):** `acceptEdits`, `plan` and `dontAsk` were never run live.
+  - **Disposition (user answer 2026-11-19: no third live trial):** a named residual. Each fails closed in code except the two prompt modes, whose designed outcome is a prompt; the unit rows and the auditor's offline probes cover them. No third trial block is added.
 - **FM (security review N1):** an arm dated in the future stayed fresh for ever.
   - **Mitigation:** the amended Fresh-arm rule; the fixes block adds rows.
 - **Security review W5, N2 and N3, not fixed here (user answer 2026-11-18, Open Question "Prompt target for sqlcmd").** W5 (the prompt shows the target as "unresolved" for `sqlcmd -Q`, also the live trial's finding W1) is a follow-up, decided: naming that target needs a change to the guard's target binder, which is outside the review's fixes, and the host's own prompt shows the full command. N2 (the neutraliser keeps `"` and `;`) is accepted, decided: no command form the auditor tried delivered a quote-forged target, and it joins the W5 follow-up, which reworks the same reason text. N3 (the read-only guard fails open on an internal error) is accepted, decided: it predates this contract, and the destructive guard beside it fails closed and refuses the same arm writes (probe P9).
 
-**Residual risk of the database override, in one place.** An agent can still create the arm through a route no hook sees, or ask the person to approve. The arm is not tied to a command: whichever blocked command comes next uses it up, so the agent chooses which command a person's arm is spent on. A person who armed for one command can be shown another, and for the common `sqlcmd -Q` form the prompt reason names the target only as "unresolved", so the host's own display of the full command is the only place the person sees what will run. A prompt may be answered by code the person configured (a permission-prompt tool, an SDK callback, a `PermissionRequest` hook); then the override is only as careful as that code. Whether a `permissions.allow` rule, which an agent can write, can turn the guard's `ask` into an allow is not yet proven; the second live trial block tests it (required before the re-review, user answer 2026-11-18). If the allow rule wins, the re-review blocks and the override is withdrawn: every destructive command then blocks and the person runs it in their own terminal (user answer 2026-11-18; refusing writes to the settings files was rejected). The withdrawal needs a further amendment, which this decision directs. A person who approves without reading is the remaining hole. Sessions with no prompt get no override; the person runs the command in their own terminal.
+**Residual risk of the database override, in one place.** An agent can still create the arm through a route no hook sees, or ask the person to approve. The arm is not tied to a command: whichever blocked command comes next uses it up, so the agent chooses which command a person's arm is spent on. A person who armed for one command can be shown another, and for the common `sqlcmd -Q` form the prompt reason names the target only as "unresolved", so the host's own display of the full command is the only place the person sees what will run. A prompt may be answered by code the person configured (a permission-prompt tool, an SDK callback, a `PermissionRequest` hook); then the override is only as careful as that code. ~~Whether a `permissions.allow` rule, which an agent can write, can turn the guard's `ask` into an allow is not yet proven; the second live trial block tests it (required before the re-review, user answer 2026-11-18).~~ *(amendment 2: answered by t9 step 6)* A `permissions.allow` rule, which an agent can write, did not turn the guard's `ask` into an allow in the second live trial (t9 step 6). That proof is narrow: one rule (`PowerShell(sqlcmd:*)`), one settings layer (the project's `settings.local.json`), `default` mode, Claude Code 2.1.327, and the branch's guard tested with the installed plugin disabled (t9 item 1). A `Bash(...)` rule, user-level or managed settings, and later host versions are untested, and the trial session's start time was inferred, not recorded, which block 9's own rule calls a void step. If an allow rule ever wins, the override is withdrawn: every destructive command then blocks and the person runs it in their own terminal (user answer 2026-11-18; refusing writes to the settings files was rejected). The withdrawal needs a further amendment, which this decision directs. While an older installed copy of the plugin is also active, its guard knows no arm and blocks, so the person sees a block, not a prompt; that fails closed. Until block 11 merges: an armed call that puts a human-only script after quoted text gets a prompt for it (re-review B1); with no arm at all, such a call runs the human-only script with no prompt (re-review P1, older than this contract); a symbolic link at a switch-file path to a Windows named pipe silently stops the concept gate and the architecture guard (re-review W4); and a pipe link at the database guards' rules file can time out the guards themselves (re-review I1, in block 11 by the user's answer of 2026-11-19). After block 11, an armed call that joins a human-only script with a database write still spends the arm on the read-only guard's ask while the destructive guard blocks (L1, accepted), and that stays closed only while a hook block beats a hook ask (ASSUMED). `acceptEdits`, `plan` and `dontAsk` rest on the unit rows, not a live trial. A person who approves without reading is the remaining hole. Sessions with no prompt get no override; the person runs the command in their own terminal.
 
 ## Open Questions for User
 
@@ -304,6 +320,12 @@ Confidence: Medium. High on the inventory (every read found by search and opened
 - [x] **Second live trial before the re-review.** The security review asks whether an allow rule in your settings file can approve an armed command with no prompt, and the first trial never ran `acceptEdits`, `plan` or `dontAsk` mode. The second live trial block holds four more steps for you to run, and the re-review waits for it. **Recommend: yes, required before the re-review.** If an allow rule can skip the prompt, an agent could approve its own armed command, and the re-review cannot judge that from code. **User answer (2026-11-18):** yes, required; the re-review (block 10) depends on the second trial (block 9).
 - [x] **If an allow rule skips the prompt.** Should the override then be withdrawn (every destructive command blocks, and you run it in your own terminal), or should the guard also refuse writes to the permission lists in the settings files? **Recommend: withdraw the override.** Refusing settings writes is a new guard rule with its own unseen routes, and blocking is the state the project had before the arm existed. Either answer needs a further amendment; this question only fixes the direction in advance. **User answer (2026-11-18):** withdraw the override; do not refuse writes to the settings files.
 - [x] **Prompt target for sqlcmd.** The prompt names the database as "unresolved" for the usual `sqlcmd -Q` form (review W5, trial finding W1). Fix it in the fixes block now, or as a follow-up? **Recommend: follow-up.** It changes the guard's target binder, a larger change than the review's fixes, and the host's prompt already shows the full command. The main session opens the follow-up stub and its tracking issue. **User answer (2026-11-18):** follow-up, not in the fixes block; N2 stays accepted and folds into that follow-up; N3 is accepted.
+
+**Amendment 2 (2026-11-19).** Already settled, not asked again: the override stays (step 6 was met, so the 2026-11-18 withdrawal direction is not triggered); W5, N2 and N3 keep their 2026-11-18 dispositions. Three decisions were yours, all answered on 2026-11-19:
+
+- [x] **Rules-file pipe link.** A link at the database guards' rules file to a named pipe can hang both database guards before any rule runs (re-review I1). It is older than this contract. Fix it in block 11, by reading that file through the same regular-file check as the switch files? **Recommend: yes.** It is the same check block 11 writes for W4, a failed check takes the guards' existing fail-closed path, and the hang can let a destructive command through with no prompt. ~~If no, block 11 drops its I1 constraint and rows, and both guards' `.py` files keep only the B1 change.~~ *(third critique round NIT: the read-only guard carries no B1 change; moot after the answer)* **User answer (2026-11-19):** yes, include I1 in block 11; the read-only guard stays in block 11's file list for I1 only.
+- [x] **Read-only guard spends an arm.** When a human-only script comes first and a row delete follows, the read-only guard uses up the person's arm on a prompt while the destructive guard blocks the call (re-review L1). Accept and record it, rather than fix it? **Recommend: accept.** ~~Nothing runs~~ *(corrected, third critique round W5)* Nothing runs provided a hook block beats a hook ask, which is still ASSUMED; the arm only ever yields a prompt, and the fix would make the read-only guard depend on the destructive guard's classifier. **User answer (2026-11-19):** accept and record it, with the precedence kept as ASSUMED and no claim that the block text tells the person to re-arm. Block 11's read-only guard rows only pin today's behaviour (user answer 2026-11-19 to the third-round BLOCKER: "Test the destructive guard alone").
+- [x] **Third live trial.** Steps 7 to 9 of the second trial (`acceptEdits`, `plan`, `dontAsk` modes) were not run. Add a third person-run trial block for them? **Recommend: no; record the residual.** The code fails closed in `dontAsk`, a prompt is the designed outcome in the other two, the auditor's offline probes and the unit rows cover all three, and Failure Modes and the residual-risk paragraph name the gap. **User answer (2026-11-19):** no third live trial; record the steps 7 to 9 residual.
 
 ---
 
@@ -493,6 +515,107 @@ Scope: the Revision line, blocks 8, 9 and 10, the re-linked Depends on lines of 
 - The t4 completion record lives on the records branch and is not in this worktree. That it carries `review_verdict: blocked` is inferred from the merged report.
 - `derive_area.py` was not run. `.claude/area-mapping.json` declares no areas, as round one noted.
 
+### Third round — 2026-11-19 (amendment 2: security-review remedy round 2)
+
+**Critic:** contract-critic
+**Date:** 2026-11-19
+**Verdict:** blockers-found
+
+Scope: the Revision 2 line, blocks 11 and 12, the re-linked Depends on lines and text of blocks 6 and 7, the amended No-prompt classes and Broken-file rules, the Guard rules file entry, Uncertain Assumptions, Failure Modes, the residual-risk paragraph and the three amendment-2 Open Questions. Checked against the t10 report and its Gate Output (read-only, in the worktree `20261118-task-t10-security-re-review`), the t9 run sheet, `db-destructive-guard.py:1187-1211`, `db-research-readonly-guard.py:175-223`, `test_db_destructive_guard.py:1880-1899` and `pr_merged.py:266-291`.
+
+**Verified, no finding:**
+- No cycle in the graph. `_parse_depends_on` (`pr_merged.py:284-291`) reads the text before the first `—`: block 6 gives `[5, 12]`, block 7 gives `[5, 6, 12]`, block 11 gives `[8]`, block 12 gives `[11]`. Every block has a Depends on line. No block names 4 or 10, so no block waits on a `blocked` record. Block 8 is merged, so 11 is releasable once approved; 12 releases on 11; 6 and 7 release only on 12's `pass` or `pass-with-findings`.
+- `derive_subtask_id` (`:266-274`) gives `t11-security-review-fixes-round-two` and `t12-security-re-review-round-three`. The declared report name `t12-security-re-review-round-three-security-auditor.md` matches, and block 7's supersedes check names the same Gate Output. t1 to t10 keep their ids.
+- Block 11 lists every failing probe of the t10 "Human-only placement" table (H1, H3, H4, H5, H6, H7, O13, O13e) plus the B1 Fix line's `cd "<p>" && <script>` and `Write-Host 'x'; <script>` forms. It keeps O11, O12, O13b and O14 as controls, and it keeps r4.7a.12, r4.7a.12b, r4.7a.7b and r4.7a.13 (`test_db_destructive_guard.py:1884-1891`, the script named inside quotes) as must-stay-allowed controls through the "existing guard suites unchanged" rule. Block 12 re-runs them in the original order, in both shell forms.
+- `db-research-readonly-guard.py:207` reads the rules file with a plain `open()`, as the I1 entry says. Its loader returns `()` on failure, which its comment (`:180-183`) defines as fail-closed. So "takes the loader's existing fail-closed result" is true for both guards.
+- No block's Files to touch names a plugin version file. Blocks 11 and 12 state the parent-mode version rule. The `**Work Item Brief:**` header is present (static check only).
+- The W5 follow-up stub `.claude/concepts/followups/2026-11-18-override-prompt-target-and-reason-neutraliser.followup.md` exists. The briefs for t6 and t7 still read `5, 10` and `5, 6, 10` (`2026-11-16-425-…:34`, `2026-11-16-426-…:34`), which the Revision 2 preconditions name for refresh before the first dispatch.
+- No hidden-question words (`maybe`, `likely`, `probably`, `TBD`, `we could`, `not sure`, `assuming`) appear outside the Critique section. Confidence `Medium` agrees with the ASSUMED entries.
+
+### Findings
+
+- **[BLOCKER] Block 11's B1 and P1 rows require an outcome from the read-only guard that it cannot give, and the same block forbids changing it**
+  - **What is wrong:** The rows run "both guards as separate processes" and expect "exit 2, no ask JSON, the arm still in place" (armed) or "exit 2" (no arm). The read-only guard has no human-only class. The t10 report shows that, armed, it claims the arm and asks on a `sqlcmd -d <db> -Q "<row delete>"` call joined with the script (L1, probe X1), and the t9 log shows it matches the `sqlcmd -Q` removal too (`claimed-by-sibling`). So for O13, O13e and H7 the read-only guard's process asks and renames the arm. With no arm, H1 to H5 contain no SQL, so the read-only guard allows them with exit 0. The same TASK says "Do not fix L1 and do not touch the read-only guard's decision code". As written, the block cannot go green. The implementer must either stop with an AMENDMENT or weaken the rows, which is how the block 8 rows went wrong.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-06 — "An exception sentence that names the outcome of a later call must list every outcome that call can have" (Apply when: "a contract adds a message or doc sentence that predicts the block reason, exit code or log event of a future call"); this contract's own `## Failure Modes & Mitigations` L1 entry; t10 report, finding L1 (X1, X2).
+  - **Where in this contract:** block 11 TASK — "both guards as separate processes … armed, default mode, expect exit 2, no ask JSON, the arm still in place" and "no arm, expect exit 2 (blocked, not allowed)"; the same block — "Do not fix L1 and do not touch the read-only guard's decision code".
+  - → Addressed by: user answer 2026-11-19 "Test the destructive guard alone": only destructive-guard rows expect a block, each in its own project with its own arm; read-only guard rows pin today's L1 behaviour (armed asks and claims on the database-write shapes, otherwise allows), and block 11's "What the rows prove" paragraph says plainly that both guards are not claimed to block.
+- **[WARN] Block 11 does not force the reported probes to be red at the tip: any reported row that passes there is relabelled a control**
+  - **What is wrong:** "Rows that already pass at the tip are controls; name them as controls" applies to every new row, including the copied t4 and t10 probes. Each reported probe fails at the tip by definition. So a copied probe that passes at the tip has been mistranscribed (script first, or a bare script name). The bug needs a folder separator before the script name: the strip pattern at `db-destructive-guard.py:1190-1192` ends in `[\\/]$`, and t10's H is `tools/db-protection/update-dev-database.cmd`. With a bare name, `echo "start" ; update-dev-database.cmd` already blocks at the tip. The block pins backslash paths for the PowerShell form only. A mistranscribed row can therefore pass as a "control", and the suite goes green again. That is the block 8 failure t10 describes: "its rows all put the script first, the one order that works, so the suite was green".
+  - **Prior artifact ignored:** t10 report, B1 ("The fixes block's rows all put the script first … so the suite is green"); `JOURNAL.md` 2026-10-17 — "Loosening a guard rule must be checked against the guard's own test fixtures" (Apply when: "a contract changes what a hook allows or blocks").
+  - **Where in this contract:** block 11 TASK — "Rows that already pass at the tip are controls; name them as controls."; "each copied from the reports' text in the reporter's exact clause order".
+  - → Addressed by: the relabelling sentence is gone; every copied probe and hang row must fail at the tip, a passing copy is fixed as mistranscribed, only named controls and pins may pass, and every row uses the folder path (forward slashes in bash, backslashes in PowerShell).
+- **[WARN] The new invoked-or-mentioned sentence can demote a script inside a quoted launcher argument, and no row pins that case**
+  - **What is wrong:** Today `bash -c "cd x; tools/db-protection/<script>"` counts as invoked. The strip pattern matches from the opening quote, which leaves `-c`, a known launcher (`:1196-1197`). The new rule splits only on "separators outside quotes", and it tests "the word that holds it … is the first word of a command segment, after any launcher word". It does not say whether a quoted launcher argument whose script follows an inner separator (`bash -c "cd x; <script>"`, `cmd /c "echo a & <script>"`, `powershell -Command "Write-Host x; <script>"`) is invoked. t10's suggested reading ("test only whether the script is the first word of a segment") makes it mentioned, which is a new P1-class allow. A search of `.claude/hooks/tests` finds no row with that shape, so the "existing suites unchanged" rule cannot catch a regression.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-17 — "Loosening a guard rule must be checked against the guard's own test fixtures"; `.claude/hooks/db-destructive-guard.py:1187-1197` (current behaviour); `JOURNAL.md` 2026-11-02 — "A revision that adds a path adds its failure modes".
+  - **Where in this contract:** `## Data Shapes` → No-prompt classes rule — "segments are split on separators outside quotes"; block 11 TASK — "Controls that must stay allowed: … that name the script inside quotes".
+  - → Addressed by: the rule now treats a known launcher's quoted argument as command text and allows only mentioned-to-invoked moves; block 11 adds blocking controls for `bash -c "cd x; <script>"`, `cmd /c "echo a & <script>"` and `powershell -Command "Write-Host x; <script>"`, and block 12 re-runs them.
+- **[WARN] The residual-risk paragraph names W4 and I1 "until block 11 merges", but omits B1 and P1, and its I1 clause assumes an unanswered question**
+  - **What is wrong:** Until block 11 merges, the parent tip lets an armed combined call prompt for a human-only script (B1), and lets the script run with no arm and no prompt after any quoted text (P1, "critical" in t10). The paragraph that says "in one place" names neither. The I1 clause says it ends when block 11 merges. If the user answers "no" to "Rules-file pipe link", I1 stays open after block 11 merges, and the sentence is false.
+  - **Prior artifact ignored:** t10 report, findings B1 and P1, and W3(b); `JOURNAL.md` 2026-10-22 — "An accepted critic WARN or answered Open Question must amend the contract body before approval" (here the reverse: the body assumes an answer that has not been given).
+  - **Where in this contract:** `## Failure Modes & Mitigations` → residual-risk paragraph — "Until block 11 merges, a symbolic link at a switch-file path … and a pipe link at the database guards' rules file can time out the guards themselves".
+  - → Addressed by: the "until block 11 merges" sentence now names B1 and P1 first, and the I1 clause cites the user's 2026-11-19 answer (I1 is in block 11), so it no longer rests on an open question.
+- **[WARN] The allow-rule bullet is marked VERIFIED without the limit that, under block 9's own rule, voids step 6**
+  - **What is wrong:** Block 9 step 6 says the Observed line must show the session start time after the save, "otherwise the step is void and is run again". The t9 Observed line says "the exact start time was not recorded". The start is inferred from a differing session id, and t10 lists this as a limit. The contract bullet states "in a session started after the rule was saved" as verified, lists the other limits, and leaves this one out. The decision not to withdraw the override rests on this bullet.
+  - **Prior artifact ignored:** t9 run sheet, step 6 Observed line (`…t9-live-prompt-trial-second-round-senior-test-engineer.md:92`); t10 report, "t9 step 6" bullet ("the session start time was inferred from a differing session id, not recorded"); `JOURNAL.md` 2026-10-05 — "Count a host's size cap the way the host counts, and prove the cap with a real trial".
+  - **Where in this contract:** `## Uncertain Assumptions` — "`VERIFIED live, limited (t9 step 6 …)` … in a session started after the rule was saved"; the Revision 2 line — "Step 6 of the second live trial was met".
+  - → Addressed by: the bullet now reads "OBSERVED live, limited, not verified to block 9's own standard", states that the start time was inferred from a session id, quotes block 9's "void and run again" rule, and names why the override is still kept (the person and t10 accepted the inference; the user declined a further trial); the Revision 2 line and the residual-risk paragraph carry the same limit.
+- **[WARN] The L1 acceptance states an ASSUMED precedence as fact and cites a block text that no block writes**
+  - **What is wrong:** "it fails closed, because a hook block beats a hook ask" contradicts Uncertain Assumptions, where "a block beats an ask when both guards answer one call" is ASSUMED. t10 also says L1 fails closed only "if a block beats an ask (still `ASSUMED`)". "The block text tells the person to re-arm": no text in `.claude/hooks` says so, and no block in this contract adds it. Block 11 forbids touching the read-only guard's decisions. The destructive guard's human-only text tells the person to run the command by hand, which is the opposite advice.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-10-04 — "Check a documented guard behaviour against the guard's code"; this contract's `## Uncertain Assumptions` second bullet; t10 report, L1.
+  - **Where in this contract:** `## Failure Modes & Mitigations` → "FM (re-review L1 …)" — "it fails closed, because a hook block beats a hook ask" and "The block text tells the person to re-arm."; Open Question "Read-only guard spends an arm".
+  - → Addressed by: the L1 entry and its Open Question now say it fails closed only if a block beats an ask, which stays ASSUMED in Uncertain Assumptions (with the L1 consequence added there); the re-arm sentence is struck through, and no block adds such text.
+- **[WARN] The I1 reuse claims that no working rules file changes meaning, but the Windows link-target check makes some working files unreadable**
+  - **What is wrong:** The amendment routes the rules file through "the Windows link-target check first". A rules file that is a link to a mapped network drive or a `\\server\share` file loads today. After the change it counts as unreadable, so every database is protected and the disposable exemption is withdrawn. That is a new false block on a working install. The sentence "no rules file that works now changes meaning" is false for it. No Failure Modes entry and no block 11 row covers this, and the change note in block 6 does not mention it. The contract says it heeds the 2026-11-01 lesson for this exact reuse.
+  - **Prior artifact ignored:** `JOURNAL.md` 2026-11-01 — "A shared reader reused by a stricter consumer must be re-checked against the forms its errors were harmless for"; `MECHANISMS.md:62` (Guard rules file: "The fail direction is per hook and must be stated in the file").
+  - **Where in this contract:** `## Reused Mechanisms` → Guard rules file — "A regular file decodes exactly as today, so no rules file that works now changes meaning"; `## Lessons referenced` 2026-11-01 — "a regular rules file decodes exactly as today".
+  - → Addressed by: the claim is struck through and corrected in place; a new Failure Modes entry accepts the network-linked rules file as fail-closed (every database protected, disposable exemption withdrawn); block 11 adds a `\\server\share` link row per guard, and block 6's change note tells the person to keep a regular file.
+- **[WARN] Block 11 asks for two new inline fallback copies of the regular-file check but only one fallback row**
+  - **What is wrong:** The I1 constraint adds an inline fallback reader to each database guard, and the read-only guard is not one of the registered Guard fallback mode users. Yet the block asks for "one fallback row with the helper removed". It also does not say whether the inline copy keeps the Windows link-target check or only the open-then-`fstat` check. The registry entry requires a test per copy, per spelling, run against a stale helper as well as a deleted one.
+  - **Prior artifact ignored:** `MECHANISMS.md:64` (Guard fallback mode, part 4: "Each inline copy is separate code, so each needs its own test for every spelling it must handle … Run the fallback against a stale copy of the helper, not only a deleted one").
+  - **Where in this contract:** block 11 TASK, I1 — "keep an inline fallback copy in each guard … one fallback row with the helper removed".
+  - → Addressed by: each inline copy must keep both the link-target check and the open-then-`fstat` check; block 11 requires, for each guard's copy, rows with the helper deleted and with a stale helper, for the `\\.\` and `\\?\` pipe-link spellings and a `\\server\share` link, plus a regular file; block 6 records the read-only guard as a new Guard fallback mode user.
+- **[NIT] "Each in a bash form and a PowerShell form" is undefined for rows that only exist in PowerShell** — O13e, H3 and `Write-Host 'x'; <script>` are already the PowerShell forms. `&&` (H4, H5) does not parse in Windows PowerShell 5.1. Block 12 repeats the instruction.
+- **[NIT] "Read both reports in full: they hold the exact probe texts" is not true for the destructive part** — t4 and t10 name destructive statements in words, by their own rule. The generators (`%TEMP%\t10h\gen_o13.py`, `gen_h.py`) are outside the repository. Only the clause order and the script path are exact.
+- **[NIT] Open Question "Rules-file pipe link", the "no" branch** — it says "both guards' `.py` files keep only the B1 change", but the read-only guard carries no B1 change. On "no" it leaves block 11 entirely, as the note under block 11's Files to touch says.
+- **[NIT] The Windows link-target check judges only the first hop** — a switch or rules file that links to a local link, which then points to a disconnected network drive, passes the check and stalls in `open` (`JOURNAL.md` 2026-11-06, drive-letter lesson). This predates amendment 2, but the rule was amended again without naming it.
+- **[NIT] Block 7's CONTEXT says blocks 9 and 10 "are in the branch through block 12"** — neither is in block 12's dependency closure (12 → 11 → 8 → 2). It is true today only because both have merged.
+- **[NIT] The guards will bind the helper's private `_read_regular_file_bytes`** — this cross-module entry point has no Commands row. Block 6's registry list has no correction for `MECHANISMS.md:62` (Guard rules file is now read through the helper) or `:64` (the read-only guard becomes a sixth fallback user). The Reused Mechanisms entry still opens with "not extended".
+- **[NIT] `## Lessons referenced` lists "2026-11-02 — Keep a review-fix block to the review's findings" twice** — once for round one and once for block 11.
+- **[NIT] Budget rule** — this third round is appended in place at the caller's request. The template moves superseded rounds to `.claude/contract-history/<slug>.round-<n>.md`.
+
+**Architect's note on the third-round NITs (2026-11-19).**
+- Bash and PowerShell forms: taken. Block 11 writes a one-shell probe once, in that shell, and keeps `&&` rows as written, because the guard judges text. Block 12 says the same.
+- Exact probe texts: taken. Block 11 now says that only the clause order and the script path are exact, and that the destructive statements are rebuilt from the reports' words.
+- The "no" branch of "Rules-file pipe link": taken. Struck through; the answer was yes.
+- Block 7's CONTEXT: taken. It now says blocks 9 and 10 merged before block 12 was released, not that they are in its dependency chain.
+- The private reader name: taken. Block 11 exposes `read_regular_file_bytes` under a public name, with a Commands row. Block 6 adds corrections for "Guard rules file" and "Guard fallback mode". The Reused Mechanisms entry no longer opens with a bare "not extended".
+- The duplicate lesson: taken. The second entry is marked as the second application.
+- Multi-hop links: deferred. It predates amendment 2 and is not a review finding (the lesson on keeping a review-fix block to the review's findings). Judging a link chain without any I/O is its own design question. Block 12 may record it as information.
+- Budget: deferred. The rounds stay in place at the caller's request.
+
+### Applicable journal entries
+
+- **2026-11-02 — After amending a contract, update every summary of the block graph** — heeded by the Revision 2 line, the Delivery shape, the Depends on lines and text of blocks 6 and 7, and the precondition to refresh the t6 and t7 briefs and sub-issues 425 and 426.
+- **2026-11-02 — Edit a reversed sentence where it stands** — heeded for the Windows-pipe sentence, the allow-rule bullet and the residual-risk sentence, which are struck through in place. Not addressed for the Guard rules file entry's opening "not extended" (NIT above).
+- **2026-11-02 — Keep a review-fix block to the review's findings** — heeded: block 11 holds B1, P1, W4 (Windows) and I1 only, and L1 and the untried modes are dispositioned rather than coded.
+- **2026-11-02 — A revision that adds a path adds its failure modes** — heeded for W4 (Windows), B1, P1, I1, L1 and the t9 residual. Not addressed for the quoted-launcher demotion or the network-linked rules file (WARNs above).
+- **2026-11-06 — An exception sentence that names the outcome of a later call must list every outcome that call can have** — violated, see BLOCKER above.
+- **2026-10-04 — Check a documented guard behaviour against the guard's code** — violated by the L1 "re-arm" claim, see WARN above.
+- **2026-11-01 — A shared reader reused by a stricter consumer must be re-checked against the forms its errors were harmless for** — claimed heeded; not addressed for the network-linked rules file, see WARN above.
+- **2026-10-17 — Loosening a guard rule must be checked against the guard's own test fixtures** — heeded by the "existing guard suites unchanged" rule and the named retirement of P1-pinning rows. Not addressed for the quoted-launcher shape, which no fixture covers.
+- **2026-11-02 — Name the tests a fix may change by the state they guard, after reading them** — heeded: `test_db_destructive_guard.py` is listed only to retire, by name, rows that pin a P1 shape as allowed.
+- **2026-11-05 — A hardening fix applied to a shared classifier must be checked against every consumer** — heeded: `_in_command_position` has one caller, `_human_only_script_hits` (`:1205`), which feeds `_dynamic_labels` (`:1268`) and `_bind_targets` (`:1521`). Block 11 limits the change to what that chain needs.
+- **2026-11-06 — Judge a drive letter with a no-I/O check before any realpath** — heeded for the first link hop; multi-hop chains not addressed (NIT).
+- **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — heeded for the 2026-11-18 answers. The residual-risk I1 clause pre-empts the open "Rules-file pipe link" answer (WARN above).
+- **2026-10-05 — Count a host's size cap the way the host counts, and prove the cap with a real trial** — heeded by block 12's real Windows pipe-link attempt. Weakened by the unrecorded session start in t9 step 6 (WARN above).
+
+### What the critic did not check
+
+- `pr_merged.py --contract 2026-11-16-file-based-switches --status --json` was not run (no shell), so `layout_defects` were not read. Missing sub-issues and briefs for t11 and t12 are expected until the main session opens them.
+- `derive_area.py` was not run; `.claude/area-mapping.json` declares no areas, as rounds one and two noted.
+- Whether the read-only guard's process asks for O13 and H7 exactly as stated was not re-run. That finding rests on t10 L1/X1 and the t9 `claimed-by-sibling` log line.
+- `.claude/north-stars/` holds no active file, so checklist item 13 produced no findings.
+
 ---
 
 ## Lessons referenced
@@ -515,6 +638,12 @@ Scope: the Revision line, blocks 8, 9 and 10, the re-linked Depends on lines of 
 - **2026-11-05 — A hardening fix applied to a shared classifier must be checked against every consumer of that classifier** — heeded by scoping the W2 fix to the Arm-write rule, leaving the prose masker's destructive-detection use and the shared shell parser unchanged. `JOURNAL.md`.
 - **2026-11-06 — Judge a drive letter with a no-I/O check before any realpath, because realpath of a mapped drive can block** — heeded by the Broken-file rule's Windows clause: a switch file that links to a network target is judged from the drive table and never opened, because a timed-out hook is an allow. `JOURNAL.md`.
 - **2026-10-22 — An accepted critic WARN or answered Open Question must amend the contract body before approval** — heeded: each accepted review finding amends the rule it concerns, and each answered question is cited where the body relies on it. `JOURNAL.md`.
+- **2026-11-01 — A shared reader reused by a stricter consumer must be re-checked against the forms its errors were harmless for** — heeded by amendment 2's I1 reuse: only the open-and-kind check is shared with the rules-file loaders, a regular rules file decodes exactly as today, a failed check maps to the loaders' existing fail-closed result, and the one working form that changes meaning (a rules file linked to a network target) is named and accepted in Failure Modes. `JOURNAL.md`.
+- **2026-11-06 — An exception sentence that names the outcome of a later call must list every outcome that call can have** — heeded after the third critique round: block 11 states each guard's outcome separately, and no sentence claims both guards block. `JOURNAL.md`.
+- **2026-11-02 — A sweep that deletes every proven file in a folder must route EVERY local reader of that folder through the remote evidence** — heeded in spirit by amendment 2: the rules file is read by both database guards, so the I1 fix names both readers, not only the one the auditor found. `JOURNAL.md`.
+- **2026-11-02 — Keep a review-fix block to the review's findings** (second application; the first is above, for block 8) — heeded by block 11: B1, P1, W4 and I1 only; L1 and the untried modes are dispositioned in the contract, not coded; other hooks' rules files stay out of scope. `JOURNAL.md`.
+- **2026-11-02 — Edit a reversed sentence where it stands** and **After amending a contract, update every summary of the block graph** — heeded by amendment 2: the Windows-pipe sentence, the allow-rule assumption and the residual-risk sentence are struck through and corrected where they stand; the header, Delivery shape, blocks 6 and 7 and the main-session preconditions carry the new graph. `JOURNAL.md`.
+- **2026-10-17 — Loosening a guard rule must be checked against the guard's own test fixtures** — heeded by block 11 in the tightening direction: the existing guard suites run unchanged, and a row that pins one of the P1 shapes as allowed is retired by name, never silently edited.
 - Orthogonal to north-stars: none active.
 
 ---
@@ -750,7 +879,7 @@ PRIOR_FINDINGS:
 
 ### 6. Documents, skills and registries (`python-ai-developer`)
 
-**Depends on:** 5, 10 — block 4 is no longer named: its record reads `blocked`, and the loop never releases a block whose dependency reads `blocked`; the re-review (10) replaces it.
+**Depends on:** 5, 12 — blocks 4 and 10 are no longer named: their records read `blocked`, and the loop never releases a block whose dependency reads `blocked`; the third security review (12) replaces them. Before amendment 2 this line read "5, 10".
 
 **Files to touch:**
 - `README.md`
@@ -775,8 +904,9 @@ TASK: Rewrite the documents and skill text for file settings, rewrite INV-12 and
   test_plugin_manifests.py, and record the mechanism and terms in the registries. Remove the last
   expectedFailure marks.
 CONTEXT: concept contract at .claude/concepts/2026-11-16-file-based-switches.md, the skill-text
-  table of the Inventory. This block runs after the ordinary switches block (5) and the security
-  re-review (10) have passed; read the re-review report
+  table of the Inventory. This block runs after the ordinary switches block (5) and the third
+  security review (12) have passed; read the report
+  t12-security-re-review-round-three-security-auditor.md, the blocked re-review
   t10-security-re-review-security-auditor.md and the second run sheet
   t9-live-prompt-trial-second-round-senior-test-engineer.md for the residual-risk wording.
 FILES: as listed.
@@ -785,9 +915,16 @@ CONSTRAINTS:
     allowed in), show the whole switch file to edit in an editor, and add a section on the
     Database override arm with PowerShell and POSIX commands for the person's own terminal and
     the stated residual risk as the contract's "Residual risk" paragraph words it: prompts
-    answered by code, the arm not tied to a command, and the allow-rule result of the second live
-    trial report (t9). Add _switches.py to the helper
-    lists. Leave "Change notes by version" as written and add a dated note for this change.
+    answered by code, the arm not tied to a command, the allow-rule result of the second live
+    trial report (t9) with its limits (one rule, one settings layer, default mode, one host
+    version), that an older installed copy of the plugin knows no arm and blocks, and that
+    acceptEdits, plan and dontAsk were not tried live. Add _switches.py to the helper
+    lists. Leave "Change notes by version" as written and add a dated note for this change. The
+    note names apart, as fixes of behaviour older than this contract: a human-only script after
+    quoted text in the same call was allowed with no prompt (re-review P1), and a link at the
+    database guards' rules file to a named pipe could hang them (I1). It also says that a rules
+    file which is a link to a network drive or share now counts as unreadable, so every
+    database is protected; keep the rules file a regular file in the project folder.
   - CONTRIBUTING: a new switch is one catalog entry, one README row and one on/off test pair,
     never an environment read.
   - Delete the CLAUDE_CONTRACT_SKIP and CLAUDE_VERIFY_REVIEW_GATE text as the table says.
@@ -795,7 +932,10 @@ CONSTRAINTS:
     concept_gate switch through the helper". Keep the add-on scan rows.
   - Registries: append through .claude/scripts/registry_append.py only. Corrections to
     "Disposable migration dry-run DB" and "Session-start context delivery", the Switch file and
-    switch helper mechanism, a correction to the Add-on term, and the five new terms.
+    switch helper mechanism, a correction to the Add-on term, and the five new terms. Amendment
+    2 adds two corrections: "Guard rules file" (the database guards read it through
+    read_regular_file_bytes) and "Guard fallback mode" (the read-only guard is a new user, with
+    an inline regular-file reader).
   - Do not touch any plugin version file. Run test_plugin_manifests.py,
     test_switch_env_scan.py, test_skill_script_lookup.py and validate_registries.py
     --check-structure.
@@ -806,7 +946,7 @@ PRIOR_FINDINGS:
 
 ### 7. Final review (`fullstack-code-reviewer`)
 
-**Depends on:** 5, 6, 10 — block 4 is replaced by the re-review (10), as for block 6.
+**Depends on:** 5, 6, 12 — blocks 4 and 10 are replaced by the third security review (12), as for block 6. Before amendment 2 this line read "5, 6, 10".
 
 **Files to touch:**
 - `.claude/reviews/2026-11-16-file-based-switches/t7-final-review-fullstack-code-reviewer.md`
@@ -815,8 +955,9 @@ PRIOR_FINDINGS:
 ```
 TASK: Review the whole parent branch against the contract, and write the review artefact.
 CONTEXT: concept contract at .claude/concepts/2026-11-16-file-based-switches.md. This block runs
-  after blocks 5, 6 and the security re-review (10) have passed; the security fixes (8) and the
-  second live trial (9) are in the branch through block 10.
+  after blocks 5, 6 and the third security review (12) have passed. The security fixes (8 and
+  11) are in the branch through block 12's dependencies; the second live trial (9) and the
+  blocked re-review (10) are not in that chain but merged before block 12 was released.
 FILES: .claude/reviews/2026-11-16-file-based-switches/t7-final-review-fullstack-code-reviewer.md
 CONSTRAINTS:
   - Check each acceptance criterion of the brief (the plugin mirror as declared in Extension
@@ -827,9 +968,10 @@ CONSTRAINTS:
     check_version_bump.py in parent mode. Record each exit code.
   - List in Disposition the global CLAUDE.md lines the landing pull request body must name.
   - Check that the folder .claude/reviews/2026-11-16-file-based-switches/ holds no effective
-    blocked report: the t4 report must be named in the supersedes list of the passing
-    re-review's Gate Output (t10-security-re-review-security-auditor.gate.json). If one is still
-    effective, the verdict is blocked.
+    blocked report: the t4 and t10 reports must both be named in the supersedes list of the
+    passing third review's Gate Output
+    (t12-security-re-review-round-three-security-auditor.gate.json). If one is still effective,
+    the verdict is blocked.
   - Write the artefact in the template's six-section shape; the file does NOT exist yet. Name
     base..head. One verdict line, alone on its line: "**Verdict:** pass",
     "**Verdict:** pass-with-findings" or "**Verdict:** blocked". Write the Gate Output beside it.
@@ -997,6 +1139,195 @@ CONSTRAINTS:
     no block is added without that amendment. If the block comes from step 6 of t9 (an allow
     rule skipped the prompt), the amendment withdraws the override instead (user answer
     2026-11-18).
+  - Edit no other report. Do not touch any plugin version file.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-16-file-based-switches.md
+  contract_status: approved
+```
+
+### 11. Security review fixes, round two (`python-ai-developer`)
+
+**Depends on:** 8 — it fixes the findings of the re-review (block 10), but does not name block 10, because the loop never releases a block whose dependency reads `blocked` (the same convention as block 8 and block 4).
+
+**Files to touch:**
+- `.claude/hooks/db-destructive-guard.py`
+- `.claude/hooks/db-research-readonly-guard.py`
+- `.claude/hooks/_switches.py`
+- `.claude/hooks/tests/test_database_override.py`
+- `.claude/hooks/tests/test_switches.py`
+- `.claude/hooks/tests/test_db_destructive_guard.py`
+
+`db-research-readonly-guard.py` is listed only for I1 (it reads the same rules file with a plain open, `:207`; user answer 2026-11-19: include I1). L1 is accepted, so its decision code is not changed. `test_db_destructive_guard.py` is listed only so a row that pins one of the P1 shapes as allowed can be retired by name (see the constraints); no other change to it is allowed. The rules-file reader is the switch helper's regular-file check, exposed under a public name, so no new helper file is added.
+
+**What the rows prove, plainly (user answer 2026-11-19, "Test the destructive guard alone").** The destructive guard is the deciding guard for B1 and P1, and only its rows expect a block. The read-only guard has no human-only class and is not changed: its rows pin today's accepted behaviour (L1), which is that armed, on a shape that holds a database write, it asks and claims the arm, and on a shape with no database statement it allows, armed or not. This contract does **not** claim that both guards block these shapes. In a live session both guards run on one call, so an armed O13 or H7 spends the person's arm on the read-only guard's ask while the destructive guard blocks; whether the host then shows a prompt rests on the ASSUMED "a block beats an ask" (Uncertain Assumptions).
+
+**Pre-written TASK block:**
+```
+TASK: Fix findings B1, P1, W4 (Windows) and I1 of the security re-review, each with test rows,
+  and nothing else.
+CONTEXT: concept contract at .claude/concepts/2026-11-16-file-based-switches.md (the No-prompt
+  classes rule's invoked-or-mentioned sentence, the Broken-file rule, the Guard rules file entry
+  under Reused Mechanisms, Failure Modes); the re-review
+  .claude/reviews/2026-11-16-file-based-switches/t10-security-re-review-security-auditor.md
+  (findings B1, P1, W4, I1; the "Human-only placement" table H1 to H7, O13, O13b, O13e; the
+  Disposition) and the first review t4-security-review-security-auditor.md (B1, probes O11 to
+  O14). Read both reports in full. Their clause order and script paths are exact; their
+  destructive statements are named in words by the reports' own rule, so rebuild each one from
+  those words by string joining, as the existing rows do.
+FILES: as listed. db-research-readonly-guard.py changes only for I1.
+CONSTRAINTS:
+  - RED before GREEN, in this one block (the block 8 convention): commit the new rows first, run
+    them at the parent tip, and list in the pull request body each new row with its outcome at
+    the tip and at your head. Every destructive-guard row copied from a reported probe (the
+    "Copied probes" list below) and every hang row MUST fail (or time out) at the tip. A copied
+    probe that passes at the tip has been mistranscribed (script first, or a bare script name
+    with no folder): fix the row until it fails at the tip; never relabel it a control. The only
+    rows allowed to pass at the tip are the ones this TASK names as controls or pins. The fix
+    commit comes after.
+  - B1 and P1: fix the classifier, not the decision. Change _in_command_position (and only what
+    _human_only_script_hits needs from it) so the No-prompt classes rule's sentence holds. The
+    change may only turn a mention into an invocation; every shape the tip classes as invoked
+    stays invoked. Text inside the quoted argument of a known launcher (bash -c, sh -c, cmd /c,
+    cmd /k, powershell -Command, -c, iex, Invoke-Expression) is command text: split it into
+    segments the same way, and a script that starts a segment there is invoked. Do not change
+    the human_only flag in _decide, which block 8 got right.
+  - Script spelling in every row: the folder path, never the bare name, because the defect needs
+    a folder separator before the name: tools/db-protection/update-dev-database.cmd (forward
+    slashes) in the bash rows, tools\db-protection\update-dev-database.cmd in the PowerShell
+    rows. A probe that exists in one shell only (O13e, H3, Write-Host 'x'; <script>) is written
+    once, in that shell. A row with && keeps it as written: the guard judges text, and Windows
+    PowerShell 5.1 not running && does not change the guard's verdict.
+  - Copied probes, the destructive guard alone, each row in its own fresh temporary project with
+    its own arm (never both guards on one arm):
+      armed, default mode, expect exit 2, no ask JSON, the arm still in place, the human-only
+      instruction in the block text: O13 (row delete on a protected database, then ";", then
+      the script), O13e (its PowerShell form), H7 (removal of a non-disposable database
+      through sqlcmd -Q, then ";", then the script), H6 (echo "a" ; the script), and the t10
+      Disposition's cd "<p>" && the script and Write-Host 'x'; the script.
+      no arm, expect exit 2 (blocked, not allowed): H1 echo "start" ; the script; H3 PowerShell
+      Write-Host 'x'; the script; H4 cd "<p>" && the script; H5 echo "a" && the restore script
+      with its recover flag.
+  - Read-only guard pins (L1, accepted; today's behaviour, expected the same at the tip and at
+    head, and named as pins in the pull request body): armed, O13, O13e and H7 give the ask JSON
+    and the arm renamed to the claim; armed, H6 and the cd and Write-Host forms give exit 0 and
+    the arm kept; no arm, H1, H3, H4 and H5 give exit 0. No row expects the read-only guard to
+    block these shapes.
+  - Controls (destructive guard, pass at the tip and at head): O11 (the script alone), O12,
+    O13b (script first) and O14 block; invoked inside a quoted launcher argument blocks, with no
+    arm: bash -c "cd x; <script>", cmd /c "echo a & <script>",
+    powershell -Command "Write-Host x; <script>". Must stay allowed: a commit message, an echo
+    text, a grep pattern and a pull request body that name the script inside quotes; the script
+    name as an argument of another command.
+  - Existing guard suites unchanged and green: test_db_destructive_guard.py,
+    test_db_guard_path_allowlist.py, test_readonly_guard_disposable_exemption.py,
+    test_worktree_path_guards.py, test_shell_write_targets.py, test_switch_env_scan.py, and the
+    db-protection fixture suite. If a row there expects ALLOW for one of the P1 shapes (a
+    human-only script invoked after quoted text), it pins the defect: retire it by name in
+    test_db_destructive_guard.py, replace it with the blocking row, and name both in the pull
+    request body. Any other row that changes outcome: stop and report an AMENDMENT; do not edit
+    it.
+  - W4 (Windows): in _read_regular_file_bytes, on every platform open with os.open (O_RDONLY,
+    plus O_BINARY and O_NONBLOCK where they exist), then os.fstat on the descriptor, and close it
+    unread unless S_ISREG; anything else is unreadable under the Broken-file rule. Keep the
+    link-target check before the open, and fix _network_link_reason so a device-namespace target
+    (\\.\..., or \\?\... not followed by a drive letter) is unreadable and never opened, instead
+    of being read as a relative local path. Rows, Windows only: a symbolic link at
+    switches.local.json to a listening named pipe (for example a
+    multiprocessing.connection.Listener on \\.\pipe\<unique name> that accepts and never
+    writes), in the \\.\ and the \\?\ spelling, gives every default and one report, with the
+    hook run as a separate process under a short timeout so the row fails instead of hanging.
+    Skip with the stated reason "symbolic link creation not permitted on this host" when
+    os.symlink raises a privilege error; skip on POSIX with the reason that the POSIX
+    named-pipe rows cover it. Keep the POSIX named-pipe rows green.
+  - Expose the reader under the public name read_regular_file_bytes (the Commands row "Read
+    regular file"); keep the private name as an alias for the helper's own callers.
+  - I1 (user answer 2026-11-19: yes): both database guards read db-destructive-guard.rules.json
+    through the same check. Bind the helper's read_regular_file_bytes with getattr; keep an
+    inline fallback copy in each guard (Guard fallback mode), because the rules load at import
+    and must fail closed with the helper missing. Each inline copy keeps BOTH parts: the Windows
+    link-target check (network drive, \\server\share, device namespace) and the
+    open-then-fstat regular-file check. A file that fails the check takes the loader's existing
+    fail-closed result: the destructive guard treats every database as protected, the read-only
+    guard withdraws the disposable exemption. A regular file decodes exactly as today. Rows,
+    per guard: a pipe link at the rules file (the same Windows skip rules) makes the guard
+    finish within the short timeout with its strict-default outcome (the destructive guard
+    blocks a removal of a non-disposable database; the read-only guard blocks a write on a
+    disposable-named database it would exempt today); a rules file that is a link to a
+    \\server\share path takes the same strict default (accepted fail-closed behaviour, Failure
+    Modes I1); a regular rules file still loads as before.
+  - Fallback rows (MECHANISMS.md line 64, part 4: one test per inline copy, per spelling, run
+    against a stale helper as well as a deleted one): for EACH of the two guards' inline readers,
+    with the helper deleted AND with a stale helper that lacks read_regular_file_bytes, a pipe
+    link in the \\.\ spelling, a pipe link in the \\?\ spelling, and a \\server\share link each
+    give the strict default within the timeout; a regular rules file loads.
+  - Do not fix L1 and do not touch the read-only guard's decision code (L1 is accepted in
+    Failure Modes). Do not change _shell_write_targets.py or the destructive-detection masking.
+  - Plugin version (project CLAUDE.md, Parent Branch Delivery Rule): this sub-task pull request
+    goes into feature/file-based-switches and does NOT raise the version. Do not touch
+    plugin.json, .claude-plugin/plugin.json, .cursor-plugin/plugin.json or
+    .claude-plugin/marketplace.json. check_version_bump.py runs in parent mode on this pull
+    request and requires the head's version to equal the base's. The landing raises it once.
+PRIOR_FINDINGS:
+  contract_path: .claude/concepts/2026-11-16-file-based-switches.md
+  contract_status: approved
+```
+
+### 12. Security re-review, round three (`security-auditor`)
+
+**Depends on:** 11 — it re-reviews the findings of blocks 4 and 10, but names neither, because both records read `blocked`.
+
+**Files to touch:**
+- `.claude/reviews/2026-11-16-file-based-switches/t12-security-re-review-round-three-security-auditor.md`
+
+**Gate Output, written beside the artefact by the same agent and deliberately not listed above:** `.claude/reviews/2026-11-16-file-based-switches/t12-security-re-review-round-three-security-auditor.gate.json`, for the same reason as blocks 9 and 10. It is the file whose `supersedes` list retires the t4 and t10 reports.
+
+**Pre-written TASK block:**
+```
+TASK: Re-review the database override and the switch reader after the second fixes block, and
+  write the review artefact.
+CONTEXT: concept contract at .claude/concepts/2026-11-16-file-based-switches.md; the blocked
+  reports .claude/reviews/2026-11-16-file-based-switches/t4-security-review-security-auditor.md
+  and t10-security-re-review-security-auditor.md; the second run sheet
+  t9-live-prompt-trial-second-round-senior-test-engineer.md.
+FILES: .claude/reviews/2026-11-16-file-based-switches/t12-security-re-review-round-three-security-auditor.md
+CONSTRAINTS:
+  - Name the commit range reviewed, base..head: the second fixes block's (11) merge into the
+    parent branch. Say whether the reviewed guard and helper files differ between that merge and
+    your head. Work in scratch copies under %TEMP% (git archive or a clone), not in a worktree
+    under the checkout.
+  - Re-run every t4 and t10 probe that failed, in its ORIGINAL clause order, with the folder
+    path of the script, in the bash form and the PowerShell form where the probe exists in both
+    (O13e, H3 and the Write-Host form exist in PowerShell only): O13, O13e, H1, H3, H4, H5, H6,
+    H7, the t10 Disposition's cd and Write-Host forms, and t4's O10, O12, O14, R3, R4 and S5.
+    The destructive guard must block each; report the read-only guard's outcome beside it (L1
+    is accepted: armed, it asks on the shapes with a database write), and state what evidence
+    there is for "a hook block beats a hook ask". Also run the quoted-launcher rows
+    (bash -c "cd x; <script>", cmd /c, powershell -Command): they must block. Then re-run the whole override
+    decision set (O0 to O20), the whole route table, the shared-claim and fallback probes (P1 to
+    P9), and the control rows (script mentioned inside quotes stays allowed). Report each with
+    its result at head.
+  - Check W4 by a real attempt on this Windows host: a symbolic link at switches.local.json to
+    a listening named pipe, in the \\.\ and \\?\ spellings; the helper must finish at once with
+    every default. Check I1 the same way at the rules file, for both database guards, with the
+    helper present, deleted and stale. If a link cannot be created, say so; that is not a pass.
+  - Check the contract's Residual risk paragraph (W3 (a) and (b) as amended, the t9 limits, the
+    Windows pipe-link route) and the Failure Modes dispositions (W4, B1, P1, I1, L1 accepted,
+    t9 steps 7 to 9 residual, W5, N2, N3). As information, list other hooks that read a rules
+    file with a plain open (same class as I1, out of this contract's scope).
+  - Run the guard suites verbatim and record each exit code: test_switches.py,
+    test_database_override.py, test_db_destructive_guard.py, test_db_guard_path_allowlist.py,
+    test_readonly_guard_disposable_exemption.py, test_worktree_path_guards.py,
+    test_shell_write_targets.py, test_switch_env_scan.py.
+  - Write the artefact in the template's six-section shape; the file does NOT exist yet. End the
+    header with one verdict line, alone on its line: "**Verdict:** pass",
+    "**Verdict:** pass-with-findings" or "**Verdict:** blocked".
+  - Write the Gate Output t12-security-re-review-round-three-security-auditor.gate.json beside
+    it, as the template says. On pass or pass-with-findings its supersedes list is exactly
+    ["t4-security-review-security-auditor.md", "t10-security-re-review-security-auditor.md"].
+    On blocked it is [] (a report that failed to clear a blocker must not retire one).
+  - A blocked verdict holds blocks 6 and 7. It leads to an architect amendment of this
+    contract that adds a further fix block and a further review block, as this round did; no
+    block is added without that amendment.
   - Edit no other report. Do not touch any plugin version file.
 PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-11-16-file-based-switches.md

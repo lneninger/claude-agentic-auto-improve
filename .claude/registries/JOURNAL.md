@@ -568,6 +568,13 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract combines a single-confirmation flow with a gate flag (`--confirm-*`) whose condition is derived from flags the operator chooses in that same confirmation.
 - **Tags:** one-confirmation, consent-gate, preview-hash, narrowing, skill-flow
 
+### 2026-11-19 — A review-fix block's rows must copy each failing probe in the reporter's exact clause order and in every shell form
+- **Trigger:** post-impl divergence
+- **Source contract:** .claude/concepts/2026-11-16-file-based-switches.md
+- **Lesson:** When a security review names failing probes, the fix block's test rows must reproduce each probe text in the order and shell form the reporter used, not a paraphrase; the first fix wrote its combined-command rows with the human-only script first, the one order the buggy classifier handled, so the suite was green while the reporter's own probe (script after quoted text) still failed, and the same classifier bug also let the script run with no prompt at all.
+- **Apply when:** a contract adds a block that fixes findings of a review, trial or audit report that lists probe commands, especially for a classifier that reads command text
+- **Tags:** review-fix, test-rows, probe-order, classifier, guard
+
 ## Project tier
 
 This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.
