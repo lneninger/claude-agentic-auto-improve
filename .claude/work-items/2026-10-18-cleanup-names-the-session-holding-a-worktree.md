@@ -1,6 +1,6 @@
 ---
 id: none
-issue_offer: pending
+issue_offer: declined
 title: Finished runs leave background sessions running, and the delivery cleanup cannot say which session holds a worktree folder
 type: IMPROVEMENT
 source: free-text
@@ -13,9 +13,9 @@ branch: infra/cleanup-names-the-session-holding-a-worktree
 worktree: D:\Dev\HIPALANET\claude-agentic-auto-improve\.claude\worktrees\20261018-infra-cleanup-names-the-session-holding-a-worktree
 north_stars: none
 contract: .claude/concepts/2026-10-18-cleanup-names-worktree-holder.md
-pr: UNKNOWN
-issue_link: unknown
-status: verifying
+pr: https://github.com/lneninger/claude-agentic-auto-improve/pull/460 (draft)
+issue_link: none (no tracking issue was opened, so the pull request closes none)
+status: shipped
 created: 2026-10-18
 ---
 
