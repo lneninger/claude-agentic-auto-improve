@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_guard_deference import World as DeferenceWorld  # noqa: E402  (the existing fixture builder)
 from test_guard_deference import DESTRUCTIVE as DEFERENCE_DESTRUCTIVE, READONLY as DEFERENCE_READONLY  # noqa: E402
 from test_guard_deference import SESSION_ID as DEFERENCE_SESSION  # noqa: E402
+from test_switches import SKIP_NO_SYMLINK, SKIP_POSIX_PIPES, make_pipe_link  # noqa: E402  (pipe server, link maker)
 
 HOOK_TIMEOUT = 60
 
@@ -189,10 +190,14 @@ class OverrideTestCase(unittest.TestCase):
     def shell(self, command: str, tool: str = "Bash", **kw) -> dict:
         return self.payload(tool, {"command": command}, **kw)
 
-    def run_guard(self, payload: dict, *, guard: Path | None = None, env: dict | None = None) -> Run:
-        proc = subprocess.run([sys.executable, "-B", str(guard or self.GUARD)],
-                              input=json.dumps(payload).encode("utf-8"), capture_output=True,
-                              env=self.env(env), cwd=str(self.tmp), timeout=HOOK_TIMEOUT)
+    def run_guard(self, payload: dict, *, guard: Path | None = None, env: dict | None = None,
+                  timeout: float = HOOK_TIMEOUT) -> Run:
+        try:
+            proc = subprocess.run([sys.executable, "-B", str(guard or self.GUARD)],
+                                  input=json.dumps(payload).encode("utf-8"), capture_output=True,
+                                  env=self.env(env), cwd=str(self.tmp), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.fail("the guard did not finish within %s seconds (it hung)" % timeout)
         return Run(proc)
 
     # ---------------------------------------------------------------- asserts
@@ -737,6 +742,316 @@ class InlineNameTestCopyTests(OverrideTestCase):
         refused = self.run_guard(self.shell("touch .claude/database-override.once"),
                                  guard=self.hooks / "db-destructive-guard.py")
         self.assert_blocks(refused, "and the inline name test still refuses the write")
+
+
+# =====================================================================================================
+# B1 and P1 (t10 re-review): where a human-only script stands in the command.
+#
+# A human-only script that is INVOKED, after quoted text or not, is the no-prompt class: never a prompt,
+# and with no arm never an allow. Every destructive statement below is built from parts, and every row
+# uses the script spelled WITH its folder (the defect needs a separator before the name): forward slashes
+# in the Bash rows, backslashes in the PowerShell rows. Each row runs in its own fresh project, with its
+# own arm (never both guards on one arm).
+# =====================================================================================================
+SCRIPT_FWD = HUMAN_ONLY_SCRIPT
+SCRIPT_BACK = HUMAN_ONLY_SCRIPT.replace("/", "\\")
+RESTORE_FWD = "tools/db-protection/restore-latest.cmd"
+RESTORE_BACK = RESTORE_FWD.replace("/", "\\")
+RECOVER_FLAG = "--recover-missing-dev-db"
+#: A row delete on a protected database (t4 probe O13).
+PROTECTED_ROW_DELETE = 'sqlcmd -S "(localdb)\\m" -E -d ' + PROTECTED + ' -Q "' + _ROW_DELETE + ' FROM dbo.T"'
+#: The removal of a NON-disposable database through sqlcmd -Q (t10 probe H7).
+OTHER_DATABASE_REMOVAL = 'sqlcmd -S localhost -Q "' + _V + ' Orders"'
+#: A write the read-only guard exempts today: a disposable-named database, no protected target.
+DISPOSABLE_NAME = PROTECTED + "_ForceAction_Test_f4dd1c3cebce4c44922ce4876cff18d3"
+DISPOSABLE_WRITE = ('sqlcmd -S "(localdb)\\m" -E -d ' + DISPOSABLE_NAME
+                    + ' -Q "INSERT INTO StrategyRuns (Id) VALUES (NEWID())"')
+DISPOSABLE_REMOVAL = 'sqlcmd -S "(localdb)\\m" -E -Q "' + _V + " [" + DISPOSABLE_NAME + ']"'
+
+#: (row id, tool, command built from the project folder). A shape that exists in one shell only is
+#: written once, in that shell.
+ARMED_ROWS = [
+    ("O13", "Bash", lambda p: PROTECTED_ROW_DELETE + " ; " + SCRIPT_FWD),
+    ("O13e", "PowerShell", lambda p: PROTECTED_ROW_DELETE + "; " + SCRIPT_BACK),
+    ("H7", "Bash", lambda p: OTHER_DATABASE_REMOVAL + " ; " + SCRIPT_FWD),
+    ("H7", "PowerShell", lambda p: OTHER_DATABASE_REMOVAL + "; " + SCRIPT_BACK),
+    ("H6", "Bash", lambda p: 'echo "a" ; ' + SCRIPT_FWD),
+    ("H6", "PowerShell", lambda p: 'echo "a" ; ' + SCRIPT_BACK),
+    ("cd", "Bash", lambda p: 'cd "' + p + '" && ' + SCRIPT_FWD),
+    ("cd", "PowerShell", lambda p: 'cd "' + p + '" && ' + SCRIPT_BACK),
+    ("write-host", "PowerShell", lambda p: "Write-Host 'x'; " + SCRIPT_BACK),
+]
+#: The rows of ARMED_ROWS whose own destructive statement makes the read-only guard ask.
+ASKING_IDS = {"O13", "O13e", "H7"}
+UNARMED_ROWS = [
+    ("H1", "Bash", lambda p: 'echo "start" ; ' + SCRIPT_FWD),
+    ("H1", "PowerShell", lambda p: 'echo "start" ; ' + SCRIPT_BACK),
+    ("H3", "PowerShell", lambda p: "Write-Host 'x'; " + SCRIPT_BACK),
+    ("H4", "Bash", lambda p: 'cd "' + p + '" && ' + SCRIPT_FWD),
+    ("H4", "PowerShell", lambda p: 'cd "' + p + '" && ' + SCRIPT_BACK),
+    ("H5", "Bash", lambda p: 'echo "a" && ' + RESTORE_FWD + " " + RECOVER_FLAG),
+    ("H5", "PowerShell", lambda p: 'echo "a" && ' + RESTORE_BACK + " " + RECOVER_FLAG),
+]
+#: Controls that block at the parent tip already: a human-only script that is first, or that stands
+#: inside the quoted argument of a known launcher.
+LAUNCHER_ROWS = [
+    ("bash-c", "Bash", lambda p: 'bash -c "cd x; ' + SCRIPT_FWD + '"'),
+    ("cmd-c", "Bash", lambda p: 'cmd /c "echo a & ' + SCRIPT_FWD + '"'),
+    ("cmd-c", "PowerShell", lambda p: 'cmd /c "echo a & ' + SCRIPT_BACK + '"'),
+    ("powershell-command", "Bash", lambda p: 'powershell -Command "Write-Host x; ' + SCRIPT_FWD + '"'),
+    ("powershell-command", "PowerShell", lambda p: 'powershell -Command "Write-Host x; ' + SCRIPT_BACK + '"'),
+]
+#: Must stay allowed: the script named inside quotes, or as an argument of another command.
+MENTION_ROWS = [
+    ("commit-message", "Bash", lambda p: 'git commit -m "docs: ' + SCRIPT_FWD + ' is run by a person"'),
+    ("commit-message", "PowerShell", lambda p: 'git commit -m "docs: ' + SCRIPT_BACK + ' is run by a person"'),
+    ("echo-text", "Bash", lambda p: 'echo "run ' + SCRIPT_FWD + ' in your own terminal"'),
+    ("echo-text", "PowerShell", lambda p: 'echo "run ' + SCRIPT_BACK + ' in your own terminal"'),
+    ("grep-pattern", "Bash", lambda p: 'grep -rn "' + SCRIPT_FWD + '" docs'),
+    ("grep-pattern", "PowerShell", lambda p: 'Select-String -Pattern "' + SCRIPT_BACK + '" docs'),
+    ("pr-body", "Bash", lambda p: 'gh pr create --title "Docs" --body "Run ' + SCRIPT_FWD + ' by hand; then go on."'),
+    ("pr-body", "PowerShell", lambda p: 'gh pr create --title "Docs" --body "Run ' + SCRIPT_BACK + ' by hand; then go on."'),
+    ("argument-git-add", "Bash", lambda p: "git add " + SCRIPT_FWD),
+    ("argument-cat", "Bash", lambda p: "cat " + SCRIPT_FWD),
+    ("argument-type", "PowerShell", lambda p: "Get-Content " + SCRIPT_BACK),
+    ("argument-after-quote", "Bash", lambda p: 'echo "a" ; echo ' + SCRIPT_FWD),
+    ("argument-after-quote", "PowerShell", lambda p: 'echo "a" ; Get-Content ' + SCRIPT_BACK),
+    ("argument-after-flag", "Bash", lambda p: 'git commit -m "x" -- ' + SCRIPT_FWD),
+]
+
+
+def _add_rows(cls, prefix: str, rows, body) -> None:
+    """One test method per row (so one row = one fresh project and one arm)."""
+    for rid, tool, factory in rows:
+        def make(rid=rid, tool=tool, factory=factory):
+            def test(self):
+                body(self, rid, tool, factory(str(self.project)))
+            return test
+        name = "test_%s_%s_%s" % (prefix, rid.lower().replace("-", "_"), tool.lower())
+        setattr(cls, name, make())
+
+
+class HumanOnlyPlacementTests(OverrideTestCase):
+    """The destructive guard alone (B1 and P1)."""
+
+    GUARD = DESTRUCTIVE_HOOK
+
+    def _armed_blocks(self, rid: str, tool: str, command: str) -> None:
+        self.arm()
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        why = "%s (%s): a human-only script that is invoked is the no-prompt class" % (rid, tool)
+        self.assert_blocks(run, "No-prompt classes rule, " + why)
+        self.assertIsNone(run.ask, why + ": no ask JSON")
+        self.assertTrue(self.arm_path.exists(), why + ": the arm is still in place (never claimed)")
+        self.assertEqual(self.claim_files(), [], why + ": no claim file was made")
+        self.assertIn("own terminal", run.err, why + ": the human-only instruction is printed")
+
+    def _unarmed_blocks(self, rid: str, tool: str, command: str) -> None:
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        why = "%s (%s), no arm" % (rid, tool)
+        self.assert_blocks(run, "a human-only script that is invoked is never run by an agent: " + why)
+        self.assertIn("own terminal", run.err, why + ": the human-only instruction is printed")
+
+    def _control_blocks(self, rid: str, tool: str, command: str) -> None:
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        self.assert_blocks(run, "invoked inside a launcher argument, %s (%s)" % (rid, tool))
+
+    def _control_allowed(self, rid: str, tool: str, command: str) -> None:
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        self.assertEqual(run.rc, 0, "a mention is not an invocation, %s (%s): %s" % (rid, tool, run))
+
+    def test_control_o11_the_script_alone_blocks_armed_and_unarmed(self):
+        for tool, script in (("Bash", SCRIPT_FWD), ("PowerShell", SCRIPT_BACK)):
+            for armed in (False, True):
+                with self.subTest(tool=tool, armed=armed):
+                    if armed:
+                        self.arm()
+                    run = self.run_guard(self.shell(script, tool, tool_use_id=self.next_id()))
+                    self.assert_blocks(run, "O11")
+                    self.assertEqual(self.arm_path.exists(), armed)
+                    if armed:
+                        self.arm_path.unlink()
+
+    def test_control_o13b_the_script_first_blocks_with_the_arm_kept(self):
+        for tool, script, sep in (("Bash", SCRIPT_FWD, " ; "), ("PowerShell", SCRIPT_BACK, "; ")):
+            with self.subTest(tool=tool):
+                self.arm()
+                run = self.run_guard(self.shell(script + sep + PROTECTED_ROW_DELETE, tool, tool_use_id=self.next_id()))
+                self.assert_blocks(run, "O13b")
+                self.assertIsNone(run.ask)
+                self.assertTrue(self.arm_path.exists(), "O13b: the arm is kept")
+                self.arm_path.unlink()
+
+
+_add_rows(HumanOnlyPlacementTests, "armed", ARMED_ROWS, HumanOnlyPlacementTests._armed_blocks)
+_add_rows(HumanOnlyPlacementTests, "unarmed", UNARMED_ROWS, HumanOnlyPlacementTests._unarmed_blocks)
+_add_rows(HumanOnlyPlacementTests, "control_launcher", LAUNCHER_ROWS, HumanOnlyPlacementTests._control_blocks)
+_add_rows(HumanOnlyPlacementTests, "control_mention", MENTION_ROWS, HumanOnlyPlacementTests._control_allowed)
+
+
+class HumanOnlyPlacementReadonlyPinTests(OverrideTestCase):
+    """L1 (accepted): the read-only guard has no human-only class and is not changed by this block.
+    These rows PIN today's behaviour, so they are expected to pass at the parent tip and at the head."""
+
+    GUARD = READONLY_HOOK
+
+    def _armed(self, rid: str, tool: str, command: str) -> None:
+        self.arm()
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id="toolu_pin"))
+        if rid in ASKING_IDS:
+            self.assert_asks(run, "pin %s (%s): the read-only guard asks on its own statement" % (rid, tool))
+            self.assertFalse(self.arm_path.exists(), "pin: the arm was renamed to the claim")
+            self.assertEqual([p.name for p in self.claim_files()], ["database-override.claimed-toolu_pin"])
+        else:
+            self.assertEqual(run.rc, 0, "pin %s (%s): nothing for the read-only guard to block: %s" % (rid, tool, run))
+            self.assertIsNone(run.ask)
+            self.assertTrue(self.arm_path.exists(), "pin: the arm is kept")
+
+    def _unarmed(self, rid: str, tool: str, command: str) -> None:
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id="toolu_pin"))
+        self.assertEqual(run.rc, 0, "pin %s (%s), no arm: %s" % (rid, tool, run))
+
+
+_add_rows(HumanOnlyPlacementReadonlyPinTests, "pin_armed", ARMED_ROWS, HumanOnlyPlacementReadonlyPinTests._armed)
+_add_rows(HumanOnlyPlacementReadonlyPinTests, "pin_unarmed", UNARMED_ROWS, HumanOnlyPlacementReadonlyPinTests._unarmed)
+
+
+# =====================================================================================================
+# I1: both database guards read db-destructive-guard.rules.json through the regular-file check.
+# =====================================================================================================
+SHORT_TIMEOUT = 15
+SHARE_TARGET = "\\\\192.0.2.1\\share\\db-destructive-guard.rules.json"  # TEST-NET-1: nothing answers
+
+
+class _RulesFileRows:
+    """Rows run once per guard and once per way the guard reaches the check (the helper, a deleted
+    helper, a stale helper). A subclass sets GUARD_NAME, STRICT (a command the strict default blocks that
+    the loaded rules also block or allow), LOADED (a command only a loaded rules file lets through)."""
+
+    GUARD_NAME: str
+    STRICT_COMMAND: str       # blocked with the rules file unreadable
+    LOADED_COMMAND: str       # allowed with the regular rules file in place, blocked without it
+
+    @property
+    def rules_path(self) -> Path:
+        return self.project / ".claude" / "hooks" / "db-destructive-guard.rules.json"
+
+    def guard_path(self) -> Path:
+        return HOOKS_SRC / self.GUARD_NAME
+
+    def _run(self, command: str) -> Run:
+        return self.run_guard(self.shell(command, tool_use_id=self.next_id()), guard=self.guard_path(),
+                              timeout=SHORT_TIMEOUT)
+
+    def _strict(self, why: str) -> None:
+        run = self._run(self.STRICT_COMMAND)
+        self.assert_blocks(run, "strict default, " + why)
+
+    def test_a_regular_rules_file_still_loads(self):
+        run = self._run(self.LOADED_COMMAND)
+        self.assertEqual(run.rc, 0, "the regular rules file loads as before: %s" % run)
+
+    def test_without_a_rules_file_the_strict_default_blocks_the_loaded_command(self):
+        """CONTROL for the row above: with no rules file the same command is blocked."""
+        self.rules_path.unlink()
+        self.assert_blocks(self._run(self.LOADED_COMMAND), "strict default: the exemption is withdrawn")
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_to_a_listening_pipe_in_the_dot_spelling_takes_the_strict_default(self):
+        self.rules_path.unlink()
+        make_pipe_link(self, self.rules_path, "dot")
+        self._strict("pipe link, dot spelling")
+        self.assert_blocks(self._run(self.LOADED_COMMAND), "the exemption is withdrawn too")
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_to_a_listening_pipe_in_the_question_mark_spelling_takes_the_strict_default(self):
+        self.rules_path.unlink()
+        make_pipe_link(self, self.rules_path, "question-mark")
+        self._strict("pipe link, question-mark spelling")
+        self.assert_blocks(self._run(self.LOADED_COMMAND), "the exemption is withdrawn too")
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_to_a_server_share_takes_the_strict_default(self):
+        self.rules_path.unlink()
+        try:
+            os.symlink(SHARE_TARGET, self.rules_path)
+        except (OSError, NotImplementedError):
+            self.skipTest(SKIP_NO_SYMLINK)
+        self._strict("link to a server share (accepted fail-closed behaviour, Failure Modes I1)")
+        self.assert_blocks(self._run(self.LOADED_COMMAND), "the exemption is withdrawn too")
+
+
+class _PluginCopyMixin:
+    """The guard runs from a copy of the hooks folder whose helper is deleted or stale."""
+
+    HELPER: str   # "deleted" or "stale"
+
+    def setUp(self):
+        super().setUp()
+        hooks = self.tmp / "plugin-copy" / ".claude" / "hooks"
+        hooks.mkdir(parents=True)
+        for src in HOOKS_SRC.iterdir():
+            if not (src.is_file() and src.suffix in (".py", ".json")):
+                continue
+            if src.name == "_switches.py":
+                if self.HELPER == "deleted":
+                    continue
+                # A stale helper: it imports and still has the claim function, but predates the reader.
+                text = src.read_text(encoding="utf-8")
+                (hooks / src.name).write_text(
+                    text + "\n\nglobals().pop('read_regular_file_bytes', None)\n", encoding="utf-8")
+                continue
+            shutil.copy2(src, hooks / src.name)
+        self.copy_hooks = hooks
+
+    def guard_path(self) -> Path:
+        return self.copy_hooks / self.GUARD_NAME
+
+
+class DestructiveGuardRulesFileTests(_RulesFileRows, OverrideTestCase):
+    GUARD = DESTRUCTIVE_HOOK
+    GUARD_NAME = "db-destructive-guard.py"
+    STRICT_COMMAND = OTHER_DATABASE_REMOVAL
+    LOADED_COMMAND = DISPOSABLE_REMOVAL
+
+
+class ReadonlyGuardRulesFileTests(_RulesFileRows, OverrideTestCase):
+    GUARD = READONLY_HOOK
+    GUARD_NAME = "db-research-readonly-guard.py"
+    STRICT_COMMAND = DISPOSABLE_WRITE
+    LOADED_COMMAND = DISPOSABLE_WRITE
+
+
+class DestructiveGuardRulesFallbackDeletedHelperTests(_PluginCopyMixin, _RulesFileRows, OverrideTestCase):
+    HELPER = "deleted"
+    GUARD = DESTRUCTIVE_HOOK
+    GUARD_NAME = "db-destructive-guard.py"
+    STRICT_COMMAND = OTHER_DATABASE_REMOVAL
+    LOADED_COMMAND = DISPOSABLE_REMOVAL
+
+
+class DestructiveGuardRulesFallbackStaleHelperTests(_PluginCopyMixin, _RulesFileRows, OverrideTestCase):
+    HELPER = "stale"
+    GUARD = DESTRUCTIVE_HOOK
+    GUARD_NAME = "db-destructive-guard.py"
+    STRICT_COMMAND = OTHER_DATABASE_REMOVAL
+    LOADED_COMMAND = DISPOSABLE_REMOVAL
+
+
+class ReadonlyGuardRulesFallbackDeletedHelperTests(_PluginCopyMixin, _RulesFileRows, OverrideTestCase):
+    HELPER = "deleted"
+    GUARD = READONLY_HOOK
+    GUARD_NAME = "db-research-readonly-guard.py"
+    STRICT_COMMAND = DISPOSABLE_WRITE
+    LOADED_COMMAND = DISPOSABLE_WRITE
+
+
+class ReadonlyGuardRulesFallbackStaleHelperTests(_PluginCopyMixin, _RulesFileRows, OverrideTestCase):
+    HELPER = "stale"
+    GUARD = READONLY_HOOK
+    GUARD_NAME = "db-research-readonly-guard.py"
+    STRICT_COMMAND = DISPOSABLE_WRITE
+    LOADED_COMMAND = DISPOSABLE_WRITE
 
 
 if __name__ == "__main__":

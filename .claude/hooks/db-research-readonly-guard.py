@@ -48,6 +48,7 @@ import datetime as _dt
 import json
 import os
 import re
+import stat as _stat
 import sys
 from pathlib import Path
 
@@ -80,6 +81,12 @@ try:
 except Exception:  # pragma: no cover - fail-soft
     _sw = None
 _sw_claim_override = getattr(_sw, "claim_database_override", None) if _sw is not None else None
+#: The rules file is read through the helper's regular-file check (t10 finding I1), bound the same way.
+#: A helper that is missing or stale leaves the inline copy below: the rules load at import and must
+#: fail closed (the disposable exemption is withdrawn) without it.
+_sw_read_regular_file_bytes = (
+    getattr(_sw, "read_regular_file_bytes", None) if _sw is not None else None
+)
 try:  # the shared shell parser (standard library only)
     import _shell_write_targets as _swt
 except Exception:  # pragma: no cover - fail-soft
@@ -199,13 +206,88 @@ def _project_rules_path() -> Path | None:
 _RULES_PATH = _project_rules_path() or Path(_RULES_FILE_NAME)
 
 
+#: Inline copy of the helper's regular-file check (Guard fallback mode, part 2), used only when the helper
+#: or its ``read_regular_file_bytes`` is missing. It keeps BOTH parts: the Windows link-target check (a
+#: network drive, ``\\server\share``, the device namespace) and the open-then-``fstat`` regular-file check,
+#: so a named pipe at the rules file, or at the end of a link, can never hold this guard at import.
+_RULES_MAX_BYTES = 1 << 20
+_RULES_MAX_LINK_HOPS = 8
+
+
+def _inline_link_reason(path: Path) -> str:
+    """Windows only: why the target of the link at ``path`` (or of a later link) is not read; else ``""``."""
+    if os.name != "nt":
+        return ""
+    current = os.fspath(path)
+    for _hop in range(_RULES_MAX_LINK_HOPS):
+        try:
+            if not os.path.islink(current):
+                return ""
+            target = os.readlink(current)
+        except OSError:
+            return "the link could not be read"
+        text = target.replace("/", "\\")
+        if text.upper().startswith(("\\\\?\\UNC\\", "\\\\.\\UNC\\", "\\??\\UNC\\")):
+            return "the link points to a network path"
+        if text.startswith("\\\\."):
+            return "the link points into the device namespace"
+        if text.startswith(("\\\\?\\", "\\??\\")):
+            rest = text[4:]
+            if not (len(rest) >= 2 and rest[0].isalpha() and rest[1] == ":"):
+                return "the link points into the device namespace"
+            text = rest
+        if text.startswith("\\\\"):
+            return "the link points to a network path"
+        absolute = os.path.join(os.path.dirname(current), text)
+        drive = os.path.splitdrive(absolute)[0] or os.path.splitdrive(os.path.abspath(current))[0]
+        if drive.startswith("\\\\"):
+            return "the link points to a network path"
+        try:
+            import ctypes
+
+            kind = int(ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive + "\\")))  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 -- drive kind unknown: not read
+            return "the drive of the link target could not be judged"
+        if kind not in (2, 3, 5, 6):  # removable, fixed, CD-ROM, RAM disk
+            return "the link points to a drive that is not local"
+        current = absolute
+    return "the link chain is too long"
+
+
+def _inline_read_regular_file_bytes(path: Path) -> bytes:
+    """Read a REGULAR file or raise: link-target check first, then open read-only (non-blocking where the
+    platform has it), ``fstat`` on the descriptor, and close it unread unless it is a regular file."""
+    reason = _inline_link_reason(path)
+    if reason:
+        raise OSError(reason)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(path, flags)
+    try:
+        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= _RULES_MAX_BYTES:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def _load_protected_names() -> tuple[str, ...]:
     project_path = _project_rules_path()
     if project_path is None:
         return ()
     try:
-        with project_path.open(encoding="utf-8") as _f:
-            data = json.load(_f)
+        reader = _sw_read_regular_file_bytes or _inline_read_regular_file_bytes
+        raw = reader(project_path)
+        if len(raw) > _RULES_MAX_BYTES:
+            return ()  # larger than any rules file: unreadable, so the strict default
+        data = json.loads(raw.decode("utf-8"))
     except Exception:
         return ()
     if not isinstance(data, dict):
