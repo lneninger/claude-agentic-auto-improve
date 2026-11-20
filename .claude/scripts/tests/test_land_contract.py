@@ -2691,7 +2691,7 @@ class StageCase(LandCase):
 
     def setUp(self):
         self.mod()
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self._tmp.cleanup)
 
     def stage(self, subdir="", **kit_kwargs):
@@ -5688,8 +5688,12 @@ import ast  # noqa: E402
 import inspect  # noqa: E402
 
 T32_VAR = "NoDefaultCurrentDirectoryInExePath"
-T32_MANIFEST_NAMES = ("plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json",
-                      ".claude-plugin/marketplace.json")
+import check_version_bump as t32_bump  # noqa: E402
+
+T32_MANIFEST_NAMES = tuple(t32_bump.MANIFESTS)
+# The parameters _p7b_version_raise has at the base; any parameter added after block 33 is one this file feeds the
+# absolute git program (the file does not guess block 33's name for it).
+T32_P7B_BASE_PARAMS = ("wt", "default", "counts")
 T32_WINDOWS_ONLY = unittest.skipUnless(
     os.name == "nt",
     "Windows only: CreateProcess looks in the current folder (and PATH) for a bare program name, and "
@@ -5893,6 +5897,8 @@ class T32Stage(Stage):
         def passthrough(cmd, *a, **k):
             stage.argv_seen.append([str(c) for c in cmd])
             stage.programs.append(str(cmd[0]) if cmd else "")
+            if cmd and str(cmd[0]) == "gh":
+                raise AssertionError("an unpatched gh edge reached _run: %r" % (cmd,))
             return real_run(cmd, *a, **k)
 
         def probe(wt, *a, **k):
@@ -5998,6 +6004,16 @@ class T32Case(PnLandingCase):
     def t32_remote_head(self, st):
         return t32_git(st.kit.origin, "rev-parse", "refs/heads/%s" % PARENT)
 
+    def assertEveryGitProgramIsResolveGitsResult(self, st, path_value):
+        """Every git program the landing handed its process launcher (``_run``) is the absolute path resolve_git
+        returns for the PATH the landing ran under (None when no git lies outside the project: then none at all)."""
+        expected = st.lc.resolve_git(path_value, [str(st.worktree), str(st.kit.main)])
+        seen = [p for p in st.programs if os.path.basename(p).lower() in ("git", "git.exe")]
+        wrong = sorted({p for p in seen if expected is None or os.path.normcase(p) != os.path.normcase(expected)})
+        self.assertEqual(wrong, [],
+                         "every git process the landing started takes resolve_git's result (%s) as its program, "
+                         "never a bare name; started with: %s (of %d git starts)" % (expected, wrong, len(seen)))
+
     def assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(self, st, before):
         after = self.t32_remote_head(st)
         self.assertNotEqual(after, before, "the landing reached P9 and pushed a new head to the remote")
@@ -6024,8 +6040,10 @@ class TestT32PlantedGitInTheVersionRaiseChild(T32Case):
         st, evidence = self.prepared("r1")
         before = t32_git(st.worktree, "rev-parse", "HEAD")
         lc = self.mod()
-        extra = {name: t32_abs_git() for name, p in list(inspect.signature(lc._p7b_version_raise).parameters.items())[3:]
-                 if p.default is p.empty and "git" in name}
+        # Whatever parameter block 33 adds (required or optional, any name) is handed the absolute git program; at the
+        # base there is none, so the call is the base's and the planted program answers.
+        extra = {name: t32_abs_git() for name, p in inspect.signature(lc._p7b_version_raise).parameters.items()
+                 if name not in T32_P7B_BASE_PARAMS and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
         with mock.patch.dict(os.environ, t32_isolated_env(st.kit.tmp)):
             os.environ.pop(T32_VAR, None)
             failure = lc._p7b_version_raise(st.worktree, "master", True, **extra)
@@ -6060,9 +6078,12 @@ class TestT32PlantedGitAgainstTheWholeLanding(T32Case):
         t32_exclude(st.kit.main, created)
         before = self.t32_remote_head(st)
         report, error = self.t32_land(st, nodefault=None)
-        self.assertEqual(t32_evidence(evidence), [],
-                         "no git process of the landing may be started by a bare name, whatever the current folder "
-                         "holds. %s" % self.t32_what(report, error))
+        with self.subTest("the planted program never ran"):
+            self.assertEqual(t32_evidence(evidence), [],
+                             "no git process of the landing may be started by a bare name, whatever the current folder "
+                             "holds. %s" % self.t32_what(report, error))
+        with self.subTest("every git program is resolve_git's result"):
+            self.assertEveryGitProgramIsResolveGitsResult(st, os.environ["PATH"])
         self.assertIsNone(error, "the landing ran to its end: %s" % error)
         self.assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(st, before)
 
@@ -6073,9 +6094,12 @@ class TestT32PlantedGitAgainstTheWholeLanding(T32Case):
         before_remote, before_head = self.t32_remote_head(st), t32_git(st.worktree, "rev-parse", "HEAD")
         path = os.pathsep.join([str(folder), os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32")])
         report, error = self.t32_land(st, nodefault="1", path=path)
-        self.assertEqual(t32_evidence(evidence), [],
-                         "the only git on PATH is inside the project, so the landing must not run it. %s"
-                         % self.t32_what(report, error))
+        with self.subTest("the planted program never ran"):
+            self.assertEqual(t32_evidence(evidence), [],
+                             "the only git on PATH is inside the project, so the landing must not run it. %s"
+                             % self.t32_what(report, error))
+        with self.subTest("no git program was started (resolve_git returns None)"):
+            self.assertEveryGitProgramIsResolveGitsResult(st, path)
         self.assertIsNone(error, "the landing ended with a report: %s" % error)
         self.assertEqual(report["outcome"], "unverifiable",
                          "no git program outside the project: the landing cannot verify and halts. %s %s"
@@ -6103,9 +6127,12 @@ class TestT32PlantedGitAgainstTheWholeLanding(T32Case):
         before = self.t32_remote_head(st)
         path = os.pathsep.join([str(folder), os.environ["PATH"]])
         report, error = self.t32_land(st, nodefault="1", path=path)
-        self.assertEqual(t32_evidence(evidence), [],
-                         "with the variable set the current folder is out of the search, but the first PATH entry, "
-                         "inside the project, is not: a bare `git` would run it. %s" % self.t32_what(report, error))
+        with self.subTest("the planted program never ran"):
+            self.assertEqual(t32_evidence(evidence), [],
+                             "with the variable set the current folder is out of the search, but the first PATH entry, "
+                             "inside the project, is not: a bare `git` would run it. %s" % self.t32_what(report, error))
+        with self.subTest("every git program is resolve_git's result"):
+            self.assertEveryGitProgramIsResolveGitsResult(st, path)
         self.assertIsNone(error, "the landing ran to its end: %s" % error)
         self.assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(st, before)
 
@@ -6120,25 +6147,71 @@ class TestT32PlantedGitAgainstTheWholeLanding(T32Case):
                         "planted program, so R12-C13-7 can fail. exit %s" % proc.returncode)
 
 
+T32_PROCESS_STARTS = frozenset({"run", "Popen", "check_output", "check_call", "call", "system", "popen", "_run",
+                                "_git", "_run_long", "_git_out"})
+T32_BARE_GIT = re.compile(r"^\s*git(\.exe)?(\s|$)", re.IGNORECASE)
+
+
+def t32_call_name(node):
+    func = node.func
+    return func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+
+
 def t32_git_literal_starts(source):
-    """``[(function, line)]`` of every list or tuple literal whose first element is the string ``git``: the argv
-    of a process start whose program is the bare name (``subprocess.run([...])``, ``_run([...])``, ``Popen``,
-    a local wrapper, or an argv built first and passed after)."""
+    """``[(function, line)]`` of every way the source names git by its bare name: a list or tuple whose first element
+    is the string ``git`` (or a module-level string constant holding it); a process start (``run``, ``Popen``,
+    ``check_output``, ``call``, ``system``, a local ``_run`` or ``_git`` wrapper) whose first argument is such a
+    string, constant, or a shell string (a literal or an f-string) beginning with ``git ``; and
+    ``shutil.which("git")``."""
     tree = ast.parse(source)
     parents = {}
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[child] = node
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = node.value.value
+
+    def bare_value(node):
+        if isinstance(node, ast.Name):
+            return constants.get(node.id)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    def is_bare(node):
+        value = bare_value(node)
+        return value is not None and value.strip().lower() in ("git", "git.exe")
+
+    def starts_shell_git(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return bool(T32_BARE_GIT.match(node.value))
+        if isinstance(node, ast.JoinedStr) and node.values and isinstance(node.values[0], ast.Constant):
+            return bool(T32_BARE_GIT.match(str(node.values[0].value)))
+        return False
+
     found = []
     for node in ast.walk(tree):
-        if isinstance(node, (ast.List, ast.Tuple)) and node.elts and isinstance(node.elts[0], ast.Constant) \
-                and isinstance(node.elts[0].value, str) and node.elts[0].value.lower() in ("git", "git.exe"):
+        hit = False
+        if isinstance(node, (ast.List, ast.Tuple)) and node.elts and is_bare(node.elts[0]):
+            hit = True
+        elif isinstance(node, ast.Call):
+            first = node.args[0] if node.args else None
+            name = t32_call_name(node)
+            if name in T32_PROCESS_STARTS and first is not None and (is_bare(first) or starts_shell_git(first)):
+                hit = True
+            elif name == "which" and first is not None and is_bare(first):
+                hit = True
+        if hit:
             owner = node
             while owner in parents and not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 owner = parents[owner]
             found.append((owner.name if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)) else "<module>",
                           node.lineno))
-    return found
+    return sorted(set(found), key=lambda item: item[1])
 
 
 class TestT32NoProcessStartNamesGitByItsBareName(unittest.TestCase):
@@ -6163,6 +6236,18 @@ class TestT32NoProcessStartNamesGitByItsBareName(unittest.TestCase):
         self.assertEqual(t32_git_literal_starts("def f():\n    return _run((\"git\", \"a\"))\n"), [("f", 2)])
         self.assertEqual(t32_git_literal_starts("subprocess.run([GIT, 'x'])\n_run(['/usr/bin/git', 'y'])\n"), [],
                          "a program held in a variable or named by a path is not a bare name")
+        self.assertEqual(t32_git_literal_starts("PROG = 'git'\ndef f():\n    return _run([PROG, 'x'])\n"), [("f", 3)],
+                         "a module-level string constant holding the bare name, used as argv[0], is found")
+        self.assertEqual(t32_git_literal_starts("GIT = 'git'\nsubprocess.run(GIT)\n"), [("<module>", 2)],
+                         "and so is one passed as the program itself")
+        self.assertEqual(t32_git_literal_starts("subprocess.run('git status', shell=True)\n"), [("<module>", 1)],
+                         "a shell string starting with git is found")
+        self.assertEqual(t32_git_literal_starts("def f(x):\n    return os.system(f'git {x}')\n"), [("f", 2)],
+                         "and so is an f-string")
+        self.assertEqual(t32_git_literal_starts("p = shutil.which('git')\n"), [("<module>", 1)],
+                         "shutil.which(\"git\") is found")
+        self.assertEqual(t32_git_literal_starts("MSG = 'git is missing'\nlog.info('git status')\nshutil.which('gh')\n"), [],
+                         "a message, a log call and another program are not process starts of git")
 
 
 class TestT32GitProgramOption(unittest.TestCase):
@@ -6184,14 +6269,14 @@ class TestT32GitProgramOption(unittest.TestCase):
         t32_git(self.repo, "fetch", "origin")
         self.head = t32_git(self.repo, "rev-parse", "HEAD")
 
-    def raise_with(self, program):
+    def raise_with(self, program, mode="--raise"):
         proc = _REAL_SUBPROCESS_RUN(
-            [sys.executable, "-B", str(SCRIPTS_DIR / "check_version_bump.py"), "--raise", "--default-branch", "master",
+            [sys.executable, "-B", str(SCRIPTS_DIR / "check_version_bump.py"), mode, "--default-branch", "master",
              "--git-program", program], cwd=str(self.repo), capture_output=True, text=True)
         return proc.returncode, (proc.stdout + proc.stderr).strip()
 
-    def assertRefused(self, program, why):
-        code, out = self.raise_with(program)
+    def assertRefused(self, program, why, mode="--raise"):
+        code, out = self.raise_with(program, mode)
         self.assertNotEqual(code, 0, "%s is refused (exit %s): %s" % (why, code, out))
         self.assertNotIn("unrecognized arguments", out, "the option exists and its value is checked, not parsed away")
         self.assertIn(program, out, "the message names the value it refused")
@@ -6205,8 +6290,22 @@ class TestT32GitProgramOption(unittest.TestCase):
         self.assertEqual(t32_versions(self.repo), ["0.12.0"] * 5, "the manifests carry the raise")
         self.assertEqual(t32_git(self.repo, "rev-parse", "HEAD^"), self.head, "one version commit on top")
 
-    def test_R12_C13_5_a_relative_git_program_is_refused(self):
-        self.assertRefused("relative-folder/git.exe", "a relative path")
+    def test_R12_C13_5_a_relative_git_program_that_exists_from_the_working_folder_is_refused(self):
+        relative = "relative-folder/git.exe"
+        (self.repo / "relative-folder").mkdir()
+        shutil.copy2(t32_abs_git(), self.repo / "relative-folder" / "git.exe")
+        t32_exclude(self.repo, ["relative-folder"])  # out of git status, so the tree check below reads only the script
+        self.assertTrue((self.repo / relative).is_file(),
+                        "control: the relative path exists from the script's working folder, so a check of existence "
+                        "alone would accept it")
+        self.assertRefused(relative, "a relative path, though the file exists from the working folder")
+
+    def test_R12_C13_5_a_git_program_is_refused_in_the_exact_mode_too(self):
+        self.assertRefused("relative-folder/git.exe", "a relative path in --exact", mode="--exact")
+
+    def test_R12_C13_5_a_git_program_is_refused_in_the_counts_mode_too(self):
+        self.assertRefused(str(Path(self._tmp.name) / "no-such-folder" / "git.exe"), "an absent file in --counts",
+                           mode="--counts")
 
     def test_R12_C13_5_an_absent_git_program_is_refused(self):
         self.assertRefused(str(Path(self._tmp.name) / "no-such-folder" / "git.exe"), "a file that does not exist")
