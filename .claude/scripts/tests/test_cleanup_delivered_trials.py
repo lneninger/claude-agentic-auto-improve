@@ -313,6 +313,86 @@ class T5GitWorktreeRemoveVersusALinkTests(TrialCase):
         self.assertIn("returncode", T5_OUTCOME, msg="T5 recorded git's behaviour on a tree holding a link")
 
 
+T6_OUTCOME: dict = {}
+
+
+@unittest.skipIf(shutil.which("claude") is None, "T6 needs the real `claude` program on PATH; it is skipped without it")
+class T6RealAgentsListTests(TrialCase):
+    """T6 (holder contract 2026-10-18, decision A8). Read-only and opt-in by presence of `claude`: it skips when
+    ``shutil.which("claude")`` is None. (T5 above is the git-versus-link trial; this one is the next number.)
+
+    It runs the production ``_run_holder_list`` once against the REAL program (`claude agents --json --all`, which only
+    reads) and checks the answer through the production helpers, so the real shape is proven on the machine and not
+    only on the committed fixture. The outcome is printed on stderr as "TRIAL T6 RESULT" and kept in ``T6_OUTCOME``.
+    """
+
+    def test_t6_the_real_agents_list_has_the_shape_the_reader_expects(self):
+        """Routed through ``_read_session_list`` run from the main root, so the PRODUCTION start (folder, environment,
+        resolution) is what the real program answers. Failure messages carry counts only, never a cwd or an id."""
+        import json
+        from unittest import mock
+        scripts = str(Path(__file__).resolve().parent.parent)
+        sys.path.insert(0, scripts)
+        try:
+            import cleanup_delivered as module
+        finally:
+            sys.path.pop(0)
+        for name in ("_read_session_list", "_run_holder_list"):
+            if not hasattr(module, name):
+                self.fail("cleanup_delivered.py does not define %s (HN-2)" % name)
+        main_root = str(Path(__file__).resolve().parents[3])  # the checkout root this suite belongs to
+        seen: list = []
+        real_runner = module._run_holder_list
+
+        def recording(exe, cwd):
+            result, text = real_runner(exe, cwd)
+            seen.append((result, text))
+            return result, text
+
+        saved = os.getcwd()
+        os.chdir(main_root)
+        try:
+            with mock.patch.object(module, "_run_holder_list", recording):
+                reading = module._read_session_list(main_root)
+        finally:
+            os.chdir(saved)
+
+        if reading.get("verdict") != "read" and reading.get("reason") == "the claude command was not found":
+            self.skipTest("T6: the only claude on PATH sits in the current folder or the main root, where production will not run it")
+        T6_OUTCOME.update({"verdict": reading.get("verdict"), "runs": len(seen), "session_variable_set": bool(os.environ.get("CLAUDE_CODE_SESSION_ID"))})
+        self.assertEqual(len(seen), 1, msg="T6: the production reader started `claude agents --json --all` once; started %d times" % len(seen))
+        self.assertEqual(seen[0][0], "answer", msg="T6: the real `claude agents --json --all` answered; the runner result was %r" % seen[0][0])
+        self.assertEqual(reading.get("verdict"), "read", msg="T6: the reader read the answer; verdict %r" % reading.get("verdict"))
+        listed = json.loads(seen[0][1])
+        self.assertIsInstance(listed, list, msg="T6: a bare JSON list")
+        self.assertTrue(all(isinstance(r, dict) for r in listed), msg="T6: every element is an object")
+        expected = {"cwd", "id", "kind", "name", "pid", "sessionId", "startedAt", "state", "status"}
+        # A stopped session has no pid and no status on a real machine, so the shape is judged over the whole list:
+        # the UNION of the keys is a superset of the nine, and every record carries the seven the reader uses.
+        seen_keys = set().union(*[set(r) for r in listed]) if listed else set()
+        needed = {"cwd", "id", "kind", "name", "sessionId", "startedAt", "state"}
+        short = sum(1 for r in listed if not needed <= set(r))
+        T6_OUTCOME.update({"bytes": len(seen[0][1].encode("utf-8")), "records": len(listed), "records_missing_core_keys": short,
+                           "readable": len(reading["records"]), "unreadable_cwd": reading["unreadable"]})
+        if listed:
+            self.assertTrue(expected <= seen_keys,
+                            msg="T6: the keys seen across the list are a superset of cwd, id, kind, name, pid, sessionId, startedAt, state, status; "
+                                "%d of the 9 are never seen" % len(expected - seen_keys))
+            self.assertEqual(short, 0, msg="T6: every record carries cwd, id, kind, name, sessionId, startedAt, state; %d of %d records miss some" % (short, len(listed)))
+        self.assertEqual(len(reading["records"]) + reading["unreadable"], len(listed),
+                         msg="T6: every record is either read or counted as unreadable (counts: %d read, %d unreadable, %d listed)"
+                             % (len(reading["records"]), reading["unreadable"], len(listed)))
+        bad_ids = sum(1 for r in reading["records"] if r["id"] is None or r["session_id"] is None)
+        T6_OUTCOME["bad_ids"] = bad_ids
+        self.assertEqual(bad_ids, 0, msg="T6: %d readable records fail the id or session id check" % bad_ids)
+        mine = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        if mine:
+            matching = [r for r in listed if r.get("sessionId") == mine]
+            T6_OUTCOME["matching_this_session"] = len(matching)
+            self.assertEqual(len(matching), 1, msg="T6: when CLAUDE_CODE_SESSION_ID is set, exactly one record is this session; found %d" % len(matching))
+        say("TRIAL T6 RESULT: %r" % (T6_OUTCOME,))
+
+
 class T4ClaudeProcessHoldsItsWorkingDirectoryTests(unittest.TestCase):
     @unittest.skip("T4 is a MANUAL trial and cannot be automated. Procedure: start a Claude Code session in the "
                    "main checkout, enter a linked worktree, run `py -3 .claude/scripts/cleanup_delivered.py "

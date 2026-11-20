@@ -557,6 +557,7 @@ prints it verbatim, exactly as `pr_merged.py`'s own human-readable output does.
 - Landing: <outcome, pull request and merged commit | halted at <gate> — remedy | running in the background (run_id) | not applicable>
 - Waiting on: <the merge this now needs, or nothing>
 - Completion: <the FINAL call's completion line, verbatim>
+<the closing paragraph below, only when the Cleanup line has the delivered form; otherwise nothing>
 - Next command: <the FINAL call's next_command.commands, joined by ", then ", or "none — <reason>". After a landing, the Landing Report's own next_command>
 - Cleanup: <Step 2.5's cleanup script `line`, verbatim>
 - Trees: <Step 2.5's sweep `tree_lines`, verbatim, one per tree touched: the starting tree, the --dispatch worktree and any removed tree>
@@ -567,6 +568,14 @@ The `completion:` line comes from the same final read-only call: `completion.ver
 The last two lines matter most. An operator who cannot see what the contract is waiting for,
 and what to type next, will either sit watching it or walk away at the wrong moment. **The next
 command is the script's own field, read after the move — never a line this skill composes.**
+
+Print the paragraph below, word for word, inside the report block, only when the Cleanup line has the delivered form `CLEANUP <slug>: removed …`. Never print it on "not delivered yet", never on "unverifiable", and never when no cleanup line was produced. The paragraph says what to do once the work is delivered; it does not say the work is delivered.
+
+The paragraph sits directly before the `- Next command:` line inside the block, and the order of the block's lines stays as it is. The paragraph is not one of the last two lines, which are the Next command and the Cleanup.
+
+Once the pull request is merged and the work is delivered, end this session with `/stop` before the delivery cleanup runs (or runs again): a session left running keeps its worktree folder in use, and the cleanup then has to leave that folder behind. `/exit` only detaches and leaves the session running; from another terminal, `claude stop <id>` stops it, where `<id>` is the 8-character id that `claude agents` shows.
+
+That paragraph is advice to the user, and it is part of the report block. You must not run `/stop`, `claude stop` or any other command that stops a session yourself. If the user tells you to keep working, their instruction comes first and you keep working.
 
 ## Where this sits
 

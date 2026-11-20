@@ -49,6 +49,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -343,6 +344,7 @@ def build_world(root: Path, *, n_tasks: int = 1, header: bool = True, brief_bran
     tools = Tools(root)
     tools.install_gh({"open_prs": [{"headRefName": RECORDS_BRANCH, "url": RECORDS_URL, "baseRefName": "master"}]})
     install_git_wrapper(tools)
+    install_fake_claude(tools)  # a fake `claude` on PATH in every world: a test never reaches a real one
     return SimpleNamespace(root=Path(root), world=world, main=main, origin=world.origin, ghub=ghub, tools=tools,
                            fw=fw, tw=tw, aw=aw, n_tasks=n_tasks, fw_branch=fw_branch)
 
@@ -547,6 +549,358 @@ def forbidden_hits(text: str) -> list:
     return hits
 
 
+# ---------------------------------------------------------------------------
+# Holder reading (contract 2026-10-18-cleanup-names-worktree-holder.md): a fake ``claude``, the session records
+# it prints, a cleaned environment, and the process-control tripwire
+# ---------------------------------------------------------------------------
+#: The fake ``claude``. It may be called ONLY as ``agents --json --all`` (the call log proves it). It logs its
+#: argv, optionally writes its pid, sleeps (rewriting a heartbeat file every 0.2 s while it does), then prints
+#: the configured text and exits with the configured code. Default: prints ``[]``.
+FAKE_CLAUDE_CODE = r'''
+import json, os, sys, time
+HERE = os.path.dirname(os.path.abspath(sys.argv[0]))
+with open(os.path.join(HERE, "claude_calls.jsonl"), "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"args": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
+with open(os.path.join(HERE, "claude_config.json"), encoding="utf-8") as fh:
+    cfg = json.load(fh)
+if cfg.get("pidfile"):
+    with open(cfg["pidfile"], "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+end = time.time() + float(cfg.get("sleep", 0))
+while time.time() < end:
+    if cfg.get("heartbeat"):
+        with open(cfg["heartbeat"], "w", encoding="utf-8") as fh:
+            fh.write(repr(time.time()))
+    time.sleep(0.2)
+if cfg.get("stdout_b64") is not None:  # raw-bytes mode: exactly these bytes, valid UTF-8 or not
+    import base64
+    raw = base64.b64decode(cfg["stdout_b64"])
+else:
+    raw = cfg.get("stdout", "[]").encode("utf-8")
+if cfg.get("pad_to"):  # trailing spaces after the JSON, up to this many bytes in all (a very large answer)
+    raw += b" " * max(0, int(cfg["pad_to"]) - len(raw))
+sys.stdout.buffer.write(raw)
+sys.stdout.flush()
+sys.exit(int(cfg.get("code", 0)))
+'''
+
+#: The variables the cleanup must never see unless a test sets them: a run inside a real Claude Code session
+#: would otherwise leak its own id into the tests (HN-7).
+HOLDER_ENV_STRIPPED = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_JOB_DIR", "CLAUDE_CODE_AGENT")
+STOP_ARGV = ["agents", "--json", "--all"]
+NOTE_TEXT = ("; note: the session list shows background sessions only; a session typed into a terminal, "
+             "an editor or another program may also hold this folder")
+NONE_FOUND_BRACKET = "[no background session in the list is in it]"
+WARNING_TEXT = "; warning: the running session was not recognised, so one stop command may be its own"
+REASON_NOT_FOUND = "the claude command was not found"
+REASON_NOT_STARTED = "the claude command could not be started"
+REASON_FORM = "the session list was not in the expected form"
+PRECEDENCE_SENTENCE = "If the user tells you to keep working, their instruction comes first and you keep working."
+HN11_PARAGRAPH = ("Once the pull request is merged and the work is delivered, end this session with `/stop` before the "
+                  "delivery cleanup runs (or runs again): a session left running keeps its worktree folder in use, and "
+                  "the cleanup then has to leave that folder behind. `/exit` only detaches and leaves the session "
+                  "running; from another terminal, `claude stop <id>` stops it, where `<id>` is the 8-character id "
+                  "that `claude agents` shows.")
+
+
+def cleanup_env(extra: dict | None, tools: Tools) -> dict:
+    """``clean_env`` with the session variables stripped, then ``extra`` (so a test can set one on purpose)."""
+    env = clean_env(None, tools=tools)
+    for key in HOLDER_ENV_STRIPPED:
+        env.pop(key, None)
+    if extra:
+        env.update(extra)
+    return env
+
+
+def install_fake_claude(tools: Tools) -> None:
+    """The executable is written ONCE per folder (like install_gh); the default list is ``[]``."""
+    if not (tools.bin / ("claude.exe" if os.name == "nt" else "claude")).exists():
+        write_exe(tools.bin, "claude", FAKE_CLAUDE_CODE)
+    set_claude(tools, [])
+
+
+def set_claude(tools: Tools, sessions=None, *, stdout: str | None = None, code: int = 0, sleep: float = 0,
+               heartbeat=None, pidfile=None, raw: bytes | None = None, pad_to: int = 0) -> None:
+    """``raw`` makes the fake print exactly these bytes (non-ASCII UTF-8, invalid UTF-8); ``pad_to`` adds trailing
+    spaces up to that many bytes in all (the 4 MiB limit)."""
+    text = stdout if stdout is not None else json.dumps(sessions if sessions is not None else [])
+    cfg = {"stdout": text, "code": code, "sleep": sleep, "heartbeat": str(heartbeat) if heartbeat else None,
+           "pidfile": str(pidfile) if pidfile else None, "pad_to": pad_to}
+    if raw is not None:
+        import base64
+        cfg["stdout_b64"] = base64.b64encode(raw).decode("ascii")
+    (tools.bin / "claude_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+
+def end_fake_claude(pidfile: Path) -> None:
+    """Cleanup of a fake `claude` this run started and a timeout left running: end it by the pid it wrote, wait until
+    it is gone (polling, not a fixed sleep), so the folder holding its executable can be deleted."""
+    try:
+        pid = int(Path(pidfile).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if IS_WINDOWS:
+            run_cmd(["taskkill", "/F", "/PID", str(pid)], cwd=Path(pidfile).parent)
+            alive = str(pid) in run_cmd(["tasklist", "/FI", "PID eq %d" % pid, "/NH"], cwd=Path(pidfile).parent).out
+        else:
+            try:
+                os.kill(pid, 9)
+                os.waitpid(pid, os.WNOHANG)
+                alive = True
+            except OSError:
+                alive = False
+        if not alive:
+            return
+        time.sleep(0.1)
+
+
+def claude_calls(tools: Tools) -> list:
+    f = tools.bin / "claude_calls.jsonl"
+    return [json.loads(l) for l in f.read_text(encoding="utf-8").splitlines() if l.strip()] if f.exists() else []
+
+
+#: The shape of one record of ``claude agents --json --all`` on a real machine (A8): a bare list of these.
+REAL_RECORD_KEYS = ("cwd", "id", "kind", "name", "pid", "sessionId", "startedAt", "state", "status")
+REAL_STATES = ("blocked", "done", "stopped", "working")
+
+
+def sess(short: str, cwd, *, name: str = "worker", state: str = "done", full: str | None = None, kind: str = "background",
+         pid: int | None = None, status: str | None = None, drop: tuple = (), **extra) -> dict:
+    """One record in the real shape: cwd, id, kind, name, pid, sessionId, startedAt, state, status."""
+    try:
+        default_pid = 1000 + int(short, 16) % 50000
+    except ValueError:
+        default_pid = 4242
+    rec = {"id": short, "sessionId": full if full is not None else short + "-0000-4000-8000-000000000000",
+           "cwd": str(cwd), "kind": kind, "name": name, "startedAt": 1760000000000, "state": state,
+           "pid": pid if pid is not None else default_pid, "status": status if status is not None else "Idle for 3m"}
+    rec.update(extra)
+    for key in drop:
+        rec.pop(key, None)
+    return rec
+
+
+def full_id(short: str) -> str:
+    return short + "-0000-4000-8000-000000000000"
+
+
+def many_ids(n: int) -> list:
+    return ["a%07x" % i for i in range(1, n + 1)]
+
+
+def synth_holder(short, *, name: str = "worker", state: str = "done", this: bool = False, stop: str | None = "auto") -> dict:
+    """A Holder as the contract's Data Shapes write it, for ``build_line`` on synthetic items."""
+    if stop == "auto":
+        stop = None if (this or short is None) else "claude stop " + short
+    return {"id": short, "session_id": full_id(short) if short else None, "name": name, "state": state, "kind": "background",
+            "started_at": 1760000000000, "cwd": "C:/r/.claude/worktrees/" + FW_NAME, "this_session": this, "stop_command": stop}
+
+
+def synth_item(holders, *, verdict: str = "found", reason: str | None = None, recognised: bool = False,
+               name: str = FW_NAME, repair: str | None = None) -> dict:
+    item = {"kind": "worktree", "path": "C:/r/.claude/worktrees/" + name, "action": "deferred", "reason": "standing-tree",
+            "files": [], "detail": None, "links": [], "identical": [],
+            "holders": {"verdict": verdict, "sessions": holders, "this_session_recognised": recognised}}
+    if reason:
+        item["holders"]["reason"] = reason
+    if repair:
+        item["repair"] = repair
+    return item
+
+
+def need_names(testcase: unittest.TestCase, module, *names: str) -> None:
+    """A missing production name is a clear failure of THIS test, never an AttributeError."""
+    missing = [n for n in names if not hasattr(module, n)]
+    if missing:
+        testcase.fail("cleanup_delivered.py does not define " + ", ".join(missing) + " yet (contract "
+                      "2026-10-18-cleanup-names-worktree-holder.md, Extension Points): the implementer adds it in GREEN")
+
+
+#: Tripwire for the holder lookup (HN-9, decision A1): the runner ends ONLY its own child, with ``proc.kill()``.
+#: FORBIDDEN_*: never allowed anywhere, not even in the exempt functions (no killpg, no taskkill, no new session or
+#: process group, no signals, no terminate). Exactly three exemptions (HN-9), each ONE name in ONE function:
+#: ``subprocess.run`` inside ``_exec``, ``Popen`` inside ``_run_holder_list``, ``kill`` inside ``_end_own_child``.
+#: Every other spawner (``run`` elsewhere, ``call``, ``check_*``, ``os.spawn*``, ``os.exec*``, ``os.posix_spawn*``)
+#: is flagged in every function. A tripwire, not a proof: the in-process recorders are the proof.
+FORBIDDEN_NAMES = {"killpg", "terminate", "send_signal", "signal", "system", "popen", "startfile", "TerminateProcess",
+                   "OpenProcess", "start_new_session", "setsid", "CREATE_NEW_PROCESS_GROUP", "process_group", "preexec_fn"}
+FORBIDDEN_STRINGS = {"taskkill", "pkill", "killall", "Stop-Process"}
+NAME_HOMES = {"kill": "_end_own_child", "Popen": "_run_holder_list", "subprocess.run": "_exec"}
+EXEMPT_ONLY_STRINGS = {"stop", "kill", "rm", "del", "rmdir"}
+SPAWN_FUNCTIONS = {"subprocess": {"run", "call", "check_call", "check_output", "getoutput", "getstatusoutput"}}
+SPAWN_PREFIXES = {"os": ("spawn", "exec", "posix_spawn"), "asyncio": ("create_subprocess",)}
+#: Names that start a process or a job object by another route (Windows API through ctypes, a pty), forbidden by
+#: prefix everywhere, the three exempt functions included. The hit is the prefix, e.g. ``CreateProcess``.
+FORBIDDEN_PREFIXES = ("CreateProcess", "CreateJobObject", "TerminateJobObject")
+FORBIDDEN_MODULE_NAMES = {"pty", "ctypes"}
+#: Modules that may be imported only as a plain ``import x`` (no alias, no ``from x import ...``): an alias or a
+#: bare imported name would hide ``subprocess.Popen`` / ``os.kill`` from the token scan.
+PLAIN_IMPORT_ONLY = {"subprocess", "os", "asyncio", "signal", "ctypes", "pty"}
+PROCESS_EXEMPT = ("_run_holder_list", "_end_own_child")
+
+
+def _starts_claude_stop(node) -> bool:
+    """True when the expression is text that begins ``claude stop``: a literal, a ``%`` or ``.format`` or f-string of one."""
+    import ast
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str) and node.value.lstrip().startswith("claude stop")
+    if isinstance(node, ast.JoinedStr):
+        return bool(node.values) and _starts_claude_stop(node.values[0])
+    if isinstance(node, ast.BinOp):
+        return _starts_claude_stop(node.left)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("format", "strip", "lstrip"):
+        return _starts_claude_stop(node.func.value)
+    return False
+
+
+def process_control_hits(text: str, exempt: tuple = PROCESS_EXEMPT, homes: dict = NAME_HOMES) -> list:
+    import ast
+    tree = ast.parse(text)
+    funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    ranges = [(n.lineno, n.end_lineno) for n in funcs if n.name in exempt]
+
+    def home_ranges(name: str) -> list:
+        return [(n.lineno, n.end_lineno) for n in funcs if n.name == homes.get(name)]
+
+    fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", -1)
+    sig = [t for t in tokenize.generate_tokens(io.StringIO(text).readline) if t.type not in (tokenize.NL, tokenize.COMMENT)]
+    hits = []
+    for node in ast.walk(tree):  # an alias or a bare import hides the dotted name from the token scan
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in PLAIN_IMPORT_ONLY and alias.asname:
+                    hits.append("import %s as" % alias.name)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in PLAIN_IMPORT_ONLY:
+            hits.append("from %s import" % node.module)
+    stack: list = []  # per open bracket: [opening char, token before it, saw a `for`]
+    for i, tok in enumerate(sig):
+        if tok.type == tokenize.OP and tok.string in "([{":
+            stack.append([tok.string, sig[i - 1].string if i else "", False])
+        elif tok.type == tokenize.OP and tok.string in ")]}" and stack:
+            stack.pop()
+        elif tok.type == tokenize.NAME and tok.string == "for" and stack:
+            stack[-1][2] = True
+        line = tok.start[0]
+        exempt_here = any(a <= line <= b for a, b in ranges)
+
+        def at_home(name: str) -> bool:
+            return any(a <= line <= b for a, b in home_ranges(name))
+
+        if tok.type == tokenize.NAME:
+            if tok.string in FORBIDDEN_NAMES or tok.string in FORBIDDEN_MODULE_NAMES:
+                hits.append(tok.string)
+            elif tok.string.startswith(FORBIDDEN_PREFIXES):
+                hits.append(next(p for p in FORBIDDEN_PREFIXES if tok.string.startswith(p)))
+            elif tok.string in ("kill", "Popen"):
+                if not at_home(tok.string):
+                    hits.append(tok.string)
+            elif i + 2 < len(sig) and sig[i + 1].string == "." and sig[i + 2].type == tokenize.NAME:
+                attr = sig[i + 2].string
+                dotted = tok.string + "." + attr
+                if attr in SPAWN_FUNCTIONS.get(tok.string, ()) or attr.startswith(SPAWN_PREFIXES.get(tok.string, ("\0",))):
+                    if not at_home(dotted):
+                        hits.append(dotted)
+                elif dotted == "os.kill":  # a process id of its own choosing: never, not even inside _end_own_child
+                    hits.append(dotted)
+        elif tok.type in (tokenize.STRING, fstring_middle):
+            prev = sig[i - 1].type if i else None
+            nxt = sig[i + 1].type if i + 1 < len(sig) else None
+            if tok.type == tokenize.STRING and prev in (None, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT) \
+                    and nxt == tokenize.NEWLINE:
+                continue  # a docstring
+            bare = tok.string.strip("'\"")
+            if bare in FORBIDDEN_STRINGS or (bare in EXEMPT_ONLY_STRINGS and not exempt_here):
+                hits.append(bare)
+            if not exempt_here and bare.startswith("claude stop") and "%" not in bare and "{" not in bare:
+                for opener in stack:  # a plain "claude stop ..." literal inside a list handed to a call
+                    if opener[0] == "[" and opener[1] in ("(", ",") and not opener[2]:
+                        hits.append("claude stop in an argument list")
+                        break
+    for node in ast.walk(tree):  # text beginning "claude stop" cut into words: that is how a stop would be launched
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "split" and _starts_claude_stop(func.value):
+            hits.append("claude stop split into words")
+        elif isinstance(func, (ast.Attribute, ast.Name)) and getattr(func, "attr", getattr(func, "id", "")) == "split" \
+                and node.args and _starts_claude_stop(node.args[0]):
+            hits.append("claude stop split into words")
+    return hits
+
+
+def name_references(text: str, name: str) -> list:
+    """Every use of ``name`` outside its own definition: a call, an alias (``x = name``), an argument, an attribute
+    or a string that spells it. Returns ``(enclosing function, kind)`` pairs, kind ``call`` or ``reference``."""
+    import ast
+    tree = ast.parse(text)
+    found: list = []
+
+    def visit(node, owner):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == name:
+                return  # its own definition (a recursive call would still be a use, but it has none)
+            owner = node.name
+        if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) == name:
+            found.append((owner, "call"))
+            for child in list(node.args) + [k.value for k in node.keywords]:
+                visit(child, owner)
+            return
+        if (isinstance(node, ast.Name) and node.id == name) or (isinstance(node, ast.Attribute) and node.attr == name) \
+                or (isinstance(node, ast.Constant) and node.value == name):
+            found.append((owner, "reference"))
+        for child in ast.iter_child_nodes(node):
+            visit(child, owner)
+
+    visit(tree, "<module>")
+    return found
+
+
+def end_own_child_problems(text: str) -> list:
+    """B7(4): the body of ``_end_own_child`` holds exactly ONE call, and it is ``<first parameter>.kill()`` with no
+    arguments at all. (A ``try/except OSError`` around it is allowed; a second call, an argument, another receiver is not.)"""
+    import ast
+    tree = ast.parse(text)
+    funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_end_own_child"]
+    if len(funcs) != 1:
+        return ["_end_own_child is defined %d times" % len(funcs)]
+    func = funcs[0]
+    params = [a.arg for a in func.args.args]
+    if len(params) != 1:
+        return ["_end_own_child takes %d parameters, not one" % len(params)]
+    calls = [c for c in ast.walk(func) if isinstance(c, ast.Call)]
+    if len(calls) != 1:
+        return ["%d calls in the body, not exactly one" % len(calls)]
+    call = calls[0]
+    func_node = call.func
+    if not (isinstance(func_node, ast.Attribute) and func_node.attr == "kill" and isinstance(func_node.value, ast.Name)
+            and func_node.value.id == params[0]):
+        return ["the one call is not %s.kill()" % params[0]]
+    if call.args or call.keywords:
+        return ["kill() is called with arguments"]
+    # The accepted body is exactly: [docstring] try: <param>.kill() except OSError: pass
+    body = list(func.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if len(body) != 1 or not isinstance(body[0], ast.Try):
+        return ["the body is not exactly one try statement"]
+    node = body[0]
+    if node.orelse or node.finalbody:
+        return ["the try has an else or finally part"]
+    if not (len(node.body) == 1 and isinstance(node.body[0], ast.Expr) and node.body[0].value is call):
+        return ["the try body is not the one kill call"]
+    if len(node.handlers) != 1:
+        return ["the try has %d handlers, not one" % len(node.handlers)]
+    handler = node.handlers[0]
+    if not (isinstance(handler.type, ast.Name) and handler.type.id == "OSError"):
+        return ["the handler does not catch exactly OSError"]
+    if not (len(handler.body) == 1 and isinstance(handler.body[0], ast.Pass)):
+        return ["the handler body is not exactly `pass`"]
+    return []
+
+
 # ===========================================================================
 # Base case
 # ===========================================================================
@@ -578,6 +932,8 @@ class CleanupCase(unittest.TestCase):
                     offenders.append(f"gh {' '.join(call.get('args', []))}: {why}")
         self.assertEqual(offenders, [], msg="INV-5: no prune, no force (but the one lease form), no switch, checkout or "
                                             "rm in any git call, and gh only reads (pr list, pr view)")
+        odd = [c["args"] for world in self.worlds for c in claude_calls(world.tools) if c["args"] != STOP_ARGV]
+        self.assertEqual(odd, [], msg="HN-2/HN-9: `claude` is called only as `agents --json --all`, never `stop` or anything else")
 
     def _reap(self) -> None:
         for p in self.procs:
@@ -602,7 +958,7 @@ class CleanupCase(unittest.TestCase):
         args = ["--contract", contract, "--from", str(from_dir or self.w.main), *flags]
         if as_json:
             args.append("--json")
-        proc = run_py(CLEANUP, *args, cwd=cwd or self.w.main, env=clean_env(env_extra, tools=self.w.tools))
+        proc = run_py(CLEANUP, *args, cwd=cwd or self.w.main, env=cleanup_env(env_extra, self.w.tools))
         return proc, (proc.json() if as_json else None)
 
     def need_report(self, proc, report, what: str) -> dict:
@@ -631,7 +987,7 @@ class CleanupCase(unittest.TestCase):
         saved_cwd = os.getcwd()
         try:
             os.chdir(str(self.w.main))
-            with mock.patch.dict(os.environ, clean_env(env_extra, tools=self.w.tools), clear=True), \
+            with mock.patch.dict(os.environ, cleanup_env(env_extra, self.w.tools), clear=True), \
                     contextlib.redirect_stdout(out), contextlib.ExitStack() as stack:
                 for target, fn in patches.items():
                     stack.enter_context(mock.patch(target, fn))
@@ -1027,6 +1383,99 @@ class SkillWiringTests(unittest.TestCase):
                              msg=f"skills/{name}/SKILL.md: the manual worktree remove + prune lines are removed")
             self.assertNotRegex(text, r"then\s+`git worktree prune`",
                                 msg=f"skills/{name}/SKILL.md: INV-5 forbids prune, so no line may recommend it")
+
+    # -- HN-11: the conditional closing paragraph --------------------------------------------------------
+    HN11_PLACES = (("flow", "Step 8"), ("advance", "Step 3"), ("task", "Status lifecycle"))
+
+    def test_the_closing_paragraph_appears_exactly_once_in_flow_step_8_advance_step_3_and_task_status_lifecycle(self):
+        for name, heading in self.HN11_PLACES:
+            with self.subTest(skill=name, section=heading):
+                body = section(read_skill(name), heading)
+
+                self.assertTrue(body, msg=f"skills/{name}/SKILL.md has a `## {heading}` section")
+                self.assertEqual(body.count(HN11_PARAGRAPH), 1,
+                                 msg=f"HN-11: the pinned paragraph appears exactly once in skills/{name}/SKILL.md `## {heading}`")
+
+    def test_the_closing_paragraph_is_not_in_task_step_6_the_hand_off_to_design_first(self):
+        body = section(read_skill("task"), "Step 6")
+
+        self.assertTrue(body, msg="skills/task/SKILL.md has a `## Step 6` section")
+        self.assertNotIn("Once the pull request is merged and the work is delivered", body,
+                         msg="HN-11: Step 6 is an automatic hand-off, not a report; the paragraph lives in `## Status lifecycle`")
+
+    def test_each_section_tells_the_model_not_to_run_stop_and_lets_the_user_keep_working(self):
+        for name, heading in self.HN11_PLACES:
+            with self.subTest(skill=name):
+                rest = section(read_skill(name), heading).replace(HN11_PARAGRAPH, "")
+
+                self.assertRegex(rest, r"(?is)(must not|never|do not|does not|not)[^.\n]{0,80}/stop|/stop[^.\n]{0,80}(must not|never|do not|not)",
+                                 msg=f"HN-11: skills/{name}/SKILL.md says in its own words that the model must not run /stop itself")
+                self.assertIn(PRECEDENCE_SENTENCE, rest,
+                              msg=f"HN-11: skills/{name}/SKILL.md carries the precedence sentence verbatim")
+
+    def test_task_says_the_status_paragraph_ends_with_it_not_that_it_may(self):
+        body = section(read_skill("task"), "Status lifecycle")
+
+        self.assertNotIn("may end with this paragraph", body, msg="HN-11: a report that names `shipped` ends with the paragraph; `may end with` lets a model skip it")
+        self.assertRegex(body, r"(?i)\bends with this paragraph\b", msg="HN-11: skills/task/SKILL.md says the report `ends with` the paragraph")
+
+    def test_advance_prints_the_paragraph_only_when_the_cleanup_line_has_the_removed_form(self):
+        body = section(read_skill("advance"), "Step 3").replace(HN11_PARAGRAPH, "")
+
+        self.assertRegex(body, r"(?is)\bparagraph\b[^.]{0,250}\bonly\b[^.]{0,250}\bremoved\b|\bonly\b[^.]{0,250}\bremoved\b[^.]{0,250}\bparagraph\b|"
+                         r"\bparagraph\b[^.]{0,250}\bremoved\b[^.]{0,250}\bonly\b",
+                         msg="HN-11: /advance says the paragraph is printed only when the Cleanup line is the delivered `removed` form")
+
+    @staticmethod
+    def sentences(text: str) -> list:
+        """(start offset, sentence) pairs; a sentence ends at . ! ? followed by a space or at a line break."""
+        flat = text.replace(HN11_PARAGRAPH, "\x00" * len(HN11_PARAGRAPH))
+        return [(m.start(), m.group(0)) for m in re.finditer(r"[^\n.!?]+(?:[.!?]+(?=\s|$))?", flat) if m.group(0).strip("\x00 \t")]
+
+    def test_d1_advance_step_3_keeps_masters_bullet_order_and_places_the_paragraph_inside_the_block_before_next_command(self):
+        body = section(read_skill("advance"), "Step 3")
+        fence = re.search(r"```[^\n]*\n(### ADVANCE REPORT\n.*?)```", body, re.S)
+        self.assertIsNotNone(fence, msg="fixture sanity: Step 3 has the report block that starts at `### ADVANCE REPORT`")
+        block = fence.group(1)
+        bullets = [m.group(1) for m in re.finditer(r"^- (Next command|Cleanup|Trees):", block, re.M)]
+
+        self.assertEqual(bullets, ["Next command", "Cleanup", "Trees"],
+                         msg="D1: the report block keeps master's order: `Next command:` before `Cleanup:` before `Trees:`")
+        lines = block.splitlines()
+        at = next(i for i, l in enumerate(lines) if l.startswith("- Next command:"))
+        before = next((l for l in reversed(lines[:at]) if l.strip()), "")
+        stripped = before.strip()
+        self.assertTrue(stripped.startswith("<") and stripped.endswith(">") and "closing paragraph" in stripped,
+                        msg=f"W2: the line directly before `- Next command:` is a `<...>` placeholder naming the closing paragraph, in the block's own style; got {before!r}")
+        prose = body.replace(HN11_PARAGRAPH, "")
+        self.assertRegex(prose, r"(?is)(directly|immediately) before[^.\n]{0,120}next command",
+                         msg="D1: the section says the paragraph sits directly before the `Next command:` line")
+        self.assertRegex(prose, r"(?is)\binside\b[^.\n]{0,80}\bblock\b|\bwithin\b[^.\n]{0,80}\bblock\b",
+                         msg="D1: the section says the paragraph is printed inside the report block")
+        for phrase in ("printed last", "After the report block", "the very last line"):
+            self.assertNotIn(phrase.lower(), body.lower(), msg=f"D1: the old wording `{phrase}` is gone from Step 3")
+
+    def test_b5_flow_says_the_paragraph_belongs_to_the_final_report_not_the_push_confirmation(self):
+        body = section(read_skill("flow"), "Step 8")
+        self.assertIn(HN11_PARAGRAPH, body, msg="fixture sanity: the pinned paragraph is in the section")
+        at = body.index(HN11_PARAGRAPH)
+        found = self.sentences(body)
+        hits = []
+        for i, (pos, sentence) in enumerate(found):
+            if not (re.search(r"(?i)final report", sentence) and re.search(r"(?i)\bnot\b|n't|\bnever\b|\bnor\b", sentence)):
+                continue
+            around = " ".join(s for _p, s in found[max(0, i - 1):i + 2])
+            if re.search(r"(?i)confirmation|confirm\b", around) and abs(pos - at) <= 1200:
+                hits.append(sentence)
+
+        self.assertTrue(hits, msg="B5: /flow Step 8 has a sentence with `final report` and a negation, next to a mention of the confirmation, "
+                                  "within 1200 characters of the closing paragraph: the paragraph belongs to the final report, not to the push confirmation prompt")
+
+    def test_the_old_unconditional_wording_is_nowhere_in_the_three_skills(self):
+        for name in ("flow", "advance", "task"):
+            with self.subTest(skill=name):
+                self.assertNotIn("Delivered. End this session", read_skill(name),
+                                 msg="HN-11: the old unconditional opening would tell the user a draft pull request is delivered")
 
 
 # ===========================================================================
@@ -1941,6 +2390,26 @@ class StandingTreeTests(CleanupCase):
         line = report["line"]
         self.assertIn("; finish: " + fc, line, msg="INV-8: the line carries `; finish: <finish_command>`")
         self.assertEqual(line.count("finish:"), 1, msg="INV-6: exactly one finish line, never several")
+        self.assertIn("holders", item, msg=f"HN-1 ({what}): a deferred standing-tree or in-use item carries the Holder reading "
+                                          f"in a `holders` field; the item has only {sorted(item)}")
+        finish_at = line.index("; finish: ")
+        stops = [m.start() for m in re.finditer(r"; stop: ", line)]
+        self.assertTrue(all(s < finish_at for s in stops), msg=f"HN-8 ({what}): every `; stop:` part comes before `; finish:`")
+
+    def holder_item(self, report: dict, path: Path | None = None) -> dict:
+        item = pick(report, "worktree", (path or self.w.fw).name)
+        self.assertIn("holders", item, msg=f"HN-1: the deferred item carries a `holders` field; it has only {sorted(item)}")
+        return item["holders"]
+
+    def held_run(self, sessions, *, env: dict | None = None, flags: tuple = (), what: str = "a held tree", **kw):
+        """The feature worktree is the standing tree; the fake `claude` lists ``sessions``."""
+        set_claude(self.w.tools, sessions)
+        extra = {"CLAUDE_PROJECT_DIR": str(self.w.fw)}
+        extra.update(env or {})
+        return self.run_report(*flags, env_extra=extra, what=what, **kw)
+
+    def stop_parts(self, line: str) -> list:
+        return re.findall(r"; stop: (claude stop [^;]*)", line)
 
     def test_claude_project_dir_inside_a_target_defers_it_with_exactly_one_finish_line(self):
         proc, report = self.run_report(env_extra={"CLAUDE_PROJECT_DIR": str(self.w.fw)}, what="CLAUDE_PROJECT_DIR in the feature worktree")
@@ -2010,6 +2479,10 @@ class StandingTreeTests(CleanupCase):
         proc, report = self.run_report(what="a held worktree")
 
         self.assertDeferredWithOneFinishLine(report, self.w.fw, "in-use", "held cwd")
+        self.assertEqual(self.holder_item(report)["verdict"], "none-found",
+                         msg="HN-1: the in-use deferral also gets a Holder reading; the default list is empty, so none-found")
+        self.assertIn(NOTE_TEXT, report["line"], msg="HN-8: the fixed note is in the line whenever any item carries holders")
+        self.assertEqual(self.stop_parts(report["line"]), [], msg="no holder, so no stop command")
         self.assertEqual(tree_listing(self.w.fw), listing, msg="INV-6: the held tree's files are intact after the probe")
         self.assertTrue(is_link_entry(link), msg="INV-4/INV-6: a deferred tree keeps its links")
         self.assertTargetSurvived(target, "held tree")
@@ -2119,6 +2592,136 @@ class StandingTreeTests(CleanupCase):
             for src, dst in failed:  # put the folder back so the fixture can be deleted
                 if os.path.isdir(src) and not os.path.exists(dst):
                     real_rename(src, dst)
+
+    # -----------------------------------------------------------------------------------------------
+    # Holder reading, end to end (contract 2026-10-18-cleanup-names-worktree-holder.md, HN-1 to HN-9).
+    # Six tests in all (with the in-use test above and the halted run), every one but the halted run a --dry-run.
+    # The reading's detail (session variable, cwd forms, forging, twenty holders) lives in the fast unit classes
+    # HolderReadingUnitTests and HolderRunnerFakeTests, which need no git world.
+    # -----------------------------------------------------------------------------------------------
+    @staticmethod
+    def without_holders(report: dict) -> list:
+        return [{k: v for k, v in it.items() if k != "holders"} for it in report["items"]]
+
+    def short_line(self, item: dict) -> str:
+        """The bracket is checked on a short synthetic line: the real line sheds a bracket when the checkout path is long."""
+        return self.load_module().build_line(SLUG, [item], "py -3 'x'")
+
+    def test_a_session_inside_the_deferred_tree_is_named_with_its_stop_command_and_the_decision_is_unchanged(self):
+        env = {"CLAUDE_PROJECT_DIR": str(self.w.fw)}
+        base_proc, base = self.run_report("--dry-run", env_extra=env, what="dry run, default empty list")
+        self.assertEqual(pick(base, "worktree", FW_NAME)["action"], "deferred", msg="fixture sanity: the tree is deferred")
+        before, main_before = state(self.w), snapshot(self.w.main)
+
+        proc, report = self.held_run([sess("bbfa6fec", self.w.fw / "src", name="worker", state="done")], flags=("--dry-run",),
+                                     what="one holder")
+
+        holders = self.holder_item(report)
+        self.assertEqual(holders.get("verdict"), "found", msg=f"HN-1: one session inside the tree reads `found`; got {holders}")
+        self.assertEqual(len(holders.get("sessions") or []), 1, msg="exactly the one session")
+        h = holders["sessions"][0]
+        self.assertEqual((h.get("id"), h.get("name"), h.get("state"), h.get("kind"), h.get("stop_command")),
+                         ("bbfa6fec", "worker", "done", "background", "claude stop bbfa6fec"), msg=f"Holder fields; got {h}")
+        self.assertFalse(h.get("this_session"), msg="CLAUDE_CODE_SESSION_ID is not set, so nobody is this session")
+        self.assertTrue(h.get("cwd"), msg="HN-6: the working folder is kept in the JSON")
+        self.assertNotIn(str(self.w.fw / "src"), report["line"], msg="HN-6: the working folder is never in the line")
+        self.assertIn('[held by bbfa6fec "worker" done]', self.short_line(pick(report, "worktree", FW_NAME)),
+                      msg="HN-8: the bracket (checked on a short line, the real one may shed it)")
+        self.assertIn(NOTE_TEXT, report["line"], msg="HN-8: the uncut note is in the real line")
+        self.assertIn("; stop: claude stop bbfa6fec", report["line"], msg="HN-8: the stop command is printed")
+        self.assertEqual(report.get("stop_commands"), ["claude stop bbfa6fec"], msg="HN-8: --json lists exactly what the line prints")
+        self.assertEqual((report.get("holder_lookup") or {}).get("verdict"), "read", msg="the report records that a lookup ran")
+        self.assertEqual((proc.rc, report["outcome"], report.get("finish_command")),
+                         (base_proc.rc, base["outcome"], base.get("finish_command")),
+                         msg="HN-1: exit code, outcome and finish command are the same with and without holders")
+        self.assertEqual(self.without_holders(report), self.without_holders(base),
+                         msg="HN-1/HN-10: action, reason, files, detail and every other field are byte-identical; only `holders` is new")
+        others = [it for it in report["items"] if not (it["action"] == "deferred" and it.get("reason") in ("standing-tree", "in-use"))]
+        self.assertTrue(others, msg="fixture sanity: items that are not deferred exist")
+        self.assertTrue(all("holders" not in it for it in others), msg="HN-10: only deferred items gain `holders`")
+        self.assertEqual(state(self.w), before, msg="a dry run with a holder: nothing on disk changes")
+        self.assertEqual(snapshot(self.w.main), main_before, msg="and the main checkout is byte-identical")
+
+    def test_two_deferred_trees_each_list_only_their_own_holder_and_get_one_stop_command_each(self):
+        x = sess("bbfa6fec", self.w.fw / "src", name="session-x", state="working")
+        y = sess("cc00dd11", self.w.tw, name="session-y", state="blocked")
+
+        proc, report = self.held_run([x, y], flags=("--dry-run",), cwd=self.w.tw, what="session X in tree A, session Y in tree B")
+
+        for path in (self.w.fw, self.w.tw):
+            self.assertEqual(pick(report, "worktree", path.name)["action"], "deferred", msg=f"fixture sanity: {path.name} is deferred")
+        a, b = pick(report, "worktree", self.w.fw.name), pick(report, "worktree", self.w.tw.name)
+        self.assertEqual([s.get("id") for s in a["holders"]["sessions"]], ["bbfa6fec"], msg="HN-5: tree A lists only X")
+        self.assertEqual([s.get("id") for s in b["holders"]["sessions"]], ["cc00dd11"], msg="HN-5: tree B lists only Y")
+        bracket_a, bracket_b = self.short_line(a), self.short_line(b)
+        self.assertIn('[held by bbfa6fec "session-x" working]', bracket_a, msg="HN-8: A's bracket names X")
+        self.assertNotIn("cc00dd11", bracket_a, msg="and does not name Y")
+        self.assertIn('[held by cc00dd11 "session-y" blocked]', bracket_b, msg="HN-8: B's bracket names Y")
+        self.assertNotIn("bbfa6fec", bracket_b, msg="and does not name X")
+        line = report["line"]
+        self.assertEqual(sorted(self.stop_parts(line)), ["claude stop bbfa6fec", "claude stop cc00dd11"],
+                         msg="HN-8: exactly one stop command for each session")
+        self.assertEqual(sorted(report.get("stop_commands") or []), ["claude stop bbfa6fec", "claude stop cc00dd11"])
+        self.assertEqual(line.count("finish:"), 1, msg="INV-6: two deferred trees, still one finish line")
+        self.assertTrue(line.endswith("; finish: " + report["finish_command"]), msg="and it is last and whole")
+        self.assertEqual(len(claude_calls(self.w.tools)), 1, msg="HN-2: one Session List Reading serves both trees")
+
+    def test_a_halted_run_still_reports_the_holders_of_a_tree_deferred_before_the_halt(self):
+        gone = self.tmp / "vanished_modules"
+        self.make_link(self.w.fw / "src" / "gone", "node_modules", gone)
+        rmtree_force(gone)
+        env = {"CLAUDE_PROJECT_DIR": str(self.w.aw)}
+        base_proc, base = self.run_report(env_extra=env, what="halted run, default list")
+        self.assertEqual((pick(base, "worktree", AW_NAME)["action"], pick(base, "worktree", AW_NAME).get("reason")),
+                         ("deferred", "standing-tree"), msg="fixture sanity: the advance tree is deferred first")
+        self.assertEqual(pick(base, "worktree", FW_NAME).get("reason"), "remove-failed", msg="fixture sanity: the next tree halts the run")
+        self.assertEqual((base_proc.rc, base["outcome"]), (3, "partial"))
+
+        set_claude(self.w.tools, [sess("bbfa6fec", self.w.aw)])
+        proc, report = self.run_report(env_extra=env, what="halted run, one holder")
+
+        holders = self.holder_item(report, self.w.aw)
+        self.assertEqual(holders.get("verdict"), "found", msg="HN-1: the lookup runs after the halt too, over the items already there")
+        self.assertIn("; stop: claude stop bbfa6fec", report["line"], msg="and its stop command is printed")
+        self.assertEqual((proc.rc, report["outcome"], report.get("finish_command")), (base_proc.rc, base["outcome"], base.get("finish_command")),
+                         msg="HN-1: outcome, exit code and finish command are the same as without the lookup")
+        self.assertEqual(self.without_holders(report), self.without_holders(base), msg="and so is every item")
+
+    def test_a_run_with_nothing_deferred_never_starts_claude_and_adds_no_holder_fields(self):
+        set_claude(self.w.tools, [sess("bbfa6fec", self.w.fw)])
+
+        proc, report = self.run_report("--dry-run", what="nothing deferred")
+
+        self.assertEqual(pick(report, "worktree", FW_NAME)["action"], "removed", msg="fixture sanity: nothing is deferred")
+        self.assertEqual(claude_calls(self.w.tools), [], msg="HN-10: a run with nothing deferred never starts claude")
+        for key in ("stop_commands", "holder_lookup"):
+            self.assertNotIn(key, report, msg=f"HN-1: no lookup ran, so no `{key}`")
+        self.assertTrue(all("holders" not in it for it in report["items"]), msg="no item gains `holders`")
+        self.assertNotIn("note:", report["line"], msg="and the line has no note")
+        self.assertNotIn("[held by", report["line"])
+
+    def test_a_session_whose_folder_reaches_the_tree_through_a_link_holds_it_like_the_deferral_says(self):
+        link = self.tmp / "via_link"
+        try:
+            make_directory_link(link, self.w.fw)
+        except (OSError, NotImplementedError, ImportError) as exc:
+            self.skipTest(f"a directory link cannot be made on this host: {exc}")
+        self.addCleanup(drop_link, link)
+
+        proc, report = self.held_run([sess("bbfa6fec", link / "src")], flags=("--dry-run",), what="folder reached through a link")
+
+        self.assertEqual(self.holder_item(report).get("verdict"), "found",
+                         msg="HN-5: the holder match is the deferral's own _inside, so a link into the tree is inside it")
+
+
+def drop_link(link: Path) -> None:
+    for remove in (os.rmdir, os.unlink):
+        try:
+            remove(str(link))
+            return
+        except OSError:
+            continue
+
 
 
 # ===========================================================================
@@ -2759,6 +3362,1063 @@ class LandedUntrackedTests(CleanupCase):
         self.assertKept(self.w.fw, "landed file behind a linked folder")
 
 
+# ===========================================================================
+# Holder reading: failure paths, the read-only proof and the real wrapper (HN-2, HN-3, HN-9)
+# ===========================================================================
+def pid_is_alive(pid: int, scratch: Path) -> bool:
+    """True while the process ``pid`` exists (tasklist on Windows, signal 0 elsewhere)."""
+    if IS_WINDOWS:
+        return str(pid) in run_cmd(["tasklist", "/FI", "PID eq %d" % pid, "/NH"], cwd=scratch).out
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _norm_text(path) -> str:
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def is_holder_call(args) -> bool:
+    return isinstance(args, (list, tuple)) and "agents" in list(args) and "--all" in list(args)
+
+
+class HolderInProcessCase(CleanupCase):
+    """The cleanup runs inside this process (``run_in_process``) so a test can patch ``shutil.which`` and
+    ``subprocess.Popen``. The fake ``claude`` is still the only program a lookup can reach."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.deliver()
+
+    def module_with(self, *names: str):
+        module = self.load_module()
+        need_names(self, module, *names)
+        return module
+
+    def track_fake(self, pidfile: Path) -> None:
+        """Registered after setUp's cleanups, so it runs before the folder is deleted: a fake `claude` that a timeout
+        left running is ended by the pid it wrote, and awaited by polling (never a fixed sleep)."""
+        self.addCleanup(end_fake_claude, pidfile)
+
+    def held_in_process(self, sessions=None, *, stdout: str | None = None, code: int = 0, sleep: float = 0,
+                        patches: dict | None = None, env: dict | None = None, flags: tuple = ("--dry-run",), pidfile=None):
+        set_claude(self.w.tools, sessions, stdout=stdout, code=code, sleep=sleep, pidfile=pidfile)
+        extra = {"CLAUDE_PROJECT_DIR": str(self.w.fw)}
+        extra.update(env or {})
+        rc, out, report = self.run_in_process(list(flags), patches=patches or {}, env_extra=extra)
+        self.assertIsInstance(report, dict, msg=f"the run must print one report, got {out[:300]!r}")
+        return rc, report
+
+    def assertCannotTell(self, rc: int, report: dict, reason: str, what: str) -> dict:
+        item = pick(report, "worktree", FW_NAME)
+        self.assertIn("holders", item, msg=f"HN-3 ({what}): a failed read still puts a Holder reading on the deferred item; it has only {sorted(item)}")
+        holders = item["holders"]
+        self.assertEqual(holders.get("verdict"), "cannot-tell", msg=f"HN-3 ({what}): a failed read is cannot-tell; got {holders}")
+        self.assertEqual(holders.get("reason"), reason, msg=f"HN-3 ({what}): the fixed reason")
+        # The bracket is checked through build_line with a short synthetic finish command, never through the real
+        # line: the real finish command carries the checkout path, and a long path makes the line shed the bracket.
+        short_line = self.load_module().build_line(SLUG, [item], "py -3 'x'")
+        self.assertIn(f"[cannot tell which session holds it: {reason}]", short_line, msg=f"HN-8 ({what}): the bracket carries the reason")
+        self.assertEqual((report.get("holder_lookup") or {}).get("verdict"), "cannot-tell", msg="the report records the failed lookup")
+        self.assertEqual((item["action"], item.get("reason")), ("deferred", "standing-tree"), msg=f"HN-1 ({what}): the deferral is unchanged")
+        self.assertEqual((rc, report["outcome"]), (3, "partial"), msg=f"HN-1 ({what}): exit code and outcome are unchanged")
+        self.assertIsInstance(report.get("finish_command"), str, msg="and the finish command is still there")
+        self.assertTrue(report["line"].endswith("; finish: " + report["finish_command"]))
+        self.assertKept(self.w.fw, what)
+        self.assertNotIn("stop_commands", report, msg="a failed read prints no stop command")
+        self.assertNotIn("; stop: ", report["line"])
+        return holders
+
+
+class HolderFailurePathTests(HolderInProcessCase):
+    """The timeout case lives in HolderReadOnlyTests (one merged test); the rest of the failure paths are here."""
+
+    def test_a_missing_claude_command_reads_cannot_tell_with_its_fixed_reason(self):
+        real_which = shutil.which
+
+        def which(name, *a, **k):
+            return None if os.path.splitext(os.path.basename(str(name)))[0].lower() == "claude" else real_which(name, *a, **k)
+
+        rc, report = self.held_in_process([sess("bbfa6fec", self.w.fw)], patches={"shutil.which": which})
+
+        self.assertCannotTell(rc, report, REASON_NOT_FOUND, "claude not found")
+        self.assertEqual(claude_calls(self.w.tools), [], msg="HN-2: nothing was started")
+
+    def test_a_program_that_cannot_be_started_reads_cannot_tell_with_its_fixed_reason(self):
+        real_popen = subprocess.Popen
+
+        def popen(args, *a, **k):
+            if is_holder_call(args):
+                raise OSError(2, "the fake launch failure")
+            return real_popen(args, *a, **k)
+
+        rc, report = self.held_in_process([sess("bbfa6fec", self.w.fw)], patches={"subprocess.Popen": popen})
+
+        self.assertCannotTell(rc, report, REASON_NOT_STARTED, "OSError on start")
+
+    def test_a_non_zero_exit_reads_cannot_tell_with_the_code_and_is_never_called_a_timeout(self):
+        rc, report = self.held_in_process(stdout="", code=3)
+
+        holders = self.assertCannotTell(rc, report, "claude agents exited with code 3", "exit code 3")
+        self.assertNotIn("no answer within", holders.get("reason", ""), msg="HN-3: an exit is never confused with a timeout")
+
+    def test_output_that_is_not_a_list_of_objects_reads_cannot_tell_with_the_form_reason(self):
+        for label, text in (("not json", "not json"), ("an object", "{}"), ("a list of numbers", "[1]"),
+                            ("an object and a number", '[{"cwd": "x"}, 3]'), ("nothing", "")):
+            with self.subTest(output=label):
+                rc, report = self.held_in_process(stdout=text)
+
+                self.assertCannotTell(rc, report, REASON_FORM, label)
+
+    def test_any_exception_in_the_lookup_reads_cannot_tell_with_the_exception_type(self):
+        real_loads = json.loads
+
+        def loads(text, *a, **k):
+            if isinstance(text, (str, bytes)) and "RAISE-ME" in str(text):
+                raise RuntimeError("the reader blew up")
+            return real_loads(text, *a, **k)
+
+        rc, report = self.held_in_process(stdout='[{"marker": "RAISE-ME"}]', patches={"json.loads": loads})
+
+        self.assertCannotTell(rc, report, "the session list could not be read (RuntimeError)", "reader raises")
+
+
+class HolderReadOnlyTests(HolderInProcessCase):
+    """HN-9 (a), decision A1: the cleanup ends nothing except its own timed-out `claude agents` child, and that with
+    ``proc.kill()`` alone: no taskkill, no killpg, no new session or process group, no tree step."""
+
+    def recorders(self, module):
+        rec = SimpleNamespace(kills=[], argvs=[], children=[], ended=[], holder_kwargs=[])
+        real_popen = subprocess.Popen
+        orig_kill, orig_term, orig_sig = real_popen.kill, real_popen.terminate, real_popen.send_signal
+        orig_os_kill, orig_end = os.kill, module._end_own_child
+
+        def popen_kill(self_, *a, **k):
+            rec.kills.append(("Popen.kill", self_.pid))
+            return orig_kill(self_, *a, **k)
+
+        def popen_term(self_, *a, **k):
+            rec.kills.append(("Popen.terminate", self_.pid))
+            return orig_term(self_, *a, **k)
+
+        def popen_sig(self_, *a, **k):
+            rec.kills.append(("Popen.send_signal", self_.pid))
+            return orig_sig(self_, *a, **k)
+
+        def os_kill(pid, *a, **k):
+            rec.kills.append(("os.kill", pid))
+            return orig_os_kill(pid, *a, **k)
+
+        def end(proc, *a, **k):
+            rec.ended.append(proc)
+            return orig_end(proc, *a, **k)
+
+        class Recording(real_popen):
+            def __init__(self, args, *a, **k):
+                rec.argvs.append(list(args) if isinstance(args, (list, tuple)) else [str(args)])
+                super().__init__(args, *a, **k)
+                if is_holder_call(args):
+                    rec.children.append(self)
+                    rec.holder_kwargs.append(dict(k))
+
+        patches = {"subprocess.Popen.kill": popen_kill, "subprocess.Popen.terminate": popen_term,
+                   "subprocess.Popen.send_signal": popen_sig, "os.kill": os_kill,
+                   "cleanup_delivered._end_own_child": end}
+        if hasattr(os, "killpg"):
+            orig_killpg = os.killpg
+
+            def os_killpg(pgid, *a, **k):
+                rec.kills.append(("os.killpg", pgid))
+                return orig_killpg(pgid, *a, **k)
+
+            patches["os.killpg"] = os_killpg
+        patches["subprocess.Popen"] = Recording  # last: the method patches above are put on the real class first
+        return rec, patches
+
+    def assertNothingEnded(self, rec, what: str) -> None:
+        self.assertEqual(rec.kills, [], msg=f"HN-9 ({what}): no kill, killpg, terminate or send_signal is called; saw {rec.kills}")
+        self.assertEqual(rec.ended, [], msg=f"HN-9 ({what}): _end_own_child is not called")
+        self.assertEqual([a for a in rec.argvs if any("taskkill" in str(x).lower() for x in a[:1])], [], msg=f"HN-9 ({what}): no taskkill")
+        self.assertEqual([a for a in rec.argvs if any("stop" == str(x) for x in a)], [], msg=f"HN-9 ({what}): no `stop` argument anywhere")
+
+    def test_a_found_a_none_found_and_a_failed_lookup_end_nothing(self):
+        module = self.module_with("_end_own_child", "_run_holder_list")
+        for label, sessions, kwargs, verdict in (("found", [sess("bbfa6fec", self.w.fw)], {}, "found"),
+                                                   ("none-found", [], {}, "none-found"),
+                                                   ("exit code", None, {"stdout": "", "code": 3}, "cannot-tell")):
+            with self.subTest(run=label):
+                rec, patches = self.recorders(module)
+
+                rc, report = self.held_in_process(sessions, patches=patches, **kwargs)
+
+                item = pick(report, "worktree", FW_NAME)
+                self.assertEqual((item.get("holders") or {}).get("verdict"), verdict, msg=f"HN-1 ({label}): the lookup was made and read {verdict}")
+                self.assertEqual(len(rec.children), 1, msg=f"HN-2 ({label}): exactly one `claude agents` child was started")
+                self.assertNothingEnded(rec, label)
+
+    def test_the_child_is_started_with_no_input_no_error_pipe_a_file_for_output_no_shell_and_the_folder_of_claude(self):
+        """B7(2): the keyword arguments of the one Popen call, as recorded."""
+        module = self.module_with("_end_own_child", "_run_holder_list")
+        rec, patches = self.recorders(module)
+
+        rc, report = self.held_in_process([sess("bbfa6fec", self.w.fw)], patches=patches)
+
+        self.assertEqual(len(rec.children), 1, msg="fixture sanity: exactly one `claude agents` child was started")
+        kwargs = rec.holder_kwargs[0]
+        argv = next(a for a in rec.argvs if is_holder_call(a))
+        self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL, msg=f"HN-2: stdin is DEVNULL; kwargs were {sorted(kwargs)}")
+        self.assertEqual(kwargs.get("stderr"), subprocess.DEVNULL, msg="HN-2: stderr is DEVNULL")
+        out = kwargs.get("stdout")
+        self.assertNotIn(out, (None, subprocess.PIPE, subprocess.DEVNULL, subprocess.STDOUT), msg="HN-2: stdout is not a pipe")
+        self.assertTrue(hasattr(out, "fileno") and hasattr(out, "read"), msg=f"HN-2: stdout is a file object, so nothing waits on a pipe; got {type(out).__name__}")
+        self.assertFalse(kwargs.get("shell"), msg="HN-2: no shell")
+        self.assertEqual(argv[1:], STOP_ARGV, msg="and the arguments are exactly `agents --json --all`")
+        self.assertIn("cwd", kwargs, msg="B1: the start names a working folder")
+        self.assertEqual(_norm_text(kwargs.get("cwd")), _norm_text(os.path.dirname(argv[0])),
+                         msg="B1: the working folder is the folder that holds the resolved claude program, not the main checkout")
+        logged = claude_calls(self.w.tools)
+        self.assertEqual(len(logged), 1, msg="the fake was called once")
+        self.assertEqual(_norm_text(logged[0]["cwd"]), _norm_text(os.path.dirname(argv[0])),
+                         msg="B1: and the fake itself saw that folder as its working folder")
+
+    def test_a_timeout_reads_cannot_tell_and_ends_only_the_runners_own_child_with_proc_kill_exactly_once(self):
+        """The one timeout test (the failure-path timeout test is merged into it). No sleep after the timeout: the
+        fake sleeps 60 s and is ended by its pid in the cleanup."""
+        module = self.module_with("_end_own_child", "_run_holder_list", "HOLDER_TIMEOUT_SECONDS", "HOLDER_END_GRACE_SECONDS")
+        rec, patches = self.recorders(module)
+        patches["cleanup_delivered.HOLDER_TIMEOUT_SECONDS"] = 1
+        patches["cleanup_delivered.HOLDER_END_GRACE_SECONDS"] = 2
+        pidfile = self.w.tools.bin / "claude_pid.txt"
+        self.track_fake(pidfile)
+
+        rc, report = self.held_in_process([sess("bbfa6fec", self.w.fw)], sleep=60, patches=patches, pidfile=pidfile)
+
+        holders = self.assertCannotTell(rc, report, "claude agents gave no answer within 1 seconds", "timeout")
+        self.assertNotIn("exited with code", holders["reason"], msg="HN-3: a timeout is never an exit code")
+        self.assertEqual(len(rec.children), 1, msg="exactly one `claude agents` child was started")
+        child = rec.children[0]
+        self.assertEqual(len(rec.ended), 1, msg="HN-9: _end_own_child is called exactly once")
+        self.assertIs(rec.ended[0], child, msg="HN-9: and with the Popen that _run_holder_list created")
+        self.assertIn(("Popen.kill", child.pid), rec.kills, msg=f"A1: the child was ended through proc.kill(); saw {rec.kills}")
+        self.assertTrue(all(pid == child.pid for _how, pid in rec.kills),
+                        msg=f"A1: every kill target is the child's own pid {child.pid}; saw {rec.kills}")
+        self.assertFalse([how for how, _pid in rec.kills if how in ("os.killpg", "Popen.terminate")],
+                         msg=f"A1: no killpg and no terminate; saw {rec.kills}")
+        self.assertEqual([a for a in rec.argvs if a and "taskkill" in str(a[0]).lower()], [], msg="A1: no taskkill, on any platform")
+        for kwargs in rec.holder_kwargs:
+            self.assertFalse(kwargs.get("start_new_session") or kwargs.get("process_group") or kwargs.get("creationflags"),
+                             msg=f"A1: the child is not started in a new session or process group; kwargs were {kwargs}")
+        self.assertIsNotNone(child.poll(), msg="A1: the child really ended (on Windows too, through proc.kill())")
+
+
+class HolderRealWrapperTests(HolderInProcessCase):
+    """HN-2 and A1 against the real thing (journal 2026-10-04): `claude` is a `.cmd` wrapper (Windows) or an sh
+    script (POSIX) that runs the fake as a CHILD and does not exec it. The runner ends its own child (the wrapper)
+    with proc.kill() and nothing else, so the grandchild may live on: the lookup must not wait for it (its output goes
+    to a file, not a pipe), and the test ends it by its pid. About 10 seconds by design."""
+
+    def make_wrapper(self) -> Path:
+        folder = self.tmp / "wrapbin"
+        folder.mkdir()
+        fake = self.w.tools.bin / ("claude.exe" if IS_WINDOWS else "claude")
+        if IS_WINDOWS:
+            (folder / "claude.cmd").write_bytes(f'@echo off\r\n"{fake}" %*\r\n'.encode("utf-8"))
+        else:
+            wrapper = folder / "claude"
+            wrapper.write_text(f'#!/bin/sh\n"{fake}" "$@"; status=$?; exit $status\n', encoding="utf-8")  # sh cannot exec it
+            wrapper.chmod(0o755)
+        return folder
+
+    def test_a_wrapper_whose_child_outlives_the_ceiling_is_ended_and_the_lookup_returns_in_time(self):
+        self.module_with("HOLDER_TIMEOUT_SECONDS", "HOLDER_END_GRACE_SECONDS", "_run_holder_list", "_end_own_child")
+        wrapdir = self.make_wrapper()
+        path = str(wrapdir) + os.pathsep + self.w.tools.bin_dir_text + os.pathsep + os.environ.get("PATH", "")
+        found = shutil.which("claude", path=path)
+        self.assertIsNotNone(found, msg="fixture sanity: the wrapper is found as `claude`")
+        self.assertEqual(os.path.dirname(os.path.realpath(found)).lower(), os.path.realpath(str(wrapdir)).lower(),
+                         msg="fixture sanity: shutil.which picks the wrapper, not the fake beside it")
+        pidfile = self.w.tools.bin / "claude_pid.txt"
+        self.track_fake(pidfile)
+
+        t0 = time.time()
+        self.held_in_process([], env={"PATH": path})
+        baseline = time.time() - t0
+        set_claude(self.w.tools, [sess("bbfa6fec", self.w.fw)], sleep=60, pidfile=pidfile)
+        t1 = time.time()
+        started: list = []
+        real_popen = subprocess.Popen
+
+        class Recording(real_popen):
+            def __init__(self, args, *a, **k):
+                if is_holder_call(args):
+                    started.append(list(args))
+                super().__init__(args, *a, **k)
+
+        rc, out, report = self.run_in_process(
+            ["--dry-run"], env_extra={"CLAUDE_PROJECT_DIR": str(self.w.fw), "PATH": path},
+            patches={"cleanup_delivered.HOLDER_TIMEOUT_SECONDS": 2, "cleanup_delivered.HOLDER_END_GRACE_SECONDS": 2,
+                     "subprocess.Popen": Recording})
+        elapsed = time.time() - t1
+
+        # B7(3): prove the scenario ran. The grandchild wrote its pid and is STILL alive after the lookup returned.
+        try:
+            grandchild = int(pidfile.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            self.fail("scenario not exercised: the grandchild never wrote its pidfile, so the wrapper did not start the fake")
+        if not pid_is_alive(grandchild, self.tmp):
+            self.fail("scenario not exercised: the grandchild is not alive, so the lookup did not return while it lived on")
+        self.assertEqual(len(started), 1, msg="exactly one `claude agents` child was started")
+        self.assertEqual(_norm_text(started[0][0]), _norm_text(found),
+                         msg="HN-2: the program started is the wrapper that production resolved (not the fake beside it)")
+        self.assertIsInstance(report, dict, msg=f"the run must print a report, got {out[:300]!r}")
+        item = pick(report, "worktree", FW_NAME)
+        holders = item.get("holders") or {}
+        self.assertEqual(holders.get("verdict"), "cannot-tell", msg=f"HN-3: a timed-out wrapper reads cannot-tell; item has {sorted(item)}")
+        self.assertIn("claude agents gave no answer within", holders.get("reason", ""), msg="HN-3: with the timeout reason")
+        self.assertLessEqual(elapsed - baseline, 2 + 2 + 3,
+                             msg=f"HN-2: the lookup ends within ceiling + grace (+3 s) although the grandchild lives on; "
+                                 f"the run took {elapsed:.1f}s, an ordinary run {baseline:.1f}s")
+
+
+# ===========================================================================
+# Holder reading, fast unit classes: no git world, real temp folders (A9)
+# ===========================================================================
+AGENTS_LIST_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "claude_agents_list.json"
+OUTPUT_LIMIT = 4 * 1024 * 1024
+UNREADABLE_REASON = "1 session records had no readable working folder"
+
+
+class HolderUnitBase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="holder_unit_")))
+        self.addCleanup(rmtree_force, self.tmp)
+        self.module = load_cleanup_module()
+        need_names(self, self.module, "_read_session_list", "_holders_for", "_run_holder_list", "build_line", "_norm")
+        self.main = self.tmp / "main_root"
+        self.main.mkdir()
+        self.tree = self.tmp / "trees" / FW_NAME
+        (self.tree / "src").mkdir(parents=True)
+        self.fake_exe = str(self.tmp / "fakebin" / ("claude.exe" if IS_WINDOWS else "claude"))
+
+    def clean_session_env(self, extra: dict | None = None) -> None:
+        for key in HOLDER_ENV_STRIPPED:
+            os.environ.pop(key, None)
+        os.environ.update(extra or {})
+
+    def read(self, payload, *, env: dict | None = None, exe: str | None = None):
+        """``_read_session_list`` with the runner patched to answer ``payload``; ``exe`` is what ``which`` finds."""
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        found = exe if exe is not None else self.fake_exe
+        with mock.patch.dict(os.environ), mock.patch.object(self.module, "_run_holder_list", lambda e, c: ("answer", text)), \
+                mock.patch("shutil.which", lambda name, *a, **k: found):
+            self.clean_session_env(env)
+            return self.module._read_session_list(str(self.main))
+
+    def holders(self, payload, *, env: dict | None = None, tree: Path | None = None) -> dict:
+        return self.module._holders_for(self.read(payload, env=env), str(tree or self.tree))
+
+    def item(self, holders: dict, tree: Path | None = None) -> dict:
+        return {"kind": "worktree", "path": str(tree or self.tree), "action": "deferred", "reason": "standing-tree",
+                "files": [], "detail": None, "links": [], "identical": [], "holders": holders}
+
+    def line(self, holders: dict, finish: str = "py -3 'x'") -> str:
+        """Brackets and the rest are asserted through build_line with a short finish command, never a real long one."""
+        return self.module.build_line(SLUG, [self.item(holders)], finish)
+
+    @staticmethod
+    def stops(line: str) -> list:
+        return re.findall(r"; stop: (claude stop [^;]*)", line)
+
+
+class HolderReadingUnitTests(HolderUnitBase):
+    """The session variable (HN-7), the working-folder forms (A3), unreadable records (HN-4), forging (HN-6) and the
+    stop list (HN-8), moved here from the end-to-end class. Fast: the runner is patched to return ("answer", payload)."""
+
+    # -- the shape -------------------------------------------------------------------------------------
+    def test_sess_builds_the_real_shape_and_every_real_state_reads_back(self):
+        self.assertEqual(set(sess("0a1b2c3d", "x")), set(REAL_RECORD_KEYS), msg="A8: sess() writes exactly the real keys")
+        for state in REAL_STATES:
+            with self.subTest(state=state):
+                holders = self.holders([sess("bbfa6fec", self.tree / "src", state=state, status="some status")])
+
+                self.assertEqual(holders["sessions"][0]["state"], state, msg=f"A8: the state `{state}` is kept")
+                self.assertIn(f'[held by bbfa6fec "worker" {state}]', self.line(holders))
+
+    # -- HN-5: inside means the deferral's own comparison ---------------------------------------------
+    def test_sessions_beside_the_tree_do_not_hold_it_and_the_reading_says_none_found_with_the_note(self):
+        holders = self.holders([sess("bbfa6fec", str(self.tree) + "-2"), sess("cc00dd11", self.main)])
+
+        self.assertEqual(holders.get("verdict"), "none-found", msg=f"HN-5: <tree>-2 and the main root are not inside; got {holders}")
+        line = self.line(holders)
+        self.assertIn(NONE_FOUND_BRACKET, line, msg="HN-8: the none-found bracket")
+        self.assertIn(NOTE_TEXT, line, msg="HN-8: the fixed note")
+        self.assertEqual(self.stops(line), [], msg="no holder, no stop command")
+
+    # -- HN-7: the session variable --------------------------------------------------------------------
+    def test_the_running_session_is_recognised_by_an_exact_session_id_and_gets_no_stop_command(self):
+        holders = self.holders([sess("bbfa6fec", self.tree)], env={"CLAUDE_CODE_SESSION_ID": full_id("bbfa6fec")})
+
+        self.assertEqual(holders.get("verdict"), "found")
+        self.assertTrue(holders["sessions"][0].get("this_session"), msg="HN-7: sessionId equals CLAUDE_CODE_SESSION_ID exactly")
+        self.assertTrue(holders.get("this_session_recognised"))
+        line = self.line(holders)
+        self.assertIn("[held by bbfa6fec (this session)]", line, msg="HN-8: written `<id> (this session)`")
+        self.assertEqual(self.stops(line), [], msg="HN-7: the finish command covers it, so no stop for it")
+        self.assertNotIn(WARNING_TEXT, line, msg="no stop is printed, so no warning")
+
+    def test_with_a_second_holder_there_is_exactly_one_stop_and_no_warning_when_the_session_is_recognised(self):
+        holders = self.holders([sess("bbfa6fec", self.tree), sess("cc00dd11", self.tree / "src", name="other")],
+                               env={"CLAUDE_CODE_SESSION_ID": full_id("bbfa6fec")})
+
+        line = self.line(holders)
+        self.assertEqual(self.stops(line), ["claude stop cc00dd11"], msg="HN-7/HN-8: one stop, for the other session")
+        self.assertNotIn(WARNING_TEXT, line, msg="HN-8: the session was recognised, so no warning")
+
+    def test_two_holders_with_no_recognised_session_print_two_stops_and_the_fixed_warning_in_order(self):
+        holders = self.holders([sess("bbfa6fec", self.tree), sess("cc00dd11", self.tree / "src", name="other")])
+
+        line = self.line(holders)
+        self.assertEqual(self.stops(line), ["claude stop bbfa6fec", "claude stop cc00dd11"],
+                         msg="HN-8: one stop per distinct session, in first-seen order")
+        self.assertIn(WARNING_TEXT, line, msg="HN-8: the fixed warning when the session was not recognised")
+        self.assertIn(NOTE_TEXT, line, msg="HN-8: the fixed note is in the line")
+        self.assertTrue(line.index(NOTE_TEXT) < line.index(WARNING_TEXT) < line.index("; stop: ") < line.index("; finish: "),
+                        msg=f"HN-8 order: note, warning, stops, finish; the line is {line!r}")
+
+    def test_an_unset_or_empty_session_variable_recognises_nobody_and_warns(self):
+        for label, env in (("unset", {}), ("empty", {"CLAUDE_CODE_SESSION_ID": ""})):
+            with self.subTest(variable=label):
+                holders = self.holders([sess("bbfa6fec", self.tree)], env=env)
+
+                line = self.line(holders)
+                self.assertEqual(self.stops(line), ["claude stop bbfa6fec"], msg="HN-7: nobody is recognised, so the stop is printed")
+                self.assertIn(WARNING_TEXT, line, msg="HN-7/HN-8: and the fixed warning follows")
+                self.assertFalse(holders.get("this_session_recognised"), msg="not recognised")
+
+    def test_only_claude_code_session_id_is_read_and_it_must_match_exactly(self):
+        full = full_id("bbfa6fec")
+        cases = {"CLAUDE_SESSION_ID": {"CLAUDE_SESSION_ID": full},
+                 "CLAUDE_JOB_DIR": {"CLAUDE_JOB_DIR": str(self.tmp / "jobs" / "bbfa6fec")},
+                 "CLAUDE_CODE_AGENT": {"CLAUDE_CODE_AGENT": "bbfa6fec"},
+                 "upper-case CLAUDE_CODE_SESSION_ID": {"CLAUDE_CODE_SESSION_ID": full.upper()},
+                 "padded CLAUDE_CODE_SESSION_ID": {"CLAUDE_CODE_SESSION_ID": " " + full}}
+        for label, env in cases.items():
+            with self.subTest(variable=label):
+                holders = self.holders([sess("bbfa6fec", self.tree)], env=env)
+
+                line = self.line(holders)
+                self.assertFalse(holders["sessions"][0].get("this_session"), msg=f"HN-7: {label} does not make a session `this session`")
+                self.assertEqual(self.stops(line), ["claude stop bbfa6fec"], msg="so its stop command is printed")
+                self.assertIn(WARNING_TEXT, line, msg="and the warning with it")
+
+    def test_two_records_with_the_running_session_id_recognise_nobody(self):
+        holders = self.holders([sess("bbfa6fec", self.tree), sess("cc00dd11", self.tree, full=full_id("bbfa6fec"))],
+                               env={"CLAUDE_CODE_SESSION_ID": full_id("bbfa6fec")})
+
+        line = self.line(holders)
+        self.assertFalse(holders.get("this_session_recognised"), msg="HN-7: the match counts only when exactly one record matches")
+        self.assertEqual(sorted(self.stops(line)), ["claude stop bbfa6fec", "claude stop cc00dd11"], msg="both get a stop command")
+        self.assertIn(WARNING_TEXT, line)
+
+    # -- HN-6 and A6: an invalid id ---------------------------------------------------------------------
+    def test_an_upper_case_id_fails_the_format_check_is_null_in_the_json_and_gets_no_stop_command(self):
+        holders = self.holders([sess("BBFA6FEC", self.tree), sess("cc00dd11", self.tree, full="CC00DD11-0000-4000-8000-000000000000")],
+                               env={"CLAUDE_CODE_SESSION_ID": "CC00DD11-0000-4000-8000-000000000000"})
+
+        line = self.line(holders)
+        self.assertEqual(holders.get("verdict"), "found", msg="HN-6: a holder with a bad id is still a holder")
+        self.assertIn("a session with an unreadable id", line, msg="HN-6: shown as `a session with an unreadable id`")
+        self.assertNotIn("BBFA6FEC", line, msg="HN-6: the bad id is not echoed")
+        bad = [s for s in holders["sessions"] if s.get("id") is None]
+        self.assertEqual(len(bad), 1, msg="A6: an invalid id is null in --json")
+        self.assertEqual((bad[0].get("session_id"), bad[0].get("stop_command")), (None, None), msg="A6: and so are its session id and stop")
+        self.assertNotIn("BBFA6FEC", json.dumps(holders), msg="A6: the invalid id is nowhere in the JSON")
+        self.assertNotIn("claude stop BBFA6FEC", line, msg="HN-6: no stop command for it")
+        second = [s for s in holders["sessions"] if s.get("id") == "cc00dd11"]
+        self.assertEqual(len(second), 1, msg="the lower-case id is kept")
+        self.assertFalse(second[0].get("this_session"), msg="HN-7: an upper-case sessionId fails its format check, so it is never matched")
+
+    def test_every_stop_command_of_twenty_holders_is_printed_and_the_finish_command_stays_last_and_whole(self):
+        ids = many_ids(20)
+
+        holders = self.holders([sess(i, self.tree / "src", name="s" + i) for i in ids])
+
+        finish = "py -3 'x' --contract 's'"
+        line = self.line(holders, finish)
+        self.assertEqual(self.stops(line), ["claude stop " + i for i in ids], msg="HN-8: all twenty stops, in order, never cut")
+        self.assertEqual(line.count("; finish: "), 1, msg="exactly one finish part")
+        self.assertTrue(line.endswith("; finish: " + finish), msg="the finish command is last and whole")
+        self.assertNotIn("\n", line, msg="one line")
+
+    # -- HN-5 / A3: the working-folder forms -----------------------------------------------------------
+    def test_a_session_whose_folder_reaches_the_tree_through_a_link_holds_it_like_the_deferral_says(self):
+        link = self.tmp / "via_link"
+        try:
+            make_directory_link(link, self.tree)
+        except (OSError, NotImplementedError, ImportError) as exc:
+            self.skipTest(f"a directory link cannot be made on this host: {exc}")
+        self.addCleanup(drop_link, link)
+
+        holders = self.holders([sess("bbfa6fec", link / "src")])
+
+        self.assertEqual(holders.get("verdict"), "found", msg="HN-5: the holder match is the deferral's own _inside")
+
+    @unittest.skipUnless(IS_WINDOWS, "case folding is Windows behaviour")
+    def test_a_changed_case_still_reaches_the_tree(self):
+        for label, cwd in (("upper case", str(self.tree).upper() + "\\src"), ("lower case", str(self.tree).lower())):
+            with self.subTest(form=label):
+                self.assertEqual(self.holders([sess("bbfa6fec", cwd)]).get("verdict"), "found",
+                                 msg=f"HN-5: {label} compares like the deferral does")
+
+    @unittest.skipUnless(IS_WINDOWS, "short (8.3) names are Windows behaviour")
+    def test_a_short_8_3_name_still_reaches_the_tree(self):
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(self.tree), buf, 1024)
+        short = buf.value if n else ""
+        if not short or short.lower() == str(self.tree).lower():
+            self.skipTest("this volume gave no 8.3 short form for the test folder (GetShortPathNameW): the case is not exercised here")
+
+        self.assertEqual(self.holders([sess("bbfa6fec", short + "\\src")]).get("verdict"), "found",
+                         msg="HN-5: the short name compares like the deferral does")
+
+    @unittest.skipUnless(IS_WINDOWS, "the Git Bash drive form is a Windows form")
+    def test_the_git_bash_drive_form_is_accepted_on_windows(self):
+        fw = str(self.tree)
+        git_bash = "/" + fw[0].lower() + fw[2:].replace("\\", "/") + "/src"
+
+        self.assertEqual(self.holders([sess("bbfa6fec", git_bash)]).get("verdict"), "found", msg="A3: /x/... is rewritten, then compared")
+
+    @unittest.skipUnless(IS_WINDOWS, "/tmp and /cygdrive are unaccepted on Windows; on POSIX they are ordinary absolute paths")
+    def test_unaccepted_windows_path_forms_make_the_record_unreadable_and_the_answer_cannot_tell(self):
+        for cwd in ("/tmp/x", "/cygdrive/c/x"):
+            with self.subTest(cwd=cwd):
+                holders = self.holders([sess("bbfa6fec", cwd)])
+
+                self.assertEqual(holders.get("verdict"), "cannot-tell", msg="HN-4: an unreadable record is not proof of absence")
+                self.assertEqual(holders.get("reason"), UNREADABLE_REASON)
+
+    @unittest.skipUnless(IS_WINDOWS, "UNC and device forms are Windows forms")
+    def test_unc_and_device_forms_are_unreadable_and_never_reach_realpath(self):
+        fw = str(self.tree)
+        forms = {"UNC": "\\\\host\\share\\x", "extended UNC": "\\\\?\\UNC\\host\\share\\x", "device": "\\\\.\\C:\\x",
+                 "extended drive": "\\\\?\\" + fw + "\\src", "forward-slash UNC": "//host/share/x", "forward-slash extended": "//?/UNC/host/share/x"}
+        real_rp = os.path.realpath
+        for label, cwd in forms.items():
+            with self.subTest(form=label):
+                seen: list = []
+
+                def realpath(path, *a, **k):
+                    text = os.fspath(path)
+                    if text.replace("/", "\\").startswith("\\\\"):
+                        seen.append(text)  # never ask the system: a network path may hang or leak a credential
+                        return text
+                    return real_rp(path, *a, **k)
+
+                with mock.patch("os.path.realpath", realpath):
+                    holders = self.holders([sess("bbfa6fec", cwd)])
+
+                self.assertEqual(seen, [], msg=f"A3 ({label}): os.path.realpath is never called with such text; saw {seen}")
+                self.assertEqual((holders.get("verdict"), holders.get("reason")), ("cannot-tell", UNREADABLE_REASON),
+                                 msg=f"A3 ({label}): an unreadable record and no match reads cannot-tell")
+
+    def test_records_without_a_readable_working_folder_never_read_as_none_found(self):
+        variants = {"relative path": {"cwd": "relative/dir"}, "empty": {"cwd": ""}, "a number": {"cwd": 5}, "missing": {"drop": ("cwd",)}}
+        for label, spec in variants.items():
+            with self.subTest(record=label):
+                record = sess("bbfa6fec", "placeholder", drop=spec.get("drop", ()))
+                if "cwd" in spec:
+                    record["cwd"] = spec["cwd"]  # set after sess(), which would turn a number into text
+
+                holders = self.holders([record])
+
+                self.assertEqual(holders.get("verdict"), "cannot-tell", msg=f"HN-4 ({label}): no match and one unreadable record is cannot-tell, never none-found")
+                self.assertEqual(holders.get("reason"), UNREADABLE_REASON)
+                self.assertIn(f"[cannot tell which session holds it: {UNREADABLE_REASON}]", self.line(holders))
+
+    def test_a_working_folder_with_a_nul_a_control_character_or_the_replacement_character_is_unreadable_on_every_platform(self):
+        base = str(self.tree / "src")
+        for label, bad in (("NUL", "\x00"), ("start of heading", "\x01"), ("line feed", "\n"), ("escape", "\x1b"), ("delete", "\x7f"),
+                           ("C1 next line", "\x85"), ("replacement character", "\ufffd")):
+            with self.subTest(character=label):
+                holders = self.holders([sess("bbfa6fec", base + bad + "x")])
+
+                self.assertEqual((holders.get("verdict"), holders.get("reason")), ("cannot-tell", UNREADABLE_REASON),
+                                 msg=f"A3 ({label}): the record is unreadable (even inside the tree), no match, so cannot-tell; got {holders}")
+
+    def test_an_unreadable_record_beside_a_matching_one_still_names_the_holder(self):
+        for label, bad in (("relative", "relative/dir"), ("NUL", str(self.tree) + "\x00x")):
+            with self.subTest(unreadable=label):
+                holders = self.holders([sess("cc00dd11", bad), sess("bbfa6fec", self.tree)])
+
+                self.assertEqual(holders.get("verdict"), "found", msg="HN-4: the holders it can match are named")
+                self.assertEqual(self.stops(self.line(holders)), ["claude stop bbfa6fec"])
+
+    def test_a_byte_order_mark_or_a_banner_line_before_the_list_reads_cannot_tell_with_the_form_reason(self):
+        banner_record = "note: x\n" + json.dumps([sess("bbfa6fec", self.tree)])
+        for label, text in (("byte order mark", "\ufeff[]"), ("banner line", "Welcome to claude\n[]"), ("banner, then a record", banner_record)):
+            with self.subTest(before_the_list=label):
+                reading = self.read(text)
+
+                self.assertEqual((reading["verdict"], reading.get("reason")), ("cannot-tell", REASON_FORM),
+                                 msg=f"A8: anything before the list is `not in the expected form`, never a guess; got {reading}")
+
+    @unittest.skipUnless(IS_WINDOWS, "a drive path written with forward slashes is a Windows form")
+    def test_a_drive_path_written_with_forward_slashes_is_accepted_on_windows(self):
+        cwd = str(self.tree / "src").replace("\\", "/")
+        self.assertRegex(cwd, r"^[A-Za-z]:/", msg="fixture sanity: C:/x form")
+
+        holders = self.holders([sess("bbfa6fec", cwd)])
+
+        self.assertEqual(holders.get("verdict"), "found", msg=f"A3: `C:/x` is an accepted form on Windows; got {holders}")
+
+    def test_pid_and_status_are_ignored_a_holder_carries_neither(self):
+        reading = self.read([sess("bbfa6fec", self.tree, pid=987654, status="Idle SECRETSTATUS")])
+
+        holders = self.module._holders_for(reading, str(self.tree))
+
+        self.assertEqual(holders.get("verdict"), "found")
+        for holder in holders["sessions"]:
+            self.assertFalse({"pid", "status"} & set(holder), msg=f"a Holder carries neither pid nor status; keys are {sorted(holder)}")
+        text = json.dumps(holders) + self.line(holders)
+        self.assertNotIn("987654", text, msg="the pid is nowhere in the reading or the line")
+        self.assertNotIn("SECRETSTATUS", text, msg="the status text is nowhere in the reading or the line")
+
+    def test_started_at_is_kept_only_for_a_real_integer_and_is_null_otherwise(self):
+        cases = {"integer": (1760000000000, 1760000000000), "text": ("1760000000000", None), "float": (1.5, None),
+                 "boolean true": (True, None), "boolean false": (False, None), "null": (None, None), "list": ([1], None)}
+        for label, (value, expected) in cases.items():
+            with self.subTest(startedAt=label):
+                record = sess("bbfa6fec", self.tree)
+                record["startedAt"] = value
+
+                holders = self.holders([record])
+
+                self.assertEqual(holders["sessions"][0]["started_at"], expected, msg=f"B2: startedAt as {label} reads {expected!r}")
+        missing = self.holders([sess("bbfa6fec", self.tree, drop=("startedAt",))])
+        self.assertIsNone(missing["sessions"][0]["started_at"], msg="B2: a missing startedAt is null")
+
+    def test_fields_that_fail_their_check_are_null_in_the_json_and_text_fields_are_empty_text(self):
+        record = sess("bbfa6fec", self.tree, drop=("name", "state", "kind"))
+        record["id"], record["sessionId"], record["startedAt"] = "BBFA6FEC", "not-a-session-id", "soon"
+
+        holders = self.holders([record])
+
+        one = holders["sessions"][0]
+        self.assertEqual((one["id"], one["session_id"], one["started_at"]), (None, None, None),
+                         msg="B2: id, session_id and started_at are null in --json when their check fails")
+        self.assertEqual((one["name"], one["state"], one["kind"]), ("", "", ""),
+                         msg="B2: name, state and kind are empty text (never null) when missing")
+        self.assertIsNone(one["stop_command"], msg="and there is no stop command for it")
+
+        non_text = {"true": True, "false": False, "number": 5, "list": ["x"], "object": {"a": 1}, "null": None}
+        for field in ("name", "state", "kind"):
+            for label, value in non_text.items():
+                with self.subTest(field=field, non_text=label):
+                    record = sess("bbfa6fec", self.tree)
+                    record[field] = value  # set after sess(): the value must stay what it is
+
+                    one = self.holders([record])["sessions"][0]
+
+                    self.assertEqual(one[field], "",
+                                     msg=f"D3: `{field}` that is not a string ({label}) reads as empty text, never as its printed form; got {one[field]!r}")
+                    holders = self.holders([record])
+                    line = self.line(holders)
+                    self.assertIn("[held by bbfa6fec", line, msg="D3: the holder is still named")
+                    self.assertNotIn("True", line, msg=f"D3: a {label} {field} never turns into text in the line")
+                    self.assertNotIn("{'a'", line, msg=f"D3: a {label} {field} never turns into text in the line")
+                    self.assertNotIn("['x']", line, msg=f"D3: a {label} {field} never turns into text in the line")
+                    self.assertNotIn("False", line, msg=f"D3: a {label} {field} never turns into text in the line")
+                    expected = {"name": "[held by bbfa6fec done]", "state": '[held by bbfa6fec "worker"]',
+                                "kind": '[held by bbfa6fec "worker" done]'}[field]
+                    self.assertIn(expected, line, msg=f"D3: an empty {field} adds nothing to the holder's words; line {line!r}")
+
+    def test_invisible_and_direction_marks_are_removed_from_name_state_and_kind(self):
+        marks = {"U+200E": "\u200e", "U+200F": "\u200f", "U+061C": "\u061c", "U+200B": "\u200b", "U+FEFF": "\ufeff"}
+        for label, mark in marks.items():
+            with self.subTest(mark=label):
+                holders = self.holders([sess("bbfa6fec", self.tree, name="wo" + mark + "rk", state="do" + mark + "ne", kind="back" + mark + "ground")])
+
+                one = holders["sessions"][0]
+                self.assertEqual((one["name"], one["state"], one["kind"]), ("work", "done", "background"),
+                                 msg=f"B4: {label} is removed from name, state and kind; got {ascii((one['name'], one['state'], one['kind']))}")
+                self.assertIn('[held by bbfa6fec "work" done]', self.line(holders), msg=f"B4: and from the line ({label})")
+                self.assertNotIn(mark, json.dumps(holders, ensure_ascii=False), msg=f"B4: and from the JSON text ({label})")
+
+    def test_all_five_marks_in_one_name_leave_only_the_letters(self):
+        name = "a\u200eb\u200fc\u061cd\u200be\ufeffg"
+
+        holders = self.holders([sess("bbfa6fec", self.tree, name=name, state=name, kind=name)])
+
+        one = holders["sessions"][0]
+        self.assertEqual((one["name"], one["state"], one["kind"]), ("abcdeg",) * 3, msg=f"B4: got {ascii((one['name'], one['state'], one['kind']))}")
+
+    # -- D2: cleaning by category (NFKC, then Cc Cf Zl Zp dropped, then ; " [ ] replaced, then cut to 60) -------
+    FORMAT_CHARS = {"tag character U+E0041": "\U000e0041", "zero width non-joiner U+200C": "‌",
+                    "zero width joiner U+200D": "‍", "word joiner U+2060": "⁠", "soft hyphen U+00AD": "­",
+                    "mongolian vowel separator U+180E": "᠎", "interlinear anchor U+FFF9": "￹"}
+
+    def test_d2_every_format_character_is_removed_from_name_state_and_kind_wherever_it_sits(self):
+        for label, mark in self.FORMAT_CHARS.items():
+            with self.subTest(character=label):
+                holders = self.holders([sess("bbfa6fec", self.tree, name="wo" + mark + "rk", state="do" + mark + "ne",
+                                             kind="back" + mark + "ground")])
+
+                one = holders["sessions"][0]
+                self.assertEqual((one["name"], one["state"], one["kind"]), ("work", "done", "background"),
+                                 msg=f"D2: {label} is a Cf character and is dropped; got {ascii((one['name'], one['state'], one['kind']))}")
+                self.assertIn('[held by bbfa6fec "work" done]', self.line(holders), msg=f"D2: and from the line ({label})")
+                self.assertNotIn(mark, json.dumps(holders, ensure_ascii=False), msg=f"D2: and from the JSON text ({label})")
+
+    def test_d2_all_format_characters_in_one_name_leave_only_the_letters(self):
+        name = "a\U000e0041b‌c‍d⁠e­f᠎g￹h"
+
+        one = self.holders([sess("bbfa6fec", self.tree, name=name, state=name, kind=name)])["sessions"][0]
+
+        self.assertEqual((one["name"], one["state"], one["kind"]), ("abcdefgh",) * 3, msg=f"D2: got {ascii((one['name'], one['state'], one['kind']))}")
+
+    def test_d2_a_lookalike_separator_cannot_forge_a_stop_part(self):
+        for label, mark in (("Greek question mark U+037E", ";"), ("fullwidth semicolon U+FF1B", "；")):
+            with self.subTest(lookalike=label):
+                name = "x" + mark + " stop: claude stop deadbeef"
+
+                holders = self.holders([sess("bbfa6fec", self.tree, name=name)])
+
+                line = self.line(holders)
+                self.assertEqual(self.stops(line), ["claude stop bbfa6fec"], msg=f"D2: only the real stop command is a stop part; line {line!r}")
+                self.assertEqual(line.count("; stop: "), 1, msg=f"D2: no second `; stop:` part appears; line {line!r}")
+                self.assertNotIn(mark, line, msg="D2: NFKC turns the lookalike into `;` first, so it is replaced like one")
+                self.assertEqual(holders["sessions"][0]["name"], "x, stop: claude stop deadbeef",
+                                 msg=f"D2: NFKC, then `;` becomes `,`; got {holders['sessions'][0]['name']!r}")
+
+    def test_d2_compatibility_forms_of_the_replaced_characters_are_replaced_too(self):
+        name = "a＂b［c］ﬁ"
+
+        one = self.holders([sess("bbfa6fec", self.tree, name=name)])["sessions"][0]
+
+        self.assertEqual(one["name"], "a'b(c)fi", msg=f"D2: NFKC maps fullwidth quote and brackets and the fi ligature before the replacement; got {one['name']!r}")
+
+    def test_d2_the_cut_to_60_comes_after_the_removal(self):
+        name = "‌" * 80 + "z" * 70
+
+        one = self.holders([sess("bbfa6fec", self.tree, name=name)])["sessions"][0]
+
+        self.assertEqual(one["name"], "z" * 60, msg=f"D2: format characters are dropped before the cut, so 60 letters remain; got {len(one['name'])} characters")
+
+    # -- HN-6: forging -----------------------------------------------------------------------------------
+    def test_text_from_the_list_is_cleaned_before_it_is_shown_and_cannot_forge_a_part_of_the_line(self):
+        name = 'x; finish: rm -rf ~"]\n\u2028\x1b[31m\u202e' + "y" * 200
+        state = 'run;ning[x]"\u0085\x07'
+
+        holders = self.holders([sess("bbfa6fec", self.tree, name=name, state=state, kind="k;[i]\"nd")])
+
+        finish = "py -3 'x'"
+        line = self.line(holders, finish)
+        self.assertEqual(line.count("; finish: "), 1, msg="HN-6: the name cannot add a finish part")
+        self.assertTrue(line.endswith("; finish: " + finish), msg="the real finish command is last")
+        self.assertIsNone(re.search("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]", line), msg=f"HN-6: no control or separator character in {line!r}")
+        self.assertEqual(self.stops(line), ["claude stop bbfa6fec"], msg="and no extra stop part")
+        h = holders["sessions"][0]
+        for field in ("name", "state", "kind"):
+            self.assertIsNone(re.search(r"[;\"\[\]\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]", h.get(field) or ""),
+                              msg=f"HN-6: `{field}` has `;` `\"` `[` `]` and control characters replaced or removed; got {h.get(field)!r}")
+        self.assertTrue(0 < len(h.get("name") or "") <= 60, msg=f"HN-6: the name is cut to 60 characters; got {len(h.get('name') or '')}")
+        self.assertIn("rm -rf ~'", h["name"], msg="the readable part survives, with `\"` turned into `'`")
+
+
+class HolderRunnerFakeTests(HolderUnitBase):
+    """The real runner against the fake `claude` (a real executable, no git world): raw bytes, the output limit, the
+    safe resolution of the command and the committed real-shape fixture."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.tools = Tools(self.tmp)
+        install_fake_claude(self.tools)
+        self.fake_exe = str(self.tools.bin / ("claude.exe" if IS_WINDOWS else "claude"))
+
+    def read_real(self, *, raw: bytes | None = None, sessions=None, pad_to: int = 0, env: dict | None = None):
+        set_claude(self.tools, sessions, raw=raw, pad_to=pad_to)
+        with mock.patch.dict(os.environ), mock.patch("shutil.which", lambda name, *a, **k: self.fake_exe):
+            self.clean_session_env(env)
+            return self.module._read_session_list(str(self.main))
+
+    @staticmethod
+    def raw_list(records: list) -> bytes:
+        return json.dumps(records, ensure_ascii=False).encode("utf-8")
+
+    # -- A8: raw UTF-8 -----------------------------------------------------------------------------------
+    def test_a_non_ascii_worktree_path_sent_as_raw_utf_8_reads_found(self):
+        tree = self.tmp / "w\u00f6rk-\u00fc-\u65e5\u672c" / FW_NAME
+        (tree / "src").mkdir(parents=True)
+        raw = self.raw_list([sess("bbfa6fec", tree / "src", name="\u00dcberpr\u00fcfung \u2713")])
+        self.assertIsNone(re.search(rb"\\u[0-9a-fA-F]{4}", raw), msg="fixture sanity: the bytes are raw UTF-8, not ASCII-escaped")
+
+        reading = self.read_real(raw=raw)
+
+        holders = self.module._holders_for(reading, str(tree))
+        self.assertEqual(reading["verdict"], "read", msg=f"A8: raw UTF-8 is a readable answer; got {reading}")
+        self.assertEqual(holders.get("verdict"), "found", msg=f"A8: a non-ASCII worktree path sent raw reads found; got {holders}")
+        self.assertEqual(holders["sessions"][0]["name"], "\u00dcberpr\u00fcfung \u2713", msg="and the non-ASCII name arrives intact")
+
+    def test_invalid_utf_8_inside_a_working_folder_reads_cannot_tell(self):
+        prefix = json.dumps(str(self.tmp / "elsewhere"))[1:-1].encode("utf-8")
+        raw = (b'[{"cwd": "' + prefix + b'\xff\xfe", "id": "bbfa6fec", "sessionId": "' + full_id("bbfa6fec").encode()
+               + b'", "kind": "background", "name": "w", "pid": 1, "startedAt": 1, "state": "done", "status": "x"}]')
+
+        reading = self.read_real(raw=raw)
+
+        holders = self.module._holders_for(reading, str(self.tree))
+        self.assertEqual(holders.get("verdict"), "cannot-tell",
+                         msg=f"A8: bytes that are not UTF-8 in a working folder are never read as `none-found`; got {holders}")
+
+    def test_the_unpatched_ceiling_constants_and_the_real_timeout_reason(self):
+        """B7(1): nothing patched but the runner, which answers `timeout`: the reason text carries the REAL ceiling."""
+        self.assertEqual(self.module.HOLDER_TIMEOUT_SECONDS, 15, msg="HN-2: the ceiling is 15 seconds")
+        self.assertEqual(self.module.HOLDER_END_GRACE_SECONDS, 5, msg="HN-2: the grace after the kill is 5 seconds")
+        with mock.patch.dict(os.environ), mock.patch.object(self.module, "_run_holder_list", lambda e, c: ("timeout", "")), \
+                mock.patch("shutil.which", lambda name, *a, **k: self.fake_exe):
+            self.clean_session_env()
+            reading = self.module._read_session_list(str(self.main))
+
+        self.assertEqual((reading["verdict"], reading.get("reason")), ("cannot-tell", "claude agents gave no answer within 15 seconds"),
+                         msg="HN-3: the real reason text, with the real number")
+
+    def test_a_byte_order_mark_in_front_of_the_list_bytes_reads_cannot_tell_with_the_form_reason(self):
+        reading = self.read_real(raw=b"\xef\xbb\xbf[]")
+
+        self.assertEqual((reading["verdict"], reading.get("reason")), ("cannot-tell", REASON_FORM),
+                         msg="A8: a UTF-8 byte order mark before the list is `not in the expected form`")
+
+    def recorded_start(self, *, env: dict | None = None):
+        """``_read_session_list`` with the real runner and the real fake, ``subprocess.Popen`` recording the holder call."""
+        seen: list = []
+        real_popen = subprocess.Popen
+
+        class Recording(real_popen):
+            def __init__(self, args, *a, **k):
+                seen.append((list(args) if isinstance(args, (list, tuple)) else [str(args)], dict(k)))
+                super().__init__(args, *a, **k)
+
+        set_claude(self.tools, [])
+        with mock.patch.dict(os.environ), mock.patch("shutil.which", lambda name, *a, **k: self.fake_exe), \
+                mock.patch("subprocess.Popen", Recording):
+            self.clean_session_env(env)
+            reading = self.module._read_session_list(str(self.main))
+        return reading, seen
+
+    def test_claude_is_started_in_the_folder_that_holds_it_not_in_the_main_checkout(self):
+        reading, seen = self.recorded_start()
+
+        self.assertEqual(reading["verdict"], "read", msg=f"fixture sanity: the lookup ran; got {reading}")
+        self.assertEqual(len(seen), 1, msg="exactly one start")
+        argv, kwargs = seen[0]
+        self.assertEqual(argv[0], self.fake_exe, msg="fixture sanity: the program started is the one resolved")
+        self.assertIn("cwd", kwargs, msg="B1: the start names a working folder")
+        self.assertEqual(_norm_text(kwargs.get("cwd")), _norm_text(os.path.dirname(self.fake_exe)),
+                         msg="B1: the working folder is the folder that holds the resolved claude program")
+        self.assertNotEqual(_norm_text(kwargs.get("cwd")), _norm_text(str(self.main)), msg="B1: and never the main checkout")
+
+    def test_the_start_passes_no_environment_argument_at_all(self):
+        """Design decision: no environment variable is a mechanism. The child inherits the unchanged environment,
+        so the start must not hand `env` to Popen (an invented variable would need one)."""
+        reading, seen = self.recorded_start()
+
+        self.assertEqual(reading["verdict"], "read", msg=f"fixture sanity: the lookup ran; got {reading}")
+        self.assertEqual(len(seen), 1, msg="exactly one start")
+        kwargs = seen[0][1]
+        self.assertNotIn("env", kwargs, msg="B1: the start passes no `env` argument; the child inherits the unchanged environment")
+
+    @unittest.skipUnless(IS_WINDOWS, "a .cmd wrapper that runs a bare `node` is the Windows shape of the install")
+    def test_a_cmd_wrapper_that_runs_a_bare_node_never_runs_a_node_planted_in_the_main_checkout(self):
+        """B1 against the real thing: `claude.cmd` calls `node`; cmd.exe looks in the current folder first, so the
+        current folder of the child must be the wrapper's own folder, never the main checkout."""
+        wrapdir = self.tmp / "wrapbin"
+        wrapdir.mkdir()
+        write_exe(wrapdir, "node", FAKE_CLAUDE_CODE)  # the real interpreter the wrapper means
+        (wrapdir / "claude.cmd").write_bytes(b'@echo off\r\nnode %*\r\n')
+        set_claude(SimpleNamespace(bin=wrapdir), [])
+        marker = self.tmp / "planted_node_ran.txt"
+        planted = f"import sys\nopen({str(marker)!r}, 'w').write('ran')\nsys.stdout.write('[]')\n"
+        write_exe(self.main, "node", planted)
+        (self.main / "node.cmd").write_bytes(f'@echo off\r\necho ran>"{marker}"\r\necho []\r\n'.encode("utf-8"))
+        elsewhere = self.tmp / "other_cwd"
+        elsewhere.mkdir()
+        path = str(wrapdir) + os.pathsep + os.environ.get("PATH", "")
+        with mock.patch.dict(os.environ):
+            # Test setup, not product behaviour: model a normal user shell, where the variable is unset.
+            os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+            self.clean_session_env({"PATH": path})
+            found = shutil.which("claude")
+            self.assertEqual(os.path.normcase(os.path.dirname(found or "")), os.path.normcase(str(wrapdir)), msg="fixture sanity: the wrapper is found as `claude`")
+            saved = os.getcwd()
+            os.chdir(str(elsewhere))
+            try:
+                reading = self.module._read_session_list(str(self.main))
+            finally:
+                os.chdir(saved)
+
+        self.assertFalse(marker.exists(), msg="B1: a node planted in the main checkout must never run")
+        self.assertEqual(reading["verdict"], "read", msg=f"B1: the node beside the wrapper answered; got {reading}")
+        logged = wrapdir / "claude_calls.jsonl"
+        calls = [json.loads(l) for l in logged.read_text(encoding="utf-8").splitlines() if l.strip()] if logged.exists() else []
+        self.assertEqual([c["args"] for c in calls], [STOP_ARGV], msg="B1: the interpreter in the wrapper's folder ran once, as `agents --json --all`")
+
+    # -- A4: the output limit ---------------------------------------------------------------------------
+    def test_the_output_limit_constant_is_four_mebibytes(self):
+        need_names(self, self.module, "HOLDER_OUTPUT_LIMIT_BYTES")
+        self.assertEqual(self.module.HOLDER_OUTPUT_LIMIT_BYTES, OUTPUT_LIMIT, msg="A4: the runner reads at most 4 MiB")
+
+    def test_an_answer_of_more_than_four_mebibytes_is_not_in_the_expected_form(self):
+        reading = self.read_real(sessions=[], pad_to=OUTPUT_LIMIT + 1)
+
+        self.assertEqual((reading["verdict"], reading.get("reason")), ("cannot-tell", REASON_FORM),
+                         msg="A4: one byte over 4 MiB is `not in the expected form`")
+
+    def test_an_answer_of_exactly_four_mebibytes_is_still_read(self):
+        reading = self.read_real(sessions=[], pad_to=OUTPUT_LIMIT)
+
+        self.assertEqual(reading["verdict"], "read", msg="A4: at most 4 MiB is read (the boundary itself is inside)")
+
+    # -- A2: the claude command is resolved safely --------------------------------------------------------
+    def test_a_resolved_command_that_is_relative_or_sits_in_the_main_root_or_the_current_folder_is_not_used(self):
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        cases = {"relative": "claude", "main root": str(self.main / "claude.exe"),
+                 "main root spelled with ..": str(self.main) + os.sep + ".." + os.sep + self.main.name + os.sep + "claude.exe",
+                 "current folder": str(elsewhere / "claude.exe")}
+        for label, exe in cases.items():
+            with self.subTest(resolved=label):
+                saved = os.getcwd()
+                os.chdir(str(elsewhere))
+                try:
+                    reading = self.read([], exe=exe)
+                finally:
+                    os.chdir(saved)
+
+                self.assertEqual((reading["verdict"], reading.get("reason")), ("cannot-tell", REASON_NOT_FOUND),
+                                 msg=f"A2 ({label}): accepted only if absolute and in neither the current folder nor the main root")
+
+    def test_d4_a_path_entry_that_is_not_a_hit_is_never_resolved_through_the_file_system(self):
+        stale = [str(self.tmp / "stale_one"), str(self.tmp / "stale_two")]  # absolute, and not on disk
+        resolved: list = []
+        real_norm, real_rp = self.module._norm, os.path.realpath
+
+        def norm(path):
+            resolved.append(os.fspath(path))
+            return real_norm(path)
+
+        def realpath(path, *a, **k):
+            resolved.append(os.fspath(path))
+            return real_rp(path, *a, **k)
+
+        with mock.patch.dict(os.environ), mock.patch("shutil.which", lambda name, *a, **k: None), \
+                mock.patch.object(self.module, "_norm", norm), mock.patch("os.path.realpath", realpath):
+            self.clean_session_env({"PATH": os.pathsep.join(stale)})
+            reading = self.module._read_session_list(str(self.main))
+
+        self.assertEqual((reading["verdict"], reading.get("reason")), ("cannot-tell", REASON_NOT_FOUND),
+                         msg=f"fixture sanity: with nothing on PATH the command is not found; got {reading}")
+        touched = [p for p in resolved if any(os.path.normcase(p).startswith(os.path.normcase(s)) for s in stale)]
+        self.assertEqual(touched, [],
+                         msg=f"D4: only the current folder and the main root may be resolved, never a PATH entry that is not a hit; resolved {resolved}")
+
+    def test_a_resolved_command_in_a_third_folder_is_used(self):
+        reading = self.read([])
+
+        self.assertEqual(reading["verdict"], "read", msg="A2: an absolute command in some other folder is fine")
+
+    def plant(self, folder: Path, marker: Path) -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        if IS_WINDOWS:
+            for ext in (".cmd", ".bat"):
+                (folder / ("claude" + ext)).write_bytes(f'@echo off\r\necho ran>"{marker}"\r\necho []\r\n'.encode("utf-8"))
+        else:
+            planted = folder / "claude"
+            planted.write_text(f'#!/bin/sh\necho ran > "{marker}"\necho "[]"\n', encoding="utf-8")
+            planted.chmod(0o755)
+
+    def read_resolving(self, *, cwd: Path, planted_in: Path, path_env: str):
+        """The real ``shutil.which`` and the real runner, NoDefaultCurrentDirectoryInExePath UNSET."""
+        marker = self.tmp / "planted_ran.txt"
+        marker.unlink(missing_ok=True)
+        (self.tools.bin / "claude_calls.jsonl").unlink(missing_ok=True)
+        self.plant(planted_in, marker)
+        with mock.patch.dict(os.environ):
+            # Test setup, not product behaviour: model a normal user shell, where the variable is unset.
+            os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+            self.clean_session_env({"PATH": path_env})
+            saved = os.getcwd()
+            os.chdir(str(cwd))
+            try:
+                reading = self.module._read_session_list(str(self.main))
+            finally:
+                os.chdir(saved)
+        return reading, marker
+
+    def test_a_planted_claude_in_the_main_root_or_the_current_folder_never_runs_and_the_one_on_path_is_used(self):
+        other = self.tmp / "other_cwd"
+        other.mkdir()
+        fake_path = self.tools.bin_dir_text + os.pathsep + os.environ.get("PATH", "")
+        cases = {"planted in the main root, started there": (self.main, self.main, fake_path if IS_WINDOWS else str(self.main) + os.pathsep + fake_path),
+                 "planted in the current folder": (other, other, fake_path if IS_WINDOWS else str(other) + os.pathsep + fake_path)}
+        for label, (cwd, planted_in, path_env) in cases.items():
+            with self.subTest(case=label):
+                reading, marker = self.read_resolving(cwd=cwd, planted_in=planted_in, path_env=path_env)
+
+                self.assertFalse(marker.exists(), msg=f"A2 ({label}): the planted claude must never run")
+                self.assertEqual(reading["verdict"], "read", msg=f"A2 ({label}): the fake claude on PATH is used; got {reading}")
+                self.assertEqual([c["args"] for c in claude_calls(self.tools)], [STOP_ARGV], msg="and it was called once, as `agents --json --all`")
+
+    def test_when_only_a_planted_claude_exists_nothing_runs_and_the_reading_says_the_command_was_not_found(self):
+        empty = self.tmp / "emptybin"
+        empty.mkdir()
+
+        reading, marker = self.read_resolving(cwd=self.main, planted_in=self.main, path_env=str(empty) if IS_WINDOWS else str(self.main))
+
+        self.assertFalse(marker.exists(), msg="A2: the planted claude must never run")
+        self.assertEqual((reading["verdict"], reading.get("reason")), ("cannot-tell", REASON_NOT_FOUND),
+                         msg="A2: no safe claude command, so the lookup says it was not found")
+
+    # -- A8: the committed real-shape fixture --------------------------------------------------------------
+    def test_the_committed_real_shape_list_is_read_end_to_end_and_names_its_holders(self):
+        self.assertTrue(AGENTS_LIST_FIXTURE.is_file(), msg=f"A8: the fixture {AGENTS_LIST_FIXTURE} is committed")
+        data = AGENTS_LIST_FIXTURE.read_bytes()
+        self.assertFalse(data.startswith(b"\xef\xbb\xbf"), msg="A8: no BOM")
+        self.assertIsNone(re.search(rb"\\u[0-9a-fA-F]{4}", data), msg="A8: raw UTF-8, not ASCII-escaped")
+        text = data.decode("utf-8")
+        self.assertTrue(any(ord(c) > 127 for c in text), msg="A8: it holds a non-ASCII session name")
+        listed = json.loads(text)
+        self.assertIsInstance(listed, list, msg="A8: a bare list")
+        self.assertEqual(len(listed), 4)
+        for rec in listed:
+            self.assertEqual(set(rec), set(REAL_RECORD_KEYS), msg="A8: exactly the real keys")
+            self.assertIsInstance(rec["cwd"], str)
+            self.assertRegex(rec["id"], r"^[0-9a-f]{8}$")
+            self.assertEqual(rec["kind"], "background")
+            self.assertIsInstance(rec["name"], str)
+            self.assertIs(type(rec["pid"]), int)
+            self.assertRegex(rec["sessionId"], r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+            self.assertIs(type(rec["startedAt"]), int)
+            self.assertIn(rec["state"], REAL_STATES)
+            self.assertIsInstance(rec["status"], str)
+        self.assertEqual({r["state"] for r in listed}, set(REAL_STATES), msg="A8: all four states appear")
+        listed[0]["cwd"], listed[1]["cwd"] = str(self.tree / "src"), str(self.tree)
+        listed[2]["cwd"], listed[3]["cwd"] = str(self.tmp / "elsewhere"), str(self.main)
+
+        reading = self.read_real(raw=self.raw_list(listed), env={"CLAUDE_CODE_SESSION_ID": listed[1]["sessionId"]})
+
+        holders = self.module._holders_for(reading, str(self.tree))
+        self.assertEqual(reading["verdict"], "read", msg=f"the real shape is a readable answer; got {reading}")
+        self.assertEqual(reading["this_session"], listed[1]["sessionId"], msg="HN-7: the running session is recognised")
+        self.assertEqual(holders["verdict"], "found")
+        self.assertEqual([(s["id"], s["name"], s["state"]) for s in holders["sessions"]],
+                         [(listed[0]["id"], listed[0]["name"], "working"), (listed[1]["id"], listed[1]["name"], "blocked")],
+                         msg="exactly the two sessions inside the tree, with their names and states")
+        self.assertEqual(self.stops(self.line(holders)), ["claude stop " + listed[0]["id"]], msg="one stop, for the other session")
+
+
 def git_rc_code(repo, *args: str) -> int:
     return run_cmd([REAL_GIT, *args], cwd=repo).rc
 
@@ -2838,6 +4498,370 @@ class PureLogicUnitTests(unittest.TestCase):
                 os.path.isjunction = saved
         self.assertTrue(flagged, msg="INV-4: a junction/symlink is flagged without os.path.isjunction")
         self.assertFalse(unflagged, msg="control: a plain folder is not a link")
+
+    # -- Holder reading: build_line on synthetic items (HN-6, HN-8) ------------------------------------
+    def test_the_bracket_has_a_form_for_found_none_found_and_cannot_tell(self):
+        module = load_cleanup_module()
+        cases = {
+            "found": (synth_item([synth_holder("bbfa6fec", name="worker", state="done"), synth_holder("cc00dd11", name="", state="running")]),
+                      'FW: standing-tree [held by bbfa6fec "worker" done, cc00dd11 running]'),
+            "this session": (synth_item([synth_holder("bbfa6fec", this=True)], recognised=True), "[held by bbfa6fec (this session)]"),
+            "none-found": (synth_item([], verdict="none-found"), NONE_FOUND_BRACKET),
+            "cannot-tell": (synth_item([], verdict="cannot-tell", reason=REASON_NOT_FOUND),
+                            "[cannot tell which session holds it: the claude command was not found]"),
+        }
+        for label, (item, expected) in cases.items():
+            with self.subTest(bracket=label):
+                line = module.build_line(SLUG, [item], "py -3 'x' --contract 's' --from 'm'")
+
+                self.assertIn(expected.replace("FW", FW_NAME), line, msg=f"HN-8: the {label} bracket; the line is {line!r}")
+                self.assertIn(NOTE_TEXT, line, msg="HN-8: the fixed note whenever an item carries holders")
+
+    def test_e2_the_note_and_the_none_found_bracket_never_claim_that_no_claude_code_session_is_in_the_folder(self):
+        module = load_cleanup_module()
+        for label, item in {"none-found": synth_item([], verdict="none-found"), "found": synth_item([synth_holder("bbfa6fec")])}.items():
+            with self.subTest(verdict=label):
+                line = module.build_line(SLUG, [item], "py -3 'x'")
+
+                self.assertNotIn("only Claude Code sessions", line, msg=f"E2: the list shows background sessions only; the old claim is gone; {line!r}")
+                self.assertNotIn("no Claude Code session", line, msg=f"E2: a none-found reading does not claim no Claude Code session exists; {line!r}")
+        for text in (NOTE_TEXT, getattr(module, "HOLDER_NOTE", "")):
+            self.assertNotIn("only Claude Code sessions", text, msg="E2: the note text no longer says only Claude Code sessions are checked")
+        self.assertIn("background sessions only", getattr(module, "HOLDER_NOTE", ""), msg="E2: the module's note says the list shows background sessions only")
+        line = module.build_line(SLUG, [synth_item([], verdict="none-found")], "py -3 'x'")
+        self.assertIn(NONE_FOUND_BRACKET, line, msg="E2: the none-found bracket reads as the corrected wording")
+
+    def test_an_item_without_holders_gets_no_note_no_bracket_and_the_old_text(self):
+        module = load_cleanup_module()
+        item = {"kind": "worktree", "path": "C:/r/.claude/worktrees/" + FW_NAME, "action": "deferred", "reason": "standing-tree", "files": []}
+
+        line = module.build_line(SLUG, [item], "py -3 'x'")
+
+        self.assertEqual(line, f"CLEANUP {SLUG}: removed 0 (); left 1 ({FW_NAME}: standing-tree); finish: py -3 'x'",
+                         msg="HN-10: an item without holders keeps today's text byte for byte")
+
+    def test_a_long_holder_list_in_a_bracket_shortens_to_plus_k_more_but_keeps_every_stop(self):
+        module = load_cleanup_module()
+        ids = many_ids(4)  # four holders keep the whole line (about 500, note included) within 600 and exceed the 3-name cap, so the bracket shortens
+        item = synth_item([synth_holder(i, name="s" + i) for i in ids])
+
+        line = module.build_line(SLUG, [item], "py -3 'x'")
+
+        self.assertLessEqual(len(line), 600, msg=f"HN-8: this case is within 600, so the bracket shortens rather than goes; got {len(line)}")
+        self.assertIn("[held by", line, msg=f"HN-8: the found bracket is in the line; the line is {line!r}")
+        bracket = line[line.index("[held by"):line.index("]", line.index("[held by")) + 1]
+        more = re.search(r"\+(\d+) more", bracket)
+        self.assertIsNotNone(more, msg=f"HN-8: a shortened bracket ends in `+k more`; got {bracket!r}")
+        k, shown = int(more.group(1)), sum(1 for i in ids if i in bracket)
+        self.assertGreater(k, 0, msg="HN-8: k is positive")
+        self.assertEqual(shown + k, len(ids), msg=f"HN-8: holders shown ({shown}) + k ({k}) == holders ({len(ids)})")
+        self.assertEqual(re.findall(r"; stop: (claude stop \w+)", line), ["claude stop " + i for i in ids], msg="HN-8: but every stop command is printed")
+
+    def test_the_uncut_part_comes_in_order_repair_note_warning_stops_finish(self):
+        module = load_cleanup_module()
+        item = synth_item([synth_holder("bbfa6fec"), synth_holder("cc00dd11")], repair="C:/r/.claude/worktrees/" + FW_NAME)
+
+        line = module.build_line(SLUG, [item], "py -3 'x' --contract 's'")
+
+        order = ["; repair: git worktree repair", NOTE_TEXT, WARNING_TEXT, "; stop: claude stop bbfa6fec", "; stop: claude stop cc00dd11", "; finish: "]
+        self.assertTrue(all(p in line for p in order), msg=f"HN-8: every uncut part is present; the line is {line!r}")
+        positions = [line.index(p) for p in order]
+        self.assertEqual(positions, sorted(positions), msg=f"HN-8 order: repair, note, warning, stops, finish; the line is {line!r}")
+        self.assertTrue(line.endswith("; finish: py -3 'x' --contract 's'"), msg="the finish part is last")
+
+    def test_no_warning_when_the_session_was_recognised_and_one_stop_per_distinct_session(self):
+        module = load_cleanup_module()
+        shared = synth_holder("cc00dd11")
+        first = synth_item([synth_holder("bbfa6fec", this=True), shared], recognised=True)
+        second = synth_item([shared], name="20261015-task-t1-cleanup", recognised=True)
+
+        line = module.build_line(SLUG, [first, second], "py -3 'x'")
+
+        self.assertNotIn(WARNING_TEXT, line, msg="HN-8: the session was recognised, so no warning")
+        self.assertEqual(re.findall(r"; stop: (claude stop \w+)", line), ["claude stop cc00dd11"],
+                         msg="HN-8: one stop for the shared session, none for this session")
+
+    def test_twenty_holders_with_a_600_character_finish_keep_every_stop_and_the_finish_whole(self):
+        module = load_cleanup_module()
+        finish = f"py -3 '{'a' * 150}' --contract '{SLUG}' --from '{'b' * 320}'"
+        ids = many_ids(20)
+        item = synth_item([synth_holder(i, name="s" + i) for i in ids])
+
+        line = module.build_line(SLUG, [item], finish)
+
+        self.assertEqual(re.findall(r"; stop: (claude stop \w+)", line), ["claude stop " + i for i in ids], msg="HN-8: all twenty stops, no cap")
+        self.assertTrue(line.endswith("; finish: " + finish), msg="the finish stays last and whole")
+        self.assertEqual(line.count("; finish: "), 1)
+        self.assertGreater(len(line), 600, msg="the counts and the uncut parts alone exceed 600 here, which is the allowed exception")
+        self.assertTrue(line.startswith(f"CLEANUP {SLUG}: removed 0; left 1"), msg=f"and only the counts remain of the summary; got {line[:80]!r}")
+        self.assertNotIn("[held by", line, msg="every cuttable bracket was dropped at the last step")
+
+    def test_the_stop_order_is_first_seen_across_items_not_sorted_and_the_report_list_equals_the_line(self):
+        module = load_cleanup_module()
+        first = synth_item([synth_holder("cc00dd11"), synth_holder("ee00ff22")])
+        second = synth_item([synth_holder("bbfa6fec"), synth_holder("cc00dd11")], name="20261015-task-t1-cleanup")
+        expected = ["claude stop cc00dd11", "claude stop ee00ff22", "claude stop bbfa6fec"]
+
+        line = module.build_line(SLUG, [first, second], "py -3 'x'")
+        listed = module._stop_commands([first, second])
+
+        in_line = re.findall(r"; stop: (claude stop \w+)", line)
+        self.assertEqual(in_line, expected, msg="HN-8: one stop per distinct session, in the order first seen across the items")
+        self.assertNotEqual(in_line, sorted(in_line), msg="control: the expected order is NOT alphabetical, so a sort would fail this test")
+        self.assertEqual(listed, in_line, msg="the report's stop_commands (built by _stop_commands) equals the stops in the line, same order")
+
+    def test_ten_holders_with_sixty_character_names_keep_the_line_within_600_characters(self):
+        module = load_cleanup_module()
+        ids = many_ids(10)
+        item = synth_item([synth_holder(i, name=("n%s" % i).ljust(60, "x")) for i in ids])
+
+        line = module.build_line(SLUG, [item], "py -3 'x'")
+
+        self.assertLessEqual(len(line), 600, msg=f"HN-8: ten holders with 60-character names still fit in 600 characters; got {len(line)}")
+        self.assertEqual(re.findall(r"; stop: (claude stop \w+)", line), ["claude stop " + i for i in ids], msg="every stop is still printed")
+        self.assertEqual(line.count("; finish: "), 1)
+        self.assertTrue(line.endswith("; finish: py -3 'x'"), msg="and the finish part is last")
+
+    def test_invisible_and_direction_marks_in_a_holder_text_are_removed_from_the_line(self):
+        module = load_cleanup_module()
+        marked = "a\u200eb\u200fc\u061cd\u200be\ufeffg"
+        item = synth_item([synth_holder("bbfa6fec", name=marked, state=marked)])
+
+        line = module.build_line(SLUG, [item], "py -3 'x'")
+
+        self.assertIsNone(re.search("[\u200e\u200f\u061c\u200b\ufeff]", line), msg=f"B4: none of U+200E U+200F U+061C U+200B U+FEFF is left in the line; {ascii(line)}")
+        self.assertIn('bbfa6fec "abcdeg" abcdeg', line, msg="B4: the readable letters survive, in order")
+
+    def test_d2_format_characters_and_lookalike_separators_in_a_raw_holder_text_do_not_reach_the_line(self):
+        module = load_cleanup_module()
+        name = "a\U000e0041b‌c‍d⁠e­f᠎g￹h"
+        item = synth_item([synth_holder("bbfa6fec", name=name, state=name)])
+
+        line = module.build_line(SLUG, [item], "py -3 'x'")
+
+        self.assertIn('bbfa6fec "abcdefgh" abcdefgh', line, msg=f"D2: only the letters survive, in order; {ascii(line)}")
+        forged = synth_item([synth_holder("bbfa6fec", name="x; stop: claude stop deadbeef", state="y； stop: claude stop cafebabe")])
+        line = module.build_line(SLUG, [forged], "py -3 'x'")
+        self.assertEqual(re.findall(r"; stop: (claude stop \w+)", line), ["claude stop bbfa6fec"],
+                         msg=f"D2: a lookalike separator in a name or state forges no stop part; {ascii(line)}")
+        self.assertIsNone(re.search("[;；]", line), msg="D2: and the lookalikes themselves are gone")
+
+    def test_d3_a_name_or_state_that_is_not_text_reads_as_empty_text_in_the_line(self):
+        module = load_cleanup_module()
+        for label, value in {"true": True, "false": False, "number": 5, "list": ["x"], "object": {"a": 1}, "null": None}.items():
+            with self.subTest(value=label):
+                item = synth_item([synth_holder("bbfa6fec", name=value, state=value)])
+
+                line = module.build_line(SLUG, [item], "py -3 'x'")
+
+                self.assertIn("[held by bbfa6fec]", line, msg=f"D3: a {label} name and state read as empty text; line {line!r}")
+
+    def test_text_in_a_holder_cannot_forge_a_part_of_the_line_even_when_build_line_gets_it_raw(self):
+        module = load_cleanup_module()
+        name = 'x; finish: rm -rf ~"]' + "\n" + "\u2028" + "\x1b[31m" + "y" * 200
+        item = synth_item([synth_holder("bbfa6fec", name=name, state="ok;[x]"),
+                           synth_holder("BBFA6FEC;rm", stop="claude stop BBFA6FEC;rm")])
+
+        line = module.build_line(SLUG, [item], "py -3 'x'")
+
+        self.assertEqual(line.count("; finish: "), 1, msg=f"HN-6: exactly one finish part; the line is {line!r}")
+        self.assertIsNone(re.search("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]", line), msg="no control or separator character")
+        shown = re.search(r'bbfa6fec "([^"]*)"', line)
+        self.assertIsNotNone(shown, msg=f"the name is shown between double quotes with none inside it; the line is {line!r}")
+        self.assertLessEqual(len(shown.group(1)), 60, msg="HN-6: the name is cut to 60 characters")
+        self.assertNotIn("BBFA6FEC;rm", line, msg="HN-6: an id that fails its format is never echoed")
+        self.assertNotIn("claude stop BBFA6FEC", line, msg="and gets no stop command")
+        self.assertIn("a session with an unreadable id", line, msg="HN-6: it is shown as such")
+        self.assertEqual(re.findall(r"; stop: (claude stop \w+)", line), ["claude stop bbfa6fec"])
+
+
+class ProcessControlScanTests(unittest.TestCase):
+    """HN-9 (b), decision A1: the source tripwire beside ForbiddenTokenScanTests, with a planted positive control for
+    every token. Three exemptions only: ``subprocess.run`` in ``_exec``, ``Popen`` in ``_run_holder_list``, ``kill`` in
+    ``_end_own_child``; taskkill, killpg and a new session are forbidden everywhere, those three functions included."""
+    PLANTED_NAMES = {"kill": "os.kill(pid, 9)", "killpg": "os.killpg(pg, 9)", "terminate": "proc.terminate()",
+                     "send_signal": "proc.send_signal(2)", "signal": "signal.signal(2, h)", "system": "os.system(c)",
+                     "popen": "os.popen(c)", "Popen": "subprocess.Popen(c)", "startfile": "os.startfile(p)",
+                     "TerminateProcess": "k32.TerminateProcess(h, 1)", "OpenProcess": "k32.OpenProcess(1, 0, pid)",
+                     "start_new_session": "launch(c, start_new_session=True)", "setsid": "os.setsid()"}
+    PLANTED_SPAWNERS = {"subprocess.run": "subprocess.run(c)", "subprocess.call": "subprocess.call(c)",
+                        "subprocess.check_call": "subprocess.check_call(c)", "subprocess.check_output": "subprocess.check_output(c)",
+                        "os.spawnl": "os.spawnl(0, c)", "os.spawnvp": "os.spawnvp(0, c, a)", "os.execv": "os.execv(c, a)",
+                        "os.execvp": "os.execvp(c, a)", "os.posix_spawn": "os.posix_spawn(c, a, e)", "os.posix_spawnp": "os.posix_spawnp(c, a, e)"}
+    PLANTED_STRINGS = ("stop", "kill", "taskkill", "pkill", "killall", "Stop-Process", "rm", "del", "rmdir")
+    PLANTED_SPLITS = {"literal .split()": '"claude stop bbfa6fec".split()', "literal .split(' ')": '"claude stop bbfa6fec".split(" ")',
+                      "shlex.split": 'shlex.split("claude stop bbfa6fec")', "formatted then split": '("claude stop %s" % sid).split()',
+                      "f-string then split": 'f"claude stop {sid}".split()'}
+
+    def test_positive_control_every_process_control_name_is_flagged_outside_its_one_home(self):
+        for name, call in self.PLANTED_NAMES.items():
+            with self.subTest(name=name):
+                self.assertIn(name, process_control_hits(f"def other():\n    {call}\n"), msg=f"control: a planted {name} must be flagged")
+
+    def test_positive_control_every_spawner_is_flagged_in_an_ordinary_function(self):
+        for label, call in self.PLANTED_SPAWNERS.items():
+            with self.subTest(spawner=label):
+                self.assertIn(label, process_control_hits(f"def other():\n    {call}\n"),
+                              msg=f"control: a planted {label} must be flagged (subprocess.run only has a home in _exec)")
+
+    def test_positive_control_every_process_control_string_is_flagged(self):
+        for word in self.PLANTED_STRINGS:
+            with self.subTest(word=word):
+                self.assertIn(word, process_control_hits(f'def other():\n    run(["{word}", "x"])\n'), msg=f"control: a planted \"{word}\" must be flagged")
+
+    def test_positive_control_a_claude_stop_literal_in_an_argument_list_is_flagged(self):
+        self.assertTrue(process_control_hits('def other():\n    run(["claude stop bbfa6fec"])\n'),
+                        msg="control: `claude stop` inside an argument list is flagged")
+
+    def test_positive_control_text_beginning_claude_stop_cut_into_words_is_flagged(self):
+        for label, expr in self.PLANTED_SPLITS.items():
+            with self.subTest(split=label):
+                hits = process_control_hits(f"def other(sid):\n    return {expr}\n")
+                self.assertIn("claude stop split into words", hits, msg=f"control: {label} is how a stop would be launched; got {hits}")
+
+    def test_the_three_exemptions_each_pass_in_their_own_function_and_nowhere_else(self):
+        homes = {"_exec": "subprocess.run(c)", "_run_holder_list": "subprocess.Popen(c)", "_end_own_child": "p.kill()"}
+        for func, call in homes.items():
+            with self.subTest(home=func):
+                self.assertEqual(process_control_hits(f"def {func}(p):\n    {call}\n"), [], msg=f"control: {call} is allowed inside {func}")
+                for other in homes:
+                    if other != func:
+                        self.assertTrue(process_control_hits(f"def {other}(p):\n    {call}\n"),
+                                        msg=f"control: {call} is flagged inside {other}: each name has ONE home")
+
+    def test_a_planted_taskkill_killpg_or_new_session_is_flagged_even_inside_the_three_functions(self):
+        for func in ("_exec", "_run_holder_list", "_end_own_child"):
+            for label, body in (("taskkill", 'x = ["taskkill", "/T"]'), ("killpg", "os.killpg(1, 9)"),
+                                ("start_new_session", "go(start_new_session=True)")):
+                with self.subTest(function=func, planted=label):
+                    self.assertIn(label, process_control_hits(f"def {func}(p):\n    {body}\n"),
+                                  msg=f"A1: {label} is forbidden everywhere, {func} included")
+
+    def test_negative_control_a_message_built_from_claude_stop_is_not_flagged(self):
+        text = ('def build(ids):\n    one = "; stop: claude stop %s" % ids[0]\n'
+                '    many = ["claude stop %s" % i for i in ids]\n    return f"claude stop {ids[0]}"\n')
+        self.assertEqual(process_control_hits(text), [], msg="control: a message is not a use")
+        self.assertEqual(process_control_hits('def f(t):\n    return t.split(";") + "a b".split()\n'), [], msg="control: other splits are fine")
+
+    def test_the_exemptions_are_exactly_the_three_the_contract_names(self):
+        self.assertEqual(PROCESS_EXEMPT, ("_run_holder_list", "_end_own_child"))
+        self.assertEqual(NAME_HOMES, {"kill": "_end_own_child", "Popen": "_run_holder_list", "subprocess.run": "_exec"})
+
+    def test_positive_control_a_second_reference_to_end_own_child_is_found_even_as_an_alias(self):
+        text = ("def _run_holder_list(p):\n    _end_own_child(p)\n"
+                "def other(m):\n    alias = _end_own_child\n    getattr(m, '_end_own_child')\n    return m._end_own_child\n")
+        refs = name_references(text, "_end_own_child")
+        self.assertEqual(refs, [("_run_holder_list", "call"), ("other", "reference"), ("other", "reference"), ("other", "reference")],
+                         msg=f"control: an alias, a string and an attribute count as callers; got {refs}")
+
+    def source_tree(self):
+        import ast
+        self.assertTrue(CLEANUP.is_file(), msg=MISSING)
+        text = CLEANUP.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        missing = [n for n in (*PROCESS_EXEMPT, "_exec") if n not in defined]
+        if missing:
+            self.fail("cleanup_delivered.py does not define " + ", ".join(missing) + " yet (HN-2, HN-9, A1): the implementer adds them in GREEN")
+        return text, tree
+
+    def test_the_real_source_passes_the_process_control_tripwire(self):
+        text, _tree = self.source_tree()
+
+        hits = process_control_hits(text)
+
+        self.assertEqual(hits, [], msg=f"HN-9/A1: no taskkill, no killpg, no new session; subprocess.run only in _exec, Popen only in "
+                                       f"_run_holder_list, kill only in _end_own_child; found {hits}")
+
+    def test_end_own_child_is_only_a_proc_kill(self):
+        text, _tree = self.source_tree()
+
+        problems = end_own_child_problems(text)
+
+        self.assertEqual(problems, [], msg=f"A1/B7: _end_own_child is exactly one call `<first parameter>.kill()` with no arguments; {problems}")
+
+    def test_positive_control_a_changed_end_own_child_body_is_found(self):
+        good = "def _end_own_child(proc):\n    try:\n        proc.kill()\n    except OSError:\n        pass\n"
+        self.assertEqual(end_own_child_problems(good), [], msg="control: the production shape passes")
+        bad = {"kill with an argument": "def _end_own_child(proc):\n    proc.kill(9)\n",
+               "another receiver": "def _end_own_child(proc):\n    other.kill()\n",
+               "a second call": "def _end_own_child(proc):\n    proc.kill()\n    proc.wait()\n",
+               "a tree step": "def _end_own_child(proc):\n    proc.kill()\n    helper(proc.pid)\n",
+               "os.kill instead": "def _end_own_child(proc):\n    os.kill(proc.pid, 9)\n",
+               "negative pid": "def _end_own_child(proc):\n    os.kill(-proc.pid, 9)\n",
+               "terminate": "def _end_own_child(proc):\n    proc.terminate()\n",
+               "no call": "def _end_own_child(proc):\n    return None\n",
+               "two parameters": "def _end_own_child(proc, tree):\n    proc.kill()\n",
+               "bare kill without try": "def _end_own_child(proc):\n    proc.kill()\n",
+               "catches Exception": "def _end_own_child(proc):\n    try:\n        proc.kill()\n    except Exception:\n        pass\n",
+               "bare except": "def _end_own_child(proc):\n    try:\n        proc.kill()\n    except:\n        pass\n",
+               "handler does more than pass": "def _end_own_child(proc):\n    try:\n        proc.kill()\n    except OSError:\n        log()\n",
+               "finally part": "def _end_own_child(proc):\n    try:\n        proc.kill()\n    except OSError:\n        pass\n    finally:\n        pass\n",
+               "kill after the try": "def _end_own_child(proc):\n    try:\n        pass\n    except OSError:\n        pass\n    proc.kill()\n"}
+        for label, text in bad.items():
+            with self.subTest(body=label):
+                self.assertTrue(end_own_child_problems(text), msg=f"control: `{label}` must be reported")
+
+    PLANTED_IMPORTS = {"import subprocess as x": "import subprocess as x\n", "import os as o": "import os as o\n",
+                       "from subprocess import Popen": "from subprocess import Popen\n",
+                       "from subprocess import *": "from subprocess import *\n",
+                       "from os import kill": "from os import kill\n",
+                       "from os import system as s": "from os import system as s\n",
+                       "from asyncio import create_subprocess_exec": "from asyncio import create_subprocess_exec\n"}
+
+    def test_positive_control_an_alias_or_a_from_import_of_subprocess_or_os_is_flagged(self):
+        for label, text in self.PLANTED_IMPORTS.items():
+            with self.subTest(statement=label):
+                self.assertTrue(process_control_hits(text), msg=f"control: `{label}` hides the dotted name from the scan and must be flagged")
+        self.assertEqual(process_control_hits("import subprocess\nimport os\n"), [], msg="control: a plain import is fine")
+
+    PLANTED_OTHER_ROUTES = {"asyncio.create_subprocess_exec": "asyncio.create_subprocess_exec(c)",
+                            "asyncio.create_subprocess_shell": "asyncio.create_subprocess_shell(c)",
+                            "pty": "pty.spawn(c)", "ctypes": "ctypes.windll.kernel32",
+                            "CreateProcess": "k32.CreateProcessW(a, b)", "CreateJobObject": "k32.CreateJobObjectW(0, 0)",
+                            "TerminateJobObject": "k32.TerminateJobObject(h, 1)"}
+
+    def test_positive_control_asyncio_pty_ctypes_and_the_windows_process_calls_are_flagged(self):
+        for name, call in self.PLANTED_OTHER_ROUTES.items():
+            with self.subTest(route=name):
+                self.assertIn(name, process_control_hits(f"def other():\n    {call}\n"), msg=f"control: a planted {name} must be flagged")
+        for name in ("import pty", "import ctypes"):
+            with self.subTest(statement=name):
+                self.assertTrue(process_control_hits(name + "\n"), msg=f"control: `{name}` must be flagged")
+
+    def test_a_planted_os_kill_of_a_negative_pid_is_flagged_even_inside_end_own_child(self):
+        text = "def _end_own_child(proc):\n    os.kill(-proc.pid, 9)\n"
+
+        hits = process_control_hits(text)
+
+        self.assertIn("os.kill", hits, msg=f"control: kill is at home in _end_own_child only as `<child>.kill()`; os.kill(-pid) there is flagged; got {hits}")
+        self.assertEqual(process_control_hits("def _end_own_child(proc):\n    proc.kill()\n"), [], msg="control: the allowed form passes")
+
+    def test_a_planted_forbidden_route_is_flagged_even_inside_the_three_functions(self):
+        for func in ("_exec", "_run_holder_list", "_end_own_child"):
+            for label, body in (("pty", "pty.fork()"), ("ctypes", "ctypes.windll"), ("CreateProcess", "k.CreateProcessW(a)"),
+                                ("asyncio.create_subprocess_exec", "asyncio.create_subprocess_exec(c)")):
+                with self.subTest(function=func, planted=label):
+                    self.assertIn(label, process_control_hits(f"def {func}(p):\n    {body}\n"), msg=f"{label} is forbidden everywhere, {func} included")
+
+    def test_end_own_child_has_exactly_one_use_and_it_is_the_timeout_handler_of_the_runner(self):
+        import ast
+        text, tree = self.source_tree()
+        refs = name_references(text, "_end_own_child")
+        self.assertEqual(refs, [("_run_holder_list", "call")],
+                         msg=f"HN-9: exactly one use, a call in _run_holder_list (no alias, no second caller); found {refs}")
+        runner = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_run_holder_list")
+        call = next(c for c in ast.walk(runner) if isinstance(c, ast.Call) and getattr(c.func, "id", getattr(c.func, "attr", None)) == "_end_own_child")
+        inside_timeout = False
+        for node in ast.walk(runner):
+            guard = None
+            if isinstance(node, ast.ExceptHandler):
+                guard = ast.dump(node.type) if node.type is not None else ""
+            elif isinstance(node, ast.If):
+                guard = ast.dump(node.test)
+            if guard is not None and "imeout" in guard and any(c is call for c in ast.walk(node)):
+                inside_timeout = True
+        self.assertTrue(inside_timeout, msg="HN-9: the call sits in the timeout handler (an `except ...TimeoutExpired` or a timeout branch)")
 
 
 class ForbiddenTokenScanTests(unittest.TestCase):

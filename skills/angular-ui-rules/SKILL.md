@@ -35,7 +35,7 @@ This is the short list. The full text of each rule, with examples, lives in the 
 - **T-001** No static `style` for layout, spacing or sizing; use Tailwind utilities.
 - **T-003** No `text-gray-*` / `bg-gray-*`.
 - **T-004** No hard-coded hex colours; use the theme-bridged utilities (`text-primary`, `bg-surface-container`, `border-outline-variant`).
-- **T-010** SCSS files stay near-empty: `:host ::ng-deep`, `@keyframes`, `@media` / `@supports`, `@apply`.
+- **T-010** SCSS files stay near-empty: third-party overrides (`:host ::ng-deep`; in a `ViewEncapsulation.None` component `:host` matches nothing, so scope them under the component's element selector), `@keyframes`, `@media` / `@supports`, `@apply`.
 - **T-011** A Material override that serves one component goes in that component's stylesheet.
 - **T-012** Scrollable containers use the global `scroll-edge` classes, never inline `overflow-y-auto` or `sticky`.
 - **T-014** Keep the height chain intact down to a scrolling child.
