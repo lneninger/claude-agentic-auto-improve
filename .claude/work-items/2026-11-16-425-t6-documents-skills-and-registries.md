@@ -31,7 +31,7 @@ The contract's own handoff block, verbatim:
 
 ### 6. Documents, skills and registries (`python-ai-developer`)
 
-**Depends on:** 5, 12 — blocks 4 and 10 are no longer named: their records read `blocked`, and the loop never releases a block whose dependency reads `blocked`; the third security review (12) replaces them. Before amendment 2 this line read "5, 10".
+**Depends on:** 5, 14 — blocks 4, 10 and 12 are no longer named: their records read `blocked`, and the loop never releases a block whose dependency reads `blocked`; the fourth security review (14) replaces them. Before amendment 3 this line read "5, 12"; before amendment 2 it read "5, 10".
 
 **Files to touch:**
 - `README.md`
@@ -56,10 +56,11 @@ TASK: Rewrite the documents and skill text for file settings, rewrite INV-12 and
   test_plugin_manifests.py, and record the mechanism and terms in the registries. Remove the last
   expectedFailure marks.
 CONTEXT: concept contract at .claude/concepts/2026-11-16-file-based-switches.md, the skill-text
-  table of the Inventory. This block runs after the ordinary switches block (5) and the third
-  security review (12) have passed; read the report
-  t12-security-re-review-round-three-security-auditor.md, the blocked re-review
-  t10-security-re-review-security-auditor.md and the second run sheet
+  table of the Inventory. This block runs after the ordinary switches block (5) and the fourth
+  security review (14) have passed; read the report
+  t14-security-re-review-round-four-security-auditor.md, the blocked reviews
+  t12-security-re-review-round-three-security-auditor.md and
+  t10-security-re-review-security-auditor.md, and the second run sheet
   t9-live-prompt-trial-second-round-senior-test-engineer.md for the residual-risk wording.
 FILES: as listed.
 CONSTRAINTS:
@@ -73,10 +74,16 @@ CONSTRAINTS:
     acceptEdits, plan and dontAsk were not tried live. Add _switches.py to the helper
     lists. Leave "Change notes by version" as written and add a dated note for this change. The
     note names apart, as fixes of behaviour older than this contract: a human-only script after
-    quoted text in the same call was allowed with no prompt (re-review P1), and a link at the
-    database guards' rules file to a named pipe could hang them (I1). It also says that a rules
-    file which is a link to a network drive or share now counts as unreadable, so every
-    database is protected; keep the rules file a regular file in the project folder.
+    quoted text in the same call was allowed with no prompt (re-review P1), including after a
+    trailing backslash before a closing quote or an escaped quote (t12 P1), and a link at the
+    database guards' rules file to a named pipe could hang them (I1). It also names: a
+    human-only script after a shell keyword, a prefix command or inside backticks was allowed
+    with no prompt (t12 P2), and a link at either database guard's audit log (db-guard.log,
+    db-research.log) or log folder could hang or redirect its audit write (t12 I2); such a log
+    is now skipped, so keep .claude/logs a real folder. It also says that a rules file which is a link to a network drive or share now
+    counts as unreadable, so every database is protected; keep the rules file a regular file in
+    the project folder. A shape the guard now reads as invoked in either shell is blocked even
+    when the other shell would only mention it; the person runs it by hand.
   - CONTRIBUTING: a new switch is one catalog entry, one README row and one on/off test pair,
     never an environment read.
   - Delete the CLAUDE_CONTRACT_SKIP and CLAUDE_VERIFY_REVIEW_GATE text as the table says.
@@ -95,6 +102,8 @@ PRIOR_FINDINGS:
   contract_path: .claude/concepts/2026-11-16-file-based-switches.md
   contract_status: approved
 ```
+
+---
 
 ## Routing
 task of .claude/concepts/2026-11-16-file-based-switches.md — dispatched by /advance
