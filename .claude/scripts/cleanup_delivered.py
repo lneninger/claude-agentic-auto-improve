@@ -30,6 +30,24 @@ Rules this module keeps (INV-1 to INV-9 of the contract):
   * Never a forced removal, never a global tidy of stale entries, never a recursive delete of a worktree,
     never a switch or checkout in any tree.
   * A tree somebody stands in is deferred and left untouched; the next call from elsewhere clears it.
+  * Holder reading (contract 2026-10-18, HN-1 to HN-11): when a tree is deferred as ``standing-tree`` or ``in-use``,
+    the script reads Claude Code's own session list once (``claude agents --json --all``) AFTER every decision is
+    made, names each Claude Code session whose working folder is inside the tree (the same ``_inside`` the
+    deferral uses), and prints ``claude stop <id>`` for every holder except the running session. The reading
+    explains the deferral; it never changes an action, a reason, the outcome, the exit code or the finish command.
+    A list that cannot be read says ``cannot-tell`` with a fixed reason, never ``none-found``.
+  * Read only, with one stated exception: the script never stops, signals or changes another session or process.
+    The one exception is its own ``claude agents`` child, ended only after the time ceiling passes, with a plain
+    ``kill`` of that one child (``_end_own_child``, called from the timeout branch of ``_run_holder_list`` and
+    nowhere else). No descendant, process group or process tree is ended: a background supervisor may be one.
+    Only three process calls exist: ``subprocess.run`` inside ``_exec``, ``Popen`` inside ``_run_holder_list`` and
+    ``kill`` inside ``_end_own_child``.
+  * The ``claude`` command is accepted only as an absolute path whose folder is neither the current folder nor the
+    main checkout root; when the first hit is unsafe the other PATH folders are searched, and when none is safe the
+    reading says "the claude command was not found". At most ``HOLDER_OUTPUT_LIMIT_BYTES`` of output are read.
+  * A record's working folder is accepted only as a drive path (``X:\\`` or ``X:/``) or the Git Bash form ``/x/...``
+    on Windows (any absolute path elsewhere). A UNC or device form is unreadable and never given to
+    ``os.path.realpath``; a folder holding NUL, any control character or U+FFFD is unreadable on every platform.
 """
 
 from __future__ import annotations
@@ -39,9 +57,12 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import unicodedata
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -59,6 +80,13 @@ PROTECTED = ("master", "main")
 UNSET_VALUES = ("", "none", "unknown", "null")
 IS_WINDOWS = os.name == "nt"
 RERUN_HINT = "runs again on the next /pr-merged or /advance"
+HOLDER_TIMEOUT_SECONDS = 15  # how long `claude agents` may take before the answer is "cannot tell" (HN-2)
+HOLDER_END_GRACE_SECONDS = 5  # how long to wait for that one child to go after the ceiling passed (HN-2)
+HOLDER_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024  # the most output read from `claude agents` (HN-2, A4)
+HOLDER_TEXT_LIMIT = 60
+HOLDER_NOTE = ("; note: the session list shows background sessions only; a session typed into a terminal, "
+               "an editor or another program may also hold this folder")
+HOLDER_WARNING = "; warning: the running session was not recognised, so one stop command may be its own"
 
 
 class Halt(Exception):
@@ -130,6 +158,244 @@ def _in_dir(path: str) -> Iterator[None]:
         yield
     finally:
         os.chdir(saved)
+
+
+# ---------------------------------------------------------------------------
+# Holder reading (contract 2026-10-18-cleanup-names-worktree-holder.md)
+# ---------------------------------------------------------------------------
+def _end_own_child(proc: Any) -> None:
+    """HN-9, the one exception: end the ``claude agents`` child this script started, and only that child."""
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _find_claude(main_root: str) -> Optional[str]:
+    """HN-2 / A2: an absolute ``claude`` path whose folder is neither the current folder nor the main checkout root."""
+    unsafe = {_norm(os.getcwd()), _norm(main_root)}
+
+    def safe(found: Optional[str]) -> bool:
+        return bool(found) and os.path.isabs(found) and _norm(os.path.dirname(found)) not in unsafe
+
+    found = shutil.which("claude")
+    if safe(found):
+        return found
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or not os.path.isabs(entry):  # D4: a PATH folder is never resolved unless it is a hit
+            continue
+        found = shutil.which(os.path.join(entry, "claude"))  # a full name: no search, so no current-folder hit
+        if safe(found):
+            return found
+    return None
+
+
+def _run_holder_list(exe: str, cwd: str) -> Tuple[str, str]:
+    """HN-2: run ``claude agents --json --all`` once. Returns ``(result, stdout)``; the result is one of
+    ``answer``, ``too-big``, ``timeout``, ``launch-failed`` or ``exit <n>``. The output goes to a temporary file, not
+    a pipe, so a program that keeps its output open can never make this wait."""
+    with tempfile.TemporaryFile() as sink:
+        try:
+            proc = subprocess.Popen([exe, "agents", "--json", "--all"], stdin=subprocess.DEVNULL, stdout=sink,
+                                    stderr=subprocess.DEVNULL, cwd=cwd)
+        except OSError:
+            return "launch-failed", ""
+        try:
+            proc.wait(timeout=HOLDER_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _end_own_child(proc)
+            try:
+                proc.wait(timeout=HOLDER_END_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            return "timeout", ""
+        if proc.returncode != 0:
+            return "exit %d" % proc.returncode, ""
+        sink.seek(0)
+        data = sink.read(HOLDER_OUTPUT_LIMIT_BYTES + 1)
+        if len(data) > HOLDER_OUTPUT_LIMIT_BYTES:
+            return "too-big", ""
+        return "answer", data.decode("utf-8", errors="replace")
+
+
+_UNSAFE_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
+
+
+def _strip_unsafe(text: Any) -> str:
+    """HN-6 / D2: NFKC normalisation, then every control, format, line-separator and paragraph-separator character
+    removed. Text that is not a string is empty (D3)."""
+    if not isinstance(text, str):
+        return ""
+    folded = unicodedata.normalize("NFKC", text)
+    return "".join(c for c in folded if unicodedata.category(c) not in _UNSAFE_CATEGORIES)
+
+
+def _list_text(text: Any) -> str:
+    """HN-6: text from the session list made safe to show in one line, then cut after the removal."""
+    cleaned = _strip_unsafe(text).replace(";", ",").replace('"', "'").replace("[", "(").replace("]", ")")
+    return cleaned[:HOLDER_TEXT_LIMIT]
+
+
+def _short_id(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{8}", value) else None
+
+
+def _long_id(value: Any) -> Optional[str]:
+    ok = isinstance(value, str) and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value)
+    return value if ok else None
+
+
+_UNREADABLE_PATH = re.compile("[\x00-\x1f\x7f-\x9f�]")
+
+
+def _holder_path(cwd: Any) -> Optional[str]:
+    """HN-5: the accepted forms of a record's working folder, or None (an unreadable record). A UNC or device form
+    is never accepted, so it never reaches ``os.path.realpath``."""
+    if not isinstance(cwd, str) or not cwd.strip() or _UNREADABLE_PATH.search(cwd):
+        return None
+    if not IS_WINDOWS:
+        return cwd if cwd.startswith("/") else None
+    bash = re.fullmatch(r"/([A-Za-z])(/.*)?", cwd)
+    if bash:
+        return bash.group(1).upper() + ":" + (bash.group(2) or "/")
+    return cwd if re.match(r"[A-Za-z]:[\\/]", cwd) else None
+
+
+def _cannot_tell(reason: str) -> Dict[str, Any]:
+    return {"verdict": "cannot-tell", "reason": reason}
+
+
+def _read_session_list(main_root: str) -> Dict[str, Any]:
+    """The Session List Reading (HN-3, HN-4, HN-7). Never raises: every failure is ``cannot-tell`` with a reason."""
+    try:
+        exe = _find_claude(main_root)
+        if not exe:
+            return _cannot_tell("the claude command was not found")
+        # B1: start the child in the folder that holds the resolved claude program, never in the main checkout.
+        result, text = _run_holder_list(exe, os.path.dirname(exe))
+        if result == "launch-failed":
+            return _cannot_tell("the claude command could not be started")
+        if result == "too-big":
+            return _cannot_tell("the session list was not in the expected form")
+        if result == "timeout":
+            return _cannot_tell("claude agents gave no answer within %d seconds" % HOLDER_TIMEOUT_SECONDS)
+        if result != "answer":
+            return _cannot_tell("claude agents exited with code %s" % result.split(" ", 1)[-1])
+        form = _cannot_tell("the session list was not in the expected form")
+        try:
+            listed = json.loads(text)
+        except ValueError:
+            return form
+        if not isinstance(listed, list) or not all(isinstance(r, dict) for r in listed):
+            return form
+        records: List[Dict[str, Any]] = []
+        unreadable = 0
+        for raw in listed:
+            path = _holder_path(raw.get("cwd"))
+            try:
+                if path is not None:
+                    _norm(path)  # the comparison below uses it; a path it cannot resolve is unreadable
+            except (ValueError, OSError):
+                path = None
+            if path is None:
+                unreadable += 1
+                continue
+            started = raw.get("startedAt")
+            records.append({"id": _short_id(raw.get("id")), "session_id": _long_id(raw.get("sessionId")),
+                            "name": _list_text(raw.get("name")), "state": _list_text(raw.get("state")),
+                            "kind": _list_text(raw.get("kind")),
+                            "started_at": started if isinstance(started, int) and not isinstance(started, bool) else None,
+                            "cwd": _strip_unsafe(raw.get("cwd")), "path": path})
+        mine = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+        matching = [r for r in records if mine and r["session_id"] == mine]
+        this_session = matching[0]["session_id"] if len(matching) == 1 else None
+        return {"verdict": "read", "records": records, "unreadable": unreadable, "this_session": this_session}
+    except Exception as exc:  # HN-3: nothing in the lookup may end the run
+        return _cannot_tell("the session list could not be read (%s)" % type(exc).__name__)
+
+
+def _holders_for(reading: Dict[str, Any], tree: str) -> Dict[str, Any]:
+    """The Holder Reading of one deferred tree, from the one Session List Reading."""
+    if reading["verdict"] != "read":
+        return {"verdict": "cannot-tell", "reason": reading["reason"], "sessions": [], "this_session_recognised": False}
+    recognised = reading["this_session"] is not None
+    sessions: List[Dict[str, Any]] = []
+    try:
+        for rec in reading["records"]:
+            if not _inside(rec["path"], tree):  # HN-5: the deferral's own comparison
+                continue
+            this = recognised and rec["session_id"] == reading["this_session"]
+            sessions.append({"id": rec["id"], "session_id": rec["session_id"], "name": rec["name"],
+                             "state": rec["state"], "kind": rec["kind"], "started_at": rec["started_at"],
+                             "cwd": rec["cwd"], "this_session": this,
+                             "stop_command": ("claude stop %s" % rec["id"]) if rec["id"] and not this else None})
+    except Exception as exc:
+        return {"verdict": "cannot-tell", "reason": "the session list could not be read (%s)" % type(exc).__name__,
+                "sessions": [], "this_session_recognised": False}
+    result: Dict[str, Any] = {"sessions": sessions, "this_session_recognised": recognised}
+    if sessions:
+        result["verdict"] = "found"
+    elif reading["unreadable"]:
+        result.update(verdict="cannot-tell", reason="%d session records had no readable working folder" % reading["unreadable"])
+    else:
+        result["verdict"] = "none-found"
+    return result
+
+
+def attach_holders(run: "Run") -> Optional[Dict[str, Any]]:
+    """HN-1: after every decision is made, give each tree deferred as standing-tree or in-use its Holder Reading.
+    Writes only ``holders``. Returns the ``holder_lookup`` for the report, or None when no lookup was needed."""
+    deferred = [i for i in run.items if i.get("kind") == "worktree" and i.get("action") == "deferred"
+                and i.get("reason") in ("standing-tree", "in-use")]
+    if not deferred:
+        return None
+    reading = _read_session_list(run.main_root)
+    for item in deferred:
+        item["holders"] = _holders_for(reading, item["path"])
+    lookup: Dict[str, Any] = {"verdict": reading["verdict"], "this_session": reading.get("this_session")}
+    if reading["verdict"] != "read":
+        lookup["reason"] = reading["reason"]
+    return lookup
+
+
+def _stop_commands(items: List[Dict[str, Any]]) -> List[str]:
+    """HN-8: one ``claude stop <id>`` per distinct session, first seen first, never for this session. The id is
+    checked here again, so a stop command is only ever built from eight lower-case hex characters."""
+    commands: List[str] = []
+    for item in items:
+        for holder in (item.get("holders") or {}).get("sessions") or []:
+            sid = _short_id(holder.get("id"))
+            command = "claude stop %s" % sid
+            if sid and not holder.get("this_session") and command not in commands:
+                commands.append(command)
+    return commands
+
+
+def _holder_text(holder: Dict[str, Any]) -> str:
+    sid = _short_id(holder.get("id"))
+    if holder.get("this_session"):
+        return "%s (this session)" % (sid or "a session with an unreadable id")
+    parts = [sid or "a session with an unreadable id"]
+    name, state = _list_text(holder.get("name")), _list_text(holder.get("state"))
+    if name:
+        parts.append('"%s"' % name)
+    if state:
+        parts.append(state)
+    return " ".join(parts)
+
+
+def _holder_bracket(holders: Optional[Dict[str, Any]], cap: int) -> str:
+    if not holders:
+        return ""
+    verdict = holders.get("verdict")
+    if verdict == "found":
+        return "[held by %s]" % _listing([_holder_text(h) for h in holders.get("sessions") or []], cap, ", ")
+    if verdict == "none-found":
+        return "[no background session in the list is in it]"
+    if verdict == "cannot-tell":
+        return "[cannot tell which session holds it: %s]" % _clean(holders.get("reason") or "no reason given")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +1140,9 @@ def _left_entry(item: Dict[str, Any], file_cap: int) -> str:
     files = [_clean(f.replace("\\", "/")) for f in item.get("files") or []]
     if files:
         text += " [%s]" % _listing(files, file_cap, ", ")
+    bracket = _holder_bracket(item.get("holders"), file_cap)
+    if bracket:
+        text += " " + bracket
     return text
 
 
@@ -890,6 +1159,13 @@ def build_line(slug: str, items: List[Dict[str, Any]], finish: Optional[str], re
     left = [i for i in items if i["action"] in ("left", "deferred")]
     repairs = [i["repair"] for i in items if i.get("repair")]
     tail = "".join("; repair: git worktree repair %s" % _quote(_clean(p)) for p in repairs)
+    if any(i.get("holders") for i in items):  # HN-8: the uncut part, in order: note, warning, stops, finish
+        tail += HOLDER_NOTE
+    stops = _stop_commands(items)
+    if stops:
+        if not any((i.get("holders") or {}).get("this_session_recognised") for i in items):
+            tail += HOLDER_WARNING
+        tail += "".join("; stop: " + command for command in stops)
     if finish:
         tail += "; finish: " + finish  # never cut: a cut command is useless
     line = ""
@@ -967,6 +1243,7 @@ def cleanup(slug: str, start: str, start_cwd: str, remove_remote: bool, dry_run:
         existed = clean_branches(run, owned)
         clean_remote(run, owned, existed)
 
+    lookup = attach_holders(run)  # HN-1: after every decision, halted runs included; it changes none of them
     items = run.items
     finish = finish_command(slug, main_root, remove_remote) if run.finish_needed else None
     actionable = [i for i in items if i["action"] != "already-gone" and i.get("reason") != "remote-kept"]
@@ -978,6 +1255,11 @@ def cleanup(slug: str, start: str, start_cwd: str, remove_remote: bool, dry_run:
     else:
         outcome, code = "nothing-owned", EXIT_OK
     base.update(outcome=outcome, items=items, line=build_line(slug, items, finish, ref))
+    if lookup:
+        base["holder_lookup"] = lookup
+        stops = _stop_commands(items)
+        if stops:
+            base["stop_commands"] = stops
     if finish:
         base["finish_command"] = finish
     if run.repair:

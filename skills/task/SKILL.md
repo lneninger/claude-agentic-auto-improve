@@ -532,6 +532,12 @@ The `status:` frontmatter field tracks the item through the chain. Each stage up
 
 `intake` → `clarified` → `designing` → `implementing` → `verifying` → `shipped`
 
+When a report names the `shipped` status, it ends with this paragraph, word for word. It says what to do once the work is delivered. It does not say the work is delivered, because a shipped item may still have a draft pull request:
+
+Once the pull request is merged and the work is delivered, end this session with `/stop` before the delivery cleanup runs (or runs again): a session left running keeps its worktree folder in use, and the cleanup then has to leave that folder behind. `/exit` only detaches and leaves the session running; from another terminal, `claude stop <id>` stops it, where `<id>` is the 8-character id that `claude agents` shows.
+
+That paragraph is advice to the user, and it is printed last. You must not run `/stop`, `claude stop` or any other command that stops a session yourself. If the user tells you to keep working, their instruction comes first and you keep working. Step 6 is the automatic hand-off to `/design-first`, not a report, so the paragraph is never printed there.
+
 ## Anti-patterns (halt immediately)
 
 **Binds the no-parent path by default.** Parent-aware mode deviates from three of these on
