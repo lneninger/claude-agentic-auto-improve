@@ -56,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_guard_deference import World as DeferenceWorld  # noqa: E402  (the existing fixture builder)
 from test_guard_deference import DESTRUCTIVE as DEFERENCE_DESTRUCTIVE, READONLY as DEFERENCE_READONLY  # noqa: E402
 from test_guard_deference import SESSION_ID as DEFERENCE_SESSION  # noqa: E402
-from test_switches import SKIP_NO_SYMLINK, SKIP_POSIX_PIPES, make_pipe_link  # noqa: E402  (pipe server, link maker)
+from test_switches import SKIP_NO_SYMLINK, SKIP_POSIX_PIPES, PipeServer, make_pipe_link  # noqa: E402  (pipe server, link maker)
 
 HOOK_TIMEOUT = 60
 
@@ -889,6 +889,88 @@ _add_rows(HumanOnlyPlacementTests, "control_launcher", LAUNCHER_ROWS, HumanOnlyP
 _add_rows(HumanOnlyPlacementTests, "control_mention", MENTION_ROWS, HumanOnlyPlacementTests._control_allowed)
 
 
+# =====================================================================================================
+# Block 13 (t12 round-three review): findings B1, P1 and P2.
+#
+# B1 and P1: the quote scanner used ONE escape model for both shells. Each row below is a spelling where a
+# human-only script is invoked after a quote that the shell closes differently from the scanner (a
+# trailing backslash before the closing quote, an escaped quote outside quotes, a backtick escape, an
+# ANSI-C quoted string). P2: the script follows a keyword or prefix command (then, do, else, elif, !, time,
+# env, nohup, exec, command, builtin, nice, timeout, xargs, sudo, a NAME=value assignment) or a backtick.
+# Row ids are the t12 ids (t12's P1 and P2 are not t4's shared-claim probes P1 to P9). Destructive
+# statements are the ones above, built from parts.
+# =====================================================================================================
+B1_ARMED_ROWS = [
+    ("N1a", "PowerShell", lambda p: 'Set-Location "C:\\work\\"; ' + SCRIPT_BACK),
+    ("N1b", "PowerShell", lambda p: PROTECTED_ROW_DELETE + '; cd "C:\\w\\"; ' + SCRIPT_BACK),
+    ("N2a", "Bash", lambda p: OTHER_DATABASE_REMOVAL + ' ; cd "C:\\\\w\\\\" && ' + SCRIPT_FWD),
+    ("K4", "Bash", lambda p: OTHER_DATABASE_REMOVAL + ' ; echo \\" ; ' + SCRIPT_FWD),
+    ("K5", "PowerShell", lambda p: OTHER_DATABASE_REMOVAL + '; Write-Host `" ; ' + SCRIPT_BACK),
+    ("K6", "PowerShell", lambda p: OTHER_DATABASE_REMOVAL + '; cd "' + p + '\\"; ' + SCRIPT_BACK),
+]
+B1_UNARMED_ROWS = [
+    ("N1", "PowerShell", lambda p: 'Set-Location "C:\\work\\"; ' + SCRIPT_BACK),
+    ("N1c", "PowerShell", lambda p: 'Write-Host "C:\\work\\"; ' + SCRIPT_BACK),
+    ("N15", "PowerShell", lambda p: 'cd "' + p + '\\"; ' + SCRIPT_BACK),
+    ("N5", "PowerShell", lambda p: 'Write-Host `" ; ' + SCRIPT_BACK),
+    ("N6", "PowerShell", lambda p: 'Write-Host "a``"; ' + SCRIPT_BACK),
+    ("N2", "Bash", lambda p: 'cd "C:\\\\work\\\\" && ' + SCRIPT_FWD),
+    ("N2b", "Bash", lambda p: 'echo "a\\\\" ; ' + SCRIPT_FWD),
+    ("N3", "Bash", lambda p: 'echo \\" ; ' + SCRIPT_FWD),
+    ("N4", "Bash", lambda p: "echo $'a\\'b' ; " + SCRIPT_FWD),
+]
+#: P2, copied from t12: keyword, prefix-command and backtick positions.
+P2_ARMED_ROWS = [
+    ("K1", "Bash", lambda p: OTHER_DATABASE_REMOVAL + " ; time " + SCRIPT_FWD),
+    ("K2", "Bash", lambda p: OTHER_DATABASE_REMOVAL + " ; if true; then " + SCRIPT_FWD + "; fi"),
+    ("K3", "Bash", lambda p: OTHER_DATABASE_REMOVAL + " ; echo `" + SCRIPT_FWD + "`"),
+]
+P2_UNARMED_ROWS = [
+    ("N7", "Bash", lambda p: "echo `" + SCRIPT_FWD + "`"),
+    ("N8", "Bash", lambda p: "if true; then " + SCRIPT_FWD + "; fi"),
+    ("N9", "Bash", lambda p: "time " + SCRIPT_FWD),
+    ("N10", "Bash", lambda p: "env " + SCRIPT_FWD),
+    ("N11", "Bash", lambda p: "nohup " + SCRIPT_FWD),
+    ("N12", "Bash", lambda p: "for i in 1; do " + SCRIPT_FWD + "; done"),
+    ("N13", "Bash", lambda p: "! " + SCRIPT_FWD),
+    # Constructed: one per remaining word, and one per valued option.
+    ("else", "Bash", lambda p: "if false; then :; else " + SCRIPT_FWD + "; fi"),
+    ("elif", "Bash", lambda p: "if false; then :; elif " + SCRIPT_FWD + "; then :; fi"),
+    ("command", "Bash", lambda p: "command " + SCRIPT_FWD),
+    ("builtin", "Bash", lambda p: "builtin " + SCRIPT_FWD),
+    ("nice", "Bash", lambda p: "nice " + SCRIPT_FWD),
+    ("timeout", "Bash", lambda p: "timeout 5 " + SCRIPT_FWD),
+    ("xargs", "Bash", lambda p: "echo x | xargs " + SCRIPT_FWD),
+    ("sudo", "Bash", lambda p: "sudo " + SCRIPT_FWD),
+    ("assignment", "Bash", lambda p: "FOO=bar " + SCRIPT_FWD),
+    ("nice-n", "Bash", lambda p: "nice -n 10 " + SCRIPT_FWD),
+    ("sudo-u", "Bash", lambda p: "sudo -u root " + SCRIPT_FWD),
+    ("env-u", "Bash", lambda p: "env -u NAME " + SCRIPT_FWD),
+    ("timeout-s", "Bash", lambda p: "timeout -s KILL 5 " + SCRIPT_FWD),
+]
+#: Named controls: block at the parent tip already (exec is an invoking word today).
+P2_BLOCKING_CONTROLS = [
+    ("exec", "Bash", lambda p: "exec " + SCRIPT_FWD),
+]
+#: Must stay allowed: a lookup, the same words as plain arguments, a name after one of them in a message.
+P2_MENTION_CONTROLS = [
+    ("command-v", "Bash", lambda p: "command -v " + SCRIPT_FWD),
+    ("command-upper-v", "Bash", lambda p: "command -V " + SCRIPT_FWD),
+    ("echo-then", "Bash", lambda p: "echo then " + SCRIPT_FWD),
+    ("grep-time", "Bash", lambda p: "grep -n time " + SCRIPT_FWD),
+    ("message-after-time", "Bash", lambda p: 'git commit -m "docs: time ' + SCRIPT_FWD + ' by hand"'),
+    ("message-after-then", "Bash", lambda p: 'git commit -m "docs: if x; then ' + SCRIPT_FWD + '; fi"'),
+    ("message-after-sudo", "Bash", lambda p: 'git commit -m "sudo ' + SCRIPT_FWD + '"'),
+]
+
+_add_rows(HumanOnlyPlacementTests, "b1_armed", B1_ARMED_ROWS, HumanOnlyPlacementTests._armed_blocks)
+_add_rows(HumanOnlyPlacementTests, "b1_unarmed", B1_UNARMED_ROWS, HumanOnlyPlacementTests._unarmed_blocks)
+_add_rows(HumanOnlyPlacementTests, "p2_armed", P2_ARMED_ROWS, HumanOnlyPlacementTests._armed_blocks)
+_add_rows(HumanOnlyPlacementTests, "p2_unarmed", P2_UNARMED_ROWS, HumanOnlyPlacementTests._unarmed_blocks)
+_add_rows(HumanOnlyPlacementTests, "p2_control_blocking", P2_BLOCKING_CONTROLS, HumanOnlyPlacementTests._control_blocks)
+_add_rows(HumanOnlyPlacementTests, "p2_control_mention", P2_MENTION_CONTROLS, HumanOnlyPlacementTests._control_allowed)
+
+
 class HumanOnlyPlacementReadonlyPinTests(OverrideTestCase):
     """L1 (accepted): the read-only guard has no human-only class and is not changed by this block.
     These rows PIN today's behaviour, so they are expected to pass at the parent tip and at the head."""
@@ -1052,6 +1134,184 @@ class ReadonlyGuardRulesFallbackStaleHelperTests(_PluginCopyMixin, _RulesFileRow
     GUARD_NAME = "db-research-readonly-guard.py"
     STRICT_COMMAND = DISPOSABLE_WRITE
     LOADED_COMMAND = DISPOSABLE_WRITE
+
+
+# =====================================================================================================
+# I2 (t12 round-three review): the audit log of BOTH database guards is written without following a link.
+#
+# A link at the log (or at .claude/logs) to a pipe that never reads used to hang the guard on its block
+# path. Every step is now checked with lstat, and the open is non-following and non-blocking. Each row
+# runs the guard as a separate process under a short timeout and expects its normal decision (blocked),
+# the record skipped (one line on standard error) and the link target untouched.
+# =====================================================================================================
+AUDIT_OVER_LIMIT = 10 * 1024 * 1024 + 1   # over both guards' rotation limits (10 MB and 5 MB)
+AUDIT_SKIP_LINE = "audit record skipped"
+SHARE_LOG_TARGET = "\\\\192.0.2.1\\share\\audit.log"   # TEST-NET-1: nothing answers
+SHARE_DIR_TARGET = "\\\\192.0.2.1\\share\\logs"
+
+
+def _symlink(case: unittest.TestCase, target: str | Path, link: Path, *, directory: bool = False) -> None:
+    try:
+        os.symlink(target, link, target_is_directory=directory)
+    except NotImplementedError:
+        case.skipTest(SKIP_NO_SYMLINK)
+    except OSError as exc:
+        if isinstance(exc, PermissionError) or getattr(exc, "winerror", 0) == 1314:
+            case.skipTest(SKIP_NO_SYMLINK)
+        raise
+
+
+def _big_file(path: Path, size: int = AUDIT_OVER_LIMIT) -> None:
+    with open(path, "wb") as handle:
+        handle.truncate(size)   # sparse where the file system allows it
+
+
+class _AuditLogRows:
+    """Rows run once per guard. A subclass sets GUARD, LOG_NAME and a command its guard blocks with no arm."""
+
+    LOG_NAME: str
+    COMMAND = BLOCKED_COMMAND
+
+    @property
+    def logs(self) -> Path:
+        return self.project / ".claude" / "logs"
+
+    @property
+    def log(self) -> Path:
+        return self.logs / self.LOG_NAME
+
+    @property
+    def rotated(self) -> Path:
+        return self.logs / (self.LOG_NAME + ".1")
+
+    def blocked_run(self) -> Run:
+        run = self.run_guard(self.shell(self.COMMAND, tool_use_id=self.next_id()), timeout=SHORT_TIMEOUT)
+        self.assert_blocks(run, "the guard keeps its normal decision whatever stands at its audit log")
+        return run
+
+    def skipped_run(self) -> Run:
+        run = self.blocked_run()
+        self.assertIn(AUDIT_SKIP_LINE, run.err, "the skipped record is named on standard error: %s" % run)
+        return run
+
+    def _json_lines(self, path: Path) -> list[dict]:
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    # ---------------------------------------------------------------- controls (pass before and after)
+    def test_control_a_regular_log_is_appended_as_before(self):
+        self.log.write_text('{"old": 1}\n', encoding="utf-8")
+        self.blocked_run()
+        lines = self._json_lines(self.log)
+        self.assertEqual(lines[0], {"old": 1})
+        self.assertGreaterEqual(len(lines), 2, "one record was appended")
+        self.assertEqual(lines[-1].get("decision"), "BLOCK")
+
+    def test_control_a_missing_log_is_created(self):
+        self.assertFalse(os.path.lexists(self.log))
+        self.blocked_run()
+        self.assertEqual(self._json_lines(self.log)[-1].get("decision"), "BLOCK")
+
+    def test_control_a_missing_logs_folder_is_created(self):
+        os.rmdir(self.logs)
+        self.blocked_run()
+        self.assertTrue(self.logs.is_dir() and not self.logs.is_symlink())
+        self.assertEqual(self._json_lines(self.log)[-1].get("decision"), "BLOCK")
+
+    def test_control_a_regular_log_over_the_limit_rotates_as_before(self):
+        _big_file(self.log)
+        self.blocked_run()
+        self.assertEqual(self.rotated.stat().st_size, AUDIT_OVER_LIMIT, "the old log became the .1 file")
+        self.assertLess(self.log.stat().st_size, 1024 * 1024, "a new, small log was started")
+        self.assertEqual(self._json_lines(self.log)[-1].get("decision"), "BLOCK")
+
+    # ---------------------------------------------------------------- Windows: links to device and share paths
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_at_the_log_to_a_listening_pipe_in_the_dot_spelling_skips_the_record(self):
+        make_pipe_link(self, self.log, "dot")
+        self.skipped_run()
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_at_the_log_to_a_listening_pipe_in_the_question_mark_spelling_skips_the_record(self):
+        make_pipe_link(self, self.log, "question-mark")
+        self.skipped_run()
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_link_at_the_log_to_a_server_share_skips_the_record(self):
+        _symlink(self, SHARE_LOG_TARGET, self.log)
+        self.skipped_run()
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_directory_link_at_the_logs_folder_into_the_pipe_namespace_skips_the_record(self):
+        server = PipeServer()
+        self.addCleanup(server.close)
+        os.rmdir(self.logs)
+        _symlink(self, "\\\\.\\pipe\\" + server.leaf, self.logs, directory=True)
+        self.skipped_run()
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_directory_link_at_the_logs_folder_to_a_server_share_skips_the_record(self):
+        os.rmdir(self.logs)
+        _symlink(self, SHARE_DIR_TARGET, self.logs, directory=True)
+        self.skipped_run()
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_directory_link_at_the_logs_folder_to_another_local_folder_writes_nothing_there(self):
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        os.rmdir(self.logs)
+        _symlink(self, elsewhere, self.logs, directory=True)
+        self.skipped_run()
+        self.assertEqual(os.listdir(elsewhere), [], "nothing was written through the directory link")
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_a_junction_at_the_logs_folder_writes_nothing_there(self):
+        elsewhere = self.tmp / "elsewhere-junction"
+        elsewhere.mkdir()
+        os.rmdir(self.logs)
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(self.logs), str(elsewhere)],
+                              capture_output=True, timeout=SHORT_TIMEOUT)
+        if made.returncode != 0:
+            self.skipTest("a junction could not be created on this host")
+        self.skipped_run()
+        self.assertEqual(os.listdir(elsewhere), [], "nothing was written through the junction")
+
+    # ---------------------------------------------------------------- rotation never follows a link
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_rotation_on_a_linked_log_renames_and_removes_nothing(self):
+        target = self.tmp / "big-target.log"
+        _big_file(target)
+        _symlink(self, target, self.log)
+        self.skipped_run()
+        self.assertTrue(self.log.is_symlink(), "the link is still the log")
+        self.assertFalse(os.path.lexists(self.rotated), "nothing was renamed to the .1 name")
+        self.assertEqual(target.stat().st_size, AUDIT_OVER_LIMIT, "the target is untouched")
+
+    @unittest.skipUnless(sys.platform == "win32", SKIP_POSIX_PIPES)
+    def test_rotation_with_a_link_at_the_dot_one_name_removes_and_renames_nothing(self):
+        _big_file(self.log)
+        keep = self.tmp / "keep-me.txt"
+        keep.write_text("keep", encoding="utf-8")
+        _symlink(self, keep, self.rotated)
+        self.skipped_run()
+        self.assertTrue(self.rotated.is_symlink(), "the link at the .1 name is still there")
+        self.assertEqual(keep.read_text(encoding="utf-8"), "keep", "its target is not removed")
+        self.assertEqual(self.log.stat().st_size, AUDIT_OVER_LIMIT, "the log was neither renamed nor appended to")
+
+    # ---------------------------------------------------------------- POSIX: a named pipe at the log
+    @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"), "POSIX only: needs a named pipe")
+    def test_a_named_pipe_at_the_log_skips_the_record(self):
+        os.mkfifo(self.log)
+        self.skipped_run()
+
+
+class DestructiveGuardAuditLogTests(_AuditLogRows, OverrideTestCase):
+    GUARD = DESTRUCTIVE_HOOK
+    LOG_NAME = "db-guard.log"
+
+
+class ReadonlyGuardAuditLogTests(_AuditLogRows, OverrideTestCase):
+    GUARD = READONLY_HOOK
+    LOG_NAME = "db-research.log"
 
 
 if __name__ == "__main__":

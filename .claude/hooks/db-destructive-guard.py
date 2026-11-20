@@ -779,28 +779,99 @@ EF_WITH_ARG_SEPARATOR_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Audit log.
 # ---------------------------------------------------------------------------
-def _audit(record: dict) -> None:
-    """Append-only structured audit log; rotates on size."""
+#: ``FILE_ATTRIBUTE_REPARSE_POINT``: on Windows a link, a junction and a mount point all carry it.
+_REPARSE_POINT_ATTRIBUTE = 0x400
+
+
+def _audit_is_plain(info: os.stat_result, kind: str) -> bool:
+    """True when an lstat result is a real folder (``kind`` "dir") or a regular file ("file"): not a link,
+    not (on Windows) a reparse point of any kind, not a pipe, a device or a socket."""
+    if _stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & _REPARSE_POINT_ATTRIBUTE:
+        return False
+    return _stat.S_ISDIR(info.st_mode) if kind == "dir" else _stat.S_ISREG(info.st_mode)
+
+
+def _audit_lstat(path: Path) -> os.stat_result | None:
+    """lstat, never following a link; None when nothing is there."""
     try:
-        AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
-        if AUDIT_LOG.exists() and AUDIT_LOG.stat().st_size > AUDIT_LOG_MAX_BYTES:
-            rotated = AUDIT_LOG.with_suffix(AUDIT_LOG.suffix + ".1")
-            try:
-                if rotated.exists():
-                    rotated.unlink()
-                AUDIT_LOG.rename(rotated)
-            except Exception:
-                pass
-        with AUDIT_LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def _audit_skip(why: str) -> None:
+    """The audit record is skipped (the decision is already made and never changes): one line on stderr."""
+    try:
+        sys.stderr.write("[%s] audit record skipped: %s\n" % (HOOK_NAME, why))
+        sys.stderr.flush()
     except Exception:
-        # Never let audit failure block the hook decision.
         pass
+
+
+def _audit(record: dict) -> None:
+    """Append-only structured audit log; rotates on size. The audit-log rule (contract
+    2026-11-16-file-based-switches, t12 finding I2): nothing on the path is followed through a link.
+
+    (a) ``.claude`` and ``.claude/logs`` are each lstat-ed and must be real folders (no link, no reparse
+    point); a missing one is made with a single-level mkdir and lstat-ed again. (b) The log is lstat-ed:
+    missing goes to the open, a link or anything but a regular file skips the record. (c) Rotation only
+    for a regular file over the limit, and only when the ``.1`` name is missing or a regular file.
+    (d) The open is O_WRONLY | O_APPEND | O_CREAT (plus O_BINARY, O_NONBLOCK and O_NOFOLLOW where they
+    exist) and the descriptor must be a regular file before one byte is written. On any failure nothing
+    is written, one line goes to standard error and no other file is touched."""
+    fd = -1
+    try:
+        log = AUDIT_LOG
+        for folder in (log.parent.parent, log.parent):
+            info = _audit_lstat(folder)
+            if info is None:
+                os.mkdir(folder)
+                info = os.lstat(folder)
+            if not _audit_is_plain(info, "dir"):
+                _audit_skip("%s is not a plain folder (a link, a reparse point or not a folder)" % folder)
+                return
+        info = _audit_lstat(log)
+        if info is not None:
+            if not _audit_is_plain(info, "file"):
+                _audit_skip("%s is not a regular file (a link, a reparse point, a pipe or a device)" % log)
+                return
+            if info.st_size > AUDIT_LOG_MAX_BYTES:
+                rotated = log.with_name(log.name + ".1")
+                old = _audit_lstat(rotated)
+                if old is not None and not _audit_is_plain(old, "file"):
+                    _audit_skip("%s is not a regular file, so the log is not rotated" % rotated)
+                    return
+                try:
+                    if old is not None:
+                        os.remove(rotated)
+                    os.rename(log, rotated)
+                except OSError:
+                    pass  # rotation is best effort: the record is appended to the large log
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        for extra in ("O_BINARY", "O_NONBLOCK", "O_NOFOLLOW"):
+            flags |= getattr(os, extra, 0)
+        fd = os.open(log, flags, 0o666)
+        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+            _audit_skip("%s did not open as a regular file" % log)
+            return
+        data = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8", "replace")
+        while data:
+            data = data[os.write(fd, data):]
+    except Exception as exc:  # noqa: BLE001 -- an audit failure never changes the hook decision
+        _audit_skip("%s: %s" % (type(exc).__name__, exc))
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
 # Tool input extraction.
 # ---------------------------------------------------------------------------
+
+
 def _edit_pair_text(old: str, new: str) -> list[str]:
     """The text of one Edit pair the guard scans.
 
@@ -1294,52 +1365,221 @@ def _takes_command_string(before: str) -> bool:
     return False
 
 
-def _starts_a_command(pre: str) -> bool:
+#: Words that themselves start a command and pass the start on to the next word (No-prompt classes rule):
+#: ``then <script>``, ``time <script>``, ``sudo -u root <script>``. After the word, its options are skipped.
+_START_PASSING_WORDS = frozenset({
+    "then", "do", "else", "elif", "!", "time", "env", "nohup", "exec", "command", "builtin",
+    "nice", "timeout", "xargs", "sudo"})
+#: The options of each start-passing word that take the next word as their value.
+_VALUED_OPTIONS: dict[str, frozenset[str]] = {
+    "nice": frozenset({"-n"}),
+    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U"}),
+    "env": frozenset({"-u", "-C"}),
+    "timeout": frozenset({"-s", "-k"}),
+    "xargs": frozenset({"-I", "-n", "-P", "-L", "-d", "-a", "-E", "-s"}),
+    "exec": frozenset({"-a"}),
+}
+_ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _words_pass_the_start(words: list[str]) -> bool:
+    """True when the word that follows ``words`` (the earlier words of ONE command segment) is still in
+    command position: nothing but ``NAME=value`` assignments and start-passing words with their options
+    stand before it. ``command -v`` and ``command -V`` are a lookup, not a run, so the name stays a mention."""
+    n, i = len(words), 0
+    while True:
+        while i < n and _ASSIGNMENT_WORD_RE.match(words[i]):
+            i += 1
+        if i >= n:
+            return True
+        word = words[i].lower()
+        if word not in _START_PASSING_WORDS:
+            return False
+        i += 1
+        valued = _VALUED_OPTIONS.get(word, frozenset())
+        while i < n and words[i].startswith("-"):
+            option = words[i]
+            if word == "command" and option in ("-v", "-V"):
+                return False
+            i += 2 if option in valued else 1
+        if i > n:
+            return False            # the file name is the value of the last option
+        if word == "timeout":
+            if i >= n:
+                return True         # `timeout <name>`: the name sits where the duration goes (fail closed)
+            i += 1                  # the duration
+
+
+class _SegmentWords:
+    """The words of the command segment being read (quotes removed, escapes resolved)."""
+
+    __slots__ = ("words", "cur", "started")
+
+    def __init__(self, words: list[str] | None = None) -> None:
+        self.words: list[str] = words if words is not None else []
+        self.cur: list[str] = []
+        self.started = False
+
+    def add(self, ch: str) -> None:
+        self.cur.append(ch)
+        self.started = True
+
+    def mark(self) -> None:
+        self.started = True
+
+    def flush(self) -> None:
+        if self.started:
+            self.words.append("".join(self.cur))
+        self.cur = []
+        self.started = False
+
+    def reset(self) -> None:
+        self.words = []
+        self.cur = []
+        self.started = False
+
+
+def _launcher_inner(inner: str, quote: str, reading: str) -> str:
+    """The text of a launcher's quoted argument, with the shell's escapes for that quote resolved."""
+    if reading == "tip":
+        return inner.replace('\\"', '"').replace('`"', '"') if quote == '"' else inner
+    if reading == "bash":
+        if quote == "'":
+            return inner
+        return re.sub(r"\\(.)", r"\1", inner, flags=re.DOTALL)
+    if quote == '"':   # the PowerShell reading
+        return re.sub(r'`(.)|""', lambda m: m.group(1) or '"', inner, flags=re.DOTALL)
+    return inner.replace("''", "'")
+
+
+def _starts_a_command(pre: str, reading: str = "tip") -> bool:
     """True when the text ``pre`` (everything before a file name) ends where a command may start: after
-    nothing, a command separator, or an invoking word, once quoted text is read as quoted text.
+    nothing, a command separator, an invoking word or a start-passing word, once quoted text is read as
+    quoted text.
 
     A quote is OPENED and CLOSED by scanning ``pre`` from the left, so the closing quote of an earlier
     argument (``echo "a" ; <script>``) never counts as the start of the token that holds the name.
     Text inside the quoted argument of a known launcher (``bash -c``, ``cmd /c``, ``powershell
-    -Command``, ``iex``) is command text and is split the same way; text inside any other quote is not."""
-    quote = ""
+    -Command``, ``iex``) is command text and is split the same way; text inside any other quote is not.
+
+    The escape rules are the ``reading``'s, because the two shells disagree about where a quote ends
+    (t12 findings B1 and P1) and the guard cannot know which shell runs the call:
+      "tip"   the rules that were in force before block 13: a backslash or a backtick before a double
+              quote escapes it inside double quotes, and nothing is an escape outside quotes;
+      "bash"  a backslash escapes the next character outside quotes and inside double quotes, nothing is
+              escaped inside single quotes, ``$'...'`` takes backslash escapes, and a backtick outside
+              single quotes opens a command segment (a substitution), as ``$(`` does;
+      "ps"    a backtick escapes the next character inside and outside double quotes and never opens a
+              segment, ``""`` and ``''`` are doubled quotes, and a backslash is a plain character."""
+    seg = _SegmentWords()
+    quote = ""                       # "", '"', "'" or "$'" (ANSI-C)
     quote_open = -1
     token_start = 0
+    backtick: tuple[str, int, list[str]] | None = None   # bash: (outer quote, its offset, outer words)
     i, n = 0, len(pre)
     while i < n:
         c = pre[i]
-        if quote:
-            if quote == '"' and c in "\\`" and i + 1 < n and pre[i + 1] == '"':
-                i += 2          # an escaped quote does not close the argument
-                continue
-            if c == quote:
-                quote = ""
-        elif c in "\"'":
-            quote, quote_open = c, i
-        elif c.isspace() or c in _COMMAND_SEPARATORS or c == ")":
+        if reading == "bash" and c == "`" and quote not in ("'", "$'"):
+            seg.flush()
+            if backtick is None:
+                backtick = (quote, quote_open, seg.words)
+                seg = _SegmentWords()
+                quote, quote_open = "", -1
+            else:
+                seg = _SegmentWords(backtick[2] + ["`"])
+                quote, quote_open = backtick[0], backtick[1]
+                backtick = None
             token_start = i + 1
+            i += 1
+            continue
+        if quote:
+            closer = "'" if quote == "$'" else quote
+            if reading == "tip":
+                if quote == '"' and c in "\\`" and i + 1 < n and pre[i + 1] == '"':
+                    i += 2           # an escaped quote does not close the argument
+                    continue
+            elif reading == "bash":
+                if quote != "'" and c == "\\":
+                    if i + 1 < n:
+                        seg.add(pre[i + 1])
+                    i += 2
+                    continue
+            else:  # ps
+                if quote == '"' and c == "`":
+                    if i + 1 < n:
+                        seg.add(pre[i + 1])
+                    i += 2
+                    continue
+                if c == closer and i + 1 < n and pre[i + 1] == closer:
+                    seg.add(c)       # a doubled quote is one literal quote
+                    i += 2
+                    continue
+            if c == closer:
+                quote = ""
+            else:
+                seg.add(c)
+            i += 1
+            continue
+        if c == "{" and pre[i + 1:i + 2] == "}":
+            seg.add("{")             # the `{}` placeholder of `xargs -I {}`, not the start of a brace group
+            seg.add("}")
+            i += 2
+            continue
+        if c in _COMMAND_SEPARATORS:
+            seg.reset()
+            token_start = i + 1
+        elif c.isspace() or c == ")":
+            seg.flush()
+            token_start = i + 1
+        elif c in "\"'":
+            ansi_c = reading == "bash" and c == "'" and bool(seg.cur) and seg.cur[-1] == "$"
+            if ansi_c:
+                seg.cur.pop()        # the `$` belongs to the `$'` opener, not to the word
+            quote = "$'" if ansi_c else c
+            quote_open = i
+            seg.mark()
+        elif c == "\\" and reading == "bash":
+            if i + 1 < n:
+                seg.add(pre[i + 1])
+            i += 2
+            continue
+        elif c == "`" and reading == "ps":
+            if i + 1 < n:
+                seg.add(pre[i + 1])
+            i += 2
+            continue
+        else:
+            seg.add(c)
         i += 1
-    before = pre[:token_start].rstrip(" \t")
     if not quote:
-        if not before or before[-1] in _COMMAND_SEPARATORS:
+        if not seg.words:
             return True
-        return re.split(r"\s+", before)[-1].lower() in _INVOKING_WORDS
+        if seg.words[-1].lower() in _INVOKING_WORDS:
+            return True
+        return _words_pass_the_start(seg.words)
+    before = pre[:token_start].rstrip(" \t")
     if quote_open != token_start or not _takes_command_string(before):
         return False
-    inner = pre[quote_open + 1:]
-    if quote == '"':
-        inner = inner.replace('\\"', '"').replace('`"', '"')
-    return _starts_a_command(inner)
+    return _starts_a_command(_launcher_inner(pre[quote_open + 1:], quote, reading), reading)
+
+
+def _quote_blind_starts_a_command(pre: str) -> bool:
+    """The quote-blind reading: strip the folder-prefix token and an optional quote before it, and test
+    whether the nearest preceding character that is not a space is a separator. A backtick never counts."""
+    stripped = re.sub(r"[\"']?[^\s\"';&|()]*[\\/]$", "", pre).rstrip(" \t")
+    return not stripped or stripped[-1] in _COMMAND_SEPARATORS
 
 
 def _in_command_position(text: str, start: int) -> bool:
     """True when the file name at ``start`` is being INVOKED, not just mentioned.
 
-    Two readings, either one counts. The first is the older, cruder one and is kept so no shape that was
-    ever classed as invoked becomes a mention. The second reads quotes as quotes (``_starts_a_command``),
-    which the first does not: its pattern strips from the CLOSING quote of any earlier argument, so a
-    script placed after quoted text (``echo "a" ; <script>``) used to read as a mention (t10 findings B1
-    and P1)."""
+    Several readings, and ANY one that says "invoked" counts, so a reading can only move a name from
+    mentioned to invoked (never the other way). (1) The older, cruder reading and the quote reading of
+    block 8 are kept so no shape that was ever classed as invoked becomes a mention. The cruder one strips
+    from the CLOSING quote of any earlier argument, so a script placed after quoted text
+    (``echo "a" ; <script>``) used to read as a mention (t10 findings B1 and P1). (2) A bash reading and
+    (3) a PowerShell reading of the quotes, because the two shells disagree about escapes and the guard
+    does not know which one runs the call (t12 findings B1 and P1). (4) A quote-blind reading."""
     pre = text[:start]
     stripped = re.sub(
         r"(?:\"[^\"\n]*[\\/]|'[^'\n]*[\\/]|[\"']?[^\s\"';&|()]*[\\/]|[\"'])$", "", pre
@@ -1348,7 +1588,8 @@ def _in_command_position(text: str, start: int) -> bool:
         return True
     if re.split(r"\s+", stripped)[-1].lower() in _INVOKING_WORDS:
         return True
-    return _starts_a_command(pre)
+    return (_starts_a_command(pre, "tip") or _starts_a_command(pre, "bash")
+            or _starts_a_command(pre, "ps") or _quote_blind_starts_a_command(pre))
 
 
 def _human_only_script_hits(text: str) -> list[str]:

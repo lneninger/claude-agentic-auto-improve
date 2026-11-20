@@ -347,21 +347,92 @@ DB_CONN_RE = [(label, re.compile(pat, re.IGNORECASE)) for label, pat in DB_CONNE
 READONLY_RE = [(label, re.compile(pat, re.IGNORECASE | re.DOTALL)) for label, pat in READONLY_PATTERNS]
 
 
-def _audit(record: dict) -> None:
+#: ``FILE_ATTRIBUTE_REPARSE_POINT``: on Windows a link, a junction and a mount point all carry it.
+_REPARSE_POINT_ATTRIBUTE = 0x400
+
+
+def _audit_is_plain(info: os.stat_result, kind: str) -> bool:
+    """True when an lstat result is a real folder (``kind`` "dir") or a regular file ("file"): not a link,
+    not (on Windows) a reparse point of any kind, not a pipe, a device or a socket."""
+    if _stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & _REPARSE_POINT_ATTRIBUTE:
+        return False
+    return _stat.S_ISDIR(info.st_mode) if kind == "dir" else _stat.S_ISREG(info.st_mode)
+
+
+def _audit_lstat(path: Path) -> os.stat_result | None:
+    """lstat, never following a link; None when nothing is there."""
     try:
-        AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
-        if AUDIT_LOG.exists() and AUDIT_LOG.stat().st_size > AUDIT_LOG_MAX_BYTES:
-            rotated = AUDIT_LOG.with_suffix(AUDIT_LOG.suffix + ".1")
-            try:
-                if rotated.exists():
-                    rotated.unlink()
-                AUDIT_LOG.rename(rotated)
-            except Exception:
-                pass
-        with AUDIT_LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def _audit_skip(why: str) -> None:
+    """The audit record is skipped (the decision is already made and never changes): one line on stderr."""
+    try:
+        sys.stderr.write("[%s] audit record skipped: %s\n" % (HOOK_NAME, why))
+        sys.stderr.flush()
     except Exception:
         pass
+
+
+def _audit(record: dict) -> None:
+    """Append-only structured audit log; rotates on size. The audit-log rule (contract
+    2026-11-16-file-based-switches, t12 finding I2): nothing on the path is followed through a link.
+
+    (a) ``.claude`` and ``.claude/logs`` are each lstat-ed and must be real folders (no link, no reparse
+    point); a missing one is made with a single-level mkdir and lstat-ed again. (b) The log is lstat-ed:
+    missing goes to the open, a link or anything but a regular file skips the record. (c) Rotation only
+    for a regular file over the limit, and only when the ``.1`` name is missing or a regular file.
+    (d) The open is O_WRONLY | O_APPEND | O_CREAT (plus O_BINARY, O_NONBLOCK and O_NOFOLLOW where they
+    exist) and the descriptor must be a regular file before one byte is written. On any failure nothing
+    is written, one line goes to standard error and no other file is touched."""
+    fd = -1
+    try:
+        log = AUDIT_LOG
+        for folder in (log.parent.parent, log.parent):
+            info = _audit_lstat(folder)
+            if info is None:
+                os.mkdir(folder)
+                info = os.lstat(folder)
+            if not _audit_is_plain(info, "dir"):
+                _audit_skip("%s is not a plain folder (a link, a reparse point or not a folder)" % folder)
+                return
+        info = _audit_lstat(log)
+        if info is not None:
+            if not _audit_is_plain(info, "file"):
+                _audit_skip("%s is not a regular file (a link, a reparse point, a pipe or a device)" % log)
+                return
+            if info.st_size > AUDIT_LOG_MAX_BYTES:
+                rotated = log.with_name(log.name + ".1")
+                old = _audit_lstat(rotated)
+                if old is not None and not _audit_is_plain(old, "file"):
+                    _audit_skip("%s is not a regular file, so the log is not rotated" % rotated)
+                    return
+                try:
+                    if old is not None:
+                        os.remove(rotated)
+                    os.rename(log, rotated)
+                except OSError:
+                    pass  # rotation is best effort: the record is appended to the large log
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        for extra in ("O_BINARY", "O_NONBLOCK", "O_NOFOLLOW"):
+            flags |= getattr(os, extra, 0)
+        fd = os.open(log, flags, 0o666)
+        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+            _audit_skip("%s did not open as a regular file" % log)
+            return
+        data = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8", "replace")
+        while data:
+            data = data[os.write(fd, data):]
+    except Exception as exc:  # noqa: BLE001 -- an audit failure never changes the hook decision
+        _audit_skip("%s: %s" % (type(exc).__name__, exc))
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _extract_text(payload: dict) -> str:
