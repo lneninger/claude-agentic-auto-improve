@@ -568,8 +568,143 @@ Retroactive tagging of pre-2026-05-20 entries is NOT performed — the journal i
 - **Apply when:** a contract combines a single-confirmation flow with a gate flag (`--confirm-*`) whose condition is derived from flags the operator chooses in that same confirmation.
 - **Tags:** one-confirmation, consent-gate, preview-hash, narrowing, skill-flow
 
+### 2026-11-19 — Re-verify an external command's output after a contract changes how it is launched, and say in user-visible text only what the list proves
+- **Trigger:** post-impl divergence
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** An output shape verified once stops being verified when a later amendment changes the program's working folder or environment, so run the real command again under the new launch and compare. Check what the list covers, not only its shape: `claude agents --json --all` turned out to list background sessions only (every record kind `background`), not interactive sessions typed into a terminal, and not only the folder it runs from. A report line that claims absence ("no Claude Code session in it") from such a list overstates what it proves. Word it by the list's real coverage ("no background session in the list is in it") and add a fixed note naming what the list cannot see.
+- **Apply when:** a contract changes the working folder or environment of a program whose output was verified earlier, or a report line claims absence ("no X in it") from a list that may not cover every kind of X
+- **Tags:** `external-cli, re-verify, coverage, absence-claim, report-text, verified-assumption`
+
 ## Project tier
 
 This file holds only the Universal tier. Project entries live in domain files beside it, one file per domain, named `JOURNAL/<domain>.md`.
 
 The file `general.md` always exists in that folder, and every `.md` file in the folder is read.
+
+### 2026-10-18 — A pinned message must not assert a state the place it is printed cannot verify
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** Before pinning one sentence in several skills, check each place against the vocabulary's definition of every state word it uses. Where a place cannot verify the state (a draft pull request reported as `shipped`), word the sentence as a condition ("Once … is delivered") and say that the vocabulary's definition wins.
+- **Apply when:** a contract pins one fixed message in several skills or reports and the message names a state (delivered, merged, landed, done) that only some of those places verify
+- **Tags:** `closing-message, vocabulary, contract-delivery, pinned-text, skills`
+
+### 2026-10-18 — Put end-of-run text only in a section that reports the end of the run
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** A skill step that hands off mid-chain never observes the chain's end, so a condition like "when the chain ends delivered" cannot be checked there, and closing advice inside an automatic hand-off pulls against it. Place such text in the section that describes the end state (a status-lifecycle note, a final report), and name that section in the wiring test.
+- **Apply when:** a contract adds closing or end-of-run text to a skill that hands off to another skill and has no final report of its own
+- **Tags:** `skills, handoff, closing-message, placement, wiring-test`
+
+### 2026-10-18 — An explanation must use the same comparison as the decision it explains
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** When a report explains why something was decided (who holds a deferred folder), reuse the helper that made the decision (here `_norm` / `_inside`), not a second matcher; a second comparison can disagree on links or short names and the report then contradicts the decision.
+- **Apply when:** a contract adds a reason, diagnosis or "held by" report next to an existing decision that compares paths, ids or names
+- **Tags:** `reuse, path-compare, _inside, duplicate-matcher, report`
+
+### 2026-10-18 — A subprocess timeout on Windows does not hold for a .cmd wrapper unless the child tree is ended
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** `subprocess.run(timeout=…)` kills only the process it started and then waits without limit for the output to close; with a `.cmd` wrapper that process is `cmd.exe`, and the real program keeps the pipe open. End the whole child tree on timeout, bound the pipe wait, and prove it with a real wrapper whose child keeps running, not a single-file fake.
+- **Apply when:** a contract runs an external CLI with a time limit and the program may be found as a `.cmd`, `.bat` or shell-script wrapper
+- **Tags:** `subprocess, timeout, windows, cmd-wrapper, process-tree, test-fake`
+
+### 2026-10-18 — A design choice that changes an acceptance criterion is an Open Question, not an invariant
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** When a journal lesson (a size cap, a bound) pushes the design against a criterion the brief states, raise the conflict with the user as an Open Question with a recommendation; do not settle it silently in an invariant.
+- **Apply when:** a contract caps, drops, shortens or reorders something the brief's acceptance criteria say is always shown or never cut
+- **Tags:** `acceptance-criteria, open-question, size-budget, scope`
+
+### 2026-10-18 — Do not leave a design decision to an implementer's trial
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** An invariant that says "the code uses whatever the trial finds" (which variables are read, which extra path rule is added) lets a design decision reach the code without the user seeing it. Settle the fact before approval, or write each possible result and its rule into the contract.
+- **Apply when:** a contract's invariants or assumptions defer a choice to a trial, a probe or "if seen" during implementation
+- **Tags:** `trial, assumption, implementer, amendment, design-decision`
+
+### 2026-10-18 — A helper that folds errors into one exit code cannot give separate failure reasons
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** When a contract needs distinct fixed reasons for a timeout, a launch failure and a non-zero exit, and forbids quoting error text, check that the process helper it reuses keeps them apart; if it folds them (like `_exec`), use a runner that returns a closed set of results.
+- **Apply when:** a contract maps a subprocess's failures to fixed reasons through an existing exec wrapper
+- **Tags:** `subprocess, _exec, timeout, exit-code, fixed-reason`
+
+### 2026-10-18 — A step placed inside a "not halted" block silently skips items handled before a halt
+- **Trigger:** pre-approval critic
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** When a new per-item step is placed after an existing call, check whether that call sits inside a halt guard; a run that stops part-way still has items handled before the halt, and the contract must say whether they get the new step and put it outside the guard if so.
+- **Apply when:** a contract adds a step to a loop or pipeline that has a halt, abort or early-stop rule
+- **Tags:** `halt, partial-run, placement, cleanup`
+
+### 2026-10-30 — Never resolve a program by bare name after moving into a repository on Windows
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** On Windows, a lookup by bare name (`shutil.which("claude")`, or a bare name handed to `Popen`) also searches the current folder. A script that runs from inside a repository can therefore start a planted `claude.exe`. Accept the result only when it is an absolute path whose folder is neither the current folder nor the repository root; otherwise treat the program as not found.
+- **Apply when:** a contract starts an external program by name from a script whose working folder is, or may be, a repository or worktree
+- **Tags:** `windows, which, path-search, planted-binary, subprocess`
+
+### 2026-10-30 — Do not tree-kill a child of a tool that can start a shared supervisor; end only your own child
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** Some CLIs, Claude Code among them, can start a long-lived supervisor as a descendant of a short client command. On a timeout, `taskkill /T`, `killpg` or a new-session group kill can then end the supervisor and every session it serves. End only the `Popen` you created (`proc.kill()`). Write the output to a temporary file, so that a grandchild left running cannot hold a pipe and break the time bound. This refines the 2026-10-18 entry on `.cmd` wrappers.
+- **Apply when:** a contract adds a timeout or a kill step for a child process of a tool that manages sessions, daemons or background workers
+- **Tags:** `subprocess, timeout, process-tree, supervisor, read-only, kill`
+
+### 2026-10-30 — A fake external CLI must be backed by one captured real payload plus an opt-in read-only trial
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** Tests that run against a hand-written fake prove only the shape the author imagined. Commit one fixture copied from a real run's shape, with synthetic values and at least one non-ASCII field written as raw UTF-8. Add one opt-in, read-only trial that runs the real command, skips when the command is absent, and checks the parse with the production helpers. Record the real run's evidence (date, count, keys, observed values) in the contract's VERIFIED line.
+- **Apply when:** a contract parses the output of an external CLI and its tests use a fake of that CLI
+- **Tags:** `test-fake, fixture, trial, external-cli, verified-claim`
+
+### 2026-10-30 — A stated time ceiling must be tested over the whole operation, including per-record filesystem calls
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** A ceiling stated for a lookup ("ends within 25 seconds") holds only if it covers everything the lookup does after the command returns. Per-record path resolution (`realpath`, which opens the path on Windows) can block on a network or offline drive. Time the whole call in the test. Filter path forms that can reach a network or a device before any filesystem call. Name any part that is not covered as a known limitation.
+- **Apply when:** a contract states a time bound for an operation that runs a command and then touches the filesystem per result
+- **Tags:** `timeout, time-bound, realpath, unc, filesystem, test`
+
+### 2026-10-30 — A pure-parsing variant belongs in a fast unit test, not in a full git-world run
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** When the variants differ only in what a parser receives (malformed output, path forms, id formats, environment values), test them in one parameterised unit class with the runner patched. Keep the end-to-end world for the few cases that prove the wiring (placement, halt, no call when nothing qualifies). Assert invariants rather than character counts, and never sleep after a timeout.
+- **Apply when:** a contract's test list repeats a heavy end-to-end setup to vary only parser input
+- **Tags:** `test-strategy, unit-test, parameterised, end-to-end, speed`
+
+### 2026-10-31 — Start a third-party command-line tool from a neutral folder, and on Windows set NoDefaultCurrentDirectoryInExePath
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** Checking where the program itself was found is not enough. A Windows `.cmd` wrapper looks up its own interpreter (for example `node`) in the current folder first, so a `node.exe` planted in a repository runs when the wrapper is started with the repository as its working folder. Start the tool with its working folder set to a neutral folder (the resolved program's own folder), and on Windows pass a copy of the environment with `NoDefaultCurrentDirectoryInExePath=1`. This refines the 2026-10-30 entry on bare-name lookups.
+- **Apply when:** a contract starts a third-party CLI, especially one installed as a `.cmd` or script wrapper, from a script that runs inside a repository or worktree
+- **Tags:** `windows, subprocess, cwd, planted-binary, cmd-wrapper, path-search`
+  - **Correction (2026-11-18, contract 2026-10-18-cleanup-names-worktree-holder, amendment 2026-11-18):** Corrected: start the tool from the folder that holds the resolved program, and set no environment variable for the child. The user's standing rule (2026-11-18) forbids creating environment variables as a mechanism, and the neutral folder alone is enough, because a Windows .cmd wrapper then looks for its interpreter in the program's own folder and never in the repository. The part of the title and Lesson that says to set NoDefaultCurrentDirectoryInExePath no longer applies.
+
+### 2026-10-31 — A timeout or kill test must prove the scenario it targets really happened
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** A test that checks only that a time bound held also passes when the slow child never started, or when production never ran the wrapper the test built. Make the scenario leave evidence (the grandchild writes a pidfile on start) and assert it after the call: the pidfile exists and that process is alive, else fail with "scenario not exercised". Also assert that production started the program the test planted.
+- **Apply when:** a contract's tests cover a timeout, a kill step or a hang guard
+- **Tags:** `test, timeout, kill, scenario-proof, pidfile, false-pass`
+
+### 2026-10-31 — When tests patch a constant to run fast, one unpatched test must pin its real value and its derived text
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** Tests that patch a timeout or limit down to a small value prove the mechanism, not the shipped number. A silent change to the constant, or to the text built from it, then passes every test. Keep one test that does not patch: assert the constant's real value and the exact user-visible text derived from it (for example "gave no answer within 15 seconds").
+- **Apply when:** a contract's tests patch a timeout, limit or other named constant that also appears in a message
+- **Tags:** `test, constants, patching, timeout, message-text`
+
+### 2026-10-31 — A source tripwire that forbids calls by name must flag aliased imports and check each exemption by exact AST shape
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** A scan for forbidden names misses `import subprocess as sp`, `from subprocess import Popen`, `from os import kill`, `asyncio.create_subprocess_*`, and native routes such as `pty`, `ctypes`, CreateProcess or job objects. Flag those forms too, each with a planted positive control. An exemption ("kill is allowed inside this helper") must be checked by exact shape: the helper's body is one call `<first parameter>.kill()` with no arguments, and anything else is flagged. This extends the 2026-10-05 entry on positive controls.
+- **Apply when:** a contract adds or widens a source tripwire that forbids calls by name, or grants a named exemption in one
+- **Tags:** `tripwire, ast, static-check, aliasing, exemption, positive-control`
+
+### 2026-10-31 — When a skill adds text "printed last", say which line ends the output if the section already names one
+- **Trigger:** post-implementation review
+- **Source contract:** `.claude/concepts/2026-10-18-cleanup-names-worktree-holder.md`
+- **Lesson:** A new closing paragraph described as "printed last" can contradict a section that already ends with another fixed line (for example a Next command) or that holds a prompt. Search the same section for any other claim about the final line, then state the order outright and which ending wins, and keep the text out of prompts that wait for the user.
+- **Apply when:** a contract adds closing or end-of-run text to a skill section
+- **Tags:** `skill-text, ordering, report, closing-message, precedence`
+

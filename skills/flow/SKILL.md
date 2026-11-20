@@ -377,6 +377,12 @@ A run is not finished while any file it wrote is uncommitted. Every file this ru
 
 Pushing is outward-facing, so confirm once with the full list of what will be pushed and what will be deleted. That confirmation covers the records only. When the records come from a writing run that flipped a contract and memory capture is enabled with candidates, the separate capture question of `/pr-merged` step 5a is asked after that run and before this step commits the brief, so the brief goes in with its receipts.
 
+When you report `shipped`, end the report with this paragraph, word for word. It says what to do once the work is delivered. It does not say the work is delivered, because at this point the pull request may still be a draft. The paragraph belongs to the final report, not to the push confirmation prompt, so it is never part of that confirmation:
+
+Once the pull request is merged and the work is delivered, end this session with `/stop` before the delivery cleanup runs (or runs again): a session left running keeps its worktree folder in use, and the cleanup then has to leave that folder behind. `/exit` only detaches and leaves the session running; from another terminal, `claude stop <id>` stops it, where `<id>` is the 8-character id that `claude agents` shows.
+
+That paragraph is advice to the user, and it is printed last. You must not run `/stop`, `claude stop` or any other command that stops a session yourself. If the user tells you to keep working, their instruction comes first and you keep working.
+
 ## Where the run stops, and where it does not
 
 The distinction matters more than any other part of this file. An operator who cannot

@@ -1,0 +1,46 @@
+[
+  {
+    "cwd": "C:\\Dev\\app\\.claude\\worktrees\\20261015-feature-50-demo\\src",
+    "id": "0a1b2c3d",
+    "kind": "background",
+    "name": "Überprüfung läuft ✓",
+    "pid": 18420,
+    "sessionId": "0a1b2c3d-1111-4222-8333-444455556666",
+    "startedAt": 1760000000000,
+    "state": "working",
+    "status": "Working on the test run"
+  },
+  {
+    "cwd": "C:\\Dev\\app\\.claude\\worktrees\\20261015-feature-50-demo",
+    "id": "4e5f6a7b",
+    "kind": "background",
+    "name": "release-check",
+    "pid": 20112,
+    "sessionId": "4e5f6a7b-2222-4333-8444-555566667777",
+    "startedAt": 1760000060000,
+    "state": "blocked",
+    "status": "Waiting for permission"
+  },
+  {
+    "cwd": "C:\\Dev\\app\\.claude\\worktrees\\20261015-task-t1-cleanup",
+    "id": "8c9d0e1f",
+    "kind": "background",
+    "name": "docs-sweep",
+    "pid": 9876,
+    "sessionId": "8c9d0e1f-3333-4444-8555-666677778888",
+    "startedAt": 1760000120000,
+    "state": "stopped",
+    "status": "Stopped by the user"
+  },
+  {
+    "cwd": "C:\\Dev\\app",
+    "id": "2a3b4c5d",
+    "kind": "background",
+    "name": "nightly-build",
+    "pid": 31337,
+    "sessionId": "2a3b4c5d-4444-4555-8666-77778888aaaa",
+    "startedAt": 1760000180000,
+    "state": "done",
+    "status": "Finished 2h ago"
+  }
+]
