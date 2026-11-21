@@ -2691,7 +2691,7 @@ class StageCase(LandCase):
 
     def setUp(self):
         self.mod()
-        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
 
     def stage(self, subdir="", **kit_kwargs):
@@ -5685,6 +5685,7 @@ if __name__ == "__main__":
 # block ends a direct `py -3 test_land_contract.py` run before they are defined.
 # ===========================================================================
 import ast  # noqa: E402
+import functools  # noqa: E402
 import inspect  # noqa: E402
 
 T32_VAR = "NoDefaultCurrentDirectoryInExePath"
@@ -5755,8 +5756,17 @@ def t32_manifests(version):
                          "plugins": [{"name": "x", "version": version,
                                       "description": "Protocol: 3 skills, 2 agents and 2 hooks that put design first."}]},
                         indent=2) + "\n"
-    return {"plugin.json": plugin, ".claude-plugin/plugin.json": claude, ".cursor-plugin/plugin.json": cursor,
-            ".claude-plugin/marketplace.json": market}
+    # The four paths come from the script's own list, so a renamed manifest moves with it (never restated here).
+    bodies = {"plugin.json": plugin, "claude": claude, "cursor": cursor, "marketplace.json": market}
+    out = {}
+    for path in T32_MANIFEST_NAMES:
+        base = path.rsplit("/", 1)[-1]
+        if base == "plugin.json":
+            key = "claude" if path.startswith(".claude-plugin/") else "cursor" if path.startswith(".cursor-plugin/") else "plugin.json"
+        else:
+            key = base
+        out[path] = bodies[key]
+    return out
 
 
 def t32_tree_files():
@@ -5942,7 +5952,11 @@ class T32Case(PnLandingCase):
     """A fixture landing with the version raise on, in its own folder, every planted file test-owned."""
 
     def setUp(self):
-        super().setUp()
+        # This case's own temporary folder tolerates a cleanup error (a copied program the operating system still
+        # holds for a moment); the shared classes above keep their strict folder, so only this setUp asks for it.
+        lenient = functools.partial(tempfile.TemporaryDirectory, ignore_cleanup_errors=True)
+        with mock.patch.object(tempfile, "TemporaryDirectory", lenient):
+            super().setUp()
         t32_abs_git()  # before any row changes PATH
         self.t32_root = Path(self._tmp.name) / "t32-owned"
         self.t32_root.mkdir()
@@ -6004,11 +6018,15 @@ class T32Case(PnLandingCase):
     def t32_remote_head(self, st):
         return t32_git(st.kit.origin, "rev-parse", "refs/heads/%s" % PARENT)
 
-    def assertEveryGitProgramIsResolveGitsResult(self, st, path_value):
+    def assertEveryGitProgramIsResolveGitsResult(self, st, path_value, require_starts=False):
         """Every git program the landing handed its process launcher (``_run``) is the absolute path resolve_git
         returns for the PATH the landing ran under (None when no git lies outside the project: then none at all)."""
         expected = st.lc.resolve_git(path_value, [str(st.worktree), str(st.kit.main)])
         seen = [p for p in st.programs if os.path.basename(p).lower() in ("git", "git.exe")]
+        if require_starts:
+            self.assertGreater(len(seen), 0,
+                               "the landing started git processes through its launcher, so the comparison below is "
+                               "not over an empty set")
         wrong = sorted({p for p in seen if expected is None or os.path.normcase(p) != os.path.normcase(expected)})
         self.assertEqual(wrong, [],
                          "every git process the landing started takes resolve_git's result (%s) as its program, "
@@ -6083,7 +6101,7 @@ class TestT32PlantedGitAgainstTheWholeLanding(T32Case):
                              "no git process of the landing may be started by a bare name, whatever the current folder "
                              "holds. %s" % self.t32_what(report, error))
         with self.subTest("every git program is resolve_git's result"):
-            self.assertEveryGitProgramIsResolveGitsResult(st, os.environ["PATH"])
+            self.assertEveryGitProgramIsResolveGitsResult(st, os.environ["PATH"], require_starts=True)
         self.assertIsNone(error, "the landing ran to its end: %s" % error)
         self.assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(st, before)
 
@@ -6132,7 +6150,7 @@ class TestT32PlantedGitAgainstTheWholeLanding(T32Case):
                              "with the variable set the current folder is out of the search, but the first PATH entry, "
                              "inside the project, is not: a bare `git` would run it. %s" % self.t32_what(report, error))
         with self.subTest("every git program is resolve_git's result"):
-            self.assertEveryGitProgramIsResolveGitsResult(st, path)
+            self.assertEveryGitProgramIsResolveGitsResult(st, path, require_starts=True)
         self.assertIsNone(error, "the landing ran to its end: %s" % error)
         self.assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(st, before)
 
@@ -6301,7 +6319,12 @@ class TestT32GitProgramOption(unittest.TestCase):
         self.assertRefused(relative, "a relative path, though the file exists from the working folder")
 
     def test_R12_C13_5_a_git_program_is_refused_in_the_exact_mode_too(self):
-        self.assertRefused("relative-folder/git.exe", "a relative path in --exact", mode="--exact")
+        relative = "relative-folder/git.exe"
+        (self.repo / "relative-folder").mkdir()
+        shutil.copy2(t32_abs_git(), self.repo / "relative-folder" / "git.exe")
+        t32_exclude(self.repo, ["relative-folder"])
+        self.assertTrue((self.repo / relative).is_file(), "control: the relative path exists from the working folder")
+        self.assertRefused(relative, "a relative path in --exact, though the file exists", mode="--exact")
 
     def test_R12_C13_5_a_git_program_is_refused_in_the_counts_mode_too(self):
         self.assertRefused(str(Path(self._tmp.name) / "no-such-folder" / "git.exe"), "an absent file in --counts",
@@ -6344,3 +6367,15 @@ class TestT32VersionRaiseStaysInsideTheManifests(T32Case):
                          % (report["outcome"], report.get("detail")))
         self.assertEqual(self.t32_remote_head(st), before, "the remote is unchanged")
         self.assertEqual(st.count("git_push"), 0, "no push after the halt")
+
+
+class TestT32VersionRaiseSeamForTheGitProgram(unittest.TestCase):
+
+    def test_R12_C13_8_p7b_version_raise_takes_the_git_program_as_a_keyword_only_parameter_with_no_default(self):
+        params = inspect.signature(land_contract._p7b_version_raise).parameters
+        self.assertIn("git_program", params,
+                      "block 33's seam: _p7b_version_raise takes the absolute git program as `git_program`; "
+                      "parameters found: %s" % list(params))
+        param = params["git_program"]
+        self.assertEqual(param.kind, inspect.Parameter.KEYWORD_ONLY, "it is keyword-only, so no caller passes it by position")
+        self.assertIs(param.default, inspect.Parameter.empty, "and it has no default, so no caller can leave it out")
