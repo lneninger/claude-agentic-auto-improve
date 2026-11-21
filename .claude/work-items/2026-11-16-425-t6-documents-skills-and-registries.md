@@ -31,7 +31,7 @@ The contract's own handoff block, verbatim:
 
 ### 6. Documents, skills and registries (`python-ai-developer`)
 
-**Depends on:** 5, 14 — blocks 4, 10 and 12 are no longer named: their records read `blocked`, and the loop never releases a block whose dependency reads `blocked`; the fourth security review (14) replaces them. Before amendment 3 this line read "5, 12"; before amendment 2 it read "5, 10".
+**Depends on:** 5, 16 — blocks 4, 10, 12 and 14 are no longer named: their records read `blocked`, and the loop never releases a block whose dependency reads `blocked`; the fifth security review (16) replaces them. Before amendment 4 this line read "5, 14"; before amendment 3, "5, 12"; before amendment 2, "5, 10".
 
 **Files to touch:**
 - `README.md`
@@ -56,9 +56,10 @@ TASK: Rewrite the documents and skill text for file settings, rewrite INV-12 and
   test_plugin_manifests.py, and record the mechanism and terms in the registries. Remove the last
   expectedFailure marks.
 CONTEXT: concept contract at .claude/concepts/2026-11-16-file-based-switches.md, the skill-text
-  table of the Inventory. This block runs after the ordinary switches block (5) and the fourth
-  security review (14) have passed; read the report
-  t14-security-re-review-round-four-security-auditor.md, the blocked reviews
+  table of the Inventory. This block runs after the ordinary switches block (5) and the fifth
+  security review (16) have passed; read the report
+  t16-security-re-review-round-five-security-auditor.md, the blocked reviews
+  t14-security-re-review-round-four-security-auditor.md,
   t12-security-re-review-round-three-security-auditor.md and
   t10-security-re-review-security-auditor.md, and the second run sheet
   t9-live-prompt-trial-second-round-senior-test-engineer.md for the residual-risk wording.
@@ -83,7 +84,23 @@ CONSTRAINTS:
     is now skipped, so keep .claude/logs a real folder. It also says that a rules file which is a link to a network drive or share now
     counts as unreadable, so every database is protected; keep the rules file a regular file in
     the project folder. A shape the guard now reads as invoked in either shell is blocked even
-    when the other shell would only mention it; the person runs it by hand.
+    when the other shell would only mention it; the person runs it by hand. Amendment 4 adds,
+    as fixes of behaviour older than this contract: a human-only script after a quote opened
+    mid-word before its name, or after an apostrophe in a # comment, was allowed with no prompt
+    (t14 B1, P1); a script after a long valued option or a command start outside the guard's
+    lists (if, while, eval, find -exec, cmd //c, Start-Process, cmd /c --% and the rest) was
+    allowed (t14 P2, P3); a call with no extension or with a continuation inside the name was
+    not seen (t14 T1); a hard link at either audit log received the record (t14 L2). By the
+    user's answers of 2026-11-21 (both yes): an apostrophe in a # comment hid later destructive
+    statements, including an EF removal of the configured database, from both guards (t14 Q1),
+    and hid an arm write from both guards' arm-write check; a statement, script name or arm
+    name that stands only in a # comment both shells read as a comment no longer blocks. A
+    human-only script name now blocks wherever it appears, except after the listed read
+    commands (cat, Get-Content, grep, echo, git show and the others); list them, say that sed,
+    less and more are not among them, that rg with --pre, git grep with -O and any environment
+    change in the same call block, and that an agent that is blocked uses a listed command or
+    asks the person. Name the text-guard limit: a name built at run time, or a listed command
+    turned into a launcher by configuration written outside the call, is not seen.
   - CONTRIBUTING: a new switch is one catalog entry, one README row and one on/off test pair,
     never an environment read.
   - Delete the CLAUDE_CONTRACT_SKIP and CLAUDE_VERIFY_REVIEW_GATE text as the table says.
