@@ -1914,7 +1914,12 @@ CASES += [
     _ok("r4.16.5 git show of the restore script at HEAD  [passes today]",
         _bash(f"git show HEAD:tools/db-protection/{_DEV_SCRIPTS[1]}")),
     *[_ok(f"r4.16.6 cat of {s}  [passes today]", _bash(f"cat tools/db-protection/{s}")) for s in _DEV_SCRIPTS],
-    *[_ok(f"r4.16.7 sed -n of {s}  [passes today]", _bash(f"sed -n '1,60p' tools/db-protection/{s}")) for s in _DEV_SCRIPTS],
+    # Amendment 5 retires ONE instance by name: "r4.16.7 sed -n of update-dev-database.cmd  [passes today]" expected an
+    # allow for a sed read of a human-only script, and sed has left the mention list (it can run a program from its own
+    # arguments). The row r4.16.7b below replaces it. The other three instances stay controls, unchanged
+    # (restore-latest.cmd has no recover flag, so it is not human-only).
+    *[_ok(f"r4.16.7 sed -n of {s}  [passes today]", _bash(f"sed -n '1,60p' tools/db-protection/{s}"))
+      for s in _DEV_SCRIPTS if s != "update-dev-database.cmd"],
     *[_ok(f"r4.16.8 grep of {s} for the recovery flag  [passes today]",
           _bash(f"grep -n -- {_RECOVER_FLAG} tools/db-protection/{s}")) for s in _DEV_SCRIPTS],
     *[_ok(f"r4.16.9 Get-Content of {s}  [passes today]", _ps(f"Get-Content tools\\db-protection\\{s}")) for s in _DEV_SCRIPTS],

@@ -385,7 +385,8 @@ def _audit(record: dict) -> None:
     missing goes to the open, a link or anything but a regular file skips the record. (c) Rotation only
     for a regular file over the limit, and only when the ``.1`` name is missing or a regular file.
     (d) The open is O_WRONLY | O_APPEND | O_CREAT (plus O_BINARY, O_NONBLOCK and O_NOFOLLOW where they
-    exist) and the descriptor must be a regular file before one byte is written. On any failure nothing
+    exist) and the descriptor must be a regular file with a link count of one before one byte is written
+    (t14 finding L2: a hard link is a regular file to lstat and fstat). On any failure nothing
     is written, one line goes to standard error and no other file is touched."""
     fd = -1
     try:
@@ -419,8 +420,14 @@ def _audit(record: dict) -> None:
         for extra in ("O_BINARY", "O_NONBLOCK", "O_NOFOLLOW"):
             flags |= getattr(os, extra, 0)
         fd = os.open(log, flags, 0o666)
-        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not _stat.S_ISREG(opened.st_mode):
             _audit_skip("%s did not open as a regular file" % log)
+            return
+        if opened.st_nlink != 1:
+            # A hard link is a regular file to lstat and fstat; only the link count shows that a write through
+            # it would reach a file the guard did not choose (t14 finding L2). The descriptor is closed unwritten.
+            _audit_skip("%s has %d links, so it shares its bytes with another file" % (log, opened.st_nlink))
             return
         data = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8", "replace")
         while data:
