@@ -1297,6 +1297,21 @@ class _AuditLogRows:
         self.assertEqual(keep.read_text(encoding="utf-8"), "keep", "its target is not removed")
         self.assertEqual(self.log.stat().st_size, AUDIT_OVER_LIMIT, "the log was neither renamed nor appended to")
 
+    # ---------------------------------------------------------------- L2 (t14): a hard link at the log
+    def test_a_hard_link_at_the_log_skips_the_record_and_leaves_the_other_file_alone(self):
+        """A hard link is a regular file to lstat and fstat, so only its link count tells the guard that a
+        write through the log would reach a file the guard did not choose (Audit-log rule, link count)."""
+        other = self.tmp / "user-file.txt"          # outside .claude/logs
+        other.write_bytes(b"user data, 11 bytes\n")
+        before = other.read_bytes()
+        try:
+            os.link(other, self.log)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("this machine cannot create a hard link: %s" % exc)
+        self.skipped_run()
+        self.assertEqual(other.read_bytes(), before, "the other file is unchanged: no record was written through the link")
+        self.assertEqual(self.log.read_bytes(), before, "the log is the same file, still unchanged")
+
     # ---------------------------------------------------------------- POSIX: a named pipe at the log
     @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"), "POSIX only: needs a named pipe")
     def test_a_named_pipe_at_the_log_skips_the_record(self):
@@ -1312,6 +1327,494 @@ class DestructiveGuardAuditLogTests(_AuditLogRows, OverrideTestCase):
 class ReadonlyGuardAuditLogTests(_AuditLogRows, OverrideTestCase):
     GUARD = READONLY_HOOK
     LOG_NAME = "db-research.log"
+
+
+# =====================================================================================================
+# Block 15 (t14 round-four review): findings B1 (a) and (b), P1, P2, P3, T1 and Q1.
+#
+# Row ids are t14's (X, A, D, V, W, CV, CW and M; t14's findings P1, P2 and P3 are not t4's probes P1 to P9).
+# Every destructive statement is built from parts. Each row runs the destructive guard alone, in its own fresh
+# project with its own arm. Four kinds of row exist and the row name says which: "copied" (a t14 row; it
+# must fail at the parent tip), "class" (a class row; expected to fail at the tip), "mutation" (its expected
+# outcome already holds at the tip; it guards a shape that only becomes dangerous with the fix, and the
+# pull request records the named mutation of the fix that makes it fail), "control" (passes at the tip and
+# at the head). The script is spelled with forward slashes in Bash rows and with backslashes in PowerShell
+# rows, except where t14 writes a forward-slash PowerShell row (X3f, X3g, X3h).
+# =====================================================================================================
+EF_REMOVAL = "dotnet ef database " + "dr" + "op --force"
+S = SCRIPT_FWD
+B = SCRIPT_BACK
+R = OTHER_DATABASE_REMOVAL
+SCRIPT_NAME = "update-dev-database.cmd"
+SCRIPT_STEM = "update-dev-database"
+FWD_DIR = "tools/db-protection/"
+BACK_DIR = "tools\\db-protection\\"
+
+
+def _slug(text: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in text).strip("_").lower()
+
+
+def _register(cls, kind: str, group: str, rows, body) -> None:
+    """One test method per row, named test_b15_<kind>_<group>_<row id>_<tool>."""
+    for rid, tool, factory in rows:
+        def make(rid=rid, tool=tool, factory=factory):
+            def test(self):
+                body(self, rid, tool, factory(str(self.project)))
+            return test
+        setattr(cls, "test_b15_%s_%s_%s_%s" % (kind, group, _slug(rid), tool.lower()), make())
+
+
+class Block15Tests(OverrideTestCase):
+    """The destructive guard alone."""
+
+    GUARD = DESTRUCTIVE_HOOK
+
+    def _armed_blocks(self, rid: str, tool: str, command: str) -> None:
+        self.arm()
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        why = "%s (%s): a human-only script that is invoked is the no-prompt class" % (rid, tool)
+        self.assert_blocks(run, "No-prompt classes rule, " + why)
+        self.assertIsNone(run.ask, why + ": no ask JSON")
+        self.assertTrue(self.arm_path.exists(), why + ": the arm is still in place (never claimed)")
+        self.assertEqual(self.claim_files(), [], why + ": no claim file was made")
+        self.assertIn("own terminal", run.err, why + ": the human-only instruction is printed")
+
+    def _unarmed_blocks(self, rid: str, tool: str, command: str) -> None:
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        why = "%s (%s), no arm" % (rid, tool)
+        self.assert_blocks(run, "a human-only script that is invoked is never run by an agent: " + why)
+        self.assertIn("own terminal", run.err, why + ": the human-only instruction is printed")
+
+    def _allowed(self, rid: str, tool: str, command: str) -> None:
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        self.assertEqual(run.rc, 0, "a mention is not an invocation, %s (%s): %s" % (rid, tool, run))
+
+    def _armed_allowed_arm_kept(self, rid: str, tool: str, command: str) -> None:
+        self.arm()
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        self.assertEqual(run.rc, 0, "a lookup is allowed, %s (%s): %s" % (rid, tool, run))
+        self.assertIsNone(run.ask, "no prompt for a mention, %s (%s)" % (rid, tool))
+        self.assertTrue(self.arm_path.exists(), "a mention leaves the arm alone, %s (%s)" % (rid, tool))
+
+    def _plain_blocks(self, rid: str, tool: str, command: str) -> None:
+        """An accepted false block, or a control that already blocks: exit 2 with no arm."""
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        self.assert_blocks(run, "%s (%s)" % (rid, tool))
+
+    def _armed_asks_and_claims(self, rid: str, tool: str, command: str) -> None:
+        self.arm()
+        run = self.run_guard(self.shell(command, tool, mode="default", tool_use_id=self.next_id()))
+        self.assert_asks(run, "%s (%s): an armed ordinary block is a prompt, not a silent allow" % (rid, tool))
+        self.assertFalse(self.arm_path.exists(), "%s (%s): the arm was claimed" % (rid, tool))
+
+
+# ---- B1 (a), B1 (b) and P1: copied armed and unarmed rows --------------------------------------------
+X1_BASH = 'echo "start"   # we don\'t need this\n' + S + '\necho "done, it\'s ok"'
+X1P_PS = 'Write-Host "start"   # we don\'t need this\n' + B + '\nWrite-Host "done, it\'s ok"'
+X3_BASH = FWD_DIR + '"' + SCRIPT_NAME + '"'
+X3F_PS = FWD_DIR + '"' + SCRIPT_NAME + '"'
+
+B15_B1_ARMED_COPIED = [
+    ("A1", "Bash", lambda p: R + "\n" + X1_BASH),
+    ("A1p", "PowerShell", lambda p: R + "\n" + X1P_PS),
+    ("X1e", "PowerShell", lambda p: 'Write-Host "go"  # don\'t\n' + B + "\n" + R + "\nWrite-Host 'x'"),
+    ("X3a", "Bash", lambda p: R + "\n" + X3_BASH),
+    ("X3h", "PowerShell", lambda p: R + "\n" + X3F_PS),
+]
+B15_B1_UNARMED_COPIED = [
+    ("X1", "Bash", lambda p: X1_BASH),
+    ("X1c", "Bash", lambda p: 'git commit -m "wip"  # don\'t push yet\n' + S + "\ngit log -1 --format='%s'"),
+    ("X1d", "Bash", lambda p: 'grep -n "x" a.txt   # it\'s here\n' + S + "\necho 'ok'"),
+    ("X1p", "PowerShell", lambda p: X1P_PS),
+    ("X3", "Bash", lambda p: X3_BASH),
+    ("X3b", "Bash", lambda p: "echo a; " + FWD_DIR + "'" + SCRIPT_NAME + "'"),
+    ("X3i", "Bash", lambda p: '"$PWD"/' + FWD_DIR + '"' + SCRIPT_NAME + '"'),
+    ("X3f", "PowerShell", lambda p: X3F_PS),
+    ("X3g", "PowerShell", lambda p: "cd x; " + FWD_DIR + "'" + SCRIPT_NAME + "'"),
+]
+
+# ---- B1 (b) class rows: a comment apostrophe on the line before the script -----------------------------
+_COMMENT_LINES = {
+    "Bash": (
+        ("echo", 'echo "start"  # it\'s fine'),
+        ("git-commit", 'git commit -m "wip"  # it\'s fine'),
+        ("grep", 'grep -n "x" a.txt  # it\'s here'),
+        ("gh-pr-create", 'gh pr create --title "t" --body "b"  # it\'s fine'),
+        ("line-that-does-something", 'echo "a" && echo "b"  # don\'t'),
+    ),
+    "PowerShell": (
+        ("write-host", 'Write-Host "start"  # it\'s fine'),
+        ("git-commit", 'git commit -m "wip"  # it\'s fine'),
+        ("select-string", 'Select-String -Pattern "x" a.txt  # it\'s here'),
+        ("gh-pr-create", 'gh pr create --title "t" --body "b"  # it\'s fine'),
+        ("line-that-does-something", 'Write-Host "a"; Write-Host "b"  # don\'t'),
+    ),
+}
+B15_COMMENT_CLASS = [
+    ("comment_" + label, tool, (lambda line, script, last: lambda p: line + "\n" + script + "\n" + last)(
+        line, S if tool == "Bash" else B, "echo 'x'" if tool == "Bash" else "Write-Host 'x'"))
+    for tool, lines in _COMMENT_LINES.items() for label, line in lines
+]
+
+# ---- B1 (a) class rows: a quote opened mid-word right before the script name ---------------------------
+_N = SCRIPT_NAME
+B15_MIDWORD_CLASS = [
+    # Bash: forward slashes, single and double quote, a doubled backslash prefix, a quoted prefix.
+    ("dq-fwd", "Bash", lambda p: FWD_DIR + '"' + _N + '"'),
+    ("sq-fwd", "Bash", lambda p: FWD_DIR + "'" + _N + "'"),
+    ("dq-backslash", "Bash", lambda p: 'tools\\\\db-protection\\\\"' + _N + '"'),
+    ("sq-backslash-prefix-quoted", "Bash", lambda p: "'tools\\db-protection\\'\"" + _N + '"'),
+    ("after-separator", "Bash", lambda p: "echo a; " + FWD_DIR + '"' + _N + '"'),
+    ("after-and", "Bash", lambda p: "true && " + FWD_DIR + "'" + _N + "'"),
+    ("after-then", "Bash", lambda p: "if true; then " + FWD_DIR + '"' + _N + '"; fi'),
+    ("after-sudo", "Bash", lambda p: "sudo " + FWD_DIR + "'" + _N + "'"),
+    ("launcher-dq-escaped", "Bash", lambda p: 'bash -c "' + FWD_DIR + '\\"' + _N + '\\""'),
+    ("launcher-sq", "Bash", lambda p: "bash -c '" + FWD_DIR + '"' + _N + '"' + "'"),
+    ("quoted-folder-prefix", "Bash", lambda p: '"tools"/"db-protection"/"' + _N + '"'),
+    # PowerShell: forward slashes and backslashes.
+    ("dq-fwd", "PowerShell", lambda p: FWD_DIR + '"' + _N + '"'),
+    ("sq-fwd", "PowerShell", lambda p: FWD_DIR + "'" + _N + "'"),
+    ("dq-backslash", "PowerShell", lambda p: BACK_DIR + '"' + _N + '"'),
+    ("sq-backslash", "PowerShell", lambda p: BACK_DIR + "'" + _N + "'"),
+    ("after-separator", "PowerShell", lambda p: "Write-Host x; " + BACK_DIR + '"' + _N + '"'),
+    ("after-sudo", "PowerShell", lambda p: "sudo " + FWD_DIR + '"' + _N + '"'),
+    ("launcher-powershell", "PowerShell", lambda p: 'powershell -Command "' + FWD_DIR + "'" + _N + "'" + '"'),
+    ("launcher-pwsh-backslash", "PowerShell", lambda p: 'pwsh -c "' + BACK_DIR + "'" + _N + "'" + '"'),
+]
+
+# ---- P2: long valued options ------------------------------------------------------------------------
+P2_COPIED_UNARMED = [
+    ("X41", "Bash", lambda p: "timeout --signal KILL 5 " + S),
+    ("X42", "Bash", lambda p: "sudo --user root " + S),
+    ("X43", "Bash", lambda p: "env --unset NAME " + S),
+    ("X44", "Bash", lambda p: "nice --adjustment 10 " + S),
+    ("X45", "Bash", lambda p: "echo x | xargs --max-args 1 " + S),
+]
+P2_COPIED_ARMED = [("A41", "Bash", lambda p: R + " ; timeout --signal KILL 5 " + S)]
+#: (long option, command word, value, extra words after the option's value).
+_LONG_OPTIONS = (
+    ("--signal", "timeout", "KILL", "5"), ("--kill-after", "timeout", "5", "10"),
+    ("--user", "sudo", "root", ""), ("--group", "sudo", "wheel", ""), ("--host", "sudo", "h", ""),
+    ("--prompt", "sudo", "p", ""), ("--close-from", "sudo", "5", ""), ("--chdir", "sudo", "/tmp", ""),
+    ("--role", "sudo", "r", ""), ("--type", "sudo", "t", ""), ("--other-user", "sudo", "u", ""),
+    ("--unset", "env", "NAME", ""), ("--adjustment", "nice", "10", ""),
+    ("--replace", "xargs", "{}", ""), ("--max-args", "xargs", "1", ""), ("--max-procs", "xargs", "2", ""),
+    ("--max-lines", "xargs", "3", ""), ("--delimiter", "xargs", ",", ""), ("--arg-file", "xargs", "f", ""),
+    ("--eof", "xargs", "E", ""), ("--max-chars", "xargs", "100", ""),
+)
+
+
+def _long_option_command(option: str, word: str, value: str, extra: str, joined: bool) -> str:
+    prefix = "echo x | " if word == "xargs" else ""
+    body = (option + "=" + value) if joined else (option + " " + value)
+    return prefix + word + " " + body + ((" " + extra) if extra else "") + " " + S
+
+
+B15_P2_CLASS_SEPARATE = [
+    (opt[2:] + "_separate", "Bash", (lambda o, w, v, e: lambda p: _long_option_command(o, w, v, e, False))(opt, w, v, e))
+    for opt, w, v, e in _LONG_OPTIONS
+]
+B15_P2_MUTATION_JOINED = [
+    (opt[2:] + "_equals", "Bash", (lambda o, w, v, e: lambda p: _long_option_command(o, w, v, e, True))(opt, w, v, e))
+    for opt, w, v, e in _LONG_OPTIONS
+]
+B15_P2_CONTROL_ALLOWED = [
+    ("nice_adjustment_cat", "Bash", lambda p: "nice --adjustment 10 cat " + S),
+]
+
+# ---- P3: the inverted classifier ---------------------------------------------------------------------
+P3_COPIED_BASH = [
+    ("X4", "Bash", lambda p: "if " + S + "; then :; fi"),
+    ("X5", "Bash", lambda p: "while " + S + "; do break; done"),
+    ("X6", "Bash", lambda p: "until " + S + "; do break; done"),
+    ("X7", "Bash", lambda p: "eval " + S),
+    ("X8", "Bash", lambda p: 'eval "' + S + '"'),
+    ("X9", "Bash", lambda p: "find . -maxdepth 0 -exec " + S + " \\;"),
+    ("X10", "Bash", lambda p: "2>/dev/null " + S),
+    ("X11", "Bash", lambda p: "cmd //c tools\\\\db-protection\\\\" + SCRIPT_NAME),
+    ("X16", "Bash", lambda p: "stdbuf -oL " + S),
+    ("X18", "Bash", lambda p: "case x in x) " + S + ";; esac"),
+    ("X19", "Bash", lambda p: "coproc " + S),
+    ("X20", "Bash", lambda p: "trap '" + S + "' EXIT"),
+]
+P3_COPIED_PS = [
+    ("X13", "PowerShell", lambda p: "Start-Process -FilePath " + B + " -Wait -NoNewWindow"),
+    ("X14", "PowerShell", lambda p: "Start-Process -Wait -NoNewWindow " + B),
+    ("X53", "PowerShell", lambda p: "cmd /c --% " + B),
+    ("X86", "PowerShell", lambda p: "& (Get-Item " + B + ")"),
+    ("X87b", "PowerShell", lambda p: "start -Wait -WindowStyle Hidden " + B),
+    ("X88b", "PowerShell", lambda p: "cmd /c start /wait /b " + B),
+    ("X89b", "PowerShell", lambda p: 'cmd /c start "" /b ' + B),
+]
+P3_COPIED_ARMED = [
+    ("A4", "Bash", lambda p: R + " ; if " + S + "; then :; fi"),
+    ("A7", "Bash", lambda p: R + " ; eval " + S),
+    ("A10", "Bash", lambda p: R + " ; 2>/dev/null " + S),
+    ("A11", "Bash", lambda p: R + " ; cmd //c tools\\\\db-protection\\\\" + SCRIPT_NAME),
+    ("A13", "PowerShell", lambda p: R + "; Start-Process -FilePath " + B + " -Wait -NoNewWindow"),
+    ("A53", "PowerShell", lambda p: R + "; cmd /c --% " + B),
+]
+P3_CONSTRUCTED_WORDS = [
+    ("X15_winpty", "Bash", lambda p: "winpty " + S),
+    ("X17_setsid", "Bash", lambda p: "setsid " + S),
+    ("X80_doas", "Bash", lambda p: "doas " + S),
+    ("X81_unbuffer", "Bash", lambda p: "unbuffer " + S),
+    ("X82_watch", "Bash", lambda p: "watch -n 1 " + S),
+    ("X83_flock", "Bash", lambda p: "flock /tmp/lock " + S),
+    ("X84_ionice", "Bash", lambda p: "ionice " + S),
+]
+P3_EXCEPTION_A = [
+    ("a_substitution_as_a_command", "Bash", lambda p: "$(cat " + S + ")"),
+    ("a_eval_substitution", "Bash", lambda p: 'eval "$(cat ' + S + ')"'),
+    ("a_process_substitution", "Bash", lambda p: "bash <(cat " + S + ")"),
+    ("a_ps_call_operator_expression", "PowerShell", lambda p: "& (Get-Item -Path " + B + ")"),
+    ("a_backtick_as_a_command", "Bash", lambda p: "`cat " + S + "`"),
+]
+P3_EXCEPTION_B = [
+    ("b_cat_pipe_bash", "Bash", lambda p: "cat " + S + " | bash"),
+    ("b_cat_grep_cmd", "Bash", lambda p: "cat " + S + " | grep . | cmd"),
+    ("b_cat_grep_head_sh", "Bash", lambda p: "cat " + S + " | grep . | head -n 99 | sh"),
+    ("b_cat_into_process_substitution", "Bash", lambda p: "cat " + S + " > >(bash)"),
+    ("b_get_content_iex", "PowerShell", lambda p: "Get-Content " + B + " | iex"),
+    ("b_get_content_out_string_iex", "PowerShell", lambda p: "Get-Content " + B + " | Out-String | iex"),
+]
+P3_EXCEPTION_C = [
+    ("c_bash_redirected_from_the_script", "Bash", lambda p: "bash < " + S),
+]
+P3_ARGUMENT_AND_ENVIRONMENT = [
+    ("rg_pre_separate", "Bash", lambda p: "rg --pre " + S + " x ."),
+    ("rg_pre_equals", "Bash", lambda p: "rg --pre=" + S + " x ."),
+    ("git_grep_O_attached", "Bash", lambda p: "git grep -O" + S + " x"),
+    ("git_grep_nO", "Bash", lambda p: "git grep -nO x -- " + S),
+    ("git_grep_open_files_in_pager", "Bash", lambda p: "git grep --open-files-in-pager x -- " + S),
+    ("env_prefix_rg_config", "Bash", lambda p: "RIPGREP_CONFIG_PATH=cfg rg x " + S),
+    ("env_prefix_git_external_diff", "Bash", lambda p: "GIT_EXTERNAL_DIFF=bash git diff -- " + S),
+    ("export_then_cat", "Bash", lambda p: "export X=1; cat " + S),
+    ("ps_env_then_git_log", "PowerShell", lambda p: "$env:GIT_PAGER = 'x'; git log -- " + B),
+]
+P3_REMOVED_WORDS = [
+    ("sed_n_1p", "Bash", lambda p: "sed -n 1p " + S),
+    ("less", "Bash", lambda p: "less " + S),
+    ("more", "Bash", lambda p: "more " + S),
+]
+P3_ACCEPTED_FALSE_BLOCK = [
+    ("find_name", "Bash", lambda p: "find . -name " + S),
+]
+#: One allowed row per mention word of the Mention positions sentence, with the bare script path as its argument.
+P3_MENTION_WORDS_BASH = [
+    ("echo", "Bash", lambda p: "echo " + S),
+    ("printf", "Bash", lambda p: "printf %s " + S),
+    ("cat", "Bash", lambda p: "cat " + S),
+    ("type", "Bash", lambda p: "type " + S),
+    ("head", "Bash", lambda p: "head -n 5 " + S),
+    ("tail", "Bash", lambda p: "tail -n 5 " + S),
+    ("wc", "Bash", lambda p: "wc -l " + S),
+    ("grep", "Bash", lambda p: "grep -n x " + S),
+    ("rg", "Bash", lambda p: "rg x " + S),
+    ("ls", "Bash", lambda p: "ls -l " + S),
+    ("cp", "Bash", lambda p: "cp " + S + " /tmp/copy.cmd"),
+    ("mv", "Bash", lambda p: "mv " + S + " /tmp/moved.cmd"),
+    ("rm", "Bash", lambda p: "rm " + S),
+    ("chmod", "Bash", lambda p: "chmod +x " + S),
+    ("which", "Bash", lambda p: "which " + S),
+    ("git-add", "Bash", lambda p: "git add " + S),
+    ("git-blame", "Bash", lambda p: "git blame " + S),
+    ("git-commit", "Bash", lambda p: "git commit -m x -- " + S),
+    ("git-diff", "Bash", lambda p: "git diff -- " + S),
+    ("git-grep", "Bash", lambda p: "git grep x -- " + S),
+    ("git-log", "Bash", lambda p: "git log -- " + S),
+    ("git-ls-files", "Bash", lambda p: "git ls-files " + S),
+    ("git-mv", "Bash", lambda p: "git mv " + S + " moved.cmd"),
+    ("git-restore", "Bash", lambda p: "git restore " + S),
+    ("git-rm", "Bash", lambda p: "git rm " + S),
+    ("git-show", "Bash", lambda p: "git show HEAD:" + S),
+    ("git-status", "Bash", lambda p: "git status -- " + S),
+    ("git-C-folder-log", "Bash", lambda p: "git -C . log -- " + S),
+    ("git-no-pager-log", "Bash", lambda p: "git --no-pager log -- " + S),
+    ("assignment-value", "Bash", lambda p: 'X="' + S + '"'),
+    ("substitution-argument-of-echo", "Bash", lambda p: "echo $(cat " + S + ")"),
+    ("pipe-chain-of-mentions", "Bash", lambda p: "cat " + S + " | grep . | head"),
+]
+P3_MENTION_WORDS_PS = [
+    ("Write-Host", "PowerShell", lambda p: "Write-Host " + B),
+    ("Write-Output", "PowerShell", lambda p: "Write-Output " + B),
+    ("write", "PowerShell", lambda p: "write " + B),
+    ("Get-Content", "PowerShell", lambda p: "Get-Content " + B),
+    ("gc", "PowerShell", lambda p: "gc " + B),
+    ("type", "PowerShell", lambda p: "type " + B),
+    ("Select-String", "PowerShell", lambda p: "Select-String -Pattern x -Path " + B),
+    ("sls", "PowerShell", lambda p: "sls x " + B),
+    ("dir", "PowerShell", lambda p: "dir " + B),
+    ("ls", "PowerShell", lambda p: "ls " + B),
+    ("gci", "PowerShell", lambda p: "gci " + B),
+    ("Get-ChildItem", "PowerShell", lambda p: "Get-ChildItem " + B),
+    ("Get-Item", "PowerShell", lambda p: "Get-Item " + B),
+    ("gi", "PowerShell", lambda p: "gi " + B),
+    ("Test-Path", "PowerShell", lambda p: "Test-Path " + B),
+    ("Copy-Item", "PowerShell", lambda p: "Copy-Item " + B + " copy.cmd"),
+    ("Move-Item", "PowerShell", lambda p: "Move-Item " + B + " moved.cmd"),
+    ("Remove-Item", "PowerShell", lambda p: "Remove-Item " + B),
+    ("Rename-Item", "PowerShell", lambda p: "Rename-Item " + B + " renamed.cmd"),
+    ("Get-Command", "PowerShell", lambda p: "Get-Command " + B),
+    ("where.exe", "PowerShell", lambda p: "where.exe " + B),
+    ("lowercase-write-host", "PowerShell", lambda p: "write-host " + B),
+    ("assignment-value", "PowerShell", lambda p: '$x = "' + B + '"'),
+]
+
+# ---- T1: name matching, continuation joining and the empty-quote splice ------------------------------
+_RESTORE_N = "restore-latest.cmd"
+T1_COPIED_UNARMED = [
+    ("X21", "PowerShell", lambda p: BACK_DIR + SCRIPT_STEM),
+    ("X21b", "Bash", lambda p: "cmd //c tools\\\\db-protection\\\\" + SCRIPT_STEM),
+    ("X23", "Bash", lambda p: FWD_DIR + "update-dev-\\\ndatabase.cmd"),
+    ("X24", "Bash", lambda p: FWD_DIR + "update-dev-''database.cmd"),
+    ("X22", "Bash", lambda p: FWD_DIR + _RESTORE_N + " \\\n" + RECOVER_FLAG),
+    ("X22p", "PowerShell", lambda p: BACK_DIR + _RESTORE_N + " `\n" + RECOVER_FLAG),
+]
+T1_COPIED_ARMED = [("A21", "PowerShell", lambda p: R + "; " + BACK_DIR + SCRIPT_STEM)]
+T1_CROSS_SHELL_MUTATION = [
+    ("ps_trailing_backslash", "PowerShell", lambda p: "Write-Host a \\\n" + B),
+    ("bash_backtick_newline", "Bash", lambda p: "echo `\n" + S + "`"),
+    ("bash_comment_ending_in_backslash", "Bash", lambda p: "# a note \\\n" + S),
+    ("ps_comment_ending_in_backtick", "PowerShell", lambda p: "# a note `\n" + B),
+]
+T1_CONTROLS_ALLOWED = [
+    ("cat_md_file", "Bash", lambda p: "cat " + FWD_DIR + SCRIPT_STEM + ".md"),
+    ("cat_notes_file", "Bash", lambda p: "cat " + FWD_DIR + SCRIPT_STEM + "-notes.txt"),
+]
+
+# ---- the controls t14 names ---------------------------------------------------------------------------
+CONTROLS_ALLOWED = [
+    ("CV1", "Bash", lambda p: "command -v " + S),
+    ("CV2", "Bash", lambda p: "command -V " + S),
+    ("CW1", "Bash", lambda p: "echo then " + S),
+    ("CW2", "Bash", lambda p: "grep -n time " + S),
+    ("CW3", "Bash", lambda p: 'git commit -m "docs: time ' + S + ' by hand"'),
+    ("CW4", "Bash", lambda p: 'git commit -m "docs: if x; then ' + S + '; fi"'),
+    ("M1c", "Bash", lambda p: "git commit -m 'docs: run `" + S + "` by hand'"),
+    ("M2", "Bash", lambda p: 'git commit -m "docs: run \\"' + S + '\\" by hand"'),
+    ("M2p", "PowerShell", lambda p: 'git commit -m "docs: run `"' + B + '`" by hand"'),
+    ("M3", "PowerShell", lambda p: 'Write-Host @"\nrun ' + B + ' by hand\n"@'),
+    ("M3b", "PowerShell", lambda p: 'git commit -m @"\ndocs: run ' + B + ' by hand\n"@'),
+    ("comment-names-the-script", "Bash", lambda p: "ls  # " + S + " is a person step"),
+    ("comment-line-names-the-script", "Bash", lambda p: "# " + S + " is run by a person\nls"),
+    ("comment-line-names-the-script", "PowerShell", lambda p: "# " + B + " is run by a person\nGet-ChildItem"),
+]
+CONTROL_CW5 = [("CW5", "Bash", lambda p: "command -v " + S + " ; git status")]
+ACCEPTED_FALSE_BLOCKS = [
+    ("M1", "PowerShell", lambda p: 'Write-Host "run `' + B + '` by hand"'),
+    ("M1b", "PowerShell", lambda p: 'git commit -m "docs: run `' + B + '` by hand"'),
+    ("M4", "Bash", lambda p: "cat <<'EOF'\n" + S + "\nEOF"),
+    ("X49", "Bash", lambda p: "command -pv " + S),
+]
+
+# ---- Escape rows, form 2 of 3 (the human-only script after the shape) -------------------------------
+#: (id, tool, text before the form, the form's tool). The form follows on the same line.
+ESCAPE_SHAPES = [
+    ("bash_escaped_quote", "Bash", 'echo "a\\" # b"; '),
+    ("ps_escaped_quote", "PowerShell", 'Write-Host "a`" # b"; '),
+    ("bash_escaped_space", "Bash", "echo a\\ # ; "),
+    ("ps_escaped_space", "PowerShell", "echo a` # ; "),
+    ("bash_ansi_c_quote", "Bash", "echo $'it\\'s' # note; "),
+    ("ps_doubled_quote", "PowerShell", 'Write-Host "say ""hi\\" # b"; '),
+]
+B15_ESCAPE_SCRIPT = [
+    (sid, tool, (lambda text, script: lambda p: text + script)(text, S if tool == "Bash" else B))
+    for sid, tool, text in ESCAPE_SHAPES
+]
+
+# ---- registration ------------------------------------------------------------------------------------
+_T = Block15Tests
+_register(_T, "copied", "b1_armed", B15_B1_ARMED_COPIED, _T._armed_blocks)
+_register(_T, "copied", "b1_unarmed", B15_B1_UNARMED_COPIED, _T._unarmed_blocks)
+# Class rows that already hold at the parent tip move to kind (3), named so: a Select-String line is not a prose
+# line to the masker, and the bash reading already keeps a backslash before a quote (it escapes it), so these
+# PowerShell backslash rows and the escaped-quote launcher row are read as invoked at the tip.
+_ALREADY_HOLDS = {
+    ("comment_select-string", "PowerShell"), ("after-separator", "PowerShell"), ("dq-backslash", "PowerShell"),
+    ("sq-backslash", "PowerShell"), ("launcher-dq-escaped", "Bash"),
+}
+_register(_T, "class", "comment", [r for r in B15_COMMENT_CLASS if (r[0], r[1]) not in _ALREADY_HOLDS],
+          _T._unarmed_blocks)
+_register(_T, "mutation", "comment", [r for r in B15_COMMENT_CLASS if (r[0], r[1]) in _ALREADY_HOLDS],
+          _T._unarmed_blocks)
+_register(_T, "class", "midword", [r for r in B15_MIDWORD_CLASS if (r[0], r[1]) not in _ALREADY_HOLDS], _T._unarmed_blocks)
+_register(_T, "mutation", "midword", [r for r in B15_MIDWORD_CLASS if (r[0], r[1]) in _ALREADY_HOLDS], _T._unarmed_blocks)
+_register(_T, "copied", "p2_unarmed", P2_COPIED_UNARMED, _T._unarmed_blocks)
+_register(_T, "copied", "p2_armed", P2_COPIED_ARMED, _T._armed_blocks)
+_register(_T, "class", "p2_long", B15_P2_CLASS_SEPARATE, _T._unarmed_blocks)
+_register(_T, "mutation", "p2_long", B15_P2_MUTATION_JOINED, _T._unarmed_blocks)
+_register(_T, "control", "p2", B15_P2_CONTROL_ALLOWED, _T._allowed)
+_register(_T, "copied", "p3_bash", P3_COPIED_BASH, _T._unarmed_blocks)
+_register(_T, "copied", "p3_ps", P3_COPIED_PS, _T._unarmed_blocks)
+_register(_T, "copied", "p3_armed", P3_COPIED_ARMED, _T._armed_blocks)
+_register(_T, "class", "p3_word", P3_CONSTRUCTED_WORDS, _T._unarmed_blocks)
+_register(_T, "class", "p3_exception", P3_EXCEPTION_A + P3_EXCEPTION_B + P3_EXCEPTION_C, _T._unarmed_blocks)
+_register(_T, "class", "p3_argument", P3_ARGUMENT_AND_ENVIRONMENT, _T._unarmed_blocks)
+_register(_T, "class", "p3_removed", P3_REMOVED_WORDS + P3_ACCEPTED_FALSE_BLOCK, _T._unarmed_blocks)
+_register(_T, "control", "p3_mention", P3_MENTION_WORDS_BASH + P3_MENTION_WORDS_PS, _T._allowed)
+_register(_T, "copied", "t1", T1_COPIED_UNARMED, _T._unarmed_blocks)
+_register(_T, "copied", "t1_armed", T1_COPIED_ARMED, _T._armed_blocks)
+_register(_T, "mutation", "t1_cross_shell", T1_CROSS_SHELL_MUTATION, _T._unarmed_blocks)
+_register(_T, "control", "t1", T1_CONTROLS_ALLOWED, _T._allowed)
+_register(_T, "control", "t14", CONTROLS_ALLOWED, _T._allowed)
+_register(_T, "control", "t14_armed", CONTROL_CW5, _T._armed_allowed_arm_kept)
+_register(_T, "control", "t14_false_block", ACCEPTED_FALSE_BLOCKS, _T._plain_blocks)
+_register(_T, "mutation", "escape_script", B15_ESCAPE_SCRIPT, _T._unarmed_blocks)
+# D8: armed, the EF removal after a comment apostrophe, asks and claims the arm.
+_register(_T, "copied", "d8", [
+    ("D8", "Bash", lambda p: 'echo "go"  # don\'t\n' + EF_REMOVAL + "\necho 'x'"),
+    ("D8", "PowerShell", lambda p: 'Write-Host "go"  # don\'t\n' + EF_REMOVAL + "\nWrite-Host 'x'"),
+], _T._armed_asks_and_claims)
+
+
+# ---- Arm-write rows (one guard per class, each guard as a separate process) -------------------------
+ARM_PATH = ".claude/database-override.once"
+ARM_WRITE_BASH = "touch " + ARM_PATH
+ARM_WRITE_PS = "New-Item -ItemType File " + ARM_PATH
+
+
+class _Block15ArmWriteRows:
+    def _arm_write_refused(self, rid: str, tool: str, command: str) -> None:
+        run = self.run_guard(self.shell(command, tool, tool_use_id=self.next_id()))
+        self.assert_blocks(run, "Arm-write rule, %s (%s)" % (rid, tool))
+        self.assertIn("database-override", run.err.lower(), "the refusal names the arm file")
+
+    def _arm_name_in_comment_allowed(self, rid: str, tool: str, command: str) -> None:
+        self.arm()
+        run = self.run_guard(self.shell(command, tool, tool_use_id=self.next_id()))
+        self.assertEqual(run.rc, 0, "a comment that only names the arm is not a write, %s (%s): %s" % (rid, tool, run))
+        self.assertTrue(self.arm_path.exists(), "a mention leaves the arm alone")
+
+
+B15_ARM_WRITE_COMMENT = [
+    ("comment_apostrophe", "Bash", lambda p: 'echo "x"  # don\'t\n' + ARM_WRITE_BASH + "\necho 'y'"),
+    ("comment_apostrophe", "PowerShell", lambda p: 'Write-Host "x"  # don\'t\n' + ARM_WRITE_PS + "\nWrite-Host 'y'"),
+]
+B15_ARM_WRITE_ESCAPE = [
+    (sid, tool, (lambda text, form: lambda p: text + form)(text, ARM_WRITE_BASH if tool == "Bash" else ARM_WRITE_PS))
+    for sid, tool, text in ESCAPE_SHAPES
+]
+B15_ARM_COMMENT_NAMES_ARM = [
+    ("comment_names_the_arm", "Bash", lambda p: "ls  # " + ARM_PATH + " is made by a person"),
+    ("comment_names_the_arm", "PowerShell", lambda p: "Get-ChildItem  # " + ARM_PATH + " is made by a person"),
+]
+
+
+class Block15DestructiveArmWriteTests(_Block15ArmWriteRows, OverrideTestCase):
+    GUARD = DESTRUCTIVE_HOOK
+
+
+class Block15ReadonlyArmWriteTests(_Block15ArmWriteRows, OverrideTestCase):
+    GUARD = READONLY_HOOK
+
+
+for _cls in (Block15DestructiveArmWriteTests, Block15ReadonlyArmWriteTests):
+    _register(_cls, "class", "arm_write", B15_ARM_WRITE_COMMENT, _Block15ArmWriteRows._arm_write_refused)
+    _register(_cls, "mutation", "arm_write_escape", B15_ARM_WRITE_ESCAPE, _Block15ArmWriteRows._arm_write_refused)
+    _register(_cls, "class", "arm_write_comment_names_arm", B15_ARM_COMMENT_NAMES_ARM,
+              _Block15ArmWriteRows._arm_name_in_comment_allowed)
 
 
 if __name__ == "__main__":
