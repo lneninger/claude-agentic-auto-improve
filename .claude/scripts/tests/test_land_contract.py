@@ -1111,6 +1111,8 @@ HALT_OUTCOMES = (
     # NAMED EDIT (#623 t1): the Protected-name gate inside P7. 27 halts and 30 outcomes. The TASK block says
     # "(26 halts)", counted before issue 113 added version-raise-failed; the tree already holds 26.
     "protected-names-removed",
+    # NAMED EDIT (#623 t33, Revision 13 B1): C14, a P7b commit outside the four manifests. 28 halts and 31 outcomes.
+    "version-raise-outside-manifests",
 )
 
 
@@ -1488,7 +1490,8 @@ class TestEdgeArgv(LandCase):
         with p_run as run, p_long as long_:
             push("feature/p", ".", "master", ["master", "main"])
         argv = self.argvs(run, long_)[0]
-        self.assertEqual(argv[:2], ["git", "push"], "the push edge runs git push")
+        # NAMED EDIT (#623 t33, Revision 13 B2): the program is compared by basename, it is an absolute path now (C13).
+        self.assertEqual([_program(argv[0]), argv[1]], ["git", "push"], "the push edge runs git push")
         self.assertIn("HEAD:refs/heads/feature/p", argv, "the destination is the parent branch")
         self.assertFalse([a for a in argv if a in ("-f", "--force", "--force-with-lease")
                           or a.startswith("--force") or a.startswith("+")],
@@ -2557,7 +2560,7 @@ class Stage:
             stage.argv_seen.append([str(c) for c in cmd])
             if cmd and str(cmd[0]) == "gh":
                 raise AssertionError("an unpatched gh edge reached _run: %r" % (cmd,))
-            if len(cmd) > 1 and str(cmd[0]) == "git" and str(cmd[1]) == "push":
+            if len(cmd) > 1 and _program(str(cmd[0])) == "git" and str(cmd[1]) == "push":  # NAMED EDIT (#623 t33, B2)
                 raise AssertionError("a git push reached _run: %r" % (cmd,))
             return orig_run(cmd, *a, **k)
 
@@ -4265,7 +4268,7 @@ class TestProtectedNamesLandingSets(LandCase):
         lc = self.mod()
         self.assertIn("protected-names-removed", lc.LANDING_OUTCOMES, "the closed set holds it")
         self.assertIn("protected-names-removed", lc.HALT_OUTCOMES, "and it is a halt")
-        self.assertEqual(len(lc.HALT_OUTCOMES), 27, "27 halts: the 26 already in the tree plus this one")
+        self.assertEqual(len(lc.HALT_OUTCOMES), 28, "28 halts: the 27 already in the tree plus C14's")  # NAMED EDIT (#623 t33, B1)
         self.assertEqual(lc.exit_code_for("protected-names-removed"), lc.EXIT_HALT, "a halt exits 9")
 
     def test_it_has_a_remedy_that_says_only_a_person_removes_a_protected_name(self):

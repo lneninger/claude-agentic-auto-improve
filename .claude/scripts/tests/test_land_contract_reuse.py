@@ -342,7 +342,7 @@ class TestVerifyOutcomeSets(T.LandCase):
         lc = self.mod()
         # NAMED EDIT (#623 block 2): was 29 (3 successes and 26 halts); protected-names-removed makes it
         # 30 outcomes, 27 of them halts.
-        self.assertEqual(len(lc.LANDING_OUTCOMES), 30, msg="3 successes and 27 halts (issue 113 adds "
+        self.assertEqual(len(lc.LANDING_OUTCOMES), 31, msg="3 successes and 28 halts (issue 113 adds "
                                                            "version-raise-failed; #623 adds "
                                                            "protected-names-removed)")
         self.assertEqual(set(lc.LANDING_OUTCOMES) & NEW_MEMBERS, set(), msg="none of the new four")
@@ -777,7 +777,7 @@ class TestManualLanding(T.StageCase):
         for edge in ("git_merge", "git_commit", "git_push", "gh_pr_create", "gh_pr_ready", "gh_pr_merge",
                      "worktree_remove", "_run_long"):
             self.assertEqual(st.count(edge), 0, "a manual landing must not call %s" % edge)
-        self.assertFalse(any(len(c) > 1 and c[0] == "git" and c[1] in ("reset", "clean", "push", "merge")
+        self.assertFalse(any(len(c) > 1 and os.path.basename(c[0]).lower().replace(".exe", "") == "git" and c[1] in ("reset", "clean", "push", "merge")
                              for c in st.argv_seen), "no reset, clean, push or merge command")
 
     def test_p1_finds_the_parent_brief_through_pr_merged_parent_brief_of(self):

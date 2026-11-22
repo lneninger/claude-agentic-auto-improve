@@ -76,8 +76,9 @@ HALT_OUTCOMES: Tuple[str, ...] = (
     "verification-not-ready", "push-rejected", "pr-mismatch", "pr-not-ready",
     "link-not-verified", "master-moved", "head-moved", "not-mergeable", "merge-refused",
     "merge-unconfirmed", "version-raise-failed", "protected-names-removed",
+    "version-raise-outside-manifests",
 )
-#: The closed Landing Outcome set: 3 successes and 27 halts.
+#: The closed Landing Outcome set: 3 successes and 28 halts.
 LANDING_OUTCOMES = frozenset(SUCCESS_OUTCOMES) | frozenset(HALT_OUTCOMES)
 #: The recording run's own outcomes (``--record-baseline``).
 BASELINE_OUTCOMES: Tuple[str, ...] = ("baseline-recorded", "landing-in-progress",
@@ -125,6 +126,10 @@ REMEDIES: Dict[str, str] = {
     "version-raise-failed": "repair the manifests named in the detail on the parent branch, then rerun",
     "protected-names-removed": "a protected database name may only be removed by a person: restore the names on "
                                "the parent branch as a remedy sub-task, or let a person merge the removal by hand",
+    "version-raise-outside-manifests": "the version raise committed a path that is not one of the four manifests "
+                                       "(or moved the head off the one it started from): inspect the landing "
+                                       "worktree's last commit, repair the version script or the manifests on the "
+                                       "parent branch, then rerun",
     "verification-not-ready": "fix the new failures named in the detail, or re-record the baseline",
     "push-rejected": "fetch, reconcile the parent branch with origin, then rerun",
     "pr-mismatch": "close or retarget the existing pull request for the parent branch",
@@ -158,6 +163,42 @@ def _run(cmd: Sequence[Any], cwd: Any = None, timeout: int = 60) -> Tuple[int, s
     if not out.strip():
         out = (proc.stderr or "").rstrip("\r\n")
     return proc.returncode, out
+
+
+# C13 (Revision 12): no git process of the landing is started by a bare name. The program is one absolute path,
+# found by ``resolve_git`` over the PATH entries that lie outside the project, kept here for the run in progress
+# (``run_landing`` binds it before its first git process and clears it when it ends); outside a landing it is
+# found afresh at each call. There is no module constant holding the bare name.
+_GIT_STATE: Dict[str, Any] = {"program": None, "excluded": []}
+NO_DEFAULT_CWD_VAR = "NoDefaultCurrentDirectoryInExePath"
+
+
+def _git_exe(git_program: Any = None) -> Optional[str]:
+    """The absolute path of the git program to start: the one named, else the landing's, else a fresh
+    ``resolve_git`` over PATH. None when no git lies outside the excluded folders."""
+    if git_program:
+        return str(git_program)
+    if _GIT_STATE["program"]:
+        return str(_GIT_STATE["program"])
+    return resolve_git(os.environ.get("PATH", ""), _GIT_STATE["excluded"])
+
+
+def _git_run(args: Sequence[Any], cwd: Any = None, timeout: int = 60,
+             git_program: Any = None) -> Tuple[int, str]:
+    """``_run`` for one git command: ``args`` are the arguments after the program. (127, why) when there is no
+    git program to start, so a caller reads it as a failed git call and no process starts."""
+    program = _git_exe(git_program)
+    if program is None:
+        return 127, "no git program was found outside the project folders"
+    return _run([program] + [str(a) for a in args], cwd=cwd, timeout=timeout)
+
+
+def _bind_git(excluded: Sequence[Any]) -> Optional[str]:
+    """Resolve the git program for the landing, keeping everything under ``excluded`` out of the search."""
+    folders = [str(e) for e in excluded if e]
+    program = resolve_git(os.environ.get("PATH", ""), folders)
+    _GIT_STATE["program"], _GIT_STATE["excluded"] = program, folders
+    return program
 
 
 def _kill_tree(proc: "subprocess.Popen[bytes]") -> None:
@@ -233,13 +274,13 @@ def probe_stage(path: Any) -> bool:
 
 def git_show(ref: str, path: str, cwd: Any = None) -> Optional[str]:
     """The text of ``path`` at ``ref``, or None when git cannot read it."""
-    rc, out = _run(["git", "show", "%s:%s" % (ref, path)], cwd=cwd)
+    rc, out = _git_run(["show", "%s:%s" % (ref, path)], cwd=cwd)
     return out if rc == 0 else None
 
 
 def git_ls_remote(ref: str, cwd: Any = None) -> Optional[str]:
     """The sha ``origin`` reports for ``ref`` right now (a fresh network read), or None."""
-    rc, out = _run(["git", "ls-remote", "origin", ref], cwd=cwd, timeout=120)
+    rc, out = _git_run(["ls-remote", "origin", ref], cwd=cwd, timeout=120)
     if rc != 0 or not out.strip():
         return None
     first = out.splitlines()[0].split()
@@ -251,17 +292,17 @@ def git_push(parent: str, cwd: Any, default_branch: str, protected: Iterable[str
     blocked = {default_branch} | set(protected or ())
     if not parent or parent in blocked or parent.startswith(("-", "+")) or ":" in parent:
         return 1, "refused: %r is the default branch, a protected branch or not a branch name" % (parent,)
-    return _run(["git", "push", "origin", "HEAD:refs/heads/%s" % parent], cwd=cwd, timeout=300)
+    return _git_run(["push", "origin", "HEAD:refs/heads/%s" % parent], cwd=cwd, timeout=300)
 
 
 def git_merge(ref: str, cwd: Any) -> Tuple[int, str]:
     """Merge ``ref`` into the checked-out head without committing, so conflicts can be resolved."""
-    return _run(["git", "merge", "--no-ff", "--no-commit", ref], cwd=cwd, timeout=300)
+    return _git_run(["merge", "--no-ff", "--no-commit", ref], cwd=cwd, timeout=300)
 
 
 def git_commit(cwd: Any, message: str) -> Tuple[int, str]:
     """Commit the staged merge. Hooks are skipped: this commit is verified by the gate, not by a hook."""
-    return _run(["git", "commit", "--no-verify", "-m", message], cwd=cwd, timeout=300)
+    return _git_run(["commit", "--no-verify", "-m", message], cwd=cwd, timeout=300)
 
 
 def gh_auth_status(cwd: Any = None) -> bool:
@@ -442,7 +483,7 @@ def write_bookkeeping(checkout: Any, parent_brief: str, pr: Dict[str, Any], repo
 
 
 def list_worktrees(cwd: Any) -> List[str]:
-    rc, out = _run(["git", "worktree", "list", "--porcelain"], cwd=cwd)
+    rc, out = _git_run(["worktree", "list", "--porcelain"], cwd=cwd)
     if rc != 0:
         raise RuntimeError("git worktree list failed: %s" % out)
     return [ln.split(" ", 1)[1].strip() for ln in out.splitlines() if ln.startswith("worktree ")]
@@ -454,14 +495,14 @@ def worktree_remove(path: Any) -> None:
     C1: the path must be a landing worktree by name and folder, checked again here, right before
     the removal, whatever the caller already decided.
     """
-    rc, out = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path)
+    rc, out = _git_run(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path)
     if rc != 0 or not out.strip():
         raise RuntimeError("cannot locate the repository of %s: %s" % (path, out))
     root = Path(out.strip()).parent
     if not is_landing_worktree(path, root):
         raise RuntimeError("%s is not a landing worktree (<main root>/.claude/worktrees/<8 digits>-land-"
                            "<issue or baseline>); refusing to remove it" % path)
-    rc, out = _run(["git", "worktree", "remove", str(path)], cwd=root, timeout=180)
+    rc, out = _git_run(["worktree", "remove", str(path)], cwd=root, timeout=180)
     if rc != 0:
         raise RuntimeError(out or "git worktree remove failed")
 
@@ -510,7 +551,7 @@ class OwnerMarkerMissing(ValueError):
 
 
 def _owner_marker_path(path: Any) -> Optional[Path]:
-    rc, out = _run(["git", "rev-parse", "--absolute-git-dir"], cwd=path)
+    rc, out = _git_run(["rev-parse", "--absolute-git-dir"], cwd=path)
     return Path(out.strip()) / OWNER_MARKER if rc == 0 and out.strip() else None
 
 
@@ -554,15 +595,15 @@ def worktree_reset(path: Any, main_root: Any, slug: str, ref: Optional[str] = No
         raise OwnerMarkerMissing(path)
     if ref:
         landing_only()
-        rc, out = _run(["git", "checkout", "--detach"], cwd=path)
+        rc, out = _git_run(["checkout", "--detach"], cwd=path)
         if rc != 0:
             raise RuntimeError("git checkout --detach failed: %s" % out)
     landing_only()
-    rc, out = _run(["git", "reset", "--hard", ref or "HEAD"], cwd=path, timeout=300)
+    rc, out = _git_run(["reset", "--hard", ref or "HEAD"], cwd=path, timeout=300)
     if rc != 0:
         raise RuntimeError("git reset --hard failed: %s" % out)
     landing_only()
-    rc, out = _run(["git", "clean", "-fd"], cwd=path, timeout=300)
+    rc, out = _git_run(["clean", "-fd"], cwd=path, timeout=300)
     if rc != 0:
         raise RuntimeError("git clean failed: %s" % out)
 
@@ -646,7 +687,7 @@ def resolve_roots(path: Any) -> Dict[str, Path]:
     ``state_dir`` / ``logs_dir`` locators run, and refuses a result outside the main root, so the
     runtime can never fall back to the home directory.
     """
-    rc, out = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path)
+    rc, out = _git_run(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path)
     if rc != 0 or not out.strip():
         raise RuntimeError("cannot find the main checkout from %s: %s" % (path, out))
     main_root = Path(out.strip()).parent
@@ -1077,8 +1118,11 @@ def _merge_file_text(base: str, ours: str, theirs: str) -> str:
         for name, text in names.items():
             with open(os.path.join(tmp, name + ".txt"), "w", encoding="utf-8", newline="") as fh:
                 fh.write(text)
+        program = _git_exe()
+        if program is None:
+            raise RuntimeError("no git program was found outside the project folders")
         proc = subprocess.run(
-            ["git", "-c", "core.autocrlf=false", "merge-file", "-p", "--diff3",
+            [program, "-c", "core.autocrlf=false", "merge-file", "-p", "--diff3",
              "-L", "ours", "-L", "base", "-L", "theirs", "ours.txt", "base.txt", "theirs.txt"],
             cwd=tmp, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
     if proc.returncode < 0 or proc.returncode > 127:
@@ -1939,7 +1983,7 @@ def exit_code_for(outcome: str) -> int:
 # Git reading helpers used by the stages
 # ---------------------------------------------------------------------------
 def _git(cwd: Any, *args: str, timeout: int = 120) -> Tuple[int, str]:
-    return _run(["git", "-c", "core.quotepath=false"] + list(args), cwd=cwd, timeout=timeout)
+    return _git_run(["-c", "core.quotepath=false"] + list(args), cwd=cwd, timeout=timeout)
 
 
 def rev_parse(cwd: Any, ref: str) -> Optional[str]:
@@ -1972,8 +2016,11 @@ def detect_default_branch(cwd: Any) -> str:
 
 def _blob(cwd: Any, spec: str) -> Optional[str]:
     """Exact text of a staged blob (``:2:path``), keeping its trailing newline."""
+    program = _git_exe()
+    if program is None:
+        return None
     try:
-        proc = subprocess.run(["git", "show", spec], cwd=str(cwd), capture_output=True, timeout=60)
+        proc = subprocess.run([program, "show", spec], cwd=str(cwd), capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
@@ -2108,8 +2155,17 @@ def run_landing(args: Dict[str, Any]) -> Dict[str, Any]:
     slug, run_id = args["contract"], args["run_id"]
     roots: Optional[Dict[str, Path]] = None
     notes: List[str] = []
+    os.environ[NO_DEFAULT_CWD_VAR] = "1"  # C13: the current folder is out of every program search, here and in children
     try:
+        # C13: the git program is found BEFORE the first git process, outside the folders the arguments name.
+        arg_folders = [args.get(k) for k in ("project_root", "checkout", "worktree")]
+        if _bind_git(arg_folders) is None:
+            raise _Halt("unverifiable", "P0", "no git program was found outside the project folders, so nothing "
+                                              "about the repository can be read")
         roots = resolve_roots(args["project_root"])
+        if _bind_git(arg_folders + [roots["main_root"]]) is None:
+            raise _Halt("unverifiable", "P0", "no git program was found outside the project folders, so nothing "
+                                              "about the repository can be read")
         contract_dir = roots["landing_root"] / slug
         previous = _read_json(contract_dir / "report.json")
         report = _land(args, roots, contract_dir, notes, previous if isinstance(previous, dict) else {})
@@ -2124,9 +2180,12 @@ def run_landing(args: Dict[str, Any]) -> Dict[str, Any]:
         report = make_report(run_id, slug, "environment-failure", "unexpected",
                              "%s: %s\n%s" % (type(exc).__name__, exc, traceback.format_exc(limit=6)),
                              notes=notes, parent_branch=args.get("parent"))
-    if roots is not None:
-        write_report(roots["landing_root"] / slug, report)
-        lock_release(roots["landing_root"], run_id)  # L-17: report.json first, then the run's own lock
+    try:
+        if roots is not None:
+            write_report(roots["landing_root"] / slug, report)
+            lock_release(roots["landing_root"], run_id)  # L-17: report.json first, then the run's own lock
+    finally:
+        _GIT_STATE["program"], _GIT_STATE["excluded"] = None, []
     return report
 
 
@@ -2351,7 +2410,8 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
     # second run changes nothing. Under `landing: manual` P1 has already ended the run (R-4).
     phase("p7b")
     if (config or {}).get("versionRaise") is True:
-        failure = _p7b_version_raise(wt, default, (config or {}).get("manifestCounts") is True)
+        failure = _p7b_version_raise(wt, default, (config or {}).get("manifestCounts") is True,
+                                     git_program=_git_exe())
         if failure:
             facts["p7b_version_raise_failed"] = True
             details["version-raise-failed"] = failure
@@ -2359,6 +2419,11 @@ def _land(args: Dict[str, Any], roots: Dict[str, Path], contract_dir: Path, note
             merge_diff = diff_names(wt, mark_p, rev_parse(wt, "HEAD"))
     gate_check("P7b")
     head = rev_parse(wt, "HEAD")
+    # C14: P7b's child may commit only the four manifests, on top of the head read before it.
+    if (config or {}).get("versionRaise") is True or head != head_before_p7b:
+        stray = _outside_manifests(wt, head_before_p7b, head)
+        if stray:
+            raise halt("version-raise-outside-manifests", "P7b", stray)
     phase("p8", merge_commit=head)
 
     # ---- P8 verification --------------------------------------------------------------------------
@@ -3146,7 +3211,23 @@ def _p7_protected_names(wt: Path, mark_m: str, head: str, facts: Dict[str, Any],
             else (result.get("reason") or "the rules file cannot be read"))
 
 
-def _p7b_version_raise(wt: Path, default: str, counts: bool = False) -> Optional[str]:
+def _outside_manifests(wt: Path, before: Optional[str], head: Optional[str]) -> Optional[str]:
+    """C14: None when ``head`` descends from ``before`` and every path changed between them is one of
+    ``MANIFESTS``; otherwise why not."""
+    if not before or not head:
+        return "the head before or after the version raise cannot be read"
+    if not is_ancestor(wt, before, head):
+        return "the head after the version raise (%s) does not descend from the head read before it (%s)" % (head, before)
+    rc, out = _git(wt, "diff", "--name-only", before, head)
+    if rc != 0:
+        return "the paths the version raise changed cannot be listed: %s" % out
+    stray = sorted(p.strip() for p in out.splitlines() if p.strip() and p.strip() not in MANIFESTS)
+    if stray:
+        return "the version raise changed paths that are not version files: %s" % ", ".join(stray)
+    return None
+
+
+def _p7b_version_raise(wt: Path, default: str, counts: bool = False, *, git_program: Any) -> Optional[str]:
     """Run ``check_version_bump.py --raise`` then ``--exact`` in the landing worktree; None, or why it failed.
 
     ``counts`` (``contractLanding.manifestCounts is True``) adds ``--manifest-counts`` to both runs: the raise
@@ -3157,7 +3238,8 @@ def _p7b_version_raise(wt: Path, default: str, counts: bool = False) -> Optional
     script = SCRIPTS_DIR / "check_version_bump.py"
     for mode in ("--raise", "--exact"):
         flags = [mode, "--manifest-counts"] if counts else [mode]
-        rc, out = _run([sys.executable, "-B", str(script), *flags, "--default-branch", default], cwd=wt, timeout=120)
+        rc, out = _run([sys.executable, "-B", str(script), *flags, "--default-branch", default,
+                        "--git-program", str(git_program)], cwd=wt, timeout=120)
         if rc != 0:
             return "check_version_bump.py %s failed (exit %s): %s" % (mode, rc, out)
     return None
@@ -3365,6 +3447,7 @@ def _resolve_slug(checkout: Path, given: str) -> str:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    os.environ[NO_DEFAULT_CWD_VAR] = "1"  # C13: for this process and every child it starts
     ap = argparse.ArgumentParser(description="Land a completed contract's parent branch on the default branch.")
     ap.add_argument("--contract", help="contract slug")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
@@ -3424,7 +3507,7 @@ DRIFT_NOT_APPLICABLE = "verify-here: Step 4 regenerates, compares and stages in 
 
 
 def _current_checkout() -> Optional[Path]:
-    rc, top = _run(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd())
+    rc, top = _git_run(["rev-parse", "--show-toplevel"], cwd=os.getcwd())
     return Path(top.strip()) if rc == 0 and top.strip() else None
 
 
@@ -3656,7 +3739,7 @@ def _verify_here(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
 
 def launch(args: "argparse.Namespace") -> int:
     """P0 and the other launcher duties, from the operator's checkout."""
-    rc, top = _run(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd())
+    rc, top = _git_run(["rev-parse", "--show-toplevel"], cwd=os.getcwd())
     if rc != 0 or not top.strip():
         print(json.dumps({"error": "not-a-repository", "detail": top}))
         return 2
@@ -3754,11 +3837,11 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
         return finish("gh-repo-set", "P0", "GH_REPO is set, which would retarget every gh call")
 
     refspecs = ["+refs/heads/%s:refs/remotes/origin/%s" % (b, b) for b in (parent, default)]
-    rc, out = _run(["git", "fetch", "origin"] + refspecs, cwd=main_root, timeout=300)
+    rc, out = _git_run(["fetch", "origin"] + refspecs, cwd=main_root, timeout=300)
     if rc != 0:
         return finish("unverifiable", "P0", "git fetch failed: %s" % out)
     records_branch = "docs/%s-records" % slug
-    _run(["git", "fetch", "origin", "+refs/heads/%s:refs/remotes/origin/%s" % (records_branch, records_branch)],
+    _git_run(["fetch", "origin", "+refs/heads/%s:refs/remotes/origin/%s" % (records_branch, records_branch)],
          cwd=main_root, timeout=300)
 
     refs = [r for r in ("origin/%s" % parent, "origin/%s" % records_branch, "origin/%s" % default)
@@ -3770,7 +3853,7 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
     if linked is not None and linked not in own:
         own.append(linked)
     absent = [b["_path"] for b in own
-              if not any(_run(["git", "cat-file", "-e", "%s:%s" % (r, b["_path"])], cwd=main_root)[0] == 0
+              if not any(_git_run(["cat-file", "-e", "%s:%s" % (r, b["_path"])], cwd=main_root)[0] == 0
                          for r in refs)]
     if absent:
         return finish("not-complete", "P0", "briefs on the operator's disk are on none of the fetched refs: "
@@ -3789,7 +3872,7 @@ def _launch_land(args: "argparse.Namespace", checkout: Path, roots: Dict[str, Pa
     path = Path(plan["path"])
     try:
         if plan["create"]:
-            rc, out = _run(["git", "worktree", "add", "--detach", str(path), "origin/%s" % parent],
+            rc, out = _git_run(["worktree", "add", "--detach", str(path), "origin/%s" % parent],
                            cwd=main_root, timeout=300)
             if rc != 0:
                 return finish("environment-failure", "P0", "cannot create the landing worktree: %s" % out)
@@ -3838,7 +3921,7 @@ def _launch_baseline(args: "argparse.Namespace", checkout: Path, roots: Dict[str
                      finish: Any, scope_dir: Path) -> int:
     main_root = roots["main_root"]
     default = detect_default_branch(checkout)
-    rc, out = _run(["git", "fetch", "origin", "+refs/heads/%s:refs/remotes/origin/%s" % (default, default)],
+    rc, out = _git_run(["fetch", "origin", "+refs/heads/%s:refs/remotes/origin/%s" % (default, default)],
                    cwd=main_root, timeout=300)
     if rc != 0:
         return finish("unverifiable", "P0", "git fetch failed: %s" % out)
@@ -3852,7 +3935,7 @@ def _launch_baseline(args: "argparse.Namespace", checkout: Path, roots: Dict[str
     path = Path(plan["path"])
     try:
         if plan["create"]:
-            rc, out = _run(["git", "worktree", "add", "--detach", str(path), "origin/%s" % default],
+            rc, out = _git_run(["worktree", "add", "--detach", str(path), "origin/%s" % default],
                            cwd=main_root, timeout=300)
             if rc != 0:
                 return finish("environment-failure", "P0", "cannot create the baseline worktree: %s" % out)

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -146,8 +147,21 @@ def raise_manifests(wanted: str, refreshed: Optional[Dict[str, str]] = None) -> 
     return version_changed or counts_changed
 
 
+#: C13: the absolute git program ``--git-program`` named (validated by ``main`` before anything runs); None when
+#: the flag is absent.
+_git_program: Optional[str] = None
+
+
+def _git_command(*args: str) -> List[str]:
+    """The argv of every git process this script starts: the ``--git-program`` path when it was given, the bare
+    name only when the flag is absent (the one place this script names git)."""
+    if _git_program:
+        return [_git_program, *args]
+    return ["git", *args]
+
+
 def _git(*args: str, cwd: Optional[str] = None) -> str:
-    return subprocess.run(["git", *args], capture_output=True, text=True, check=True, cwd=cwd).stdout
+    return subprocess.run(_git_command(*args), capture_output=True, text=True, check=True, cwd=cwd).stdout
 
 
 def is_non_default_base(base_ref: Optional[str], default_ref: Optional[str]) -> bool:
@@ -240,7 +254,7 @@ def tree_paths(cwd: Optional[str] = None) -> List[str]:
     decoded as UTF-8 with ``surrogateescape`` rather than through ``_git``'s locale text decoding (D4).
     A git failure raises ``subprocess.CalledProcessError``.
     """
-    raw = subprocess.run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD"], capture_output=True,
+    raw = subprocess.run(_git_command("ls-tree", "-r", "-z", "--name-only", "HEAD"), capture_output=True,
                          check=True, cwd=cwd).stdout
     return [chunk.decode("utf-8", "surrogateescape") for chunk in raw.split(b"\0") if chunk]
 
@@ -447,7 +461,7 @@ def tree_measures(cwd: Optional[str] = None) -> Tuple[Optional[Dict[str, int]], 
 
 def _head_manifest_texts(cwd: Optional[str] = None) -> Dict[str, str]:
     """Each manifest as HEAD holds it, decoded as UTF-8 (a decode failure is a ``ValueError``)."""
-    return {name: subprocess.run(["git", "show", "HEAD:" + name], capture_output=True, check=True,
+    return {name: subprocess.run(_git_command("show", "HEAD:" + name), capture_output=True, check=True,
                                  cwd=cwd).stdout.decode("utf-8") for name in MANIFESTS}
 
 
@@ -494,7 +508,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     modes.add_argument("--raise", dest="raise_version", action="store_true")
     modes.add_argument("--counts", action="store_true")
     parser.add_argument("--manifest-counts", action="store_true")
+    parser.add_argument("--git-program", default=None,
+                        help="the absolute path of the git program every git process of this script starts")
     args = parser.parse_args(argv)
+    global _git_program
+    _git_program = None
+    if args.git_program is not None:
+        # C13: an absolute path to an existing file, or nothing runs: a relative one would be looked up from the
+        # working folder, which is the planted-program case this option closes.
+        if not (os.path.isabs(args.git_program) and os.path.isfile(args.git_program)):
+            print("VERSION BUMP: --git-program must be the absolute path of an existing file: %s" % args.git_program)
+            return 2
+        _git_program = args.git_program
     if args.manifest_counts and not (args.exact or args.raise_version):
         print("VERSION BUMP: --manifest-counts rides on --raise or --exact only (use --counts to check the counts alone)")
         return 2
