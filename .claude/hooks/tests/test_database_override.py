@@ -1499,7 +1499,7 @@ _LONG_OPTIONS = (
     ("--prompt", "sudo", "p", ""), ("--close-from", "sudo", "5", ""), ("--chdir", "sudo", "/tmp", ""),
     ("--role", "sudo", "r", ""), ("--type", "sudo", "t", ""), ("--other-user", "sudo", "u", ""),
     ("--unset", "env", "NAME", ""), ("--adjustment", "nice", "10", ""),
-    ("--replace", "xargs", "{}", ""), ("--max-args", "xargs", "1", ""), ("--max-procs", "xargs", "2", ""),
+    ("--replace", "xargs", "R", ""), ("--max-args", "xargs", "1", ""), ("--max-procs", "xargs", "2", ""),
     ("--max-lines", "xargs", "3", ""), ("--delimiter", "xargs", ",", ""), ("--arg-file", "xargs", "f", ""),
     ("--eof", "xargs", "E", ""), ("--max-chars", "xargs", "100", ""),
 )
@@ -1521,6 +1521,14 @@ B15_P2_MUTATION_JOINED = [
 ]
 B15_P2_CONTROL_ALLOWED = [
     ("nice_adjustment_cat", "Bash", lambda p: "nice --adjustment 10 cat " + S),
+    # The same mention after a valued long option whose value is after = (these fail when an option that holds =
+    # also skips the next word, which is the proof the = rows above cannot give: they block whatever is skipped).
+    ("nice_adjustment_equals_cat", "Bash", lambda p: "nice --adjustment=10 cat " + S),
+    ("sudo_user_separate_cat", "Bash", lambda p: "sudo --user root cat " + S),
+    ("sudo_user_equals_cat", "Bash", lambda p: "sudo --user=root cat " + S),
+    ("timeout_signal_separate_cat", "Bash", lambda p: "timeout --signal KILL 5 cat " + S),
+    ("timeout_signal_equals_cat", "Bash", lambda p: "timeout --signal=KILL 5 cat " + S),
+    ("xargs_max_args_equals_cat", "Bash", lambda p: "echo x | xargs --max-args=1 cat " + S),
 ]
 
 # ---- P3: the inverted classifier ---------------------------------------------------------------------
@@ -1767,6 +1775,7 @@ _register(_T, "copied", "d8", [
     ("D8", "Bash", lambda p: 'echo "go"  # don\'t\n' + EF_REMOVAL + "\necho 'x'"),
     ("D8", "PowerShell", lambda p: 'Write-Host "go"  # don\'t\n' + EF_REMOVAL + "\nWrite-Host 'x'"),
 ], _T._armed_asks_and_claims)
+del _T   # an alias would make the loader collect the class twice
 
 
 # ---- Arm-write rows (one guard per class, each guard as a separate process) -------------------------
@@ -1815,6 +1824,7 @@ for _cls in (Block15DestructiveArmWriteTests, Block15ReadonlyArmWriteTests):
     _register(_cls, "mutation", "arm_write_escape", B15_ARM_WRITE_ESCAPE, _Block15ArmWriteRows._arm_write_refused)
     _register(_cls, "class", "arm_write_comment_names_arm", B15_ARM_COMMENT_NAMES_ARM,
               _Block15ArmWriteRows._arm_name_in_comment_allowed)
+del _cls   # a loop variable would make the loader collect the last class twice
 
 
 if __name__ == "__main__":

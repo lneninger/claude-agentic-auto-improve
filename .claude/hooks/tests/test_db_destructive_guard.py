@@ -2307,8 +2307,10 @@ CASES += [
     *[_t15("mutation", f"PowerShell here-string {label} holding a #temp name then a removal",
            _ps(text), 2)
       for label, text in (
-          ('@"', '$q = @"\n' + _T15_TEMP_LINE + '\n"@\nsqlcmd -S localhost -Q $q'),
-          ("@'", "$q = @'\n" + _T15_TEMP_LINE + "\n'@\nsqlcmd -S localhost -Q $q"),
+          # One quote of the here-string's own kind sits inside the body: a reader that does not know here-strings
+          # pairs it with the opener, so the `#temp` that follows would look like a comment to it.
+          ('@"', '$q = @"\n' + _T15_TEMP_LINE.replace("SELECT 1", 'SELECT "x') + '\n"@\nsqlcmd -S localhost -Q $q'),
+          ("@'", "$q = @'\n" + _T15_TEMP_LINE.replace("SELECT 1", "SELECT 'x") + "\n'@\nsqlcmd -S localhost -Q $q"),
       )],
     _t15("mutation", "PowerShell --% then # then a removal on the same line",
          _ps("native.exe --% # " + _T15_REMOVAL), 2),
@@ -2319,7 +2321,7 @@ CASES += [
           ("a#b", "echo a#b ; " + _T15_REMOVAL),
       )],
     _t15("mutation", "PowerShell <# block whose second line is a removal",
-         _ps("<# note\n" + _T15_REMOVAL + "\n#>"), 2),
+         _ps("<# note\n# " + _T15_REMOVAL + "\n#>"), 2),
 
     # Escape rows (mutation), form 1 of 3: the EF removal after the shape. (Forms 2 and 3, the human-only script and
     # an arm write, are in test_database_override.py.)
