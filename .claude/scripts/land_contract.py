@@ -1996,7 +1996,7 @@ def is_ancestor(cwd: Any, ancestor: str, descendant: str) -> bool:
 
 
 def diff_names(cwd: Any, *args: str) -> List[str]:
-    rc, out = _git(cwd, "diff", "--name-only", *args)
+    rc, out = _git(cwd, "diff", "--name-only", "--no-renames", *args)  # both paths of a rename are listed
     return [ln.strip() for ln in out.splitlines() if ln.strip()] if rc == 0 else []
 
 
@@ -2155,6 +2155,7 @@ def run_landing(args: Dict[str, Any]) -> Dict[str, Any]:
     slug, run_id = args["contract"], args["run_id"]
     roots: Optional[Dict[str, Path]] = None
     notes: List[str] = []
+    var_before = os.environ.get(NO_DEFAULT_CWD_VAR)  # restored in the finally below (D4)
     os.environ[NO_DEFAULT_CWD_VAR] = "1"  # C13: the current folder is out of every program search, here and in children
     try:
         # C13: the git program is found BEFORE the first git process, outside the folders the arguments name.
@@ -2163,7 +2164,11 @@ def run_landing(args: Dict[str, Any]) -> Dict[str, Any]:
             raise _Halt("unverifiable", "P0", "no git program was found outside the project folders, so nothing "
                                               "about the repository can be read")
         roots = resolve_roots(args["project_root"])
-        if _bind_git(arg_folders + [roots["main_root"]]) is None:
+        try:  # C7: the main checkout and every linked worktree of it, read from files
+            excluded_trees = linked_worktrees(roots["main_root"])
+        except GitFailure as exc:
+            raise _Halt("unverifiable", "P0", "the folders to keep git programs out of cannot be read: %s" % exc)
+        if _bind_git(arg_folders + excluded_trees) is None:
             raise _Halt("unverifiable", "P0", "no git program was found outside the project folders, so nothing "
                                               "about the repository can be read")
         contract_dir = roots["landing_root"] / slug
@@ -2186,6 +2191,10 @@ def run_landing(args: Dict[str, Any]) -> Dict[str, Any]:
             lock_release(roots["landing_root"], run_id)  # L-17: report.json first, then the run's own lock
     finally:
         _GIT_STATE["program"], _GIT_STATE["excluded"] = None, []
+        if var_before is None:  # D4: the variable is this landing's own; a caller's value comes back as it was
+            os.environ.pop(NO_DEFAULT_CWD_VAR, None)
+        else:
+            os.environ[NO_DEFAULT_CWD_VAR] = var_before
     return report
 
 
@@ -3218,7 +3227,8 @@ def _outside_manifests(wt: Path, before: Optional[str], head: Optional[str]) -> 
         return "the head before or after the version raise cannot be read"
     if not is_ancestor(wt, before, head):
         return "the head after the version raise (%s) does not descend from the head read before it (%s)" % (head, before)
-    rc, out = _git(wt, "diff", "--name-only", before, head)
+    # --no-renames: rename detection prints only the destination, which would hide a file renamed onto a manifest
+    rc, out = _git(wt, "diff", "--name-only", "--no-renames", before, head)
     if rc != 0:
         return "the paths the version raise changed cannot be listed: %s" % out
     stray = sorted(p.strip() for p in out.splitlines() if p.strip() and p.strip() not in MANIFESTS)
@@ -3446,7 +3456,52 @@ def _resolve_slug(checkout: Path, given: str) -> str:
     return matches[0].stem if len(matches) == 1 else name
 
 
+def _launcher_excluded_roots() -> Optional[List[str]]:
+    """D2: the current folder, its checkout (the nearest folder at or above it holding ``.git``) and every tree
+    C7's ``linked_worktrees`` lists for it, read from files with no git process. None when a pointer cannot be read."""
+    here = Path(os.getcwd())
+    top = next((p for p in [here, *here.parents] if os.path.lexists(str(p / ".git"))), here)
+    try:
+        return [str(here)] + linked_worktrees(top)
+    except GitFailure:
+        return None
+
+
+def _bind_launcher_git(args: "argparse.Namespace") -> Optional[int]:
+    """D2: bind the git program before the launcher's first git process. None when bound (or when a landing stage
+    is starting, which binds and reports for itself); else the exit code after an ``unverifiable`` report."""
+    folders = _launcher_excluded_roots()
+    if folders is not None and _bind_git(folders) is not None:
+        return None
+    if args.stage:
+        return None
+    detail = ("no git program was found outside the current checkout and its worktrees, so nothing about the "
+              "repository can be read")
+    _emit(_lean_report("unverifiable", "P0", detail), args.json)
+    return exit_code_for("unverifiable")
+
+
+def _bind_launcher_main_root(roots: Dict[str, Path], args: "argparse.Namespace") -> Optional[int]:
+    """D2: bind again once the main root is known (only when ``main`` bound the program for this run)."""
+    if not _GIT_STATE["program"]:
+        return None
+    if _bind_git(list(_GIT_STATE["excluded"]) + [str(roots["main_root"])]) is not None:
+        return None
+    detail = "no git program was found outside the main checkout and its worktrees, so nothing about the repository can be read"
+    _emit(_lean_report("unverifiable", "P0", detail), args.json)
+    return exit_code_for("unverifiable")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """The command line. The git program the run bound is cleared when it ends, whatever it returns."""
+    saved = dict(_GIT_STATE)
+    try:
+        return _main(argv)
+    finally:
+        _GIT_STATE.update(saved)
+
+
+def _main(argv: Optional[Sequence[str]] = None) -> int:
     os.environ[NO_DEFAULT_CWD_VAR] = "1"  # C13: for this process and every child it starts
     ap = argparse.ArgumentParser(description="Land a completed contract's parent branch on the default branch.")
     ap.add_argument("--contract", help="contract slug")
@@ -3474,10 +3529,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--out", help=argparse.SUPPRESS)
     args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
 
+    if args.stage and args.probe:
+        print("land-stage-ok")
+        return EXIT_OK
+    refused = _bind_launcher_git(args)  # D2: before any git process of any entry point below
+    if refused is not None:
+        return refused
     if args.stage:
-        if args.probe:
-            print("land-stage-ok")
-            return EXIT_OK
         worktree = args.worktree or os.getcwd()
         if args.stage == "land":
             report = run_landing({"contract": args.contract, "parent": args.parent,
@@ -3603,6 +3661,9 @@ def launch_verify_here(args: "argparse.Namespace") -> int:
     except RuntimeError as exc:
         print(json.dumps({"error": "environment-failure", "detail": str(exc)}))
         return EXIT_HALT
+    refused = _bind_launcher_main_root(roots, args)
+    if refused is not None:
+        return refused
     if args.status:
         located = verify_locator(roots, run_id)  # type: ignore[arg-type]
         print(json.dumps(located, indent=2, default=str) if args.json else "state: %s" % located["state"])
@@ -3749,6 +3810,9 @@ def launch(args: "argparse.Namespace") -> int:
     except RuntimeError as exc:
         print(json.dumps({"error": "environment-failure", "detail": str(exc)}))
         return EXIT_HALT
+    refused = _bind_launcher_main_root(roots, args)
+    if refused is not None:
+        return refused
     main_root, landing_dir = roots["main_root"], roots["landing_root"]
     baseline_run = bool(args.record_baseline)
     slug = None if baseline_run else _resolve_slug(checkout, args.contract)

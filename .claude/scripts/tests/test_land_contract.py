@@ -6382,3 +6382,156 @@ class TestT32VersionRaiseSeamForTheGitProgram(unittest.TestCase):
         param = params["git_program"]
         self.assertEqual(param.kind, inspect.Parameter.KEYWORD_ONLY, "it is keyword-only, so no caller passes it by position")
         self.assertIs(param.default, inspect.Parameter.empty, "and it has no default, so no caller can leave it out")
+
+
+# ===========================================================================
+# Contract 2026-10-13-database-guard-names-in-rules-file, Revision 14, block 33 second pass: two rows (R14-1, R14-2)
+# for the two defects the independent review of plugin pull request 471 found.
+#
+# R14-1: `git diff --name-only <before> <head>` detects renames and prints only the destination, so a rename of a
+# file that is not a manifest onto a manifest path passed C14. R14-2: only run_landing bound the git program; the
+# launcher's own git starts (main() and everything under it) took a fresh resolve_git over PATH with no excluded
+# folder, so a git planted on a PATH entry inside the operator's checkout answered them.
+# ===========================================================================
+R14_STANDIN = r'''import os, re, subprocess, sys
+GIT = @GIT@
+MANIFESTS = @MANIFESTS@
+MODE = @MODE@
+SOURCE = @SOURCE@
+TARGET = @TARGET@
+
+
+def git(*a):
+    return subprocess.run([GIT] + list(a), check=True, capture_output=True, text=True).stdout.strip()
+
+
+if "--raise" in sys.argv and MODE == "rename":
+    os.makedirs(os.path.dirname(TARGET) or ".", exist_ok=True)
+    git("mv", SOURCE, TARGET)
+    git("commit", "-q", "--no-verify", "-m", "chore: raise the plugin version to 0.12.0 at the landing")
+elif "--raise" in sys.argv and MODE == "manifests":
+    for name in MANIFESTS:
+        text = open(name, "rb").read().decode("utf-8")
+        open(name, "wb").write(re.sub(r'("version"\s*:\s*")[^"]*(")', r'\g<1>0.12.0\g<2>', text).encode("utf-8"))
+    git("add", "--", *MANIFESTS)
+    git("commit", "-q", "--no-verify", "-m", "chore: raise the plugin version to 0.12.0 at the landing")
+sys.exit(0)
+'''
+R14_SOURCE = "notes/protected-copy.json"
+
+
+def r14_standin(mode, target=None):
+    values = {"@GIT@": repr(t32_abs_git()), "@MANIFESTS@": repr(list(T32_MANIFEST_NAMES)), "@MODE@": repr(mode),
+              "@SOURCE@": repr(R14_SOURCE), "@TARGET@": repr(target)}
+    text = R14_STANDIN
+    for key, value in values.items():
+        text = text.replace(key, value)
+    return text
+
+
+@T32_WINDOWS_ONLY
+class TestR14RenameOntoAManifest(T32Case):
+    """A version commit may touch only the four manifests; git's rename detection must not hide the source path."""
+
+    def r14_land(self, name, mode, *, drop=None):
+        target = drop
+        text = r14_standin(mode, target)
+        folder = Path(self._tmp.name) / name
+        folder.mkdir()
+        base = dict(t32_manifests("0.11.3"))
+        base.update(t32_tree_files())
+        base[R14_SOURCE] = "the protected names\n" * 8
+        base[".claude/scripts/check_version_bump.py"] = text
+        if drop:
+            del base[drop]  # the manifest is absent before P7b, so a file renamed onto it is an addition
+        base.update(self.real_checker())
+        base[PN_RULES] = pn_rules(PN_NAMES)
+        cfg = landing_config(steps=[STEP_BUILD], versionRaise=True, manifestCounts=False)
+        kit = Kit(folder, config=cfg, base_files=base, parent_files={"src/feature.py": "x = 1\n"})
+        kit.commit_remote("master", {"master-note.txt": "master moved on\n"})
+        st = T32Stage(self, kit, real_push=True)
+        before = self.t32_remote_head(st)
+        report, error = self.t32_land(st, nodefault=None, standin_dir=self.t32_standin_dir(name, text))
+        return st, before, report, error
+
+    def test_R14_1_a_rename_of_a_non_manifest_file_onto_a_manifest_path_halts_and_the_remote_stays(self):
+        target = ".cursor-plugin/plugin.json"
+        self.assertIn(target, T32_MANIFEST_NAMES, "fixture: the manifest the rename lands on is one of the four")
+        st, before, report, error = self.r14_land("r14-1", "rename", drop=target)
+        self.assertIsNone(error, "the landing ended with a report: %s" % error)
+        self.assertEqual(report["outcome"], "version-raise-outside-manifests",
+                         "P7b's commit renamed %s onto the manifest %s; the listing of what it changed must name both "
+                         "paths, so the source is a stray path: %s %s"
+                         % (R14_SOURCE, target, report["outcome"], report.get("detail")))
+        self.assertIn(R14_SOURCE, str(report.get("detail")), "the halt names the renamed-away source path")
+        self.assertEqual(self.t32_remote_head(st), before, "the remote is unchanged")
+        self.assertEqual(st.count("git_push"), 0, "nothing was pushed")
+
+    def test_R14_1C_control_a_version_commit_that_edits_only_the_manifests_lands(self):
+        st, before, report, error = self.r14_land("r14-1c", "manifests")
+        self.assertIsNone(error, "the landing ended with a report: %s" % error)
+        self.assertEqual(report["outcome"], "landed",
+                         "control: the same world and stand-in committing only the four manifests lands: %s %s"
+                         % (report["outcome"], report.get("detail")))
+        self.assertRemoteIsTheCheckedHeadPlusAtMostTheVersionCommit(st, before)
+
+
+@T32_WINDOWS_ONLY
+class TestR14TheLauncherNeverRunsAGitPlantedInTheCheckout(unittest.TestCase):
+
+    def setUp(self):
+        t32_abs_git()
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.repo = self.root / "checkout"
+        self.repo.mkdir()
+        t32_git(self.repo, "init", "-q", "--initial-branch=master")
+        Kit._configure(self.repo)
+        (self.repo / "a.txt").write_text("a\n", encoding="utf-8")
+        t32_git(self.repo, "add", "-A")
+        t32_git(self.repo, "commit", "-q", "-m", "initial")
+        self.planted = self.repo / "tools" / "bin"
+        self.evidence = self.root / "evidence.txt"
+        created = t32_plant_git(self.planted, self.evidence, self.root / "hook")
+        t32_exclude(self.repo, ["tools"])
+        self.assertTrue(created, "fixture: the program was planted")
+        self.path = os.pathsep.join([str(self.planted), os.environ["PATH"]])
+
+    def test_R14_2_the_launchers_git_starts_never_run_a_git_planted_on_a_path_entry_inside_the_checkout(self):
+        lc = land_contract
+        real_run, programs = lc._run, []
+
+        def recording(cmd, *a, **k):
+            programs.append(str(cmd[0]) if cmd else "")
+            return real_run(cmd, *a, **k)
+
+        saved_cwd = os.getcwd()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, t32_isolated_env(self.root)):
+            os.environ["PATH"] = self.path
+            os.environ.pop(T32_VAR, None)
+            os.chdir(str(self.repo))
+            try:
+                expected = lc.resolve_git(self.path, lc.linked_worktrees(self.repo))
+                with mock.patch.object(lc, "_run", side_effect=recording), contextlib.redirect_stdout(out):
+                    code = lc.main(["--module-tags", "--base", "HEAD"])
+            finally:
+                os.chdir(saved_cwd)
+        seen = [p for p in programs if os.path.basename(p).lower() in ("git", "git.exe")]
+        self.assertEqual(t32_evidence(self.evidence), [],
+                         "the launcher must not start the git planted inside the operator's checkout. exit %s: %s"
+                         % (code, out.getvalue().strip()))
+        self.assertTrue(seen, "the launcher started git processes through its launcher, so the check below is not "
+                              "over an empty set")
+        self.assertIsNotNone(expected, "fixture: a real git lies outside the checkout on this PATH")
+        self.assertEqual(sorted({os.path.normcase(p) for p in seen}), [os.path.normcase(expected)],
+                         "every git process the launcher started takes resolve_git's result as its program; "
+                         "started with: %s" % sorted(set(seen)))
+
+    def test_R14_2C_control_a_bare_name_git_start_in_the_same_environment_does_run_the_planted_program(self):
+        with mock.patch.dict(os.environ, {T32_VAR: "1", "PATH": self.path}):
+            proc = _REAL_SUBPROCESS_RUN(["git", "rev-parse", "HEAD"], cwd=str(self.repo), capture_output=True, text=True)
+        self.assertTrue(t32_evidence(self.evidence),
+                        "control: with the checkout's own folder on PATH a bare `git` reaches the planted program, so "
+                        "R14-2 can fail. exit %s" % proc.returncode)
