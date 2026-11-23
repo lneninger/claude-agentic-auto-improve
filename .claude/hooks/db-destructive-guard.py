@@ -817,7 +817,8 @@ def _audit(record: dict) -> None:
     missing goes to the open, a link or anything but a regular file skips the record. (c) Rotation only
     for a regular file over the limit, and only when the ``.1`` name is missing or a regular file.
     (d) The open is O_WRONLY | O_APPEND | O_CREAT (plus O_BINARY, O_NONBLOCK and O_NOFOLLOW where they
-    exist) and the descriptor must be a regular file before one byte is written. On any failure nothing
+    exist) and the descriptor must be a regular file with a link count of one before one byte is written
+    (t14 finding L2: a hard link is a regular file to lstat and fstat). On any failure nothing
     is written, one line goes to standard error and no other file is touched."""
     fd = -1
     try:
@@ -851,8 +852,14 @@ def _audit(record: dict) -> None:
         for extra in ("O_BINARY", "O_NONBLOCK", "O_NOFOLLOW"):
             flags |= getattr(os, extra, 0)
         fd = os.open(log, flags, 0o666)
-        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not _stat.S_ISREG(opened.st_mode):
             _audit_skip("%s did not open as a regular file" % log)
+            return
+        if opened.st_nlink != 1:
+            # A hard link is a regular file to lstat and fstat; only the link count shows that a write through
+            # it would reach a file the guard did not choose (t14 finding L2). The descriptor is closed unwritten.
+            _audit_skip("%s has %d links, so it shares its bytes with another file" % (log, opened.st_nlink))
             return
         data = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8", "replace")
         while data:
@@ -1365,49 +1372,417 @@ def _takes_command_string(before: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Reading a text as bash and as PowerShell read it (No-prompt classes rule, Comment-aware masker and Name
+# matching, amendment 4, t14 findings B1 (b), Q1 and T1).
+#
+# Each reading scans the WHOLE text from its start with its own escape model and recognises its own comments,
+# here-documents or here-strings and block comments, so its quote state after each of them is right. The
+# masker's own quote pairing (_skip_quoted) never decides whether a `#` starts a comment.
+# ---------------------------------------------------------------------------
+_COMMENT_BOUNDARY = " \t\r\n;|&()"
+
+
+def _line_end(text: str, i: int) -> int:
+    """Index of the end of the physical line that holds ``i`` (the CR or LF that ends it, or the text's end)."""
+    n = len(text)
+    while i < n and text[i] not in "\r\n":
+        i += 1
+    return i
+
+
+def _bash_heredoc_tag(text: str, i: int) -> tuple[str, bool, int] | None:
+    """Parse a here-document start at ``i`` (``text[i:i+2] == "<<"``, not ``<<<``): (tag, strips tabs, index after
+    the tag), or None when the guard cannot parse it. Every spelling is read: ``<<WORD``, ``<< WORD``, ``<<'WORD'``,
+    ``<<"WORD"``, ``<<\\WORD``, a partly quoted tag such as ``<<E"O"F``, and ``<<-WORD``."""
+    n = len(text)
+    j = i + 2
+    strip_tabs = text[j:j + 1] == "-"
+    if strip_tabs:
+        j += 1
+    while j < n and text[j] in " \t":
+        j += 1
+    tag: list[str] = []
+    while j < n:
+        c = text[j]
+        if c in " \t\r\n;|&()<>":
+            break
+        if c in "'\"":
+            end = text.find(c, j + 1)
+            if end == -1:
+                return None
+            tag.append(text[j + 1:end])
+            j = end + 1
+        elif c == "\\":
+            if j + 1 >= n:
+                return None
+            tag.append(text[j + 1])
+            j += 2
+        else:
+            tag.append(c)
+            j += 1
+    word = "".join(tag)
+    return (word, strip_tabs, j) if word else None
+
+
+def _scan_reading(text: str, reading: str) -> tuple[set[int], list[tuple[int, int]], list[int]]:
+    """Scan ``text`` as bash ("bash") or PowerShell ("ps") reads it.
+
+    Returns (the indexes of the ``#`` that start a line comment in this reading; the (index, length) of each
+    line continuation that this reading joins, outside single quotes and outside comments (a backslash and a
+    newline for bash, a backtick and a newline for PowerShell); the indexes of each empty quote pair, ``''`` or
+    ``""``, outside quotes that touches a non-space character).
+
+    A ``#`` starts a line comment when it is outside quotes, not escaped, and starts a word: at the start of the
+    text or a line, or after an unescaped space, tab, ``;``, ``|``, ``&``, ``(`` or ``)``. Nothing is a comment
+    in a bash here-document body (every delimiter spelling, to the exact end line or to the end of the text),
+    after a bash ``<<`` this guard cannot parse that is not ``<<<`` (no later ``#`` is a comment), in a
+    PowerShell here-string, on a line after ``--%``, or inside ``<# ... #>``."""
+    bash = reading == "bash"
+    n = len(text)
+    comments: set[int] = set()
+    joins: list[tuple[int, int]] = []
+    splices: list[int] = []
+    stack: list[list] = []              # [mode, paren depth]; modes: dq, sq, ansi, bt (code), sub (code)
+    pending: list[tuple[str, bool]] = []
+    comments_off = False
+    boundary = True
+    i = 0
+
+    def newline_length(at: int) -> int:
+        """Length of the line break at ``at`` (1 for LF or CR, 2 for CRLF), or 0 when none."""
+        if text[at:at + 2] == "\r\n":
+            return 2
+        return 1 if text[at:at + 1] in ("\r", "\n") else 0
+
+    while i < n:
+        c = text[i]
+        mode = stack[-1][0] if stack else "code"
+        if mode == "sq":
+            k = text.find("'", i)
+            while not bash and k != -1 and text[k + 1:k + 2] == "'":
+                k = text.find("'", k + 2)       # a doubled quote in PowerShell is one literal quote
+            if k == -1:
+                i = n
+            else:
+                i = k + 1
+                stack.pop()
+                boundary = False
+            continue
+        if mode == "ansi":
+            if c == "\\":
+                i += 2
+            elif c == "'":
+                stack.pop()
+                boundary = False
+                i += 1
+            else:
+                i += 1
+            continue
+        if mode == "dq":
+            escape = "\\" if bash else "`"
+            if c == escape:
+                brk = newline_length(i + 1)
+                if brk:
+                    joins.append((i, 1 + brk))
+                i += 2 + (brk - 1 if brk else 0)
+            elif c == '"':
+                if not bash and text[i + 1:i + 2] == '"':
+                    i += 2                      # a doubled quote in PowerShell is one literal quote
+                else:
+                    stack.pop()
+                    boundary = False
+                    i += 1
+            elif c == "$" and text[i + 1:i + 2] == "(":
+                stack.append(["sub", 0])
+                boundary = True
+                i += 2
+            elif bash and c == "`":
+                stack.append(["bt", 0])
+                boundary = True
+                i += 1
+            else:
+                i += 1
+            continue
+        # ---- code (the top level, a backtick region or a substitution) ----------------------------------
+        if c in "\r\n":
+            boundary = True
+            brk = newline_length(i)
+            if bash and pending:
+                # The here-document bodies start on the next line and end at the first line that is exactly the
+                # tag (after leading tabs for <<-), or at the end of the text when no such line exists.
+                pos = i + brk
+                for tag, strip_tabs in pending:
+                    while pos < n:
+                        end = _line_end(text, pos)
+                        line = text[pos:end]
+                        if (line.lstrip("\t") if strip_tabs else line) == tag:
+                            pos = end
+                            break
+                        pos = end + newline_length(end)
+                pending = []
+                i = pos
+                continue
+            i += brk
+            continue
+        if c in " \t":
+            boundary = True
+            i += 1
+            continue
+        if c == "\\" and bash:
+            brk = newline_length(i + 1)
+            if brk:
+                joins.append((i, 1 + brk))
+            i += 2 + (brk - 1 if brk else 0)
+            if not brk:
+                boundary = False
+            continue
+        if c == "`" and not bash:
+            brk = newline_length(i + 1)
+            if brk:
+                joins.append((i, 1 + brk))
+            i += 2 + (brk - 1 if brk else 0)
+            if not brk:
+                boundary = False
+            continue
+        if c == "`" and bash:
+            if mode == "bt":
+                stack.pop()
+                boundary = False
+            else:
+                stack.append(["bt", 0])
+                boundary = True
+            i += 1
+            continue
+        if c in "'\"":
+            if text[i + 1:i + 2] == c:          # an empty pair
+                before = text[i - 1:i] if i else ""
+                after = text[i + 2:i + 3]
+                if (before and not before.isspace()) or (after and not after.isspace()):
+                    splices.append(i)
+                i += 2
+                boundary = False
+                continue
+            stack.append(["sq" if c == "'" else "dq", 0])
+            boundary = False
+            i += 1
+            continue
+        if bash and c == "$" and text[i + 1:i + 2] == "'":
+            stack.append(["ansi", 0])
+            boundary = False
+            i += 2
+            continue
+        if c == "$" and text[i + 1:i + 2] == "(" or (not bash and c == "@" and text[i + 1:i + 2] == "("):
+            stack.append(["sub", 0])
+            boundary = True
+            i += 2
+            continue
+        if c == "(":
+            if mode == "sub":
+                stack[-1][1] += 1
+            boundary = True
+            i += 1
+            continue
+        if c == ")":
+            if mode == "sub":
+                if stack[-1][1] == 0:
+                    stack.pop()
+                    boundary = False
+                else:
+                    stack[-1][1] -= 1
+                    boundary = True
+            else:
+                boundary = True
+            i += 1
+            continue
+        if c in ";|&":
+            boundary = True
+            i += 1
+            continue
+        if bash and c == "<" and text[i + 1:i + 2] == "<":
+            if text[i + 2:i + 3] == "<":
+                i += 3                          # a here-string (<<<), not a here-document
+                boundary = False
+                continue
+            parsed = _bash_heredoc_tag(text, i)
+            if parsed is None:
+                comments_off = True             # an unparsable << ends comment blanking for the rest of the text
+                i += 2
+                boundary = False
+                continue
+            pending.append((parsed[0], parsed[1]))
+            i = parsed[2]
+            boundary = False
+            continue
+        if not bash and c == "<" and text[i + 1:i + 2] == "#":
+            end = text.find("#>", i + 2)         # a block comment: nothing in it is blanked, no quote opens a span
+            i = n if end == -1 else end + 2
+            boundary = True
+            continue
+        if not bash and c == "@" and text[i + 1:i + 2] in ("'", '"'):
+            m = re.compile(r"[ \t]*\r?\n").match(text, i + 2)
+            if m is not None:                   # a here-string: its body is data to the end line
+                quote = text[i + 1]
+                end = text.find("\n" + quote + "@", m.end() - 1)
+                i = n if end == -1 else end + 3
+                boundary = False
+                continue
+        if not bash and c == "-" and text.startswith("--%", i) and boundary and text[i + 3:i + 4] in ("", " ", "\t", "\r", "\n"):
+            i = _line_end(text, i)               # the stop-parsing token: the rest of the line is data
+            continue
+        if c == "#":
+            if boundary and not comments_off:
+                comments.add(i)
+                i = _line_end(text, i)
+                continue
+            boundary = False
+            i += 1
+            continue
+        boundary = False
+        i += 1
+    return comments, joins, splices
+
+
+def _blank_comments(text: str) -> str:
+    """``text`` with every line comment that BOTH the bash reading and the PowerShell reading start at the same
+    ``#`` replaced by spaces up to the end of its physical line (the line breaks stay). Where the readings
+    disagree, nothing is blanked: blanking less is always the fail-closed direction."""
+    agreed = _scan_reading(text, "bash")[0] & _scan_reading(text, "ps")[0]
+    if not agreed:
+        return text
+    chars = list(text)
+    for index in agreed:
+        for k in range(index, _line_end(text, index)):
+            chars[k] = " "
+    return "".join(chars)
+
+
+
 #: Words that themselves start a command and pass the start on to the next word (No-prompt classes rule):
 #: ``then <script>``, ``time <script>``, ``sudo -u root <script>``. After the word, its options are skipped.
 _START_PASSING_WORDS = frozenset({
     "then", "do", "else", "elif", "!", "time", "env", "nohup", "exec", "command", "builtin",
     "nice", "timeout", "xargs", "sudo"})
-#: The options of each start-passing word that take the next word as their value.
+#: The options of each start-passing word that take the next word as their value, in the short and in the
+#: long spelling (the value is in the next word, or after ``=`` in the same word, which needs no entry here).
 _VALUED_OPTIONS: dict[str, frozenset[str]] = {
-    "nice": frozenset({"-n"}),
-    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U"}),
-    "env": frozenset({"-u", "-C"}),
-    "timeout": frozenset({"-s", "-k"}),
-    "xargs": frozenset({"-I", "-n", "-P", "-L", "-d", "-a", "-E", "-s"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U",
+                       "--user", "--group", "--host", "--prompt", "--close-from", "--chdir", "--role",
+                       "--type", "--other-user"}),
+    "env": frozenset({"-u", "-C", "--unset", "--chdir"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "xargs": frozenset({"-I", "-n", "-P", "-L", "-d", "-a", "-E", "-s",
+                        "--replace", "--max-args", "--max-procs", "--max-lines", "--delimiter", "--arg-file",
+                        "--eof", "--max-chars"}),
     "exec": frozenset({"-a"}),
 }
 _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
+#: Mention positions (No-prompt classes rule, amendment 4 t14 finding P3, amendment 5): the CLOSED list of
+#: command words whose arguments only read, list, copy or move the named file. Lower case; PowerShell words
+#: match in any case. Nothing that can run a program from its arguments, its environment or its options may
+#: be added (a launcher, a command-start word, find, xargs, env, source, ``.``, trap, eval, Start-Process,
+#: start, Invoke-Item, sed, less, more, awk, an editor, git with -c or --config-env, rebase, bisect).
+_MENTION_COMMANDS = frozenset({
+    "echo", "printf", "write-host", "write-output", "write", "cat", "type", "get-content", "gc", "head", "tail",
+    "wc", "grep", "rg", "select-string", "sls", "ls", "dir", "gci", "get-childitem", "get-item", "gi", "test-path",
+    "cp", "mv", "rm", "chmod", "copy-item", "move-item", "remove-item", "rename-item", "which", "where.exe",
+    "get-command"})
+#: The git subcommands that are mention positions (only ``-C <folder>`` and ``--no-pager`` may precede them).
+_GIT_MENTION_SUBCOMMANDS = frozenset({
+    "add", "blame", "commit", "diff", "grep", "log", "ls-files", "mv", "restore", "rm", "show", "status"})
 
-def _words_pass_the_start(words: list[str]) -> bool:
-    """True when the word that follows ``words`` (the earlier words of ONE command segment) is still in
-    command position: nothing but ``NAME=value`` assignments and start-passing words with their options
-    stand before it. ``command -v`` and ``command -V`` are a lookup, not a run, so the name stays a mention."""
-    n, i = len(words), 0
+
+def _command_word(words: list[str]) -> tuple[int | None, bool]:
+    """(index of the command word among ``words``, whether a ``NAME=value`` assignment came before it).
+
+    ``words`` are the earlier words of ONE command segment. The index is ``len(words)`` when the word that
+    follows them is itself the command word (nothing but assignments and start-passing words with their
+    options stand before it), and None when the next word is the VALUE of the last option (``nice -n <name>``).
+    ``command -v`` and ``command -V`` are a lookup: the index then names ``command`` itself."""
+    n, i, assigned = len(words), 0, False
     while True:
         while i < n and _ASSIGNMENT_WORD_RE.match(words[i]):
             i += 1
+            assigned = True
         if i >= n:
-            return True
+            return n, assigned
         word = words[i].lower()
         if word not in _START_PASSING_WORDS:
-            return False
-        i += 1
+            return i, assigned
+        j = i + 1
+        if word == "command" and j < n and words[j] in ("-v", "-V"):
+            return i, assigned
         valued = _VALUED_OPTIONS.get(word, frozenset())
-        while i < n and words[i].startswith("-"):
-            option = words[i]
-            if word == "command" and option in ("-v", "-V"):
-                return False
-            i += 2 if option in valued else 1
-        if i > n:
-            return False            # the file name is the value of the last option
+        while j < n and words[j].startswith("-"):
+            j += 2 if words[j] in valued else 1
+        if j > n:
+            return None, assigned   # the file name is the value of the last option
         if word == "timeout":
-            if i >= n:
-                return True         # `timeout <name>`: the name sits where the duration goes (fail closed)
-            i += 1                  # the duration
+            if j >= n:
+                return n, assigned  # `timeout <name>`: the name sits where the duration goes (fail closed)
+            j += 1                  # the duration
+        i = j
+
+
+def _command_names(word: str) -> set[str]:
+    """The lower-case spellings under which ``word`` may name a command: its last path part, with and without .exe."""
+    base = re.split(r"[\\/]", word)[-1].lower()
+    return {base, base[:-4]} if base.endswith(".exe") else {base}
+
+
+def _is_mention_command(words: list[str], index: int, segment: list[str]) -> bool:
+    """True when ``words[index]`` is a command of the closed mention list, under its argument rules.
+    ``segment`` is every word of the segment (before and after the name), for the argument rules."""
+    names = _command_names(words[index])
+    if "command" in names:
+        return index + 1 < len(words) and words[index + 1] in ("-v", "-V")
+    if names & _MENTION_COMMANDS:
+        if "rg" in names:
+            # --pre, --pre=... and --pre-glob run a program on each file searched.
+            return not any(w.lower().startswith("--pre") for w in segment)
+        return True
+    if "git" in names:
+        j = index + 1
+        while j < len(words):
+            if words[j] == "-C":
+                j += 2
+            elif words[j] == "--no-pager":
+                j += 1
+            else:
+                break
+        if j >= len(words) or words[j].lower() not in _GIT_MENTION_SUBCOMMANDS:
+            return False
+        if words[j].lower() == "grep":
+            # --open-files-in-pager (every abbreviation starts with --o) and -O, -O<pager>, -nO run a program.
+            tail = segment
+            for k, w in enumerate(segment):
+                if w.lower() == "grep":
+                    tail = segment[k + 1:]
+                    break
+            for w in tail:
+                if w.startswith("--o") or (w.startswith("-") and not w.startswith("--") and "O" in w):
+                    return False
+        return True
+    return False
+
+
+def _segment_is_mention(words: list[str]) -> bool:
+    """True when the command word of a whole segment (``words``) is a mention command."""
+    return bool(words) and _words_are_mention_position(words + ["x"], words)
+
+
+def _words_are_mention_position(words: list[str], segment: list[str]) -> bool:
+    """True when a word that follows ``words`` (the earlier words of one command segment) is an ARGUMENT of a
+    mention command: the command word exists, no assignment stands before it, and the last earlier word is
+    not an invoking word."""
+    index, assigned = _command_word(words)
+    if index is None or index >= len(words) or assigned:
+        return False
+    if words[-1].lower() in _INVOKING_WORDS:
+        return False
+    return _is_mention_command(words, index, segment)
 
 
 class _SegmentWords:
@@ -1452,43 +1827,67 @@ def _launcher_inner(inner: str, quote: str, reading: str) -> str:
     return inner.replace("''", "'")
 
 
-def _starts_a_command(pre: str, reading: str = "tip") -> bool:
-    """True when the text ``pre`` (everything before a file name) ends where a command may start: after
-    nothing, a command separator, an invoking word or a start-passing word, once quoted text is read as
-    quoted text.
+_PLAIN_RUN_RE = re.compile(r"""[^\s"'\\`(){;&|$<>@]+""")
+_QUOTED_RUN_RE = re.compile(r"""[^"'\\`]+""")
+
+
+class _Scan:
+    """What a reading knows about the text before a file name: the words of the open command segment, the open
+    quote (if any) and the substitutions the name stands inside (each with the words that stand before it)."""
+
+    __slots__ = ("seg", "quote", "quote_open", "token_start", "contexts")
+
+    def __init__(self) -> None:
+        self.seg = _SegmentWords()
+        self.quote = ""                  # "", '"', "'" or "$'" (ANSI-C)
+        self.quote_open = -1
+        self.token_start = 0
+        #: (kind, words before the substitution, quote it opened in): kind is "`" or "(".
+        self.contexts: list[tuple[str, list[str], str, int]] = []
+
+
+def _scan_before(pre: str, reading: str) -> _Scan:
+    """Scan ``pre`` (everything before a file name) as the ``reading`` reads it.
 
     A quote is OPENED and CLOSED by scanning ``pre`` from the left, so the closing quote of an earlier
-    argument (``echo "a" ; <script>``) never counts as the start of the token that holds the name.
-    Text inside the quoted argument of a known launcher (``bash -c``, ``cmd /c``, ``powershell
-    -Command``, ``iex``) is command text and is split the same way; text inside any other quote is not.
-
-    The escape rules are the ``reading``'s, because the two shells disagree about where a quote ends
-    (t12 findings B1 and P1) and the guard cannot know which shell runs the call:
+    argument (``echo "a" ; <script>``) never counts as the start of the token that holds the name. The escape
+    rules are the ``reading``'s, because the two shells disagree about where a quote ends (t12 findings B1 and
+    P1) and the guard cannot know which shell runs the call:
       "tip"   the rules that were in force before block 13: a backslash or a backtick before a double
               quote escapes it inside double quotes, and nothing is an escape outside quotes;
       "bash"  a backslash escapes the next character outside quotes and inside double quotes, nothing is
               escaped inside single quotes, ``$'...'`` takes backslash escapes, and a backtick outside
               single quotes opens a command segment (a substitution), as ``$(`` does;
       "ps"    a backtick escapes the next character inside and outside double quotes and never opens a
-              segment, ``""`` and ``''`` are doubled quotes, and a backslash is a plain character."""
-    seg = _SegmentWords()
-    quote = ""                       # "", '"', "'" or "$'" (ANSI-C)
+              segment, ``""`` and ``''`` are doubled quotes, and a backslash is a plain character.
+    A ``(`` outside quotes opens a substitution or a group: the words before it are kept, so the judgement can
+    ask whether the substitution is itself an argument of a mention command."""
+    scan = _Scan()
+    seg = scan.seg
+    quote = ""
     quote_open = -1
     token_start = 0
-    backtick: tuple[str, int, list[str]] | None = None   # bash: (outer quote, its offset, outer words)
+    contexts = scan.contexts
     i, n = 0, len(pre)
     while i < n:
+        # A run of ordinary characters is added in one step (it holds no quote, escape, separator or paren, and
+        # none of `$ < > @`, whose single-character form the substitution test below reads).
+        run = (_QUOTED_RUN_RE if quote else _PLAIN_RUN_RE).match(pre, i)
+        if run is not None:
+            seg.cur.append(run.group())
+            seg.started = True
+            i = run.end()
+            continue
         c = pre[i]
         if reading == "bash" and c == "`" and quote not in ("'", "$'"):
             seg.flush()
-            if backtick is None:
-                backtick = (quote, quote_open, seg.words)
+            if contexts and contexts[-1][0] == "`":
+                _kind, outer_words, quote, quote_open = contexts.pop()
+                seg = _SegmentWords(outer_words + ["`"])
+            else:
+                contexts.append(("`", seg.words, quote, quote_open))
                 seg = _SegmentWords()
                 quote, quote_open = "", -1
-            else:
-                seg = _SegmentWords(backtick[2] + ["`"])
-                quote, quote_open = backtick[0], backtick[1]
-                backtick = None
             token_start = i + 1
             i += 1
             continue
@@ -1525,7 +1924,21 @@ def _starts_a_command(pre: str, reading: str = "tip") -> bool:
             seg.add("}")
             i += 2
             continue
-        if c in _COMMAND_SEPARATORS:
+        if c == "(":
+            # A substitution ($( <( >( @( ) or a group: keep the words that stand before it.
+            if seg.cur and seg.cur[-1] in "$<>@":
+                seg.cur.pop()        # the `$` of `$(` belongs to the substitution, not to a word
+                seg.started = bool(seg.cur)
+            seg.flush()
+            contexts.append(("(", seg.words, "", -1))
+            seg = _SegmentWords()
+            token_start = i + 1
+        elif c == ")" and contexts and contexts[-1][0] == "(":
+            seg.flush()
+            _kind, outer_words, _q, _qo = contexts.pop()
+            seg = _SegmentWords(outer_words + ["$()"])   # the substitution is one argument word of the outer segment
+            token_start = i + 1
+        elif c in _COMMAND_SEPARATORS:
             seg.reset()
             token_start = i + 1
         elif c.isspace() or c == ")":
@@ -1551,36 +1964,126 @@ def _starts_a_command(pre: str, reading: str = "tip") -> bool:
         else:
             seg.add(c)
         i += 1
-    if not quote:
-        if not seg.words:
-            return True
-        if seg.words[-1].lower() in _INVOKING_WORDS:
-            return True
-        return _words_pass_the_start(seg.words)
-    before = pre[:token_start].rstrip(" \t")
-    if quote_open != token_start or not _takes_command_string(before):
-        return False
-    return _starts_a_command(_launcher_inner(pre[quote_open + 1:], quote, reading), reading)
+    scan.seg = seg
+    scan.quote, scan.quote_open, scan.token_start = quote, quote_open, token_start
+    return scan
 
 
-def _quote_blind_starts_a_command(pre: str) -> bool:
-    """The quote-blind reading: strip the folder-prefix token and an optional quote before it, and test
-    whether the nearest preceding character that is not a space is a separator. A backtick never counts."""
-    stripped = re.sub(r"[\"']?[^\s\"';&|()]*[\\/]$", "", pre).rstrip(" \t")
-    return not stripped or stripped[-1] in _COMMAND_SEPARATORS
+def _blind_words(text: str) -> list[str]:
+    """The words of ``text`` split on white space, with every quote character removed (a crude, quote-blind split)."""
+    return [w for w in (word.replace('"', "").replace("'", "") for word in text.split()) if w]
 
 
-def _in_command_position(text: str, start: int) -> bool:
-    """True when the file name at ``start`` is being INVOKED, not just mentioned.
+def _blind_segment_words(text: str, start: int) -> list[str]:
+    """Every word of the command segment that holds ``start``, read without regard to quotes: back to the last
+    ``;``, ``|``, ``&``, ``(`` or newline before it, forward to the next ``;``, ``|``, ``&``, ``)`` or newline."""
+    left = max(text.rfind(ch, 0, start) for ch in ";|&(\n\r")
+    right = len(text)
+    for k in range(start, len(text)):
+        if text[k] in ";|&)\n\r":
+            right = k
+            break
+    return _blind_words(text[left + 1:right])
 
-    Several readings, and ANY one that says "invoked" counts, so a reading can only move a name from
-    mentioned to invoked (never the other way). (1) The older, cruder reading and the quote reading of
-    block 8 are kept so no shape that was ever classed as invoked becomes a mention. The cruder one strips
-    from the CLOSING quote of any earlier argument, so a script placed after quoted text
-    (``echo "a" ; <script>``) used to read as a mention (t10 findings B1 and P1). (2) A bash reading and
-    (3) a PowerShell reading of the quotes, because the two shells disagree about escapes and the guard
-    does not know which one runs the call (t12 findings B1 and P1). (4) A quote-blind reading."""
+
+def _is_assignment_value(text: str, start: int) -> bool:
+    """True when the name at ``start`` stands inside a quoted string that is the WHOLE value of a variable
+    assignment (PowerShell ``$x = "..."``, bash ``X="..."``): running it later goes through the variable, which
+    is the text-guard limit, so the name is a mention."""
     pre = text[:start]
+    m = re.search(r"""(?:^|[;&|(\n{]|(?<=\s))[ \t]*(?:\$[\w:.{}]+[ \t]*=[ \t]*|[A-Za-z_]\w*=)(["'])(?:(?!\1)[\s\S])*$""", pre)
+    if m is None:
+        return False
+    before = pre[:m.start()].rstrip(" \t")
+    if before and before[-1] not in ";&|(\n\r{":
+        return False
+    closing = text.find(m.group(1), start)
+    return closing != -1 and (closing + 1 >= len(text) or text[closing + 1] in " \t\r\n;|&)")
+
+
+def _scan_is_mention(scan: _Scan, pre: str, segment: list[str], text: str, start: int, reading: str) -> bool:
+    """True when this reading places the name at the end of ``pre`` in a mention position."""
+    seg = scan.seg
+    if scan.quote:
+        before = pre[:scan.token_start].rstrip(" \t")
+        if scan.quote_open == scan.token_start and _takes_command_string(before):
+            inner = _launcher_inner(pre[scan.quote_open + 1:], scan.quote, reading)
+            return _scan_is_mention(_scan_before(inner, reading), inner, segment, text, start, reading)
+        index, _assigned = _command_word(seg.words)
+        if index == len(seg.words) and scan.quote_open == scan.token_start:
+            # A quote that begins the word that is itself the command word. Only a backtick substitution that
+            # opened inside a double-quoted argument is read as a mention here (a PowerShell commit message with
+            # escaped quotes, M2p): every other quoted command word is invoked.
+            if not (scan.contexts and scan.contexts[-1][0] == "`" and scan.contexts[-1][2] == '"'):
+                return False
+            return all(_words_are_mention_position(words, segment) for _kind, words, _q, _qo in scan.contexts)
+    if not _words_are_mention_position(seg.words, segment):
+        return False
+    return all(_words_are_mention_position(words, segment) for _kind, words, _q, _qo in scan.contexts)
+
+
+def _quote_blind_is_mention(pre: str, segment: list[str]) -> bool:
+    """The quote-blind reading: strip the folder-prefix token (with a quote before it, after it and inside it)
+    and read the segment's words without regard to quotes. A separator before the name is a command start."""
+    stripped = re.sub(r"[\"']?[^\s;&|()]*[\\/][\"']?$", "", pre).rstrip(" \t")
+    if not stripped or stripped[-1] in _COMMAND_SEPARATORS:
+        return False
+    cut = max(stripped.rfind(ch) for ch in _COMMAND_SEPARATORS)
+    return _words_are_mention_position(_blind_words(stripped[cut + 1:]), segment)
+
+
+#: An environment change an earlier segment of the call makes (the Environment rule of the Mention positions sentence).
+_ENVIRONMENT_SET_RE = re.compile(
+    r"(?:^|[;&|(\n])[ \t]*(?:export|declare[ \t]+-[a-z]*x|typeset[ \t]+-[a-z]*x|set[ \t]+-[a-z]*a)\b"
+    r"|(?:^|[;&|(\n])[ \t]*(?:[A-Za-z_]\w*=(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|()]*)[ \t]*)+(?=[;&|\n)])"
+    r"|\$env:\w+[ \t]*="
+    r"|\b(?:Set|New)-Item\b[^;\n|]*\benv:"
+    r"|\[Environment\]::SetEnvironmentVariable",
+    re.IGNORECASE)
+
+
+def _output_reaches_a_non_mention(text: str, start: int) -> bool:
+    """Exception (b) of the Mention positions sentence: the output of the name's segment reaches a segment whose
+    command word is not a mention command, through any chain of pipes or a redirection into a process
+    substitution (``> >(bash)``). Every later segment of the pipeline must itself be a mention position."""
+    n = len(text)
+
+    def blind_end(i: int) -> int:
+        while i < n:
+            c = text[i]
+            if c in ";\n\r|":
+                return i
+            if c == "&" and text[i - 1:i] not in (">", "<") and text[i + 1:i + 2] != ">":
+                return i
+            i += 1
+        return n
+
+    end = blind_end(start)
+    own = text[max(text.rfind(ch, 0, start) for ch in ";|&(\n\r") + 1:end]
+    for m in re.finditer(r">\(", own):
+        depth, k = 1, m.end()
+        while k < len(own) and depth:
+            depth += {"(": 1, ")": -1}.get(own[k], 0)
+            k += 1
+        for part in re.split(r"[;|&\n]", own[m.end():k - 1]):
+            words = _blind_words(part)
+            if words and not _segment_is_mention(words):
+                return True
+    pos = end
+    while pos < n and text[pos] == "|" and text[pos + 1:pos + 2] != "|":
+        pos += 2 if text[pos + 1:pos + 2] == "&" else 1
+        nxt = blind_end(pos)
+        if not _segment_is_mention(_blind_words(text[pos:nxt].replace("(", " ").replace(")", " "))):
+            return True
+        pos = nxt
+    return False
+
+
+def _occurrence_is_invoked(text: str, start: int) -> bool:
+    """True when the human-only name at ``start`` is INVOKED. Fail closed (Mention positions sentence): every
+    visible occurrence is invoked unless EVERY reading that sees it places it in a mention position."""
+    pre = text[:start]
+    # (1) The older, cruder readings are kept, so no shape that was ever classed as invoked becomes a mention.
     stripped = re.sub(
         r"(?:\"[^\"\n]*[\\/]|'[^'\n]*[\\/]|[\"']?[^\s\"';&|()]*[\\/]|[\"'])$", "", pre
     ).rstrip(" \t")
@@ -1588,21 +2091,77 @@ def _in_command_position(text: str, start: int) -> bool:
         return True
     if re.split(r"\s+", stripped)[-1].lower() in _INVOKING_WORDS:
         return True
-    return (_starts_a_command(pre, "tip") or _starts_a_command(pre, "bash")
-            or _starts_a_command(pre, "ps") or _quote_blind_starts_a_command(pre))
+    # (2) A quoted string that is the whole value of a variable assignment is a mention position.
+    if _is_assignment_value(text, start):
+        return False
+    segment = _blind_segment_words(text, start)
+    # (3) The tip, bash and PowerShell readings, each with its own escape model, and the quote-blind reading.
+    for reading in ("tip", "bash", "ps"):
+        if not _scan_is_mention(_scan_before(pre, reading), pre, segment, text, start, reading):
+            return True
+    if not _quote_blind_is_mention(pre, segment):
+        return True
+    # (4) The Environment rule: an earlier segment sets or exports an environment variable.
+    if _ENVIRONMENT_SET_RE.search(pre):
+        return True
+    # (5) Exception (b): the output reaches a segment that is not a mention command.
+    return _output_reaches_a_non_mention(text, start)
+
+
+def _name_pattern(base: str) -> re.Pattern[str]:
+    """The pattern that finds a human-only script: its stem with or without ``.cmd`` or ``.bat`` and with trailing
+    dots (and trailing spaces inside a quoted word), not followed by a word character, a dot or a hyphen."""
+    stem = re.sub(r"\.(?:cmd|bat)$", "", base, flags=re.IGNORECASE)
+    return re.compile(r"(?<![\w.-])" + re.escape(stem) + r"(?:\.(?:cmd|bat))?(?:\.|\ (?=[ .]*[\"']))*(?![\w.-])",
+                      re.IGNORECASE)
+
+
+def _without_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` with the given (start, length) spans removed."""
+    out, last = [], 0
+    for begin, length in sorted(spans):
+        out.append(text[last:begin])
+        last = begin + length
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _name_readings(text: str) -> list[str]:
+    """The text as it is, plus the readings a shell adds when it joins a continuation or removes an empty quote pair.
+    Each joined reading is ADDED beside the unjoined text, never in place of it, and is joined only by the shell
+    that continues the line: bash joins backslash-newline outside single quotes and comments, PowerShell joins
+    backtick-newline outside single quotes and comments; an empty quote pair that touches a non-space character
+    is removed as an added reading per shell."""
+    readings = [text]
+    for reading in ("bash", "ps"):
+        _comments, joins, splices = _scan_reading(text, reading)
+        spliced = [(i, 2) for i in splices]
+        for spans in (joins, spliced, joins + spliced):
+            if spans:
+                candidate = _without_spans(text, spans)
+                if candidate not in readings:
+                    readings.append(candidate)
+    return readings
 
 
 def _human_only_script_hits(text: str) -> list[str]:
     hits: list[str] = []
+    readings = _name_readings(text)
     for base, flag in HUMAN_ONLY_ENTRIES:
-        rx = re.compile(r"(?<![\w.-])" + re.escape(base) + r"(?![\w.-])", re.IGNORECASE)
-        for m in rx.finditer(text):
-            if not _in_command_position(text, m.start()):
-                continue
-            if flag and flag.lower() not in text[m.end():].split("\n", 1)[0].lower():
-                continue
+        rx = _name_pattern(base)
+        found = False
+        for reading_text in readings:
+            for m in rx.finditer(reading_text):
+                if not _occurrence_is_invoked(reading_text, m.start()):
+                    continue
+                if flag and flag.lower() not in reading_text[m.end():].split("\n", 1)[0].lower():
+                    continue
+                found = True
+                break
+            if found:
+                break
+        if found:
             hits.append(base + (" " + flag if flag else ""))
-            break
     return hits
 
 
@@ -2087,7 +2646,16 @@ def _mask_inert_prose(text: str, redirect_is_code: bool = False) -> str:
 
     ``redirect_is_code`` is for the Arm-write rule only: a git segment with a real output redirection to a
     named file is then NOT prose (its quoted spans stay readable). Destructive-command detection never
-    sets it, so its masking is unchanged."""
+    sets it, so its masking is unchanged.
+
+    Comment-aware (amendment 4, t14 findings B1 (b) and Q1): a line comment that both the bash reading and the
+    PowerShell reading start at the same ``#`` is blanked first, to the end of its physical line, so its text is
+    never paired as a quote. An apostrophe in ``# don't`` used to open a "span" that ran across lines and hid
+    every statement up to the next apostrophe."""
+    try:
+        text = _blank_comments(text)
+    except Exception:  # noqa: BLE001 -- fail closed: no comment is blanked, nothing is hidden
+        pass
     out = list(text)
     n, i = len(text), 0
     words: list[str] = []

@@ -1192,8 +1192,14 @@ CASES += [
                        f'const string Marker = "{_DISP}";\nusing var db = new Ctx();\ndb.Database.{_ENSURE_DEL}();\n')),
     _blk("dbp.G2.3 cache flush with a marker AND a protected name in a -d position",
          _bash(f'redis-cli {_FLUSH_ALL} ; sqlcmd -E -d {_DB_PROT} -Q "SELECT 1" {_HASH_MARK}')),
-    _ok_audited("dbp.G2.4 cache flush with a disposable marker present",
-                _bash(f"redis-cli -n 3 {_FLUSH_DB} {_HASH_MARK}")),
+    # dbp.G2.4 retired by name (amendment 4, owner's approval 2026-11-23): its disposable marker
+    # stood only inside a trailing comment, which the comment-aware masker now ignores. It is
+    # replaced by dbp.G2.4b (the same text now blocks) and dbp.G2.4c (a marker that is a real
+    # argument still allows, with an audit record).
+    _blk("dbp.G2.4b cache flush with a disposable marker only in a trailing comment",
+         _bash(f"redis-cli -n 3 {_FLUSH_DB} {_HASH_MARK}")),
+    _ok_audited("dbp.G2.4c cache flush with a disposable marker as a real argument",
+                _bash(f"echo {_DISP} ; redis-cli -n 3 {_FLUSH_DB}")),
     _ok_audited("dbp.G2.5 cloud database deletion call with a disposable marker present",
                 _write("d:/Dev/Foo/tests/CosmosTest.cs",
                        f'// {_MARK}\nawait client{_COSMOS_DEL}"x");\n')),
@@ -1914,7 +1920,12 @@ CASES += [
     _ok("r4.16.5 git show of the restore script at HEAD  [passes today]",
         _bash(f"git show HEAD:tools/db-protection/{_DEV_SCRIPTS[1]}")),
     *[_ok(f"r4.16.6 cat of {s}  [passes today]", _bash(f"cat tools/db-protection/{s}")) for s in _DEV_SCRIPTS],
-    *[_ok(f"r4.16.7 sed -n of {s}  [passes today]", _bash(f"sed -n '1,60p' tools/db-protection/{s}")) for s in _DEV_SCRIPTS],
+    # Amendment 5 retires ONE instance by name: "r4.16.7 sed -n of update-dev-database.cmd  [passes today]" expected an
+    # allow for a sed read of a human-only script, and sed has left the mention list (it can run a program from its own
+    # arguments). The row r4.16.7b below replaces it. The other three instances stay controls, unchanged
+    # (restore-latest.cmd has no recover flag, so it is not human-only).
+    *[_ok(f"r4.16.7 sed -n of {s}  [passes today]", _bash(f"sed -n '1,60p' tools/db-protection/{s}"))
+      for s in _DEV_SCRIPTS if s != "update-dev-database.cmd"],
     *[_ok(f"r4.16.8 grep of {s} for the recovery flag  [passes today]",
           _bash(f"grep -n -- {_RECOVER_FLAG} tools/db-protection/{s}")) for s in _DEV_SCRIPTS],
     *[_ok(f"r4.16.9 Get-Content of {s}  [passes today]", _ps(f"Get-Content tools\\db-protection\\{s}")) for s in _DEV_SCRIPTS],
@@ -2222,6 +2233,151 @@ CASES += [
          _multi([(_ED_CALL, _TEARDOWN_CALL), ("var x = 1;", _DROP_BATCH)])),
     _blk("del.11 Write of a file holding the EF removal call", _write(_FIXTURE_PATH, _ED_CALL)),
     _blk("del.12 Bash command holding a removal batch for an unnamed target", _bash(f'sqlcmd -E -Q "{_DROP_DB} [x]"')),
+]
+
+# ===========================================================================
+# Block 15 (t14 round-four review, finding Q1 and the masker rules of the No-prompt classes rule).
+#
+# An apostrophe in a `#` comment used to open a quoted "span" in the prose masker that ran across lines and hid
+# every destructive statement up to the next apostrophe. Row ids are t14's (D0 to D8). Every destructive
+# statement is built from parts (named in words in the comments, never as literal command text). Kinds:
+# "copied" = copied from t14, must fail at the parent tip; "mutation" = already holds at the tip, guards a
+# shape that only becomes dangerous with the comment-aware masker (proved by a named mutation of the fix);
+# "control" = passes at the tip and at the head; "class" = a class row.
+# ===========================================================================
+_T15_REMOVAL = f'sqlcmd -S localhost -Q "{_DROP_DB} Orders"'           # a non-disposable database removal
+_T15_EF = _EF_DROP + " --force"                                         # the EF removal of the configured database
+_T15_TRUNC = f'sqlcmd -S "(localdb)\\m" -E -d {_DB_PROT} -Q "{_TRUNC_TBL} dbo.T"'   # an empty-table statement
+_T15_TEMP_LINE = f"SELECT 1 FROM #temp; {_DROP_DB} Orders"             # a body line: a #temp table name, then a removal
+
+
+def _t15(kind: str, name: str, payload: dict, rc: int) -> Case:
+    return Case(name=f"t15.{kind}.{name} -> {'BLOCK' if rc == 2 else 'ALLOW'}", payload=payload, expect_rc=rc,
+                isolate=True)
+
+
+_T15_COMMENTS = (
+    ("bash", _bash, 'echo "go"  # don\'t', "echo 'x'"),
+    ("ps", _ps, 'Write-Host "go"  # don\'t', "Write-Host 'x'"),
+)
+_T15_Q1_ROWS: list[Case] = []
+for _shell, _mk, _line1, _last in _T15_COMMENTS:
+    for _rid, _desc, _first, _stmt in (
+        ("D1" if _shell == "bash" else "D3", "comment apostrophe, then a database removal through sqlcmd", _line1, _T15_REMOVAL),
+        ("D2" if _shell == "bash" else "D4", "comment apostrophe, then the EF removal", _line1, _T15_EF),
+        ("D5", "git commit line with a comment apostrophe, then the EF removal", 'git commit -m "wip"  # it\'s fine', _T15_EF),
+        ("D6", "comment apostrophe, then an empty-table statement on a protected database", _line1, _T15_TRUNC),
+    ):
+        _T15_Q1_ROWS.append(_t15("copied", f"{_rid} ({_shell}) {_desc}", _mk(f"{_first}\n{_stmt}\n{_last}"), 2))
+CASES += _T15_Q1_ROWS
+
+CASES += [
+    # Controls that already block at the tip.
+    _t15("control", "D0 a database removal through sqlcmd alone", _bash(_T15_REMOVAL), 2),
+    _t15("control", "D0e the EF removal alone", _bash(_T15_EF), 2),
+    _t15("control", "D7 an ANSI-C quoted apostrophe pair, then the EF removal",
+         _bash("echo $'\\''\n" + _T15_EF + "\necho $'\\''"), 2),
+    # The same shapes in the other tool for D0 and D0e.
+    _t15("control", "D0 (ps) a database removal through sqlcmd alone", _ps(_T15_REMOVAL), 2),
+    _t15("control", "D0e (ps) the EF removal alone", _ps(_T15_EF), 2),
+
+    # Class rows: the line that carries the comment is an echo, a Write-Host, a git commit, a grep or Select-String,
+    # a gh pr create, or a line that does something and ends in a comment.
+    # (A Select-String line is not a prose line to the masker, so those two rows already block at the tip: kind
+    # "mutation", not "class".)
+    *[_t15("mutation" if label == "Select-String" else "class",
+           f"{label} ({shell}) comment apostrophe line, then {what}", mk(f"{line}\n{stmt}\necho 'x'"), 2)
+      for shell, mk, lines in (
+          ("bash", _bash, (("echo", 'echo "start"  # it\'s fine'),
+                           ("git commit", 'git commit -m "wip"  # it\'s fine'),
+                           ("grep", 'grep -n "x" a.txt  # it\'s here'),
+                           ("gh pr create", 'gh pr create --title "t" --body "b"  # it\'s fine'),
+                           ("end of a line that does something", 'echo "a" && echo "b"  # don\'t'))),
+          ("ps", _ps, (("Write-Host", 'Write-Host "start"  # it\'s fine'),
+                       ("git commit", 'git commit -m "wip"  # it\'s fine'),
+                       ("Select-String", 'Select-String -Pattern "x" a.txt  # it\'s here'),
+                       ("gh pr create", 'gh pr create --title "t" --body "b"  # it\'s fine'),
+                       ("end of a line that does something", 'Write-Host "a"; Write-Host "b"  # don\'t'))))
+      for label, line in lines
+      for what, stmt in (("a database removal through sqlcmd", _T15_REMOVAL), ("the EF removal", _T15_EF))],
+
+    # Masker exclusion rows (mutation): where a `#` is data, not a comment, the removal stays visible.
+    *[_t15("mutation", f"here-document {label} body line with a #temp name then a removal",
+           _bash(text), 2)
+      for label, text in (
+          ("<<WORD", "sqlcmd -S localhost <<WORD\n" + _T15_TEMP_LINE + "\nWORD"),
+          ("<< WORD", "sqlcmd -S localhost << WORD\n" + _T15_TEMP_LINE + "\nWORD"),
+          ("<<'WORD'", "sqlcmd -S localhost <<'WORD'\n" + _T15_TEMP_LINE + "\nWORD"),
+          ('<<"WORD"', 'sqlcmd -S localhost <<"WORD"\n' + _T15_TEMP_LINE + "\nWORD"),
+          ("<<\\WORD", "sqlcmd -S localhost <<\\WORD\n" + _T15_TEMP_LINE + "\nWORD"),
+          ('<<E"O"F', 'sqlcmd -S localhost <<E"O"F\n' + _T15_TEMP_LINE + "\nEOF"),
+          ("<<-WORD with a tab-indented end line", "sqlcmd -S localhost <<-WORD\n\t" + _T15_TEMP_LINE + "\n\tWORD"),
+          ("<<WORD with no end line", "sqlcmd -S localhost <<WORD\n" + _T15_TEMP_LINE),
+          ("after an unparsable <<", "cat <<\n" + _T15_TEMP_LINE),
+      )],
+    *[_t15("mutation", f"PowerShell here-string {label} holding a #temp name then a removal",
+           _ps(text), 2)
+      for label, text in (
+          # One quote of the here-string's own kind sits inside the body: a reader that does not know here-strings
+          # pairs it with the opener, so the `#temp` that follows would look like a comment to it.
+          ('@"', '$q = @"\n' + _T15_TEMP_LINE.replace("SELECT 1", 'SELECT "x') + '\n"@\nsqlcmd -S localhost -Q $q'),
+          ("@'", "$q = @'\n" + _T15_TEMP_LINE.replace("SELECT 1", "SELECT 'x") + "\n'@\nsqlcmd -S localhost -Q $q"),
+      )],
+    _t15("mutation", "PowerShell --% then # then a removal on the same line",
+         _ps("native.exe --% # " + _T15_REMOVAL), 2),
+    *[_t15("mutation", f"a # inside a word ({label}) before a removal on the same line", _bash(text), 2)
+      for label, text in (
+          ("$#", "echo $# ; " + _T15_REMOVAL),
+          ("${#x}", "echo ${#x} ; " + _T15_REMOVAL),
+          ("a#b", "echo a#b ; " + _T15_REMOVAL),
+      )],
+    _t15("mutation", "PowerShell <# block whose second line is a removal",
+         _ps("<# note\n# " + _T15_REMOVAL + "\n#>"), 2),
+
+    # Escape rows (mutation), form 1 of 3: the EF removal after the shape. (Forms 2 and 3, the human-only script and
+    # an arm write, are in test_database_override.py.)
+    *[_t15("mutation", f"escape row {label}, then the EF removal", mk(prefix + _T15_EF), 2)
+      for label, mk, prefix in (
+          ("bash echo \"a\\\" # b\";", _bash, 'echo "a\\" # b"; '),
+          ("PowerShell Write-Host \"a`\" # b\";", _ps, 'Write-Host "a`" # b"; '),
+          ("bash echo a\\ # ;", _bash, "echo a\\ # ; "),
+          ("PowerShell echo a` # ;", _ps, "echo a` # ; "),
+          ("bash $'...' span with \\' before the #", _bash, "echo $'it\\'s' # note; "),
+          ("PowerShell doubled quote before the #", _ps, 'Write-Host "say ""hi\\" # b"; '),
+      )],
+
+    # Masker controls that must stay allowed (an apostrophe or a # inside the quotes of prose, a comment that names
+    # the script, a comment that names a destructive statement).
+    _t15("control", "commit message holding # and apostrophes names the script",
+         _bash(f'git commit -m "docs: don\'t run {_UPD_CMD} # it\'s a person step"'), 0),
+    _t15("control", "echo text holding # and apostrophes names the script",
+         _bash(f'echo "note: don\'t run {_UPD_CMD} # it\'s manual"'), 0),
+    _t15("control", "pull request body holding # and apostrophes names the script",
+         _bash(f'gh pr create --title "t" --body "don\'t run {_UPD_CMD} # it\'s manual"'), 0),
+    _t15("control", "commit message holding # and apostrophes names a removal in words",
+         _bash(f'git commit -m "docs: it\'s # a note; {_DROP_DB} Orders is blocked"'), 0),
+    _t15("control", "echo text holding # and apostrophes names a removal in words",
+         _bash(f'echo "it\'s # fine; {_DROP_DB} Orders"'), 0),
+    _t15("control", "pull request body holding # and apostrophes names the EF removal in words",
+         _bash(f'gh pr create --title "t" --body "don\'t # run {_T15_EF}"'), 0),
+    _t15("control", "(ps) echo text holding # and apostrophes names the script",
+         _ps(f'Write-Host "note: don\'t run {_UPD_CMD.replace("/", chr(92))} # it\'s manual"'), 0),
+    _t15("control", "a # comment that names the script, at the end of a line",
+         _bash(f"ls  # {_UPD_CMD} is a person step"), 0),
+    _t15("control", "a # comment line that names the script",
+         _bash(f"# {_UPD_CMD} is run by a person\nls"), 0),
+    _t15("control", "(ps) a # comment line that names the script",
+         _ps(f"# {_UPD_CMD.replace('/', chr(92))} is run by a person\nGet-ChildItem"), 0),
+    _t15("class", "a # comment that names a removal in words",
+         _bash(f"ls  # {_DROP_DB} Orders is never run by an agent"), 0),
+    _t15("class", "(ps) a # comment that names a removal in words",
+         _ps(f"Get-ChildItem  # {_DROP_DB} Orders is never run by an agent"), 0),
+
+    # Retirement (amendment 5): "r4.16.7 sed -n of update-dev-database.cmd  [passes today]" expected an allow for a sed
+    # read of a human-only script; sed has left the mention list (it can run a program from its own arguments).
+    # The retiring commit removes that one instance and this row takes its place: same text, no arm, now a block.
+    _blk_a("r4.16.7b sed -n of update-dev-database.cmd, blocked after sed left the mention list",
+           _bash("sed -n '1,60p' tools/db-protection/update-dev-database.cmd"), "", "own terminal"),
 ]
 
 # Self-checks that are not hook payloads. Each returns (passed, detail).
