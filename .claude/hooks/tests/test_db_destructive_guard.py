@@ -1192,8 +1192,14 @@ CASES += [
                        f'const string Marker = "{_DISP}";\nusing var db = new Ctx();\ndb.Database.{_ENSURE_DEL}();\n')),
     _blk("dbp.G2.3 cache flush with a marker AND a protected name in a -d position",
          _bash(f'redis-cli {_FLUSH_ALL} ; sqlcmd -E -d {_DB_PROT} -Q "SELECT 1" {_HASH_MARK}')),
-    _ok_audited("dbp.G2.4 cache flush with a disposable marker present",
-                _bash(f"redis-cli -n 3 {_FLUSH_DB} {_HASH_MARK}")),
+    # dbp.G2.4 retired by name (amendment 4, owner's approval 2026-11-23): its disposable marker
+    # stood only inside a trailing comment, which the comment-aware masker now ignores. It is
+    # replaced by dbp.G2.4b (the same text now blocks) and dbp.G2.4c (a marker that is a real
+    # argument still allows, with an audit record).
+    _blk("dbp.G2.4b cache flush with a disposable marker only in a trailing comment",
+         _bash(f"redis-cli -n 3 {_FLUSH_DB} {_HASH_MARK}")),
+    _ok_audited("dbp.G2.4c cache flush with a disposable marker as a real argument",
+                _bash(f"echo {_DISP} ; redis-cli -n 3 {_FLUSH_DB}")),
     _ok_audited("dbp.G2.5 cloud database deletion call with a disposable marker present",
                 _write("d:/Dev/Foo/tests/CosmosTest.cs",
                        f'// {_MARK}\nawait client{_COSMOS_DEL}"x");\n')),
